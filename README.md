@@ -93,7 +93,7 @@ echo "Setup completed successfully for sub.domain.com. Your site is now configur
 
 ## Contributing 🤝
 
-We welcome contributions! If you would like to improve NginxConfigGen, please open an issue or submit a pull request.
+We welcome contributions! If you would like to improve ProxyPilot, please open an issue or submit a pull request.
 
 ## License 📜
 

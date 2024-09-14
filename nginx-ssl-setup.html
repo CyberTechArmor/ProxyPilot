@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NGINX Config Script Generator</title>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937;
+            color: #f3f4f6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            height: 100vh;
+            margin: 0;
+            justify-content: center;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background-color: #374151;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, textarea {
+            width: calc(100% - 20px);
+            padding: 10px;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            background-color: #1f2937;
+            color: #f3f4f6;
+            outline: none;
+            transition: border-color 0.3s;
+            margin: 0 auto;
+            display: block;
+        }
+        input:focus, textarea:focus {
+            border-color: #10b981;
+        }
+        textarea {
+            height: 200px;
+            resize: none;
+        }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            text-align: center;
+            border: none;
+            border-radius: 4px;
+            background-color: #10b981;
+            color: #fff;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            margin-top: 10px;
+        }
+        .btn:hover {
+            background-color: #059669;
+        }
+        .output-container {
+            display: none;
+            margin-top: 20px;
+            background-color: #1f2937;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        .copy-btn {
+            margin-top: 10px;
+            background-color: #3b82f6;
+        }
+        .copy-btn:hover {
+            background-color: #2563eb;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>NGINX Setup Script Generator</h1>
+    <div class="input-group">
+        <label for="serverName">Server Name</label>
+        <input type="text" id="serverName" placeholder="e.g., sub.domain.com">
+    </div>
+    <div class="input-group">
+        <label for="backendIP">Backend IP Address</label>
+        <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1">
+    </div>
+    <div class="input-group">
+        <label for="backendPort">Backend Port</label>
+        <input type="text" id="backendPort" placeholder="e.g., 3000">
+    </div>
+    <button class="btn" onclick="generateScript()">Generate Script</button>
+
+    <div class="output-container" id="outputContainer">
+        <label for="output">Generated Script</label>
+        <textarea id="output" readonly></textarea>
+        <button class="btn copy-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
+    </div>
+</div>
+
+<script>
+    function generateScript() {
+        const serverName = document.getElementById('serverName').value.trim();
+        const backendIP = document.getElementById('backendIP').value.trim();
+        const backendPort = document.getElementById('backendPort').value.trim();
+
+        if (!serverName || !backendIP || !backendPort) {
+            alert('Please fill in all fields.');
+            return;
+        }
+
+        const script = `
+#!/bin/bash
+
+# Step 1: Create the NGINX Configuration File
+echo "Creating NGINX configuration for ${serverName}..."
+cat <<EOL | sudo tee /etc/nginx/sites-available/${serverName}
+server {
+    listen 80;
+    server_name ${serverName};
+
+    location / {
+        proxy_pass http://${backendIP}:${backendPort};  # Backend server
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
+    }
+}
+EOL
+
+# Step 2: Enable the Site and Test the Configuration
+echo "Enabling site and testing NGINX configuration..."
+sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/
+sudo nginx -t
+if [ $? -ne 0 ]; then
+    echo "NGINX configuration test failed. Please check your configuration."
+    exit 1
+fi
+sudo systemctl restart nginx
+
+# Step 3: Install Certbot and Obtain the SSL Certificate
+echo "Installing Certbot and obtaining SSL certificate..."
+sudo apt update
+sudo apt install certbot python3-certbot-nginx -y
+
+# Step 4: Obtain the SSL Certificate Using Certbot
+echo "Running Certbot to obtain SSL certificate..."
+sudo certbot --nginx -d ${serverName}
+
+# Step 5: Setup Automatic Renewal
+echo "Setting up automatic certificate renewal..."
+sudo systemctl enable certbot.timer
+
+echo "Setup completed successfully for ${serverName}. Your site is now configured with SSL."
+`;
+
+        document.getElementById('output').value = script.trim();
+        document.getElementById('outputContainer').style.display = 'block';
+    }
+
+    function copyToClipboard() {
+        const output = document.getElementById('output');
+        output.select();
+        output.setSelectionRange(0, 99999); // For mobile devices
+        navigator.clipboard.writeText(output.value)
+            .then(() => alert('Script copied to clipboard!'))
+            .catch(err => alert('Failed to copy text: ', err));
+    }
+</script>
+
+</body>
+</html>

@@ -1,239 +1,240 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NGINX Config Script Generator</title>
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #1f2937;
-            color: #f3f4f6;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 20px;
-            height: 100vh;
-            margin: 0;
-            justify-content: center;
-        }
-        .container {
-            max-width: 600px;
-            width: 100%;
-            background-color: #374151;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
-        }
-        h1 {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .input-group {
-            margin-bottom: 15px;
-            text-align: center;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        input, textarea {
-            width: calc(100% - 20px);
-            padding: 10px;
-            border: 1px solid #4b5563;
-            border-radius: 4px;
-            background-color: #1f2937;
-            color: #f3f4f6;
-            outline: none;
-            transition: border-color 0.3s;
-            margin: 0 auto;
-            display: block;
-        }
-        input:focus, textarea:focus {
-            border-color: #10b981;
-        }
-        textarea {
-            height: 250px;
-            resize: none;
-        }
-        .btn {
-            display: block;
-            width: 100%;
-            padding: 12px;
-            text-align: center;
-            border: none;
-            border-radius: 4px;
-            background-color: #10b981;
-            color: #fff;
-            font-weight: bold;
-            cursor: pointer;
-            transition: background-color 0.3s;
-            margin-top: 10px;
-        }
-        .btn:hover {
-            background-color: #059669;
-        }
-        .output-container {
-            display: none;
-            margin-top: 20px;
-            background-color: #1f2937;
-            padding: 15px;
-            border-radius: 8px;
-        }
-        .copy-btn {
-            margin-top: 10px;
-            background-color: #3b82f6;
-        }
-        .copy-btn:hover {
-            background-color: #2563eb;
-        }
-        .note {
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+     <title>NGINX Config Script Generator</title>
+     <style>
+         body {
+             font-family: 'Inter', sans-serif;
+             background-color: #1f2937;
+             color: #f3f4f6;
+             display: flex;
+             flex-direction: column;
+             align-items: center;
+             padding: 20px;
+             height: 100vh;
+             margin: 0;
+             justify-content: center;
+         }
+         .container {
+             max-width: 600px;
+             width: 100%;
+             background-color: #374151;
+             border-radius: 8px;
+             padding: 20px;
+             box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+         }
+         h1 {
+             text-align: center;
+             margin-bottom: 20px;
+         }
+         .input-group {
+             margin-bottom: 15px;
+             text-align: center;
+         }
+         label {
+             display: block;
+             margin-bottom: 5px;
+             font-weight: bold;
+         }
+         input, textarea {
+             width: calc(100% - 20px);
+             padding: 10px;
+             border: 1px solid #4b5563;
+             border-radius: 4px;
+             background-color: #1f2937;
+             color: #f3f4f6;
+             outline: none;
+             transition: border-color 0.3s;
+             margin: 0 auto;
+             display: block;
+         }
+         input:focus, textarea:focus {
+             border-color: #10b981;
+         }
+         textarea {
+             height: 200px;
+             resize: none;
+         }
+         .btn {
+             display: block;
+             width: 100%;
+             padding: 12px;
+             text-align: center;
+             border: none;
+             border-radius: 4px;
+             background-color: #10b981;
+             color: #fff;
+             font-weight: bold;
+             cursor: pointer;
+             transition: background-color 0.3s;
+             margin-top: 10px;
+         }
+         .btn:hover {
+             background-color: #059669;
+         }
+         .output-container {
+             display: none;
+             margin-top: 20px;
+             background-color: #1f2937;
+             padding: 15px;
+             border-radius: 8px;
+         }
+         .copy-btn {
+             margin-top: 10px;
+             background-color: #3b82f6;
+         }
+         .copy-btn:hover {
+             background-color: #2563eb;
+         }
+         .note {
             font-size: 0.9em;
             color: #9ca3af;
             margin-top: -10px;
             margin-bottom: 10px;
-        }
-    </style>
+            text-align: center;
+         }
+     </style>
 </head>
 <body>
 <div class="container">
-    <h1>NGINX Setup Script Generator</h1>
-    <div class="input-group">
-        <label for="serverName">Server Name (Domain)</label>
-        <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required />
-    </div>
-    <div class="input-group">
-        <label for="backendIP">Backend IP Address or Host</label>
-        <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost" required />
-    </div>
-    <div class="input-group">
-        <label for="backendPort">Backend Port</label>
-        <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" required />
-    </div>
-    <div class="input-group">
-        <label for="email">Your Email (for Let's Encrypt SSL)</label>
-        <input type="email" id="email" placeholder="you@example.com" required />
-        <div class="note">Used by Certbot to register and recover certificates.</div>
-    </div>
-    <button class="btn" onclick="generateScript()">Generate Script</button>
-    <div class="output-container" id="outputContainer">
-        <label for="output">Generated Script</label>
-        <textarea id="output" readonly></textarea>
-        <button class="btn copy-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
-    </div>
+     <h1>NGINX Setup Script Generator</h1>
+     <div class="input-group">
+         <label for="serverName">Server Name (Domain)</label>
+         <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required />
+     </div>
+     <div class="input-group">
+         <label for="backendIP">Backend IP Address or Host</label>
+         <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost" required />
+     </div>
+     <div class="input-group">
+         <label for="backendPort">Backend Port</label>
+         <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" required />
+     </div>
+     <div class="input-group">
+         <label for="email">Your Email (for Let's Encrypt SSL)</label>
+         <input type="email" id="email" placeholder="you@example.com" required />
+         <div class="note">Used by Certbot to register and recover certificates.</div>
+     </div>
+     <button class="btn" onclick="generateScript()">Generate Script</button>
+     <div class="output-container" id="outputContainer">
+         <label for="output">Generated Script</label>
+         <textarea id="output" readonly></textarea>
+         <button class="btn copy-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
+     </div>
 </div>
 <script>
-    function generateScript() {
-        const serverName = document.getElementById('serverName').value.trim();
-        const backendIP = document.getElementById('backendIP').value.trim();
-        const backendPort = document.getElementById('backendPort').value.trim();
-        const email = document.getElementById('email').value.trim();
+     function generateScript() {
+         const serverName = document.getElementById('serverName').value.trim();
+         const backendIP = document.getElementById('backendIP').value.trim();
+         const backendPort = document.getElementById('backendPort').value.trim();
+         const email = document.getElementById('email').value.trim();
 
-        if (!serverName || !backendIP || !backendPort || !email) {
-            alert('Please fill in all fields.');
-            return;
-        }
+         if (!serverName || !backendIP || !backendPort || !email) {
+             alert('Please fill in all fields.');
+             return;
+         }
 
-        // Validate backendIP is either 'localhost' or a valid IPv4 address
-        const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
-        const isLocalhost = backendIP.toLowerCase() === 'localhost';
+         // Validate backendIP: allow either "localhost" or valid IPv4 address
+         const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+         const isLocalhost = backendIP.toLowerCase() === "localhost";
 
-        if (!isLocalhost) {
-            if (!ipPattern.test(backendIP)) {
-                alert('Please enter a valid IPv4 address or "localhost" for Backend IP.');
-                return;
-            }
-            // Further check each octet is between 0 and 255
-            const octets = backendIP.split('.');
-            for (let octet of octets) {
-                const num = Number(octet);
-                if (num < 0 || num > 255) {
-                    alert('Please enter a valid IPv4 address for Backend IP.');
-                    return;
-                }
-            }
-        }
+         if (!isLocalhost) {
+             if (!ipRegex.test(backendIP)) {
+                 alert('Please enter a valid IPv4 address or "localhost" for Backend IP.');
+                 return;
+             }
+             // Verify each octet between 0 and 255
+             const octets = backendIP.split(".");
+             for (const octet of octets) {
+                 const val = Number(octet);
+                 if (val < 0 || val > 255) {
+                     alert('Please enter a valid IPv4 address for Backend IP.');
+                     return;
+                 }
+             }
+         }
 
-        // Check port is number and within valid range
-        const portNum = Number(backendPort);
-        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-            alert('Please enter a valid port number (1-65535).');
-            return;
-        }
+         // Validate port number
+         const portNum = Number(backendPort);
+         if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+             alert("Please enter a valid port number (1-65535).");
+             return;
+         }
 
-        // Escape $ signs to avoid breaking bash here-docs
-        function escapeBashVars(str) {
-            return str.replace(/\$/g, '\\$');
-        }
-        const DOMAIN = escapeBashVars(serverName);
-        const BACKEND = `http://${backendIP}:${backendPort}`;
-        const EMAIL = escapeBashVars(email);
+         // Escape $ signs, so the bash script is safer within here-documents
+         function escapeBash(str) {
+             return str.replace(/\$/g, '\\$');
+         }
 
-        const script = `#!/usr/bin/env bash
-set -euo pipefail
-#––– ERROR HANDLER ──────────────────────────────────────────────
-trap 'echo "❌ Error on line $LINENO. Check above for details.";
-     # if running interactively (eg. DigitalOcean console), do nothing (no pause)
-' ERR
-#––– CONFIGURATION ─────────────────────────────────────────────
-DOMAIN="${DOMAIN}"
-NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}"
-BACKEND="${BACKEND}"
-EMAIL="${EMAIL}"
-echo "🛠  Setting up NGINX & SSL for ${DOMAIN}..."
-#––– 1) Write NGINX Server Block ─────────────────────────────────
-echo "› Creating NGINX config at ${NGINX_CONF}..."
-sudo tee "${NGINX_CONF}" > /dev/null <<EOF
+         const safeServerName = escapeBash(serverName);
+         const safeBackendIP = backendIP; // no special escaping needed in URL part
+         const safeBackendPort = backendPort;
+         const safeEmail = escapeBash(email);
+
+         const script = `#!/bin/bash
+# Step 1: Create the NGINX Configuration File
+echo "Creating NGINX configuration for ${safeServerName}..."
+cat <<EOL | sudo tee /etc/nginx/sites-available/${safeServerName}
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name ${safeServerName};
     location / {
-        proxy_pass ${BACKEND};
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_pass http://${safeBackendIP}:${safeBackendPort};  # Backend server
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
     }
 }
-EOF
-#––– 2) Enable & Test ────────────────────────────────────────────
-echo "› Enabling site & testing configuration..."
-sudo ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/
+EOL
+# Step 2: Enable the Site and Test the Configuration
+echo "Enabling site and testing NGINX configuration..."
+sudo ln -sf /etc/nginx/sites-available/${safeServerName} /etc/nginx/sites-enabled/
 sudo nginx -t
+if [ $? -ne 0 ]; then
+    echo "NGINX configuration test failed. Please check your configuration."
+    exit 1
+fi
 sudo systemctl restart nginx
-#––– 3) Install Certbot ─────────────────────────────────────────
-echo "› Updating apt & installing Certbot..."
-sudo apt-get update -y
-sudo apt-get install certbot python3-certbot-nginx -y
-#––– 4) Obtain SSL Certificate ─────────────────────────────────
-echo "› Running Certbot for ${DOMAIN}..."
-sudo certbot --nginx \\
-  --non-interactive \\
-  --agree-tos \\
-  --email "${EMAIL}" \\
-  -d "${DOMAIN}"
-#––– 5) Enable Auto-Renewal ──────────────────────────────────────
-echo "› Enabling automatic certificate renewal..."
+# Step 3: Install Certbot and Obtain SSL Certificate
+echo "Installing Certbot and obtaining SSL certificate..."
+sudo apt update
+sudo apt install certbot python3-certbot-nginx -y
+# Step 4: Obtain SSL Certificate using Certbot
+echo "Running Certbot to obtain SSL certificate..."
+sudo certbot --nginx --non-interactive --agree-tos --email ${safeEmail} -d ${safeServerName}
+# Step 5: Setup automatic renewal
+echo "Setting up automatic certificate renewal..."
 sudo systemctl enable certbot.timer
-echo "✅ ${DOMAIN} is now live with SSL!"
+echo "Setup completed successfully for ${safeServerName}. Your site is now configured with SSL."
 `;
 
-        document.getElementById('output').value = script.trim();
-        document.getElementById('outputContainer').style.display = 'block';
-        document.getElementById('output').scrollIntoView({ behavior: 'smooth' });
-    }
+         const outputContainer = document.getElementById("outputContainer");
+         const outputTextarea = document.getElementById("output");
+         outputTextarea.value = script.trim();
+         outputContainer.style.display = "block";
+         outputTextarea.scrollIntoView({ behavior: "smooth" });
+     }
 
-    function copyToClipboard() {
-        const output = document.getElementById('output');
-        if (!output.value) {
-            alert('Nothing to copy.');
-            return;
-        }
-        navigator.clipboard.writeText(output.value)
-            .then(() => alert('Script copied to clipboard!'))
-            .catch(err => alert('Failed to copy text: ' + err));
-    }
+     function copyToClipboard() {
+         const output = document.getElementById('output');
+         if (!output.value) {
+             alert('Nothing to copy!');
+             return;
+         }
+         output.select();
+         output.setSelectionRange(0, 99999); // For mobile devices
+         try {
+             navigator.clipboard.writeText(output.value).then(() => {
+                 alert('Script copied to clipboard!');
+                 window.getSelection().removeAllRanges(); // Deselect text
+             });
+         } catch (err) {
+             alert('Failed to copy text: ' + err);
+         }
+     }
 </script>
 </body>
 </html>

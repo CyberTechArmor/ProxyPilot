@@ -112,6 +112,9 @@
             padding: 15px;
             border-radius: 8px;
             text-align: left;
+            font-family: monospace, monospace;
+            font-size: 0.9em;
+            white-space: pre-wrap;
         }
         .copy-btn {
             margin-top: 10px;
@@ -188,46 +191,63 @@
             color: #f3f4f6;
             user-select: none;
         }
+        .note {
+            font-size: 0.9em;
+            color: #9ca3af;
+            margin-top: -10px;
+            margin-bottom: 10px;
+            text-align: left;
+        }
     </style>
 </head>
 <body>
     <div class="container" role="main">
         <div class="rocket" aria-hidden="true">🚀</div>
         <h1>NGINX Setup Script Generator</h1>
+
         <div class="input-group">
             <label for="serverName">Server Name (Domain)</label>
             <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required aria-describedby="serverName-desc" />
         </div>
+
         <div class="input-group">
             <label for="backendIP">Backend IP Address, Hostname, or 'localhost'</label>
             <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost or backend.internal" required />
         </div>
+
         <div class="input-group">
             <label for="backendPort">Backend Port</label>
             <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" required />
         </div>
+
         <div class="input-group">
             <label for="email">Your Email (for Let's Encrypt SSL)</label>
             <input type="email" id="email" placeholder="you@example.com" required />
         </div>
+
         <div class="input-group">
             <label for="maxUploadSize">Max Upload Size (optional, default 1G)</label>
             <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" aria-describedby="maxUploadDesc" />
             <div id="maxUploadDesc" class="note sr-only">May include M for megabytes, G for gigabytes.</div>
         </div>
+
         <div class="toggle-group">
             <input type="checkbox" id="websocketToggle" checked aria-describedby="websocketLabel" />
             <label class="toggle-label" for="websocketToggle" tabindex="0"></label>
             <label class="toggle-text" id="websocketLabel" for="websocketToggle">Enable WebSocket Support</label>
         </div>
+
         <div class="toggle-group">
             <input type="checkbox" id="forceHttpsToggle" aria-describedby="forceHttpsLabel" />
             <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
             <label class="toggle-text" id="forceHttpsLabel" for="forceHttpsToggle">Force HTTPS</label>
         </div>
+
         <button class="btn" id="generateBtn" type="button">Generate Script</button>
         <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
+
         <div role="region" aria-live="polite" class="sr-only" id="ariaStatus"></div>
+
         <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script container">
             <label for="output">Generated Script</label>
             <textarea id="output" readonly rows="18" spellcheck="false" aria-describedby="output-desc"></textarea>
@@ -236,6 +256,7 @@
             <div id="copyFeedback" class="feedback" role="alert"></div>
         </div>
     </div>
+
     <script>
         (function() {
             const serverNameInput = document.getElementById('serverName');
@@ -323,17 +344,14 @@
                 return true;
             }
 
-            // Validate max upload size format (simple)
             function validateMaxUploadSize(size) {
                 if (!size) return true; // optional, defaults to 1G
-                // Allow format like 50M or 1G (case insensitive)
                 return /^[1-9][0-9]*[MG]$/i.test(size.trim());
             }
 
             function generateScript() {
-                if (!validateInputs()) {
-                    return;
-                }
+                if (!validateInputs()) return;
+
                 const maxUploadRaw = maxUploadInput.value.trim();
                 if (!validateMaxUploadSize(maxUploadRaw)) {
                     alert('Please enter a valid Max Upload Size like 50M or 1G.');
@@ -348,7 +366,6 @@
                 const websocketEnabled = websocketToggle.checked;
                 const forceHttps = forceHttpsToggle.checked;
 
-                // Additional WebSocket headers block with proper indentation
                 const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -383,21 +400,24 @@
                 const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName}`;
 
                 const script = `#!/bin/bash
-set -e
+
 # Step 1: Create the NGINX Redirect Configuration (if HTTPS enforced)
 ${forceHttps ? '# Redirect HTTP to HTTPS' : '# No HTTP to HTTPS redirect'}
 ${httpsRedirect}# Step 2: Create the NGINX Configuration File
 echo "Creating NGINX configuration for ${serverName}..."
-cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
+cat <<EOL | sudo tee /etc/nginx/sites-available/${serverName}
 server {
     listen 80;
     server_name ${serverName};
+
     client_max_body_size ${maxUploadSize};
+
     location / {
-${wsHeaders}    proxy_pass http://${backendIP}:${backendPort};  # Backend server
+${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};  # Backend server
     }
 }
 EOL
+
 # Step 3: Enable the Site and Test the Configuration
 echo "Enabling site and testing NGINX configuration..."
 sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/
@@ -407,19 +427,21 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 sudo systemctl restart nginx
+
 # Step 4: Install Certbot and Obtain SSL Certificate
 echo "Installing Certbot and obtaining SSL certificate..."
 sudo apt update
 sudo apt install certbot python3-certbot-nginx -y
+
 # Step 5: Obtain SSL Certificate using Certbot
 echo "Running Certbot to obtain SSL certificate..."
 ${certbotCmd}
+
 # Step 6: Setup automatic renewal
 echo "Setting up automatic certificate renewal..."
 sudo systemctl enable certbot.timer
+
 echo "Setup completed successfully for ${serverName}. Your site is now configured with SSL."
-echo "Press Enter to exit..."
-read -r
 `;
 
                 outputTextarea.value = script.trim();
@@ -468,7 +490,6 @@ sudo apt install nginx certbot python3-certbot-nginx -y`;
             generateBtn.addEventListener('click', generateScript);
             copyBtn.addEventListener('click', copyToClipboard);
             recoveryBtn.addEventListener('click', copyRecovery);
-            // Keyboard shortcut Ctrl+Enter or Cmd+Enter triggers generation
             [serverNameInput, backendIPInput, backendPortInput, emailInput].forEach(el => {
                 el.addEventListener('keydown', function(e) {
                     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {

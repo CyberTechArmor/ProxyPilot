@@ -16,9 +16,10 @@
             flex-direction: column;
             align-items: center;
             padding: 20px;
-            height: 100vh;
             margin: 0;
-            justify-content: center;
+            justify-content: flex-start; /* Changed from center */
+            min-height: 100vh;            /* Changed from fixed height */
+            overflow-y: auto;            /* Allow scrolling */
         }
         .container {
             max-width: 600px;
@@ -204,50 +205,40 @@
     <div class="container" role="main">
         <div class="rocket" aria-hidden="true">🚀</div>
         <h1>NGINX Setup Script Generator</h1>
-
         <div class="input-group">
             <label for="serverName">Server Name (Domain)</label>
             <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required aria-describedby="serverName-desc" />
         </div>
-
         <div class="input-group">
             <label for="backendIP">Backend IP Address, Hostname, or 'localhost'</label>
             <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost or backend.internal" required />
         </div>
-
         <div class="input-group">
             <label for="backendPort">Backend Port</label>
             <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" required />
         </div>
-
         <div class="input-group">
             <label for="email">Your Email (for Let's Encrypt SSL)</label>
             <input type="email" id="email" placeholder="you@example.com" required />
         </div>
-
         <div class="input-group">
             <label for="maxUploadSize">Max Upload Size (optional, default 1G)</label>
             <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" aria-describedby="maxUploadDesc" />
             <div id="maxUploadDesc" class="note sr-only">May include M for megabytes, G for gigabytes.</div>
         </div>
-
         <div class="toggle-group">
             <input type="checkbox" id="websocketToggle" checked aria-describedby="websocketLabel" />
             <label class="toggle-label" for="websocketToggle" tabindex="0"></label>
             <label class="toggle-text" id="websocketLabel" for="websocketToggle">Enable WebSocket Support</label>
         </div>
-
         <div class="toggle-group">
             <input type="checkbox" id="forceHttpsToggle" aria-describedby="forceHttpsLabel" />
             <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
             <label class="toggle-text" id="forceHttpsLabel" for="forceHttpsToggle">Force HTTPS</label>
         </div>
-
         <button class="btn" id="generateBtn" type="button">Generate Script</button>
         <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
-
         <div role="region" aria-live="polite" class="sr-only" id="ariaStatus"></div>
-
         <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script container">
             <label for="output">Generated Script</label>
             <textarea id="output" readonly rows="18" spellcheck="false" aria-describedby="output-desc"></textarea>
@@ -256,7 +247,6 @@
             <div id="copyFeedback" class="feedback" role="alert"></div>
         </div>
     </div>
-
     <script>
         (function() {
             const serverNameInput = document.getElementById('serverName');
@@ -273,12 +263,10 @@
             const copyBtn = document.getElementById('copyBtn');
             const copyFeedback = document.getElementById('copyFeedback');
             const ariaStatus = document.getElementById('ariaStatus');
-
             const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
             const ipv6Regex = /^[0-9a-fA-F:]+$/;
             const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
             function validateInputs() {
                 const serverName = serverNameInput.value.trim();
                 const backendIP = backendIPInput.value.trim();
@@ -343,15 +331,12 @@
                 }
                 return true;
             }
-
             function validateMaxUploadSize(size) {
                 if (!size) return true; // optional, defaults to 1G
                 return /^[1-9][0-9]*[MG]$/i.test(size.trim());
             }
-
             function generateScript() {
                 if (!validateInputs()) return;
-
                 const maxUploadRaw = maxUploadInput.value.trim();
                 if (!validateMaxUploadSize(maxUploadRaw)) {
                     alert('Please enter a valid Max Upload Size like 50M or 1G.');
@@ -365,7 +350,6 @@
                 const email = emailInput.value.trim();
                 const websocketEnabled = websocketToggle.checked;
                 const forceHttps = forceHttpsToggle.checked;
-
                 const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -374,33 +358,26 @@
         proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \\$scheme;
         proxy_cache_bypass \\$http_upgrade;
-
         # Additional WebSocket handshake headers
         proxy_set_header Origin "";
         proxy_set_header Sec-WebSocket-Version \\$http_sec_websocket_version;
         proxy_set_header Sec-WebSocket-Key \\$http_sec_websocket_key;
         proxy_set_header Sec-WebSocket-Protocol \\$http_sec_websocket_protocol;
-
         # Disable request buffering (helps with streaming uploads)
         proxy_request_buffering off;
-` : `        proxy_set_header Host \\$host;
+`:`         proxy_set_header Host \\$host;
         proxy_set_header X-Real-IP \\$remote_addr;
         proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \\$scheme;
 `;
-
                 const httpsRedirect = forceHttps ? `server {
     listen 80;
     server_name ${serverName};
     return 301 https://\\$host\\$request_uri;
 }
-
 ` : '';
-
                 const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName}`;
-
                 const script = `#!/bin/bash
-
 # Step 1: Create the NGINX Redirect Configuration (if HTTPS enforced)
 ${forceHttps ? '# Redirect HTTP to HTTPS' : '# No HTTP to HTTPS redirect'}
 ${httpsRedirect}# Step 2: Create the NGINX Configuration File
@@ -409,15 +386,12 @@ cat <<EOL | sudo tee /etc/nginx/sites-available/${serverName}
 server {
     listen 80;
     server_name ${serverName};
-
     client_max_body_size ${maxUploadSize};
-
     location / {
 ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};  # Backend server
     }
 }
 EOL
-
 # Step 3: Enable the Site and Test the Configuration
 echo "Enabling site and testing NGINX configuration..."
 sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/
@@ -427,30 +401,24 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 sudo systemctl restart nginx
-
 # Step 4: Install Certbot and Obtain SSL Certificate
 echo "Installing Certbot and obtaining SSL certificate..."
 sudo apt update
 sudo apt install certbot python3-certbot-nginx -y
-
 # Step 5: Obtain SSL Certificate using Certbot
 echo "Running Certbot to obtain SSL certificate..."
 ${certbotCmd}
-
 # Step 6: Setup automatic renewal
 echo "Setting up automatic certificate renewal..."
 sudo systemctl enable certbot.timer
-
 echo "Setup completed successfully for ${serverName}. Your site is now configured with SSL."
 `;
-
                 outputTextarea.value = script.trim();
                 outputContainer.style.display = "block";
                 outputTextarea.focus();
                 outputTextarea.select();
                 ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
             }
-
             function copyToClipboard() {
                 const text = outputTextarea.value;
                 if (!text) {

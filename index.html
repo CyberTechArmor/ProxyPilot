@@ -152,7 +152,7 @@
     <div id="staticFields" class="hidden">
         <div class="input-group">
             <label for="rootDir">Root Directory (absolute path)</label>
-            <input type="text" id="rootDir" placeholder="/var/www/mysite" />
+            <input type="text" id="rootDir" placeholder="/home/thomas/websites/mysite" />
         </div>
         <div class="row">
             <div class="toggle-group">
@@ -166,7 +166,7 @@
                 <label class="toggle-text" id="gzipLabel" for="gzipToggle">Enable gzip</label>
             </div>
         </div>
-        <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code> if empty.</div>
+        <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code> if empty. If the path is under <code>/home/…</code>, the script also fixes parent directory execute bits and adds an AppArmor override for nginx.</div>
     </div>
 
     <!-- Force HTTPS applies to both modes -->
@@ -255,7 +255,7 @@
         if (isStatic) {
             const rootDir = rootDirInput.value.trim();
             if (!rootDir) { alert('Root Directory is required in Static Site mode.'); rootDirInput.focus(); return false; }
-            if (!rootDir.startsWith('/')) { alert('Root Directory must be an absolute path (e.g., /var/www/site).'); rootDirInput.focus(); return false; }
+            if (!rootDir.startsWith('/')) { alert('Root Directory must be an absolute path (e.g., /home/thomas/websites/site).'); rootDirInput.focus(); return false; }
         } else {
             const backendIP = backendIPInput.value.trim();
             const backendPort = backendPortInput.value.trim();
@@ -331,20 +331,28 @@ ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
 
+        // Write only the HTTP block initially; Certbot will add HTTPS + (optional) redirect.
         return `server {
     listen 80;
+    listen [::]:80;
     server_name ${serverName};
     client_max_body_size ${maxUploadSize};
     root ${rootDir};
-    index index.html;
-${gzipBlock}
+    index index.html;${gzipBlock}
+
+    # ACME challenge must be reachable on :80
+    location ^~ /.well-known/acme-challenge/ {
+        root ${rootDir};
+        default_type "text/plain";
+    }
+
     location / {
         ${tryFiles}
     }
 }`;
     }
 
-    // >>> FIXED FLOW generateScript (no pre-redirect; Certbot handles redirect if requested)
+    // Updated generator: adds parent-dir perms + AppArmor override when serving from /home/*
     function generateScript() {
         if (!validateInputs()) return;
 
@@ -362,7 +370,7 @@ ${gzipBlock}
         const spa = (spaToggle || {}).checked ?? false;
         const gzip = (gzipToggle || {}).checked ?? false;
 
-        // Certbot: add --redirect only AFTER issuance (Certbot handles that safely)
+        // Certbot: add --redirect only AFTER issuance (Certbot safely edits the 443 block it adds)
         const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
         let mainServerBlock = '';
@@ -370,12 +378,42 @@ ${gzipBlock}
 
         if (isStatic) {
             mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
+
+            // Preface does: create root, starter index, set perms, fix /home parent execute bits, AppArmor override
             preface = `# Ensure root directory exists and has an index.html
-sudo mkdir -p ${rootDir}
-if [ ! -f "${rootDir}/index.html" ]; then
-  echo "<!DOCTYPE html><html><head><meta charset=\\"utf-8\\"><title>${serverName}</title></head><body><h1>It works!</h1><p>Serving static files for ${serverName}</p></body></html>" | sudo tee ${rootDir}/index.html >/dev/null
+ROOT_DIR="${rootDir}"
+sudo mkdir -p "$ROOT_DIR"
+if [ ! -f "$ROOT_DIR/index.html" ]; then
+  sudo tee "$ROOT_DIR/index.html" >/dev/null <<'HTML'
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>${serverName}</title></head><body><h1>It works!</h1><p>Serving static files for ${serverName}</p></body></html>
+HTML
 fi
-sudo chown -R www-data:www-data ${rootDir} || true
+
+echo "Setting safe ownership & permissions..."
+sudo chown -R www-data:www-data "$ROOT_DIR" || true
+sudo find "$ROOT_DIR" -type d -exec chmod 755 {} \\;
+sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
+
+# If serving from /home/..., make sure nginx can traverse parents and allow via AppArmor
+if [[ "$ROOT_DIR" == /home/*/* ]]; then
+  echo "Adjusting parent directory execute bits under /home..."
+  PARENT1="/home"
+  USERDIR="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)"
+  TOPSUB="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)"
+  sudo chmod 755 "$PARENT1" "$USERDIR" "$TOPSUB" || true
+
+  if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
+    echo "Adding AppArmor allowlist for nginx to read $ROOT_DIR ..."
+    sudo mkdir -p /etc/apparmor.d/local
+    # Allow read (r) and execute traversal (ix) within the chosen ROOT_DIR
+    LINE="$ROOT_DIR/** r,"
+    LINE2="$ROOT_DIR/** rix,"
+    sudo bash -c 'grep -qxF '"'"'$LINE'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
+    sudo bash -c 'grep -qxF '"'"'$LINE2'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE2'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
+    sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx 2>/dev/null || true
+    sudo systemctl reload apparmor || true
+  fi
+fi
 `;
         } else {
             mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
@@ -396,6 +434,9 @@ trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 echo "Installing NGINX & Certbot (if needed)..."
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx
+
+# Remove default to avoid conflicts
+sudo rm -f /etc/nginx/sites-enabled/default || true
 
 ${preface}echo "Writing initial HTTP server (no redirect) so Certbot can validate..."
 cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}

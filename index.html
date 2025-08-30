@@ -30,12 +30,7 @@
             box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
             text-align: center;
         }
-        .rocket {
-            font-size: 5rem;
-            margin-bottom: 0.25em;
-            user-select: none;
-            line-height: 1;
-        }
+        .rocket { font-size: 5rem; margin-bottom: 0.25em; user-select: none; line-height: 1; }
         h1 { margin-bottom: 20px; user-select: none; }
         .input-group { margin-bottom: 15px; text-align: left; }
         label { display: block; margin-bottom: 5px; font-weight: bold; cursor: pointer; }
@@ -83,12 +78,8 @@
         }
         .feedback { margin-top: 6px; font-size: 0.9em; text-align: center; color: #10b981; display: none; }
         .feedback.error { color: #dc2626; }
-        .toggle-group, .radio-row {
-            display: flex; align-items: center; gap: 10px; margin-bottom: 15px; user-select: none;
-        }
-        .toggle-group input[type="checkbox"] {
-            height: 0; width: 0; visibility: hidden; position: absolute;
-        }
+        .toggle-group, .radio-row { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; user-select: none; flex-wrap: wrap; }
+        .toggle-group input[type="checkbox"] { height: 0; width: 0; visibility: hidden; position: absolute; }
         .toggle-label {
             background: #4b5563; border-radius: 20px; cursor: pointer; width: 50px; height: 26px;
             position: relative; transition: background-color 0.3s; display: inline-block; vertical-align: middle;
@@ -200,20 +191,24 @@
 
 <script>
 (function () {
+    // UI elements
     const modeProxy = document.getElementById('modeProxy');
     const modeStatic = document.getElementById('modeStatic');
-
     const proxyFields = document.getElementById('proxyFields');
     const staticFields = document.getElementById('staticFields');
 
     const serverNameInput = document.getElementById('serverName');
     const emailInput = document.getElementById('email');
     const maxUploadInput = document.getElementById('maxUploadSize');
+
     const backendIPInput = document.getElementById('backendIP');
     const backendPortInput = document.getElementById('backendPort');
     const websocketToggle = document.getElementById('websocketToggle');
+
+    const rootDirInput = document.getElementById('rootDir');
     const spaToggle = document.getElementById('spaToggle');
     const gzipToggle = document.getElementById('gzipToggle');
+
     const forceHttpsToggle = document.getElementById('forceHttpsToggle');
 
     const generateBtn = document.getElementById('generateBtn');
@@ -224,8 +219,7 @@
     const copyFeedback = document.getElementById('copyFeedback');
     const ariaStatus = document.getElementById('ariaStatus');
 
-    const rootDirInput = document.getElementById('rootDir');
-
+    // Validation helpers
     const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
     const ipv6Regex = /^[0-9a-fA-F:]+$/;
     const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
@@ -235,13 +229,10 @@
         const isStatic = modeStatic.checked;
         proxyFields.classList.toggle('hidden', isStatic);
         staticFields.classList.toggle('hidden', !isStatic);
-
-        // Field requirements by mode
         backendIPInput.required = !isStatic;
         backendPortInput.required = !isStatic;
         rootDirInput.required = isStatic;
     }
-
     modeProxy.addEventListener('change', setModeUI);
     modeStatic.addEventListener('change', setModeUI);
     setModeUI();
@@ -353,6 +344,7 @@ ${gzipBlock}
 }`;
     }
 
+    // >>> FIXED FLOW generateScript (no pre-redirect; Certbot handles redirect if requested)
     function generateScript() {
         if (!validateInputs()) return;
 
@@ -362,25 +354,22 @@ ${gzipBlock}
         const maxUploadSize = (maxUploadInput.value.trim() || '1G');
         const forceHttps = forceHttpsToggle.checked;
 
-        // Common: HTTP->HTTPS redirect server (if forced)
-        const httpsRedirect = forceHttps ? `server {
-    listen 80;
-    server_name ${serverName};
-    return 301 https://\\$host\\$request_uri;
-}
-` : '';
+        const backendIP = (backendIPInput || {}).value?.trim?.() ?? '';
+        const backendPort = (backendPortInput || {}).value?.trim?.() ?? '';
+        const websocketEnabled = (websocketToggle || {}).checked ?? true;
 
-        const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName}`;
+        const rootDir = (rootDirInput || {}).value?.trim?.() ?? '';
+        const spa = (spaToggle || {}).checked ?? false;
+        const gzip = (gzipToggle || {}).checked ?? false;
+
+        // Certbot: add --redirect only AFTER issuance (Certbot handles that safely)
+        const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
         let mainServerBlock = '';
         let preface = '';
+
         if (isStatic) {
-            const rootDir = rootDirInput.value.trim();
-            const spa = spaToggle.checked;
-            const gzip = gzipToggle.checked;
-
             mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
-
             preface = `# Ensure root directory exists and has an index.html
 sudo mkdir -p ${rootDir}
 if [ ! -f "${rootDir}/index.html" ]; then
@@ -389,46 +378,48 @@ fi
 sudo chown -R www-data:www-data ${rootDir} || true
 `;
         } else {
-            const backendIP = backendIPInput.value.trim();
-            const backendPort = backendPortInput.value.trim();
-            const websocketEnabled = websocketToggle.checked;
             mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
         }
 
         const script = `#!/bin/bash
 # Generated by NGINX Setup Script Generator
-set -e
+set -uo pipefail
 
-# Step 0: Install NGINX & Certbot (if not present)
+pause_if_tty() {
+  if [ -t 1 ]; then
+    echo
+    read -rp "Press Enter to close..." _
+  fi
+}
+trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
+
 echo "Installing NGINX & Certbot (if needed)..."
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx
 
-${preface}# Step 1: Create the NGINX Configuration File
-echo "Creating NGINX configuration for ${serverName}..."
+${preface}echo "Writing initial HTTP server (no redirect) so Certbot can validate..."
 cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
-${forceHttps ? '# HTTP -> HTTPS redirect' : '# No forced redirect'}
-${httpsRedirect}${isStatic ? '# Static site server block' : '# Reverse proxy server block'}
 ${mainServerBlock}
 EOL
 
-# Step 2: Enable site and test NGINX
-echo "Enabling site and testing config..."
 sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
 sudo nginx -t
 sudo systemctl reload nginx
 
-# Step 3: Obtain SSL with Certbot
-echo "Obtaining SSL certificate with Certbot..."
+echo "Running Certbot..."
 ${certbotCmd}
 
-# Step 4: Enable auto-renewal
-sudo systemctl enable certbot.timer
-echo "Setup completed successfully for ${serverName}."
+echo "Testing auto-renewal (dry run)..."
+sudo certbot renew --dry-run || true
+
+sudo systemctl enable certbot.timer || true
+
+echo "All done for ${serverName}."
+pause_if_tty
 `;
 
         outputTextarea.value = script.trim();
-        outputContainer.style.display = "block";
+        document.getElementById('outputContainer').style.display = "block";
         outputTextarea.focus();
         outputTextarea.select();
         ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
@@ -471,7 +462,6 @@ sudo apt install -y nginx certbot python3-certbot-nginx`;
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generateScript();
         });
     });
-
 })();
 </script>
 </body>

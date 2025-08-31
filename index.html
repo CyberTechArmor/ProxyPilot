@@ -361,7 +361,7 @@ ${wsHeaders}
 }`;
     }
 
-    // NEW: exact static-site script generator (matches user's requested output)
+    // NEW: exact static-site script generator (fixed: single-quoted heredoc for $host/$request_uri)
     function genStaticFullScript({ serverName, email, rootDir }) {
       return `#!/bin/bash
 # Setup for ${serverName} — static site on ${rootDir}
@@ -401,12 +401,12 @@ sudo chmod -R 755 "\${WEBROOT}"
 
 echo "[4/6] Writing NGINX server config..."
 # Single HTTP server: allow ACME, otherwise redirect to HTTPS.
-sudo tee "/etc/nginx/sites-available/\${DOMAIN}" >/dev/null <<NGINX
+sudo tee "/etc/nginx/sites-available/\${DOMAIN}" >/dev/null <<'NGINX'
 server {
     listen 80;
     listen [::]:80;
-    server_name \${DOMAIN};
-    root \${WEBROOT};
+    server_name ${serverName};
+    root ${rootDir};
     index index.html;
 
     # ACME challenge must be reachable on :80 for initial and renewals
@@ -417,7 +417,7 @@ server {
 
     # Everything else: redirect to HTTPS
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://$host$request_uri;
     }
 }
 NGINX
@@ -489,7 +489,7 @@ echo "Done. Test with:  curl -I http://\${DOMAIN}  and  curl -I https://\${DOMAI
         let script = '';
 
         if (isStatic) {
-            // Generate EXACT static-site script as requested
+            // Generate EXACT static-site script as requested (with fixed heredoc)
             script = genStaticFullScript({ serverName, email, rootDir });
         } else {
             // Original proxy path (unchanged)

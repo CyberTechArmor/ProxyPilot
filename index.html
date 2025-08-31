@@ -290,7 +290,7 @@
         return true;
     }
 
-    // UPDATED: robust proxy block with ACME local webroot and timeouts
+    // Proxy mode: ACME served by nginx (never proxied), sane timeouts
     function genProxyServerBlock(opts) {
         const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
         const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
@@ -304,7 +304,7 @@
 
     client_max_body_size ${maxUploadSize};
 
-    # Let ACME hit nginx directly (don’t proxy to the app)
+    # ACME to nginx directly
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
         default_type "text/plain";
@@ -327,6 +327,7 @@ ${wsHeaders}
 }`;
     }
 
+    // Static mode: HTTP-only block first; Certbot will add HTTPS (+ optional redirect)
     function genStaticServerBlock(opts) {
         const { serverName, rootDir, spa, gzip, maxUploadSize } = opts;
 
@@ -340,7 +341,6 @@ ${wsHeaders}
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
 
-        // HTTP block only; Certbot will add HTTPS + (optional) redirect.
         return `server {
     listen 80;
     listen [::]:80;
@@ -387,7 +387,7 @@ ${wsHeaders}
         if (isStatic) {
             mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
 
-            // Create webroot, starter index (“It works!”), perms, /home execute bits, AppArmor allow
+            // Create webroot, starter index, perms, /home exec bits, AppArmor allow
             preface = `# Ensure root directory exists and has an index.html
 ROOT_DIR="${rootDir}"
 sudo mkdir -p "$ROOT_DIR"

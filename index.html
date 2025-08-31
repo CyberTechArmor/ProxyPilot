@@ -45,6 +45,7 @@
   <div class="rocket" aria-hidden="true">🚀</div>
   <h1>NGINX Setup Script Generator</h1>
 
+  <!-- Deployment Mode -->
   <div class="input-group">
     <label>Deployment Mode</label>
     <div class="radio-row" role="radiogroup" aria-label="Deployment Mode">
@@ -54,6 +55,7 @@
     <div class="note">Choose “Static Site” to serve files directly from a folder (no upstream app).</div>
   </div>
 
+  <!-- Common -->
   <div class="input-group">
     <label for="serverName">Server Name (Domain)</label>
     <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required />
@@ -67,6 +69,7 @@
     <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" />
   </div>
 
+  <!-- Proxy fields -->
   <div id="proxyFields">
     <div class="input-group">
       <label for="backendIP">Backend IP Address, Hostname, or 'localhost'</label>
@@ -83,6 +86,7 @@
     </div>
   </div>
 
+  <!-- Static fields -->
   <div id="staticFields" class="hidden">
     <div class="input-group">
       <label for="rootDir">Root Directory (absolute path)</label>
@@ -103,6 +107,7 @@
     <div class="note">We create the folder and an <code>index.html</code>. If the path is under <code>/home/…</code>, we also set parent execute bits and add an AppArmor allowlist for nginx.</div>
   </div>
 
+  <!-- Force HTTPS -->
   <div class="toggle-group">
     <input type="checkbox" id="forceHttpsToggle" />
     <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
@@ -167,7 +172,7 @@
   modeStatic.addEventListener('change', setModeUI);
   setModeUI();
 
-  function validateInputs() {
+  function validate() {
     const serverName = serverNameInput.value.trim();
     const email = emailInput.value.trim();
     const isStatic = modeStatic.checked;
@@ -176,32 +181,27 @@
     if (!email || !emailRegex.test(email)) { alert('Valid email is required.'); return false; }
 
     if (isStatic) {
-      const rootDir = rootDirInput.value.trim();
-      if (!rootDir) { alert('Root Directory is required in Static Site mode.'); return false; }
+      if (!rootDirInput.value.trim()) { alert('Root Directory is required in Static Site mode.'); return false; }
     } else {
-      const backendIP = backendIPInput.value.trim();
-      const backendPort = backendPortInput.value.trim();
-      if (!backendIP || !backendPort) { alert('Backend host and port are required.'); return false; }
-      const isLocalhost = backendIP.toLowerCase() === 'localhost';
-      if (!isLocalhost && !ipv4Regex.test(backendIP) && !ipv6Regex.test(backendIP) && !hostnameRegex.test(backendIP)) {
+      const host = backendIPInput.value.trim();
+      const port = backendPortInput.value.trim();
+      if (!host || !port) { alert('Backend host and port are required.'); return false; }
+      const isLocalhost = host.toLowerCase() === 'localhost';
+      if (!isLocalhost && !ipv4Regex.test(host) && !ipv6Regex.test(host) && !hostnameRegex.test(host)) {
         alert('Enter a valid Backend IP/host.'); return false;
       }
-      const portNum = Number(backendPort);
-      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
-        alert('Enter a valid port (1–65535).'); return false;
-      }
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) { alert('Enter a valid port (1–65535).'); return false; }
     }
-
     const m = maxUploadInput.value.trim();
     if (m && !/^[1-9][0-9]*[MG]$/i.test(m)) { alert('Max Upload Size must look like 50M or 1G.'); return false; }
     return true;
   }
 
   function genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize }) {
-    const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
+    const ws = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
         proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
-
     return `server {
     listen 80;
     listen [::]:80;
@@ -216,7 +216,7 @@
     }
 
     location / {
-${wsHeaders}
+${ws}
         proxy_set_header Host \\$host;
         proxy_set_header X-Real-IP \\$remote_addr;
         proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
@@ -232,25 +232,24 @@ ${wsHeaders}
 }`;
   }
 
-  function genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize }) {
+  function genStaticServerBlock({ serverName, rootVar, spa, gzip, maxUploadSize }) {
     const tryFiles = spa ? 'try_files \\$uri \\$uri/ /index.html;' : 'try_files \\$uri \\$uri/ =404;';
     const gzipBlock = gzip ? `
     gzip on;
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
-
     return `server {
     listen 80;
     listen [::]:80;
     server_name ${serverName};
     client_max_body_size ${maxUploadSize};
-    root ${rootDir};
+    root ${rootVar};
     index index.html;${gzipBlock}
 
     # ACME challenge must be reachable on :80
     location ^~ /.well-known/acme-challenge/ {
-        root ${rootDir};
+        root ${rootVar};
         default_type "text/plain";
     }
 
@@ -261,7 +260,7 @@ ${wsHeaders}
   }
 
   function generateScript() {
-    if (!validateInputs()) return;
+    if (!validate()) return;
 
     const isStatic = modeStatic.checked;
     const serverName = serverNameInput.value.trim();
@@ -279,13 +278,19 @@ ${wsHeaders}
 
     const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
-    let mainServerBlock = '';
     let preface = '';
-    let postWritePatch = '';
+    let mainServerBlock = '';
 
     if (isStatic) {
-      // Use placeholder; we'll replace it with the resolved path after writing the file.
-      mainServerBlock = genStaticServerBlock({ serverName, rootDir: '__ROOT__', spa, gzip, maxUploadSize });
+      // literal ${ROOT_DIR} for runtime expansion (JS inserts it literally)
+      const ROOT_LITERAL = '${ROOT_DIR}';
+      mainServerBlock = genStaticServerBlock({
+        serverName,
+        rootVar: ROOT_LITERAL,
+        spa,
+        gzip,
+        maxUploadSize
+      });
 
       preface = `# --- Normalize and create webroot ---
 set -euo pipefail
@@ -316,10 +321,6 @@ if [ ! -e "$ROOT_DIR/index.html" ]; then
 HTML
 fi
 
-sudo test -d "$ROOT_DIR" || { echo "ERROR: failed to create $ROOT_DIR"; exit 1; }
-sudo test -f "$ROOT_DIR/index.html" || { echo "ERROR: failed to create $ROOT_DIR/index.html"; exit 1; }
-
-echo "[perms] Setting safe ownership & permissions..."
 sudo chown -R www-data:www-data "$ROOT_DIR" || true
 sudo find "$ROOT_DIR" -type d -exec chmod 755 {} \\;
 sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
@@ -344,14 +345,14 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
   fi
 fi
 `;
-
-      // *** Correct, safe replacement of the placeholder with the resolved path ***
-      postWritePatch = `# Substitute placeholder with resolved ROOT_DIR (escape & and \\ in replacement)
-ESCAPED_ROOT="$(printf '%s' "$ROOT_DIR" | sed -e 's/[&\\\\]/\\\\&/g')"
-sudo sed -i "s#__ROOT__#${ESCAPED_ROOT}#g" /etc/nginx/sites-available/${serverName}
-`;
     } else {
-      mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
+      mainServerBlock = genProxyServerBlock({
+        serverName,
+        backendIP,
+        backendPort,
+        websocketEnabled,
+        maxUploadSize
+      });
       preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
@@ -373,11 +374,13 @@ sudo apt install -y nginx certbot python3-certbot-nginx
 sudo rm -f /etc/nginx/sites-enabled/default || true
 
 ${preface}echo "[nginx] Writing initial HTTP server (no redirect) so Certbot can validate..."
-cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
+cat <<EOL | sudo tee /etc/nginx/sites-available/${serverName}
 ${mainServerBlock}
 EOL
 
-${postWritePatch}sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
+# Expand ${ROOT_DIR} in the heredoc above (Bash expanded it already).
+# Link, test, reload:
+sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
 sudo nginx -t
 sudo systemctl reload nginx
 
@@ -394,14 +397,14 @@ pause_if_tty
 `;
 
     outputTextarea.value = script.trim();
-    document.getElementById('outputContainer').style.display = "block";
+    outputContainer.style.display = "block";
     outputTextarea.focus();
     outputTextarea.select();
     ariaStatus.textContent = `Script generated for ${serverName}`;
   }
 
   function copyToClipboard() {
-    const text = document.getElementById('output').value;
+    const text = outputTextarea.value;
     if (!text) { showCopy('Nothing to copy!', true); return; }
     navigator.clipboard.writeText(text)
       .then(() => showCopy('Script copied to clipboard!'))

@@ -193,7 +193,6 @@
     return true;
   }
 
-  // Proxy generator (unchanged)
   function genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize }) {
     const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
@@ -228,7 +227,7 @@ ${wsHeaders}
 }`;
   }
 
-  // NEW: Static-site script (no second 443 server, no loops)
+  // NEW: Static-site script (unified config; serves on 80 and 443; no redirects)
   function genStaticFullScript({ serverName, email, rootDir }) {
     return `#!/bin/bash
 # Setup for ${serverName} — static site on ${rootDir}
@@ -238,134 +237,129 @@ DOMAIN="${serverName}"
 WEBROOT="${rootDir}"
 EMAIL="${email}"
 
-echo "[1/6] Installing NGINX & Certbot..."
-sudo apt update
-sudo apt install -y nginx certbot python3-certbot-nginx
-
-echo "[2/6] Creating web root + sample index..."
-sudo mkdir -p "\${WEBROOT}"
-if [ ! -f "\${WEBROOT}/index.html" ]; then
-  sudo tee "\${WEBROOT}/index.html" >/dev/null <<'HTML'
-<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${serverName}</title>
-<style>body{font-family:system-ui;margin:3rem}code{background:#f0f0f0;padding:.2rem .4rem;border-radius:.25rem}</style>
-</head><body>
-  <h1>✅ It works!</h1>
-  <p>Serving static files for <strong>${serverName}</strong> from <code>${rootDir}</code>.</p>
-</body></html>
+echo "[1/6] Ensure webroot + sample index..."
+sudo mkdir -p "$WEBROOT"
+if [ ! -f "$WEBROOT/index.html" ]; then
+  sudo tee "$WEBROOT/index.html" >/dev/null <<'HTML'
+<!doctype html><html><head><meta charset="utf-8"><title>It works</title></head>
+<body style="font-family:system-ui;margin:2rem"><h1>✅ It works!</h1></body></html>
 HTML
 fi
 
-echo "[3/6] Setting safe ownership & permissions..."
-sudo chown -R www-data:www-data "\${WEBROOT}"
+echo "[2/6] Permissions (nginx must traverse /home/*)..."
+sudo chown -R www-data:www-data "$WEBROOT"
 sudo chmod 755 /home || true
 sudo chmod 755 /home/thomas || true
 sudo chmod 755 /home/thomas/websites || true
-sudo chmod -R 755 "\${WEBROOT}"
+sudo chmod -R 755 "$WEBROOT"
 
-echo "[4/6] Writing initial HTTP server..."
-# Single HTTP server: allow ACME on :80; otherwise redirect to HTTPS.
-sudo tee "/etc/nginx/sites-available/\${DOMAIN}" >/dev/null <<'NGINX'
+echo "[3/6] Install nginx/certbot if needed..."
+sudo apt-get update -y
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+sudo rm -f /etc/nginx/sites-enabled/default || true
+
+CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+if [ ! -f "${CERT_DIR}/fullchain.pem" ] || [ ! -f "${CERT_DIR}/privkey.pem" ]; then
+  echo "[3b/6] Obtaining certificate..."
+  sudo certbot --nginx --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
+fi
+
+FULLCHAIN="${CERT_DIR}/fullchain.pem"
+PRIVKEY="${CERT_DIR}/privkey.pem"
+CHAIN="${CERT_DIR}/chain.pem"
+
+echo "[4/6] Remove duplicate/old site configs for this domain..."
+sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "${DOMAIN}-*" -delete || true
+sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "${DOMAIN}-*" -delete || true
+sudo rm -f "/etc/nginx/sites-available/${DOMAIN}" || true
+sudo rm -f "/etc/nginx/sites-enabled/${DOMAIN}" || true
+
+echo "[5/6] Write a SINGLE canonical config (HTTP and HTTPS serve; no redirects)..."
+TMP="/tmp/${DOMAIN}.nginx.tmp"
+sudo tee "$TMP" >/dev/null <<'NGINX'
+# =========================
+# __DOMAIN__
+# Unified, no-loop config
+# =========================
+
+# HTTP: serve the site directly (NO redirect). ACME still works.
 server {
     listen 80;
     listen [::]:80;
-    server_name ${serverName};
-    root ${rootDir};
+    server_name __DOMAIN__;
+    root __WEBROOT__;
     index index.html;
 
+    # ACME challenge (Let’s Encrypt)
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         allow all;
     }
 
     location / {
-        return 301 https://$host$request_uri;
-    }
-}
-NGINX
-
-sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
-sudo nginx -t && sudo systemctl reload nginx
-
-echo "[5/6] Obtaining certificate with Certbot..."
-sudo certbot --nginx --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}"
-
-echo "[5b/6] Writing FINAL unified HTTP+HTTPS config (no duplicates)..."
-# Remove any extra files Certbot might have created for this domain to avoid duplicate 443 servers
-sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "\${DOMAIN}-*" -delete || true
-sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "\${DOMAIN}-*" -delete || true
-
-# Paths where Certbot stores the certs
-CERT_DIR="/etc/letsencrypt/live/\${DOMAIN}"
-FULLCHAIN="\${CERT_DIR}/fullchain.pem"
-PRIVKEY="\${CERT_DIR}/privkey.pem"
-CHAIN="\${CERT_DIR}/chain.pem"
-
-sudo tee "/etc/nginx/sites-available/\${DOMAIN}" >/dev/null <<NGINX
-server {
-    listen 80;
-    listen [::]:80;
-    server_name \${DOMAIN};
-    root \${WEBROOT};
-    index index.html;
-
-    location ^~ /.well-known/acme-challenge/ {
-        default_type "text/plain";
-        allow all;
-    }
-
-    location / {
-        return 301 https://\$host\$request_uri;
+        try_files $uri $uri/ /index.html;
     }
 }
 
+# HTTPS: serve the same site (NO redirect).
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name \${DOMAIN};
-
-    root \${WEBROOT};
+    server_name __DOMAIN__;
+    root __WEBROOT__;
     index index.html;
 
-    ssl_certificate           \${FULLCHAIN};
-    ssl_certificate_key       \${PRIVKEY};
+    ssl_certificate           __FULLCHAIN__;
+    ssl_certificate_key       __PRIVKEY__;
     include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_trusted_certificate   \${CHAIN};
+    ssl_trusted_certificate   __CHAIN__;
 
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files $uri $uri/ /index.html;
     }
 }
 NGINX
 
-sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
-sudo nginx -t && sudo systemctl reload nginx
+sudo sed -i \
+  -e "s|__DOMAIN__|${DOMAIN}|g" \
+  -e "s|__WEBROOT__|${WEBROOT}|g" \
+  -e "s|__FULLCHAIN__|${FULLCHAIN}|g" \
+  -e "s|__PRIVKEY__|${PRIVKEY}|g" \
+  -e "s|__CHAIN__|${CHAIN}|g" \
+  "$TMP"
 
-echo "[6/6] Enable auto-renewal timer..."
-sudo systemctl enable certbot.timer || true
+sudo mv "$TMP" "/etc/nginx/sites-available/${DOMAIN}"
+sudo ln -sf "/etc/nginx/sites-available/${DOMAIN}" "/etc/nginx/sites-enabled/${DOMAIN}"
 
-echo "Done. Test with:  curl -I http://\${DOMAIN}  &&  curl -I https://\${DOMAIN}"
+echo "[6/6] Test & reload..."
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo
+echo "✅ Fixed. HTTP and HTTPS both serve content (no redirects)."
+echo "Quick checks:"
+echo "  curl -I http://${DOMAIN}"
+echo "  curl -I https://${DOMAIN}"
 `;
   }
 
   function generateScript() {
     if (!validateInputs()) return;
 
-    const isStatic = modeStatic.checked;
+    const isStatic = document.getElementById('modeStatic').checked;
     const serverName = serverNameInput.value.trim();
     const email = emailInput.value.trim();
-    const maxUploadSize = (document.getElementById('maxUploadSize').value.trim() || '1G');
+
+    const maxUploadSize = (maxUploadInput.value.trim() || '1G');
     const backendIP = backendIPInput.value.trim();
     const backendPort = backendPortInput.value.trim();
-    const websocketEnabled = document.getElementById('websocketToggle').checked;
+    const websocketEnabled = websocketToggle.checked;
     const rootDir = (rootDirInput || {}).value?.trim?.() ?? '';
 
     let script = '';
     if (isStatic) {
       script = genStaticFullScript({ serverName, email, rootDir });
     } else {
-      // existing proxy flow (unchanged)
       const block = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
       const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName}`.trim();
       const preface = `sudo mkdir -p /var/www/letsencrypt
@@ -406,24 +400,26 @@ pause_if_tty
     ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
   }
 
-  function validateInputs(){ /* trimmed for brevity above; unchanged from earlier */ return (function(){
-    const serverName=serverNameInput.value.trim(), email=emailInput.value.trim(), isStatic=modeStatic.checked;
-    if(!serverName||!hostnameRegex.test(serverName)){alert('Enter a valid server name.');serverNameInput.focus();return false}
-    if(!email||!emailRegex.test(email)){alert('Enter a valid email.');emailInput.focus();return false}
-    if(isStatic){const root=rootDirInput.value.trim(); if(!root||!root.startsWith('/')){alert('Root Directory must be an absolute path.');rootDirInput.focus();return false}}
-    else{const ip=backendIPInput.value.trim(), port=backendPortInput.value.trim(); if(!ip||!port){alert('Backend host and port are required.');return false}
-      if(!ipv4Regex.test(ip)&&!ipv6Regex.test(ip)&&ip.toLowerCase()!=='localhost'&&!hostnameRegex.test(ip)){alert('Enter a valid IPv4/IPv6/hostname/localhost.');return false}
-      const p=Number(port); if(!(p>=1&&p<=65535)){alert('Port must be 1–65535.');return false}}
-    const max=maxUploadInput.value.trim(); if(max&&!/^[1-9][0-9]*[MG]$/i.test(max)){alert('Max upload example: 50M or 1G.');return false}
-    return true; })(); }
+  function copyToClipboard(){
+    const t=outputTextarea.value;
+    if(!t){ copyFeedback.textContent='Nothing to copy!'; copyFeedback.classList.add('error'); copyFeedback.style.display='block'; setTimeout(()=>{copyFeedback.style.display='none';copyFeedback.classList.remove('error')},3000); return; }
+    navigator.clipboard.writeText(t).then(()=>{
+      copyFeedback.textContent='Script copied to clipboard!';
+      copyFeedback.classList.remove('error'); copyFeedback.style.display='block';
+      setTimeout(()=>{copyFeedback.style.display='none'},3000);
+    }).catch(e=>{
+      copyFeedback.textContent='Failed to copy: '+e;
+      copyFeedback.classList.add('error'); copyFeedback.style.display='block';
+      setTimeout(()=>{copyFeedback.style.display='none';copyFeedback.classList.remove('error')},3000);
+    });
+  }
 
-  function copyToClipboard(){ const t=outputTextarea.value; if(!t){feedback('Nothing to copy!',true);return}
-    navigator.clipboard.writeText(t).then(()=>feedback('Script copied to clipboard!')).catch(e=>feedback('Failed to copy: '+e,true)); }
-  function feedback(msg,err){ copyFeedback.textContent=msg; copyFeedback.classList.toggle('error',!!err); copyFeedback.style.display='block';
-    setTimeout(()=>{copyFeedback.style.display='none';copyFeedback.textContent='';copyFeedback.classList.remove('error')},3000); }
-  function copyRecovery(){ const s=`# Recovery: install NGINX & Certbot
+  function copyRecovery(){
+    const s=`# Recovery: install NGINX & Certbot
 sudo apt update
-sudo apt install -y nginx certbot python3-certbot-nginx`; navigator.clipboard.writeText(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e)); }
+sudo apt install -y nginx certbot python3-certbot-nginx`;
+    navigator.clipboard.writeText(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e));
+  }
 
   generateBtn.addEventListener('click', generateScript);
   copyBtn.addEventListener('click', copyToClipboard);

@@ -290,30 +290,39 @@
         return true;
     }
 
+    // UPDATED: robust proxy block with ACME local webroot and timeouts
     function genProxyServerBlock(opts) {
         const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
         const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
+
+        return `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+
+    client_max_body_size ${maxUploadSize};
+
+    # Let ACME hit nginx directly (don’t proxy to the app)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+    }
+
+    location / {
+${wsHeaders}
         proxy_set_header Host \\$host;
         proxy_set_header X-Real-IP \\$remote_addr;
         proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \\$scheme;
-        proxy_cache_bypass \\$http_upgrade;
-        proxy_set_header Origin "";
-        proxy_request_buffering off;
-` : `        proxy_set_header Host \\$host;
-        proxy_set_header X-Real-IP \\$remote_addr;
-        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\$scheme;
-`;
 
-        return `server {
-    listen 80;
-    server_name ${serverName};
-    client_max_body_size ${maxUploadSize};
-    location / {
-${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
+        proxy_read_timeout 300;
+        proxy_connect_timeout 60;
+        proxy_send_timeout 300;
+        proxy_buffering off;
+
+        proxy_pass http://${backendIP}:${backendPort};
     }
 }`;
     }
@@ -331,7 +340,7 @@ ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
 
-        // Write only the HTTP block initially; Certbot will add HTTPS + (optional) redirect.
+        // HTTP block only; Certbot will add HTTPS + (optional) redirect.
         return `server {
     listen 80;
     listen [::]:80;
@@ -352,7 +361,7 @@ ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
 }`;
     }
 
-    // Updated generator: adds parent-dir perms + AppArmor override when serving from /home/*
+    // Generator: Static adds It-works page + /home fixes + AppArmor; Proxy adds ACME webroot.
     function generateScript() {
         if (!validateInputs()) return;
 
@@ -370,7 +379,6 @@ ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
         const spa = (spaToggle || {}).checked ?? false;
         const gzip = (gzipToggle || {}).checked ?? false;
 
-        // Certbot: add --redirect only AFTER issuance (Certbot safely edits the 443 block it adds)
         const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
         let mainServerBlock = '';
@@ -379,7 +387,7 @@ ${wsHeaders}        proxy_pass http://${backendIP}:${backendPort};
         if (isStatic) {
             mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
 
-            // Preface does: create root, starter index, set perms, fix /home parent execute bits, AppArmor override
+            // Create webroot, starter index (“It works!”), perms, /home execute bits, AppArmor allow
             preface = `# Ensure root directory exists and has an index.html
 ROOT_DIR="${rootDir}"
 sudo mkdir -p "$ROOT_DIR"
@@ -405,7 +413,6 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
   if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
     echo "Adding AppArmor allowlist for nginx to read $ROOT_DIR ..."
     sudo mkdir -p /etc/apparmor.d/local
-    # Allow read (r) and execute traversal (ix) within the chosen ROOT_DIR
     LINE="$ROOT_DIR/** r,"
     LINE2="$ROOT_DIR/** rix,"
     sudo bash -c 'grep -qxF '"'"'$LINE'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
@@ -417,6 +424,11 @@ fi
 `;
         } else {
             mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
+
+            // Ensure local ACME directory exists for proxy flow
+            preface = `sudo mkdir -p /var/www/letsencrypt
+sudo chown -R www-data:www-data /var/www/letsencrypt || true
+`;
         }
 
         const script = `#!/bin/bash

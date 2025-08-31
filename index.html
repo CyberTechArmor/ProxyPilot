@@ -290,7 +290,7 @@
         return true;
     }
 
-    // UPDATED: robust proxy block with ACME local webroot and timeouts
+    // Proxy server block generator (unchanged)
     function genProxyServerBlock(opts) {
         const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
         const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
@@ -327,6 +327,7 @@ ${wsHeaders}
 }`;
     }
 
+    // (kept for completeness, not used by the new static flow)
     function genStaticServerBlock(opts) {
         const { serverName, rootDir, spa, gzip, maxUploadSize } = opts;
 
@@ -340,7 +341,6 @@ ${wsHeaders}
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
 
-        // HTTP block only; Certbot will add HTTPS + (optional) redirect.
         return `server {
     listen 80;
     listen [::]:80;
@@ -361,13 +361,118 @@ ${wsHeaders}
 }`;
     }
 
-    // Generator: Static adds It-works page + /home fixes + AppArmor; Proxy adds ACME webroot.
+    // NEW: exact static-site script generator (matches user's requested output)
+    function genStaticFullScript({ serverName, email, rootDir }) {
+      return `#!/bin/bash
+# Setup for ${serverName} — static site on ${rootDir}
+set -euo pipefail
+
+DOMAIN="${serverName}"
+WEBROOT="${rootDir}"
+EMAIL="${email}"
+
+echo "[1/6] Installing NGINX & Certbot..."
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx
+
+echo "[2/6] Creating web root + sample index..."
+sudo mkdir -p "\${WEBROOT}"
+if [ ! -f "\${WEBROOT}/index.html" ]; then
+  sudo tee "\${WEBROOT}/index.html" >/dev/null <<'HTML'
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${serverName}</title>
+<style>body{font-family:system-ui;margin:3rem}code{background:#f0f0f0;padding:.2rem .4rem;border-radius:.25rem}</style>
+</head><body>
+  <h1>✅ It works!</h1>
+  <p>Serving static files for <strong>${serverName}</strong> from <code>${rootDir}</code>.</p>
+</body></html>
+HTML
+fi
+
+# Ensure nginx (www-data) can traverse to WEBROOT
+# (execute bit required on every parent dir)
+echo "[3/6] Setting safe ownership & permissions..."
+sudo chown -R www-data:www-data "\${WEBROOT}"
+sudo chmod 755 /home || true
+sudo chmod 755 /home/thomas || true
+sudo chmod 755 /home/thomas/websites || true
+sudo chmod -R 755 "\${WEBROOT}"
+
+echo "[4/6] Writing NGINX server config..."
+# Single HTTP server: allow ACME, otherwise redirect to HTTPS.
+sudo tee "/etc/nginx/sites-available/\${DOMAIN}" >/dev/null <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name \${DOMAIN};
+    root \${WEBROOT};
+    index index.html;
+
+    # ACME challenge must be reachable on :80 for initial and renewals
+    location ^~ /.well-known/acme-challenge/ {
+        default_type "text/plain";
+        allow all;
+    }
+
+    # Everything else: redirect to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX
+
+sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo "[5/6] Obtaining & installing HTTPS certificate..."
+# This will create/update a 443 server block with ssl_certificate lines.
+sudo certbot --nginx --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}"
+
+# OPTIONAL: ensure the HTTPS server uses the static root/try_files we want.
+# certbot usually keeps the same root; add a hardened 443 block if needed:
+HTTPS_FILE="/etc/nginx/sites-available/\${DOMAIN}-ssl"
+sudo tee "\${HTTPS_FILE}" >/dev/null <<'NGINX'
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${serverName};
+
+    root ${rootDir};
+    index index.html;
+
+    # (Certbot manages these ssl_* lines; keep them in the main file if present)
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    # ssl_certificate and ssl_certificate_key are included in the primary file by certbot
+
+    location / {
+        # IMPORTANT: real $uri variables (no backslashes)
+        try_files $uri $uri/ /index.html;
+    }
+}
+NGINX
+
+# Merge ssl lines from certbot-managed file, if needed
+# If certbot already injected the ssl server into \${DOMAIN}, we don't need the extra file above.
+# Reload either way.
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo "[6/6] Enable auto-renewal timer..."
+sudo systemctl enable certbot.timer || true
+
+echo "Done. Test with:  curl -I http://\${DOMAIN}  and  curl -I https://\${DOMAIN}"
+`;
+    }
+
     function generateScript() {
         if (!validateInputs()) return;
 
         const isStatic = modeStatic.checked;
         const serverName = serverNameInput.value.trim();
         const email = emailInput.value.trim();
+
         const maxUploadSize = (maxUploadInput.value.trim() || '1G');
         const forceHttps = forceHttpsToggle.checked;
 
@@ -381,57 +486,26 @@ ${wsHeaders}
 
         const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
-        let mainServerBlock = '';
-        let preface = '';
+        let script = '';
 
         if (isStatic) {
-            mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
-
-            // Create webroot, starter index (“It works!”), perms, /home execute bits, AppArmor allow
-            preface = `# Ensure root directory exists and has an index.html
-ROOT_DIR="${rootDir}"
-sudo mkdir -p "$ROOT_DIR"
-if [ ! -f "$ROOT_DIR/index.html" ]; then
-  sudo tee "$ROOT_DIR/index.html" >/dev/null <<'HTML'
-<!DOCTYPE html><html><head><meta charset="utf-8"><title>${serverName}</title></head><body><h1>It works!</h1><p>Serving static files for ${serverName}</p></body></html>
-HTML
-fi
-
-echo "Setting safe ownership & permissions..."
-sudo chown -R www-data:www-data "$ROOT_DIR" || true
-sudo find "$ROOT_DIR" -type d -exec chmod 755 {} \\;
-sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
-
-# If serving from /home/..., make sure nginx can traverse parents and allow via AppArmor
-if [[ "$ROOT_DIR" == /home/*/* ]]; then
-  echo "Adjusting parent directory execute bits under /home..."
-  PARENT1="/home"
-  USERDIR="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)"
-  TOPSUB="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)"
-  sudo chmod 755 "$PARENT1" "$USERDIR" "$TOPSUB" || true
-
-  if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
-    echo "Adding AppArmor allowlist for nginx to read $ROOT_DIR ..."
-    sudo mkdir -p /etc/apparmor.d/local
-    LINE="$ROOT_DIR/** r,"
-    LINE2="$ROOT_DIR/** rix,"
-    sudo bash -c 'grep -qxF '"'"'$LINE'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
-    sudo bash -c 'grep -qxF '"'"'$LINE2'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE2'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
-    sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx 2>/dev/null || true
-    sudo systemctl reload apparmor || true
-  fi
-fi
-`;
+            // Generate EXACT static-site script as requested
+            script = genStaticFullScript({ serverName, email, rootDir });
         } else {
-            mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
+            // Original proxy path (unchanged)
+            const mainServerBlock = genProxyServerBlock({
+                serverName,
+                backendIP,
+                backendPort,
+                websocketEnabled,
+                maxUploadSize
+            });
 
-            // Ensure local ACME directory exists for proxy flow
-            preface = `sudo mkdir -p /var/www/letsencrypt
+            const preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
-        }
 
-        const script = `#!/bin/bash
+            script = `#!/bin/bash
 # Generated by NGINX Setup Script Generator
 set -uo pipefail
 
@@ -470,6 +544,7 @@ sudo systemctl enable certbot.timer || true
 echo "All done for ${serverName}."
 pause_if_tty
 `;
+        }
 
         outputTextarea.value = script.trim();
         document.getElementById('outputContainer').style.display = "block";

@@ -1,6 +1,3 @@
-Here’s an updated **README.md** that reflects the new name and the latest feature set/behavior you implemented.
-
-````markdown
 # ProxyPilot
 
 A tool to automate NGINX configuration, SSL certificate setup, and renewal with Certbot. **ProxyPilot** simplifies server setups by generating ready-to-run Bash scripts that configure reverse proxies or static sites and secure your domains—perfect for developers and sysadmins who want fast, reproducible web server management.

@@ -8,39 +8,136 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
   <style>
-    body { font-family:'Inter',sans-serif; background:#1f2937; color:#f3f4f6; display:flex; flex-direction:column; align-items:center; padding:20px; margin:0; min-height:100vh; }
-    .container{ max-width:760px; width:100%; background:#374151; border-radius:10px; padding:22px 28px 30px; box-shadow:0 4px 14px rgba(0,0,0,.25); text-align:center; }
-    .rocket{ font-size:4.6rem; margin-bottom:.35em; user-select:none; line-height:1; }
-    h1{ margin:0 0 16px; font-size:1.55rem; }
-    .input-group{ margin-bottom:14px; text-align:left; }
-    label{ display:block; margin-bottom:6px; font-weight:700; cursor:pointer; }
-    input[type=text],input[type=email],input[type=number],textarea{ width:100%; padding:10px 12px; border:1px solid #4b5563; border-radius:6px; background:#1f2937; color:#f3f4f6; outline:none; transition:border-color .2s; font-family:inherit; }
-    input:focus,textarea:focus{ border-color:#10b981; }
-    textarea{ height:220px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:.92em; color:#d1d5db; background:#111827; }
-    .btn{ display:inline-block; min-width:180px; padding:11px 14px; text-align:center; border:none; border-radius:6px; background:#10b981; color:#fff; font-weight:700; cursor:pointer; transition:background-color .2s, transform .02s; user-select:none; }
-    .btn + .btn{ margin-left:10px; }
-    .btn:hover:not(:disabled){ background:#059669; }
-    .btn:active:not(:disabled){ transform:translateY(1px); }
-    .btn:disabled{ background:#4b5563; cursor:not-allowed; }
-    .recovery-btn{ background:#dc2626; } .recovery-btn:hover:not(:disabled){ background:#b91c1c; }
-    .bar{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:6px; }
-    .output-container{ display:none; margin-top:18px; background:#1f2937; padding:14px; border-radius:8px; text-align:left; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:.92em; white-space:pre-wrap; }
-    .copy-btn{ background:#3b82f6; } .copy-btn:hover:not(:disabled){ background:#2563eb; }
-    .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
-    .feedback{ margin-top:8px; font-size:.95em; text-align:center; color:#10b981; display:none; }
-    .feedback.error{ color:#dc2626; }
-    .toggle-group,.radio-row{ display:flex; align-items:center; gap:12px; margin-bottom:14px; user-select:none; flex-wrap:wrap; }
-    .toggle-group input[type=checkbox]{ height:0; width:0; visibility:hidden; position:absolute; }
-    .toggle-label{ background:#4b5563; border-radius:20px; cursor:pointer; width:50px; height:26px; position:relative; transition:background-color .2s; display:inline-block; vertical-align:middle; }
-    .toggle-label::after{ content:''; position:absolute; top:3px; left:3px; width:20px; height:20px; background:#f3f4f6; border-radius:50%; transition:.2s; }
-    .toggle-group input[type=checkbox]:checked + .toggle-label{ background:#10b981; }
-    .toggle-group input[type=checkbox]:checked + .toggle-label::after{ left:calc(100% - 23px); }
-    .toggle-text{ font-weight:700; cursor:pointer; color:#f3f4f6; user-select:none; }
-    .note{ font-size:.92em; color:#9ca3af; margin-top:-6px; margin-bottom:8px; text-align:left; }
-    .hidden{ display:none; }
-    .row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-    .pill{ display:inline-block; padding:5px 11px; border:1px solid #4b5563; border-radius:999px; font-size:.95em; background:#111827; cursor:pointer; }
-    .pill input{ margin-right:6px; transform:translateY(1px); }
+    :root{
+      --card-pad:24px;
+    }
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #1f2937;
+      color: #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      margin: 0;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 760px;
+      width: 100%;
+      background-color: #374151;
+      border-radius: 10px;
+      padding: var(--card-pad);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .rocket { font-size: 4.6rem; margin-bottom: .35em; user-select: none; line-height: 1; }
+    h1 { margin: 0 0 16px; font-size: 1.55rem; user-select: none; }
+
+    /* Inputs: equal spacing left/right and full width */
+    .input-group { margin: 14px 0; text-align: left; }
+    label { display: block; margin-bottom: 6px; font-weight: 700; cursor: pointer; }
+    input[type="text"], input[type="email"], input[type="number"], textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #4b5563;
+      border-radius: 6px;
+      background-color: #1f2937;
+      color: #f3f4f6;
+      outline: none;
+      transition: border-color .2s;
+      font-family: inherit;
+      box-sizing: border-box; /* <-- ensure equal padding */
+    }
+    input:focus, textarea:focus { border-color: #10b981; }
+
+    /* Buttons */
+    .btn {
+      display: inline-block;
+      min-width: 180px;
+      padding: 11px 14px;
+      text-align: center;
+      border: none;
+      border-radius: 6px;
+      background-color: #10b981;
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color .2s, transform .02s;
+      user-select: none;
+    }
+    .btn:hover:not(:disabled) { background-color: #059669; }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { background-color: #4b5563; cursor: not-allowed; }
+    .recovery-btn { background-color: #dc2626; }
+    .recovery-btn:hover:not(:disabled) { background-color: #b91c1c; }
+
+    .bar { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top: 6px; }
+
+    /* Output box fits and scrolls nicely */
+    .output-container {
+      display: none;
+      margin-top: 18px;
+      background-color: #1f2937;
+      padding: 14px;
+      border-radius: 8px;
+      text-align: left;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: .92em;
+      box-sizing: border-box;
+      width: 100%;
+    }
+    .output-container textarea {
+      width: 100%;
+      min-height: 320px;
+      max-height: 60vh;
+      overflow: auto;
+      resize: vertical;
+      background: #111827;
+      color: #d1d5db;
+      white-space: pre;
+      box-sizing: border-box;
+    }
+    .copy-row {
+      display:flex;
+      justify-content:flex-end;
+      margin-top:10px;
+    }
+    .copy-btn { background-color: #3b82f6; }
+    .copy-btn:hover:not(:disabled) { background-color: #2563eb; }
+
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); border: 0;
+    }
+    .feedback { margin-top: 8px; font-size: .95em; text-align: center; color: #10b981; display: none; }
+    .feedback.error { color: #dc2626; }
+    .toggle-group, .radio-row {
+      display: flex; align-items: center; gap: 12px; margin: 14px 0; user-select: none; flex-wrap: wrap;
+    }
+    .toggle-group input[type="checkbox"] { height: 0; width: 0; visibility: hidden; position: absolute; }
+    .toggle-label {
+      background: #4b5563; border-radius: 20px; cursor: pointer; width: 50px; height: 26px;
+      position: relative; transition: background-color .2s; display: inline-block; vertical-align: middle;
+    }
+    .toggle-label::after {
+      content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+      background: #f3f4f6; border-radius: 50%; transition: .2s;
+    }
+    .toggle-group input[type="checkbox"]:checked + .toggle-label { background: #10b981; }
+    .toggle-group input[type="checkbox"]:checked + .toggle-label::after { left: calc(100% - 23px); }
+    .toggle-text { font-weight: 700; cursor: pointer; color: #f3f4f6; user-select: none; }
+    .note { font-size: .92em; color: #9ca3af; margin-top: -6px; text-align: left; }
+    .hidden { display: none; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .pill {
+      display:inline-block; padding:5px 11px; border:1px solid #4b5563; border-radius:999px; font-size:.95em;
+      background:#111827; cursor:pointer;
+    }
+    .pill input { margin-right:6px; transform: translateY(1px); }
+
+    /* tiny toast for JS errors */
     .toast{ position:fixed; right:16px; bottom:16px; background:#111827; color:#fef3c7; border:1px solid #78350f; padding:10px 12px; border-radius:6px; font-size:.9em; display:none; max-width:70vw; }
   </style>
 </head>
@@ -111,22 +208,25 @@
       <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code>. We’ll also fix parent-dir execute bits under <code>/home</code>.</div>
     </div>
 
-    <!-- Global options -->
+    <!-- Force HTTPS applies to BOTH modes now -->
     <div class="toggle-group">
       <input type="checkbox" id="forceHttpsToggle" />
       <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
-      <label class="toggle-text" for="forceHttpsToggle">Force HTTPS (proxy mode only)</label>
+      <label class="toggle-text" for="forceHttpsToggle">Force HTTPS (redirect http → https)</label>
     </div>
 
     <div class="bar">
       <button class="btn" id="generateBtn" type="button">Generate Script</button>
-      <button class="btn copy-btn" id="copyBtn" type="button" disabled>Copy to Clipboard</button>
       <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
     </div>
 
+    <!-- Output -->
     <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script">
       <label for="output" class="sr-only">Generated Script</label>
       <textarea id="output" readonly spellcheck="false"></textarea>
+      <div class="copy-row">
+        <button class="btn copy-btn" id="copyBtn" type="button" disabled>Copy to Clipboard</button>
+      </div>
       <div id="copyFeedback" class="feedback" role="alert"></div>
     </div>
 
@@ -140,7 +240,6 @@
     // utilities
     const $ = (sel) => document.querySelector(sel);
     const show = (el) => el && (el.style.display = 'block');
-    const hide = (el) => el && (el.style.display = 'none');
     const toast = $('#toast');
     function notify(msg, isError = true) {
       if (!toast) return;
@@ -166,8 +265,6 @@
     const websocketToggle = $('#websocketToggle');
 
     const rootDirInput = $('#rootDir');
-    const spaToggle = $('#spaToggle');
-    const gzipToggle = $('#gzipToggle');
 
     const forceHttpsToggle = $('#forceHttpsToggle');
 
@@ -179,10 +276,6 @@
     const copyFeedback = $('#copyFeedback');
     const ariaStatus = $('#ariaStatus');
 
-    // guards
-    const mustHave = [generateBtn, copyBtn, recoveryBtn, outputTextarea, serverNameInput, emailInput];
-    if (mustHave.some(x => !x)) { notify('Missing required UI elements. Please reload the page.'); return; }
-
     // validators
     const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
     const ipv6Regex = /^[0-9a-fA-F:]+$/;
@@ -190,13 +283,13 @@
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     function setModeUI() {
-      const isStatic = modeStatic && modeStatic.checked;
+      const isStatic = modeStatic.checked;
       proxyFields.classList.toggle('hidden', isStatic);
       staticFields.classList.toggle('hidden', !isStatic);
       backendIPInput.required = !isStatic;
       backendPortInput.required = !isStatic;
       rootDirInput.required = isStatic;
-      forceHttpsToggle.disabled = isStatic; // static flow uses no-redirect config
+      // Force HTTPS is allowed for both modes now
     }
     modeProxy.addEventListener('change', setModeUI);
     modeStatic.addEventListener('change', setModeUI);
@@ -232,7 +325,9 @@
           alert('Enter a valid Backend IP (IPv4, IPv6), hostname, or "localhost".'); backendIPInput.focus(); return false;
         }
         if (ipv4Regex.test(backendIP)) {
-          const octets = backendIP.split("."); for (const oct of octets) { const v = +oct; if (v < 0 || v > 255) { alert('Invalid IPv4 address.'); backendIPInput.focus(); return false; } }
+          const octets = backendIP.split("."); for (const oct of octets) {
+            const v = +oct; if (v < 0 || v > 255) { alert('Invalid IPv4 address.'); backendIPInput.focus(); return false; }
+          }
         }
         const portNum = +backendPort;
         if (!(portNum >= 1 && portNum <= 65535)) { alert('Enter a valid port number (1-65535).'); backendPortInput.focus(); return false; }
@@ -280,8 +375,54 @@ ${wsHeaders}
 }`;
     }
 
-    // Static-site generator (UNIFIED, NO-REDIRECT) — all bash ${...} escaped as \${...}
-    function genStaticFullScript({ serverName, email, rootDir }) {
+    // Build the HTTP block for static site depending on Force HTTPS
+    function httpBlockForStatic(forceHttps) {
+      if (forceHttps) {
+        return `server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+    root __WEBROOT__;
+    index index.html;
+
+    # ACME must be reachable on :80
+    location ^~ /.well-known/acme-challenge/ {
+        default_type "text/plain";
+        allow all;
+    }
+
+    # Redirect everything else
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+`;
+      } else {
+        return `server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+    root __WEBROOT__;
+    index index.html;
+
+    # ACME challenge (Let’s Encrypt)
+    location ^~ /.well-known/acme-challenge/ {
+        default_type "text/plain";
+        allow all;
+    }
+
+    # Serve directly (no redirect)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+`;
+      }
+    }
+
+    // Static-site generator (UNIFIED; optional redirect on :80)
+    function genStaticFullScript({ serverName, email, rootDir, forceHttps }) {
+      const HTTP_BLOCK = httpBlockForStatic(forceHttps);
       return `#!/bin/bash
 # Setup for ${serverName} — static site on ${rootDir}
 set -euo pipefail
@@ -327,34 +468,17 @@ sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "\${DOMAIN}-*" -d
 sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}" || true
 sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
 
-echo "[5/6] Write a SINGLE canonical config (HTTP and HTTPS serve; no redirects)..."
+echo "[5/6] Write a SINGLE canonical config..."
 TMP="/tmp/\${DOMAIN}.nginx.tmp"
 sudo tee "$TMP" >/dev/null <<'NGINX'
 # =========================
 # __DOMAIN__
-# Unified, no-loop config
+# Unified config (http block varies by Force HTTPS)
 # =========================
 
-# HTTP: serve the site directly (NO redirect). ACME still works.
-server {
-    listen 80;
-    listen [::]:80;
-    server_name __DOMAIN__;
-    root __WEBROOT__;
-    index index.html;
+__HTTP_BLOCK__
 
-    # ACME challenge (Let’s Encrypt)
-    location ^~ /.well-known/acme-challenge/ {
-        default_type "text/plain";
-        allow all;
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-
-# HTTPS: serve the same site (NO redirect).
+# HTTPS: serve the site
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
@@ -373,7 +497,9 @@ server {
 }
 NGINX
 
+# Inject the chosen HTTP block and paths
 sudo sed -i \
+  -e "s|__HTTP_BLOCK__|$(printf '%s' "${HTTP_BLOCK//|/\\|}")|" \
   -e "s|__DOMAIN__|${serverName}|g" \
   -e "s|__WEBROOT__|${rootDir}|g" \
   -e "s|__FULLCHAIN__|\${FULLCHAIN}|g" \
@@ -389,44 +515,42 @@ sudo nginx -t
 sudo systemctl reload nginx
 
 echo
-echo "✅ Fixed. HTTP and HTTPS both serve content (no redirects)."
+echo "✅ Done. HTTP ${forceHttps ? 'redirects to HTTPS' : 'serves directly'}; HTTPS serves content."
 echo "Quick checks:"
 echo "  curl -I http://\${DOMAIN}"
 echo "  curl -I https://\${DOMAIN}"
 `;
     }
 
-    // generation
     function generateScript() {
-      try {
-        if (!validateInputs()) return;
+      if (!validateInputs()) return;
 
-        const isStatic = modeStatic.checked;
-        const serverName = (serverNameInput.value || '').trim();
-        const email = (emailInput.value || '').trim();
-        const maxUploadSize = (maxUploadInput.value || '').trim() || '1G';
-        const backendIP = (backendIPInput.value || '').trim();
-        const backendPort = (backendPortInput.value || '').trim();
-        const websocketEnabled = !!websocketToggle.checked;
-        const rootDir = (rootDirInput.value || '').trim();
-        const forceHttps = !!document.getElementById('forceHttpsToggle').checked; // proxy only
+      const isStatic = modeStatic.checked;
+      const serverName = (serverNameInput.value || '').trim();
+      const email = (emailInput.value || '').trim();
+      const maxUploadSize = (maxUploadInput.value || '').trim() || '1G';
+      const backendIP = (backendIPInput.value || '').trim();
+      const backendPort = (backendPortInput.value || '').trim();
+      const websocketEnabled = !!document.getElementById('websocketToggle').checked;
+      const rootDir = (rootDirInput.value || '').trim();
+      const forceHttps = !!forceHttpsToggle.checked;
 
-        let script = '';
+      let script = '';
 
-        if (isStatic) {
-          script = genStaticFullScript({ serverName, email, rootDir });
-        } else {
-          const mainServerBlock = genProxyServerBlock({
-            serverName, backendIP, backendPort, websocketEnabled, maxUploadSize
-          });
+      if (isStatic) {
+        script = genStaticFullScript({ serverName, email, rootDir, forceHttps });
+      } else {
+        const mainServerBlock = genProxyServerBlock({
+          serverName, backendIP, backendPort, websocketEnabled, maxUploadSize
+        });
 
-          const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
+        const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
-          const preface = `sudo mkdir -p /var/www/letsencrypt
+        const preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
 
-          script = `#!/bin/bash
+        script = `#!/bin/bash
 # Generated by NGINX Setup Script Generator
 set -uo pipefail
 
@@ -465,16 +589,14 @@ sudo systemctl enable certbot.timer || true
 echo "All done for ${serverName}."
 pause_if_tty
 `;
-        }
-
-        outputTextarea.value = script.trim();
-        outputContainer.style.display = "block";
-        document.getElementById('copyBtn').disabled = false;
-        ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
-        outputTextarea.focus(); outputTextarea.select();
-      } catch (err) {
-        notify('Generation failed: ' + (err?.message || err));
       }
+
+      outputTextarea.value = script.trim();
+      outputContainer.style.display = "block";
+      copyBtn.disabled = false;
+      ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
+      outputContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      outputTextarea.focus(); outputTextarea.select();
     }
 
     function showCopyFeedback(message, isError = false) {
@@ -485,15 +607,11 @@ pause_if_tty
     }
 
     function copyToClipboard() {
-      try {
-        const text = outputTextarea.value || '';
-        if (!text) { showCopyFeedback('Nothing to copy!', true); return; }
-        navigator.clipboard.writeText(text)
-          .then(() => showCopyFeedback('Script copied to clipboard!'))
-          .catch(err => showCopyFeedback('Failed to copy: ' + err, true));
-      } catch (err) {
-        notify('Copy failed: ' + (err?.message || err));
-      }
+      const text = outputTextarea.value || '';
+      if (!text) { showCopyFeedback('Nothing to copy!', true); return; }
+      navigator.clipboard.writeText(text)
+        .then(() => showCopyFeedback('Script copied to clipboard!'))
+        .catch(err => showCopyFeedback('Failed to copy: ' + err, true));
     }
 
     function copyRecovery() {
@@ -506,9 +624,9 @@ sudo apt install -y nginx certbot python3-certbot-nginx`;
     }
 
     // wire up
-    generateBtn.addEventListener('click', generateScript);
-    copyBtn.addEventListener('click', copyToClipboard);
-    recoveryBtn.addEventListener('click', copyRecovery);
+    document.getElementById('generateBtn').addEventListener('click', generateScript);
+    document.getElementById('copyBtn').addEventListener('click', copyToClipboard);
+    document.getElementById('recoveryBtn').addEventListener('click', copyRecovery);
 
     // Ctrl/Cmd + Enter generates
     [serverNameInput, emailInput, backendIPInput, backendPortInput, rootDirInput, maxUploadInput].forEach(el => {

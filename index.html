@@ -45,7 +45,6 @@
   <div class="rocket" aria-hidden="true">🚀</div>
   <h1>NGINX Setup Script Generator</h1>
 
-  <!-- Deployment Mode -->
   <div class="input-group">
     <label>Deployment Mode</label>
     <div class="radio-row" role="radiogroup" aria-label="Deployment Mode">
@@ -55,10 +54,9 @@
     <div class="note">Choose “Static Site” to serve files directly from a folder (no upstream app).</div>
   </div>
 
-  <!-- Common -->
   <div class="input-group">
     <label for="serverName">Server Name (Domain)</label>
-    <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required aria-describedby="serverName-desc" />
+    <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required />
   </div>
   <div class="input-group">
     <label for="email">Your Email (for Let's Encrypt SSL)</label>
@@ -66,28 +64,25 @@
   </div>
   <div class="input-group">
     <label for="maxUploadSize">Max Upload Size (optional, default 1G)</label>
-    <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" aria-describedby="maxUploadDesc" />
-    <div id="maxUploadDesc" class="note sr-only">May include M for megabytes, G for gigabytes.</div>
+    <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" />
   </div>
 
-  <!-- Proxy fields -->
   <div id="proxyFields">
     <div class="input-group">
       <label for="backendIP">Backend IP Address, Hostname, or 'localhost'</label>
-      <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost or backend.internal" />
+      <input type="text" id="backendIP" placeholder="127.0.0.1 or localhost" />
     </div>
     <div class="input-group">
       <label for="backendPort">Backend Port</label>
-      <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" />
+      <input type="number" id="backendPort" placeholder="3000" min="1" max="65535" />
     </div>
     <div class="toggle-group">
-      <input type="checkbox" id="websocketToggle" checked aria-describedby="websocketLabel" />
+      <input type="checkbox" id="websocketToggle" checked />
       <label class="toggle-label" for="websocketToggle" tabindex="0"></label>
-      <label class="toggle-text" id="websocketLabel" for="websocketToggle">Enable WebSocket Support</label>
+      <label class="toggle-text" for="websocketToggle">Enable WebSocket Support</label>
     </div>
   </div>
 
-  <!-- Static fields -->
   <div id="staticFields" class="hidden">
     <div class="input-group">
       <label for="rootDir">Root Directory (absolute path)</label>
@@ -95,34 +90,32 @@
     </div>
     <div class="row">
       <div class="toggle-group">
-        <input type="checkbox" id="spaToggle" aria-describedby="spaLabel" />
+        <input type="checkbox" id="spaToggle" />
         <label class="toggle-label" for="spaToggle" tabindex="0"></label>
-        <label class="toggle-text" id="spaLabel" for="spaToggle">SPA Fallback (route everything to index.html)</label>
+        <label class="toggle-text" for="spaToggle">SPA Fallback (route everything to index.html)</label>
       </div>
       <div class="toggle-group">
-        <input type="checkbox" id="gzipToggle" aria-describedby="gzipLabel" />
+        <input type="checkbox" id="gzipToggle" />
         <label class="toggle-label" for="gzipToggle" tabindex="0"></label>
-        <label class="toggle-text" id="gzipLabel" for="gzipToggle">Enable gzip</label>
+        <label class="toggle-text" for="gzipToggle">Enable gzip</label>
       </div>
     </div>
-    <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code> if empty. If the path is under <code>/home/…</code>, we also fix parent execute bits and add an AppArmor allowlist for nginx.</div>
+    <div class="note">We create the folder and an <code>index.html</code>. If the path is under <code>/home/…</code>, we also set parent execute bits and add an AppArmor allowlist for nginx.</div>
   </div>
 
-  <!-- Force HTTPS -->
   <div class="toggle-group">
-    <input type="checkbox" id="forceHttpsToggle" aria-describedby="forceHttpsLabel" />
+    <input type="checkbox" id="forceHttpsToggle" />
     <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
-    <label class="toggle-text" id="forceHttpsLabel" for="forceHttpsToggle">Force HTTPS</label>
+    <label class="toggle-text" for="forceHttpsToggle">Force HTTPS</label>
   </div>
 
   <button class="btn" id="generateBtn" type="button">Generate Script</button>
   <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
 
-  <div role="region" aria-live="polite" class="sr-only" id="ariaStatus"></div>
-  <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script container">
+  <div class="sr-only" id="ariaStatus" aria-live="polite"></div>
+  <div class="output-container" id="outputContainer">
     <label for="output">Generated Script</label>
-    <textarea id="output" readonly rows="18" spellcheck="false" aria-describedby="output-desc"></textarea>
-    <div id="output-desc" class="note sr-only">Copy and paste this script to configure your NGINX server.</div>
+    <textarea id="output" readonly rows="18" spellcheck="false"></textarea>
     <button class="btn copy-btn" id="copyBtn" type="button">Copy to Clipboard</button>
     <div id="copyFeedback" class="feedback" role="alert"></div>
   </div>
@@ -130,7 +123,6 @@
 
 <script>
 (function () {
-  // UI refs
   const modeProxy = document.getElementById('modeProxy');
   const modeStatic = document.getElementById('modeStatic');
   const proxyFields = document.getElementById('proxyFields');
@@ -158,7 +150,6 @@
   const copyFeedback = document.getElementById('copyFeedback');
   const ariaStatus = document.getElementById('ariaStatus');
 
-  // Validation
   const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
   const ipv6Regex = /^[0-9a-fA-F:]+$/;
   const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
@@ -176,56 +167,37 @@
   modeStatic.addEventListener('change', setModeUI);
   setModeUI();
 
-  function validateMaxUploadSize(size) {
-    if (!size) return true;
-    return /^[1-9][0-9]*[MG]$/i.test(size.trim());
-  }
-
   function validateInputs() {
     const serverName = serverNameInput.value.trim();
     const email = emailInput.value.trim();
     const isStatic = modeStatic.checked;
 
-    if (!serverName) { alert('Server Name (Domain) is required.'); serverNameInput.focus(); return false; }
-    if (!hostnameRegex.test(serverName)) { alert('Please enter a valid server name (domain).'); serverNameInput.focus(); return false; }
-    if (!email) { alert("Email is required for Let's Encrypt SSL."); emailInput.focus(); return false; }
-    if (!emailRegex.test(email)) { alert('Please enter a valid email address.'); emailInput.focus(); return false; }
+    if (!serverName || !hostnameRegex.test(serverName)) { alert('Valid Server Name is required.'); return false; }
+    if (!email || !emailRegex.test(email)) { alert('Valid email is required.'); return false; }
 
     if (isStatic) {
       const rootDir = rootDirInput.value.trim();
-      if (!rootDir) { alert('Root Directory is required in Static Site mode.'); rootDirInput.focus(); return false; }
+      if (!rootDir) { alert('Root Directory is required in Static Site mode.'); return false; }
     } else {
       const backendIP = backendIPInput.value.trim();
       const backendPort = backendPortInput.value.trim();
-      if (!backendIP) { alert('Backend IP/Host is required in Reverse Proxy mode.'); backendIPInput.focus(); return false; }
-      if (!backendPort) { alert('Backend Port is required in Reverse Proxy mode.'); backendPortInput.focus(); return false; }
+      if (!backendIP || !backendPort) { alert('Backend host and port are required.'); return false; }
       const isLocalhost = backendIP.toLowerCase() === 'localhost';
       if (!isLocalhost && !ipv4Regex.test(backendIP) && !ipv6Regex.test(backendIP) && !hostnameRegex.test(backendIP)) {
-        alert('Enter a valid Backend IP (IPv4, IPv6), hostname, or "localhost".'); backendIPInput.focus(); return false;
-      }
-      if (ipv4Regex.test(backendIP)) {
-        const octets = backendIP.split(".");
-        for (const octet of octets) {
-          const val = Number(octet);
-          if (val < 0 || val > 255) { alert('Invalid IPv4 address.'); backendIPInput.focus(); return false; }
-        }
+        alert('Enter a valid Backend IP/host.'); return false;
       }
       const portNum = Number(backendPort);
       if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
-        alert("Enter a valid port number (1-65535)."); backendPortInput.focus(); return false;
+        alert('Enter a valid port (1–65535).'); return false;
       }
     }
 
-    const maxUploadRaw = maxUploadInput.value.trim();
-    if (!validateMaxUploadSize(maxUploadRaw)) {
-      alert('Enter a valid Max Upload Size like 50M or 1G.'); maxUploadInput.focus(); return false;
-    }
+    const m = maxUploadInput.value.trim();
+    if (m && !/^[1-9][0-9]*[MG]$/i.test(m)) { alert('Max Upload Size must look like 50M or 1G.'); return false; }
     return true;
   }
 
-  // Proxy block with ACME webroot + timeouts
-  function genProxyServerBlock(opts) {
-    const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
+  function genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize }) {
     const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
         proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
@@ -260,9 +232,7 @@ ${wsHeaders}
 }`;
   }
 
-  // Static block (HTTP only first with placeholder root)
-  function genStaticServerBlock(opts) {
-    const { serverName, rootDir, spa, gzip, maxUploadSize } = opts;
+  function genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize }) {
     const tryFiles = spa ? 'try_files \\$uri \\$uri/ /index.html;' : 'try_files \\$uri \\$uri/ =404;';
     const gzipBlock = gzip ? `
     gzip on;
@@ -299,13 +269,13 @@ ${wsHeaders}
     const maxUploadSize = (maxUploadInput.value.trim() || '1G');
     const forceHttps = forceHttpsToggle.checked;
 
-    const backendIP = (backendIPInput || {}).value?.trim?.() ?? '';
-    const backendPort = (backendPortInput || {}).value?.trim?.() ?? '';
-    const websocketEnabled = (websocketToggle || {}).checked ?? true;
+    const backendIP = (backendIPInput.value || '').trim();
+    const backendPort = (backendPortInput.value || '').trim();
+    const websocketEnabled = !!websocketToggle.checked;
 
-    const rootDirRaw = (rootDirInput || {}).value?.trim?.() ?? '';
-    const spa = (spaToggle || {}).checked ?? false;
-    const gzip = (gzipToggle || {}).checked ?? false;
+    const rootDirRaw = (rootDirInput.value || '').trim();
+    const spa = !!spaToggle.checked;
+    const gzip = !!gzipToggle.checked;
 
     const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
@@ -314,22 +284,19 @@ ${wsHeaders}
     let postWritePatch = '';
 
     if (isStatic) {
-      // Use placeholder __ROOT__ in the nginx block, then sed-replace with normalized $ROOT_DIR
+      // Use placeholder; we'll replace it with the resolved path after writing the file.
       mainServerBlock = genStaticServerBlock({ serverName, rootDir: '__ROOT__', spa, gzip, maxUploadSize });
 
-      // Robust creation + normalization + AppArmor
       preface = `# --- Normalize and create webroot ---
 set -euo pipefail
 umask 022
 
 ROOT_DIR_RAW="${rootDirRaw}"
-# Expand leading ~ safely
 case "$ROOT_DIR_RAW" in
-  "~/"* ) ROOT_DIR="\${HOME}\${ROOT_DIR_RAW#\\~}";;
-  "~"   ) ROOT_DIR="\${HOME}";;
-  *     ) ROOT_DIR="$ROOT_DIR_RAW";;
+  "~/"*) ROOT_DIR="\${HOME}\${ROOT_DIR_RAW#\\~}";;
+  "~")   ROOT_DIR="\${HOME}";;
+  *)     ROOT_DIR="$ROOT_DIR_RAW";;
 esac
-# Strip trailing slashes (but not if the path is just "/")
 if [ "$ROOT_DIR" != "/" ]; then ROOT_DIR="\${ROOT_DIR%/}"; fi
 
 if [ -z "$ROOT_DIR" ]; then echo "ERROR: Root directory not provided."; exit 1; fi
@@ -349,7 +316,6 @@ if [ ! -e "$ROOT_DIR/index.html" ]; then
 HTML
 fi
 
-# Verify creation
 sudo test -d "$ROOT_DIR" || { echo "ERROR: failed to create $ROOT_DIR"; exit 1; }
 sudo test -f "$ROOT_DIR/index.html" || { echo "ERROR: failed to create $ROOT_DIR/index.html"; exit 1; }
 
@@ -358,16 +324,16 @@ sudo chown -R www-data:www-data "$ROOT_DIR" || true
 sudo find "$ROOT_DIR" -type d -exec chmod 755 {} \\;
 sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
 
-# If serving from /home/..., make sure nginx can traverse parents and allow via AppArmor
+# If serving from /home/..., fix parent execute bits & AppArmor
 if [[ "$ROOT_DIR" == /home/*/* ]]; then
-  echo "[perms] Fixing parent execute bits under /home for nginx traversal..."
+  echo "[perms] Fixing parent execute bits under /home..."
   PARENT1="/home"
   USERDIR="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)"
   TOPSUB="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)"
   sudo chmod 755 "$PARENT1" "$USERDIR" "$TOPSUB" || true
 
   if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
-    echo "[apparmor] Allowing nginx to read $ROOT_DIR via local profile..."
+    echo "[apparmor] Allowing nginx to read $ROOT_DIR..."
     sudo mkdir -p /etc/apparmor.d/local
     LINE="$ROOT_DIR/** r,"
     LINE2="$ROOT_DIR/** rix,"
@@ -379,19 +345,16 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
 fi
 `;
 
-      // Replace __ROOT__ with the normalized $ROOT_DIR in the nginx file
-      postWritePatch = `# Substitute placeholder with resolved ROOT_DIR
-sudo sed -i "s#__ROOT__#\\\${ROOT_DIR//&/\\\\&}#g" /etc/nginx/sites-available/${serverName}
+      // *** Correct, safe replacement of the placeholder with the resolved path ***
+      postWritePatch = `# Substitute placeholder with resolved ROOT_DIR (escape & and \\ in replacement)
+ESCAPED_ROOT="$(printf '%s' "$ROOT_DIR" | sed -e 's/[&\\\\]/\\\\&/g')"
+sudo sed -i "s#__ROOT__#${ESCAPED_ROOT}#g" /etc/nginx/sites-available/${serverName}
 `;
     } else {
       mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
-
-      // Ensure ACME webroot for proxy flow
-      preface = `# Proxy mode: ACME directory for nginx
-sudo mkdir -p /var/www/letsencrypt
+      preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
-      postWritePatch = ``;
     }
 
     const script =
@@ -431,49 +394,30 @@ pause_if_tty
 `;
 
     outputTextarea.value = script.trim();
-    outputContainer.style.display = "block";
+    document.getElementById('outputContainer').style.display = "block";
     outputTextarea.focus();
     outputTextarea.select();
-    ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
+    ariaStatus.textContent = `Script generated for ${serverName}`;
   }
 
   function copyToClipboard() {
-    const text = outputTextarea.value;
-    if (!text) { displayCopyFeedback('Nothing to copy!', true); return; }
+    const text = document.getElementById('output').value;
+    if (!text) { showCopy('Nothing to copy!', true); return; }
     navigator.clipboard.writeText(text)
-      .then(() => displayCopyFeedback('Script copied to clipboard!'))
-      .catch(err => displayCopyFeedback('Failed to copy: ' + err, true));
+      .then(() => showCopy('Script copied to clipboard!'))
+      .catch(err => showCopy('Failed to copy: ' + err, true));
   }
-
+  function showCopy(msg, isErr){copyFeedback.textContent=msg;copyFeedback.classList.toggle('error',!!isErr);copyFeedback.style.display='block';setTimeout(()=>{copyFeedback.style.display='none';copyFeedback.textContent='';copyFeedback.classList.remove('error');},3000);}
   function copyRecovery() {
-    const recoveryCmds = `# Recovery: install NGINX & Certbot
+    const recovery = `# Recovery: install NGINX & Certbot
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx`;
-    navigator.clipboard.writeText(recoveryCmds)
-      .then(() => alert('Recovery commands copied to clipboard!'))
-      .catch(err => alert('Failed to copy recovery commands: ' + err));
-  }
-
-  function displayCopyFeedback(message, isError = false) {
-    copyFeedback.textContent = message;
-    copyFeedback.classList.toggle('error', isError);
-    copyFeedback.style.display = 'block';
-    setTimeout(() => {
-      copyFeedback.style.display = 'none';
-      copyFeedback.textContent = '';
-      copyFeedback.classList.remove('error');
-    }, 3000);
+    navigator.clipboard.writeText(recovery).then(()=>alert('Recovery commands copied!'));
   }
 
   generateBtn.addEventListener('click', generateScript);
   copyBtn.addEventListener('click', copyToClipboard);
   recoveryBtn.addEventListener('click', copyRecovery);
-
-  [serverNameInput, emailInput, backendIPInput, backendPortInput, rootDirInput].forEach(el => {
-    el.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generateScript();
-    });
-  });
 })();
 </script>
 </body>

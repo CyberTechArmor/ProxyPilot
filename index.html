@@ -101,10 +101,13 @@
     <!-- Static Site -->
     <div id="staticFields" class="hidden">
       <div class="input-group">
-        <label for="rootDir">Root Directory (absolute path)</label>
-        <input type="text" id="rootDir" placeholder="/home/thomas/websites/mysite" />
+        <label for="rootDir">Root Directory (absolute path) — <em>Optional</em></label>
+        <input type="text" id="rootDir" placeholder="/home/user/websites/mysite" />
       </div>
-      <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code>. Parent dirs under <code>/home</code> get execute bits for nginx.</div>
+      <div class="note">
+        Optional: leave blank to use <code>/var/www/{your-domain}/index.html</code>. If set under <code>/home</code>, we’ll make
+        parent dirs traversable for nginx.
+      </div>
     </div>
 
     <!-- Force HTTPS applies to BOTH modes -->
@@ -160,7 +163,8 @@
       staticFields.classList.toggle('hidden', !isStatic);
       backendIPInput.required = !isStatic;
       backendPortInput.required = !isStatic;
-      rootDirInput.required = isStatic;
+      // rootDir optional in static mode
+      rootDirInput.required = false;
     }
     modeProxy.addEventListener('change', setModeUI);
     modeStatic.addEventListener('change', setModeUI);
@@ -176,7 +180,7 @@
 
       if(modeStatic.checked){
         const rd = (rootDirInput.value||'').trim();
-        if(!rd || !rd.startsWith('/')){ alert('Root Directory must be an absolute path.'); rootDirInput.focus(); return false; }
+        if(rd && !rd.startsWith('/')){ alert('If provided, Root Directory must be an absolute path. Or leave it blank to use /var/www/{domain}.'); rootDirInput.focus(); return false; }
       }else{
         const ip = backendIPInput.value.trim(), port = backendPortInput.value.trim();
         if(!ip || !port){ alert('Backend host and port are required.'); return false; }
@@ -221,7 +225,6 @@ ${ws}
 }`;
     }
 
-    // HTTP block for static depending on Force HTTPS
     function httpBlock(forceHttps){
       return forceHttps ? `server {
     listen 80;
@@ -244,32 +247,64 @@ ${ws}
 `;
     }
 
-    // Build full static-site script; we substitute __HTTP_BLOCK__ in JS (no sed on that)
+    // Build full static-site script; rootDir may be empty (optional)
     function genStaticFullScript({serverName, email, rootDir, forceHttps}){
       const HTTP_BLOCK = httpBlock(forceHttps);
       let script = `#!/bin/bash
-# Setup for ${serverName} — static site on ${rootDir}
+# Setup for ${serverName} — static site with optional WEBROOT
 set -euo pipefail
 
 DOMAIN="${serverName}"
-WEBROOT="${rootDir}"
+WEBROOT_INPUT="${rootDir}"
 EMAIL="${email}"
 
-echo "[1/6] Ensure webroot + sample index..."
-sudo mkdir -p "$WEBROOT"
-if [ ! -f "$WEBROOT/index.html" ]; then
-  sudo tee "$WEBROOT/index.html" >/dev/null <<'HTML'
+# Default WEBROOT if none provided
+if [ -z "\${WEBROOT_INPUT}" ]; then
+  WEBROOT="/var/www/\${DOMAIN}"
+else
+  WEBROOT="\${WEBROOT_INPUT}"
+fi
+
+echo "[1/6] Ensure webroot + sample index at \${WEBROOT}..."
+sudo mkdir -p "\${WEBROOT}"
+if [ ! -f "\${WEBROOT}/index.html" ]; then
+  sudo tee "\${WEBROOT}/index.html" >/dev/null <<'HTML'
 <!doctype html><html><head><meta charset="utf-8"><title>It works</title></head>
 <body style="font-family:system-ui;margin:2rem"><h1>✅ It works!</h1></body></html>
 HTML
 fi
 
-echo "[2/6] Permissions (nginx must traverse /home/*)..."
-sudo chown -R www-data:www-data "$WEBROOT"
-sudo chmod 755 /home || true
-sudo chmod 755 /home/thomas || true
-sudo chmod 755 /home/thomas/websites || true
-sudo chmod -R 755 "$WEBROOT"
+echo "[2/6] Permissions (ensure nginx can traverse to WEBROOT)..."
+# Own the site content
+sudo chown -R www-data:www-data "\${WEBROOT}"
+sudo chmod -R 755 "\${WEBROOT}"
+
+# Carefully ensure execute (traverse) bits on parent dirs under /home or /var/www only.
+if [[ "\${WEBROOT}" == /home/* ]]; then
+  # Make /home and /home/<user> traversable
+  sudo chmod 755 /home || true
+  USERDIR="/home/\$(echo "\${WEBROOT}" | cut -d/ -f3)"
+  if [ -d "\${USERDIR}" ]; then
+    sudo chmod 755 "\${USERDIR}" || true
+  fi
+  # Walk upward until /home and set 755 for each parent on the path to WEBROOT
+  LIMIT="/home"
+  PATHCUR="\${WEBROOT}"
+  declare -a TOFIX=()
+  while [ "\${PATHCUR}" != "\${LIMIT}" ] && [ "\${PATHCUR}" != "/" ]; do
+    TOFIX=( "\${PATHCUR}" "\${TOFIX[@]}" )
+    PATHCUR="\$(dirname "\${PATHCUR}")"
+  done
+  TOFIX=( "\${LIMIT}" "\${TOFIX[@]}" )
+  for d in "\${TOFIX[@]}"; do
+    [ -d "\${d}" ] && sudo chmod 755 "\${d}" || true
+  done
+elif [[ "\${WEBROOT}" == /var/www/* ]]; then
+  # Standard web root: ensure traverse on /var and /var/www
+  sudo chmod 755 /var || true
+  sudo mkdir -p /var/www || true
+  sudo chmod 755 /var/www || true
+fi
 
 echo "[3/6] Install nginx/certbot if needed..."
 sudo apt-get update -y
@@ -294,7 +329,7 @@ sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
 
 echo "[5/6] Write a SINGLE canonical config..."
 TMP="/tmp/\${DOMAIN}.nginx.tmp"
-sudo tee "$TMP" >/dev/null <<'NGINX'
+sudo tee "\${TMP}" >/dev/null <<'NGINX'
 # =========================
 # __DOMAIN__
 # Unified config (http block varies by Force HTTPS)
@@ -322,13 +357,18 @@ NGINX
 # Replace placeholders with runtime values (keep $uri/$host literal by using quoted heredoc above)
 sudo sed -i \
   -e "s|__DOMAIN__|${serverName}|g" \
-  -e "s|__WEBROOT__|${rootDir}|g" \
+  -e "s|__WEBROOT__|${rootDir || ''}|g" \
   -e "s|__FULLCHAIN__|\${FULLCHAIN}|g" \
   -e "s|__PRIVKEY__|\${PRIVKEY}|g" \
   -e "s|__CHAIN__|\${CHAIN}|g" \
-  "$TMP"
+  "\${TMP}"
 
-sudo mv "$TMP" "/etc/nginx/sites-available/\${DOMAIN}"
+# If WEBROOT came from default, rewrite placeholder with actual value now
+if [ -z "\${WEBROOT_INPUT}" ]; then
+  sudo sed -i -e "s|root __WEBROOT__;|root \${WEBROOT};|g" "\${TMP}"
+fi
+
+sudo mv "\${TMP}" "/etc/nginx/sites-available/\${DOMAIN}"
 sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
 
 echo "[6/6] Test & reload..."
@@ -337,11 +377,11 @@ sudo systemctl reload nginx
 
 echo
 echo "✅ Done. HTTP ${forceHttps ? 'redirects to HTTPS' : 'serves directly'}; HTTPS serves content."
+echo "WEBROOT: \${WEBROOT}"
 echo "Quick checks:"
 echo "  curl -I http://\${DOMAIN}"
 echo "  curl -I https://\${DOMAIN}"
 `;
-      // Substitute the HTTP block placeholder here (JS-side), avoiding any ${...} pitfalls.
       return script.replace('__HTTP_BLOCK__', HTTP_BLOCK);
     }
 
@@ -355,7 +395,7 @@ echo "  curl -I https://\${DOMAIN}"
       const backendIP = (backendIPInput.value||'').trim();
       const backendPort = (backendPortInput.value||'').trim();
       const ws = !!websocketToggle.checked;
-      const rootDir = (rootDirInput.value||'').trim();
+      const rootDir = (rootDirInput.value||'').trim(); // optional now
       const forceHttps = !!forceHttpsToggle.checked;
 
       let script = '';
@@ -409,12 +449,22 @@ pause_if_tty
 
     function copy(){
       const text = outputTextarea.value || '';
-      if(!text){ copyFeedback.textContent='Nothing to copy!'; copyFeedback.classList.add('error'); copyFeedback.style.display='block'; setTimeout(()=>{copyFeedback.style.display='none'; copyFeedback.classList.remove('error');},2400); return; }
+      if(!text){
+        copyFeedback.textContent='Nothing to copy!';
+        copyFeedback.classList.add('error');
+        copyFeedback.style.display='block';
+        setTimeout(()=>{copyFeedback.style.display='none'; copyFeedback.classList.remove('error');},2400);
+        return;
+      }
       navigator.clipboard.writeText(text).then(()=>{
-        copyFeedback.textContent='Script copied to clipboard!'; copyFeedback.classList.remove('error'); copyFeedback.style.display='block';
+        copyFeedback.textContent='Script copied to clipboard!';
+        copyFeedback.classList.remove('error');
+        copyFeedback.style.display='block';
         setTimeout(()=>{copyFeedback.style.display='none';},2200);
       }).catch(e=>{
-        copyFeedback.textContent='Failed to copy: '+e; copyFeedback.classList.add('error'); copyFeedback.style.display='block';
+        copyFeedback.textContent='Failed to copy: '+e;
+        copyFeedback.classList.add('error');
+        copyFeedback.style.display='block';
         setTimeout(()=>{copyFeedback.style.display='none'; copyFeedback.classList.remove('error');},2400);
       });
     }

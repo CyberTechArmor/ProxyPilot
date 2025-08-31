@@ -127,7 +127,8 @@
 </div>
 
 <script>
-(function () {
+(() => {
+  // Elements
   const modeProxy = document.getElementById('modeProxy');
   const modeStatic = document.getElementById('modeStatic');
   const proxyFields = document.getElementById('proxyFields');
@@ -155,59 +156,47 @@
   const copyFeedback = document.getElementById('copyFeedback');
   const ariaStatus = document.getElementById('ariaStatus');
 
-  const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
-  const ipv6Regex = /^[0-9a-fA-F:]+$/;
-  const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
+  // Helpers
   function setModeUI() {
     const isStatic = modeStatic.checked;
     proxyFields.classList.toggle('hidden', isStatic);
     staticFields.classList.toggle('hidden', !isStatic);
-    backendIPInput.required = !isStatic;
-    backendPortInput.required = !isStatic;
-    rootDirInput.required = isStatic;
   }
   modeProxy.addEventListener('change', setModeUI);
   modeStatic.addEventListener('change', setModeUI);
   setModeUI();
 
+  function validEmail(x){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x); }
+  function validHost(x){ return /^[a-zA-Z0-9.-]+$/.test(x); }
+  function validIPv4(x){ return /^(\d{1,3}\.){3}\d{1,3}$/.test(x) && x.split('.').every(o=>+o>=0&&+o<=255); }
+
   function validate() {
     const serverName = serverNameInput.value.trim();
     const email = emailInput.value.trim();
-    const isStatic = modeStatic.checked;
-
-    if (!serverName || !hostnameRegex.test(serverName)) { alert('Valid Server Name is required.'); return false; }
-    if (!email || !emailRegex.test(email)) { alert('Valid email is required.'); return false; }
-
-    if (isStatic) {
-      if (!rootDirInput.value.trim()) { alert('Root Directory is required in Static Site mode.'); return false; }
+    if (!serverName || !validHost(serverName)) { alert('Valid Server Name is required.'); return false; }
+    if (!email || !validEmail(email)) { alert('Valid email is required.'); return false; }
+    if (modeStatic.checked) {
+      const root = rootDirInput.value.trim();
+      if (!root) { alert('Root Directory is required.'); return false; }
     } else {
       const host = backendIPInput.value.trim();
-      const port = backendPortInput.value.trim();
-      if (!host || !port) { alert('Backend host and port are required.'); return false; }
-      const isLocalhost = host.toLowerCase() === 'localhost';
-      if (!isLocalhost && !ipv4Regex.test(host) && !ipv6Regex.test(host) && !hostnameRegex.test(host)) {
-        alert('Enter a valid Backend IP/host.'); return false;
-      }
-      const p = Number(port);
-      if (!Number.isInteger(p) || p < 1 || p > 65535) { alert('Enter a valid port (1–65535).'); return false; }
+      const port = +backendPortInput.value.trim();
+      if (!host || !(validHost(host) || validIPv4(host) || host.toLowerCase()==='localhost')) { alert('Valid backend host required.'); return false; }
+      if (!Number.isInteger(port) || port<1 || port>65535) { alert('Valid backend port required (1–65535).'); return false; }
     }
-    const m = maxUploadInput.value.trim();
-    if (m && !/^[1-9][0-9]*[MG]$/i.test(m)) { alert('Max Upload Size must look like 50M or 1G.'); return false; }
+    const mus = maxUploadInput.value.trim();
+    if (mus && !/^[1-9][0-9]*[MG]$/i.test(mus)) { alert('Max Upload Size must look like 50M or 1G.'); return false; }
     return true;
   }
 
-  function genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize }) {
-    const ws = websocketEnabled ? `        proxy_http_version 1.1;
-        proxy_set_header Upgrade \\$http_upgrade;
-        proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
-    return `server {
+  // Nginx blocks (keep $ escaped)
+  function proxyBlock({serverName, backendIP, backendPort, websocketEnabled, maxUpload}) {
+return `server {
     listen 80;
     listen [::]:80;
     server_name ${serverName};
 
-    client_max_body_size ${maxUploadSize};
+    client_max_body_size ${maxUpload};
 
     # ACME to nginx directly
     location ^~ /.well-known/acme-challenge/ {
@@ -216,7 +205,8 @@
     }
 
     location / {
-${ws}
+        proxy_http_version 1.1;
+${websocketEnabled ? '        proxy_set_header Upgrade \\$http_upgrade;\\n        proxy_set_header Connection "upgrade";' : ''}
         proxy_set_header Host \\$host;
         proxy_set_header X-Real-IP \\$remote_addr;
         proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
@@ -229,35 +219,32 @@ ${ws}
 
         proxy_pass http://${backendIP}:${backendPort};
     }
-}`;
-  }
+}`;}
 
-  function genStaticServerBlock({ serverName, rootVar, spa, gzip, maxUploadSize }) {
+  function staticBlock({serverName, spa, gzip, maxUpload}) {
     const tryFiles = spa ? 'try_files \\$uri \\$uri/ /index.html;' : 'try_files \\$uri \\$uri/ =404;';
     const gzipBlock = gzip ? `
     gzip on;
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
-    return `server {
+return `server {
     listen 80;
     listen [::]:80;
     server_name ${serverName};
-    client_max_body_size ${maxUploadSize};
-    root ${rootVar};
+    client_max_body_size ${maxUpload};
+    root __ROOT__;
     index index.html;${gzipBlock}
 
-    # ACME challenge must be reachable on :80
     location ^~ /.well-known/acme-challenge/ {
-        root ${rootVar};
+        root __ROOT__;
         default_type "text/plain";
     }
 
     location / {
         ${tryFiles}
     }
-}`;
-  }
+}`;}
 
   function generateScript() {
     if (!validate()) return;
@@ -265,33 +252,25 @@ ${ws}
     const isStatic = modeStatic.checked;
     const serverName = serverNameInput.value.trim();
     const email = emailInput.value.trim();
-    const maxUploadSize = (maxUploadInput.value.trim() || '1G');
-    const forceHttps = forceHttpsToggle.checked;
+    const maxUpload = (maxUploadInput.value.trim() || '1G');
+    const forceHttps = !!forceHttpsToggle.checked;
 
-    const backendIP = (backendIPInput.value || '').trim();
-    const backendPort = (backendPortInput.value || '').trim();
+    const backendIP = backendIPInput.value.trim();
+    const backendPort = backendPortInput.value.trim();
     const websocketEnabled = !!websocketToggle.checked;
 
     const rootDirRaw = (rootDirInput.value || '').trim();
     const spa = !!spaToggle.checked;
     const gzip = !!gzipToggle.checked;
 
-    const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
+    const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`;
 
-    let preface = '';
-    let mainServerBlock = '';
+    let mainBlock, preface, afterWrite;
 
     if (isStatic) {
-      // literal ${ROOT_DIR} for runtime expansion (JS inserts it literally)
-      const ROOT_LITERAL = '${ROOT_DIR}';
-      mainServerBlock = genStaticServerBlock({
-        serverName,
-        rootVar: ROOT_LITERAL,
-        spa,
-        gzip,
-        maxUploadSize
-      });
+      mainBlock = staticBlock({serverName, spa, gzip, maxUpload});
 
+      // preface: normalize, create, perms, /home execute bits, AppArmor
       preface = `# --- Normalize and create webroot ---
 set -euo pipefail
 umask 022
@@ -315,7 +294,6 @@ sudo install -d -m 755 "$ROOT_DIR"
 
 # Starter index if missing
 if [ ! -e "$ROOT_DIR/index.html" ]; then
-  echo "[create] Writing starter index.html"
   sudo tee "$ROOT_DIR/index.html" >/dev/null <<'HTML'
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${serverName}</title></head><body style="font-family:system-ui;margin:2rem"><h1>It works! ✨</h1><p>Serving static files for ${serverName}</p></body></html>
 HTML
@@ -327,17 +305,10 @@ sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
 
 # If serving from /home/..., fix parent execute bits & AppArmor
 if [[ "$ROOT_DIR" == /home/*/* ]]; then
-  echo "[perms] Fixing parent execute bits under /home..."
-  PARENT1="/home"
-  USERDIR="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)"
-  TOPSUB="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)"
-  sudo chmod 755 "$PARENT1" "$USERDIR" "$TOPSUB" || true
-
+  sudo chmod 755 /home "/home/$(echo "$ROOT_DIR" | cut -d/ -f3)" "/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)" || true
   if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
-    echo "[apparmor] Allowing nginx to read $ROOT_DIR..."
     sudo mkdir -p /etc/apparmor.d/local
-    LINE="$ROOT_DIR/** r,"
-    LINE2="$ROOT_DIR/** rix,"
+    LINE="$ROOT_DIR/** r,"; LINE2="$ROOT_DIR/** rix,"
     sudo bash -c 'grep -qxF '"'"'$LINE'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
     sudo bash -c 'grep -qxF '"'"'$LINE2'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE2'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
     sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx 2>/dev/null || true
@@ -345,17 +316,17 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
   fi
 fi
 `;
+
+      // afterWrite: replace placeholder with escaped path BEFORE nginx -t
+      afterWrite = `ESCAPED_ROOT="$(printf '%s' "$ROOT_DIR" | sed -e 's/[\\\\/&|]/\\\\&/g')"
+sudo sed -i "s|__ROOT__|${ESCAPED_ROOT}|g" /etc/nginx/sites-available/${serverName}
+`;
     } else {
-      mainServerBlock = genProxyServerBlock({
-        serverName,
-        backendIP,
-        backendPort,
-        websocketEnabled,
-        maxUploadSize
-      });
+      mainBlock = proxyBlock({serverName, backendIP, backendPort, websocketEnabled, maxUpload});
       preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
+      afterWrite = ``;
     }
 
     const script =
@@ -363,7 +334,7 @@ sudo chown -R www-data:www-data /var/www/letsencrypt || true
 # Generated by NGINX Setup Script Generator
 set -euo pipefail
 
-pause_if_tty() { if [ -t 1 ]; then echo; read -rp "Press Enter to close..." _; fi; }
+pause_if_tty(){ if [ -t 1 ]; then echo; read -rp "Press Enter to close..." _; fi; }
 trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 
 echo "[install] Installing NGINX & Certbot (if needed)..."
@@ -374,13 +345,11 @@ sudo apt install -y nginx certbot python3-certbot-nginx
 sudo rm -f /etc/nginx/sites-enabled/default || true
 
 ${preface}echo "[nginx] Writing initial HTTP server (no redirect) so Certbot can validate..."
-cat <<EOL | sudo tee /etc/nginx/sites-available/${serverName}
-${mainServerBlock}
+cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
+${mainBlock}
 EOL
 
-# Expand ${ROOT_DIR} in the heredoc above (Bash expanded it already).
-# Link, test, reload:
-sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
+${afterWrite}sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
 sudo nginx -t
 sudo systemctl reload nginx
 
@@ -389,7 +358,6 @@ ${certbotCmd}
 
 echo "[renew] Testing auto-renewal (dry run)..."
 sudo certbot renew --dry-run || true
-
 sudo systemctl enable certbot.timer || true
 
 echo "✅ All done for ${serverName}."
@@ -404,20 +372,27 @@ pause_if_tty
   }
 
   function copyToClipboard() {
-    const text = outputTextarea.value;
-    if (!text) { showCopy('Nothing to copy!', true); return; }
+    const text = outputTextarea.value || '';
+    if (!text) return;
     navigator.clipboard.writeText(text)
       .then(() => showCopy('Script copied to clipboard!'))
       .catch(err => showCopy('Failed to copy: ' + err, true));
   }
-  function showCopy(msg, isErr){copyFeedback.textContent=msg;copyFeedback.classList.toggle('error',!!isErr);copyFeedback.style.display='block';setTimeout(()=>{copyFeedback.style.display='none';copyFeedback.textContent='';copyFeedback.classList.remove('error');},3000);}
   function copyRecovery() {
     const recovery = `# Recovery: install NGINX & Certbot
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx`;
-    navigator.clipboard.writeText(recovery).then(()=>alert('Recovery commands copied!'));
+    navigator.clipboard.writeText(recovery)
+      .then(()=>alert('Recovery commands copied!'));
+  }
+  function showCopy(msg, isErr=false){
+    copyFeedback.textContent = msg;
+    copyFeedback.classList.toggle('error', !!isErr);
+    copyFeedback.style.display = 'block';
+    setTimeout(()=>{ copyFeedback.style.display='none'; copyFeedback.textContent=''; copyFeedback.classList.remove('error'); }, 2500);
   }
 
+  // Wire up buttons (works now; no hidden exceptions)
   generateBtn.addEventListener('click', generateScript);
   copyBtn.addEventListener('click', copyToClipboard);
   recoveryBtn.addEventListener('click', copyRecovery);

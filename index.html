@@ -47,7 +47,6 @@
     .toggle-text{ font-weight:700; cursor:pointer; color:#f3f4f6; user-select:none; }
     .note{ font-size:.92em; color:#9ca3af; margin-top:-6px; text-align:left; }
     .hidden{ display:none; }
-    .row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
     .pill{ display:inline-block; padding:5px 11px; border:1px solid #4b5563; border-radius:999px; font-size:.95em; background:#111827; cursor:pointer; }
     .pill input{ margin-right:6px; transform:translateY(1px); }
 
@@ -137,9 +136,6 @@
   <script>
   (function(){
     const $ = s => document.querySelector(s);
-    const toast = $('#toast');
-    const notify = (m,e=true)=>{ if(!toast) return; toast.textContent=m; toast.style.display='block'; toast.style.borderColor=e?'#78350f':'#14532d'; setTimeout(()=>{toast.style.display='none';toast.textContent='';},3200); };
-    window.addEventListener('error', ev => notify('JS error: '+ev.message));
 
     const modeProxy = $('#modeProxy'), modeStatic = $('#modeStatic');
     const proxyFields = $('#proxyFields'), staticFields = $('#staticFields');
@@ -163,8 +159,7 @@
       staticFields.classList.toggle('hidden', !isStatic);
       backendIPInput.required = !isStatic;
       backendPortInput.required = !isStatic;
-      // rootDir optional in static mode
-      rootDirInput.required = false;
+      rootDirInput.required = false; // optional
     }
     modeProxy.addEventListener('change', setModeUI);
     modeStatic.addEventListener('change', setModeUI);
@@ -247,12 +242,15 @@ ${ws}
 `;
     }
 
-    // Build full static-site script; rootDir may be empty (optional)
+    // --- Static-site script (webroot challenge; no certbot --nginx) ---
     function genStaticFullScript({serverName, email, rootDir, forceHttps}){
       const HTTP_BLOCK = httpBlock(forceHttps);
       let script = `#!/bin/bash
 # Setup for ${serverName} — static site with optional WEBROOT
 set -euo pipefail
+
+pause_if_tty(){ if [ -t 1 ]; then echo; read -rp "Press Enter to close..." _; fi; }
+trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 
 DOMAIN="${serverName}"
 WEBROOT_INPUT="${rootDir}"
@@ -265,7 +263,7 @@ else
   WEBROOT="\${WEBROOT_INPUT}"
 fi
 
-echo "[1/6] Ensure webroot + sample index at \${WEBROOT}..."
+echo "[1/8] Ensure webroot + sample index at \${WEBROOT}..."
 sudo mkdir -p "\${WEBROOT}"
 if [ ! -f "\${WEBROOT}/index.html" ]; then
   sudo tee "\${WEBROOT}/index.html" >/dev/null <<'HTML'
@@ -273,71 +271,85 @@ if [ ! -f "\${WEBROOT}/index.html" ]; then
 <body style="font-family:system-ui;margin:2rem"><h1>✅ It works!</h1></body></html>
 HTML
 fi
+sudo mkdir -p "\${WEBROOT}/.well-known/acme-challenge"
 
-echo "[2/6] Permissions (ensure nginx can traverse to WEBROOT)..."
-# Own the site content
+echo "[2/8] Permissions (ensure nginx can traverse to WEBROOT)..."
 sudo chown -R www-data:www-data "\${WEBROOT}"
 sudo chmod -R 755 "\${WEBROOT}"
 
-# Carefully ensure execute (traverse) bits on parent dirs under /home or /var/www only.
+# Carefully ensure traverse bits for parents
 if [[ "\${WEBROOT}" == /home/* ]]; then
-  # Make /home and /home/<user> traversable
   sudo chmod 755 /home || true
   USERDIR="/home/\$(echo "\${WEBROOT}" | cut -d/ -f3)"
-  if [ -d "\${USERDIR}" ]; then
-    sudo chmod 755 "\${USERDIR}" || true
-  fi
-  # Walk upward until /home and set 755 for each parent on the path to WEBROOT
+  [ -d "\${USERDIR}" ] && sudo chmod 755 "\${USERDIR}" || true
   LIMIT="/home"
   PATHCUR="\${WEBROOT}"
   declare -a TOFIX=()
   while [ "\${PATHCUR}" != "\${LIMIT}" ] && [ "\${PATHCUR}" != "/" ]; do
-    TOFIX=( "\${PATHCUR}" "\${TOFIX[@]}" )
-    PATHCUR="\$(dirname "\${PATHCUR}")"
+    TOFIX=( "\${PATHCUR}" "\${TOFIX[@]}" ); PATHCUR="\$(dirname "\${PATHCUR}")"
   done
   TOFIX=( "\${LIMIT}" "\${TOFIX[@]}" )
-  for d in "\${TOFIX[@]}"; do
-    [ -d "\${d}" ] && sudo chmod 755 "\${d}" || true
-  done
+  for d in "\${TOFIX[@]}"; do [ -d "\${d}" ] && sudo chmod 755 "\${d}" || true; done
 elif [[ "\${WEBROOT}" == /var/www/* ]]; then
-  # Standard web root: ensure traverse on /var and /var/www
   sudo chmod 755 /var || true
   sudo mkdir -p /var/www || true
   sudo chmod 755 /var/www || true
 fi
 
-echo "[3/6] Install nginx/certbot if needed..."
+echo "[3/8] Install nginx/certbot if needed..."
 sudo apt-get update -y
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 sudo rm -f /etc/nginx/sites-enabled/default || true
 
-CERT_DIR="/etc/letsencrypt/live/\${DOMAIN}"
-if [ ! -f "\${CERT_DIR}/fullchain.pem" ] || [ ! -f "\${CERT_DIR}/privkey.pem" ]; then
-  echo "[3b/6] Obtaining certificate..."
-  sudo certbot --nginx --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}" || true
-fi
-
-FULLCHAIN="\${CERT_DIR}/fullchain.pem"
-PRIVKEY="\${CERT_DIR}/privkey.pem"
-CHAIN="\${CERT_DIR}/chain.pem"
-
-echo "[4/6] Remove duplicate/old site configs for this domain..."
+echo "[4/8] Remove old configs for this domain..."
 sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "\${DOMAIN}-*" -delete || true
 sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "\${DOMAIN}-*" -delete || true
 sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}" || true
 sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
 
-echo "[5/6] Write a SINGLE canonical config..."
+echo "[5/8] Write TEMPORARY HTTP-only config for ACME..."
+TMPHTTP="/tmp/\${DOMAIN}.acme.http.tmp"
+sudo tee "\${TMPHTTP}" >/dev/null <<'NGINX'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+    root __WEBROOT__;
+    index index.html;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root __WEBROOT__;
+        default_type "text/plain";
+    }
+
+    location / { try_files $uri $uri/ /index.html; }
+}
+NGINX
+sudo sed -i -e "s|__DOMAIN__|${serverName}|g" -e "s|__WEBROOT__|${rootDir || ''}|g" "\${TMPHTTP}"
+if [ -z "\${WEBROOT_INPUT}" ]; then
+  sudo sed -i -e "s|root __WEBROOT__;|root \${WEBROOT};|g" "\${TMPHTTP}"
+fi
+sudo mv "\${TMPHTTP}" "/etc/nginx/sites-available/\${DOMAIN}-acme"
+sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}-acme" "/etc/nginx/sites-enabled/\${DOMAIN}-acme"
+sudo nginx -t && sudo systemctl reload nginx
+
+echo "[6/8] Obtain certificate via webroot (no NGINX edits by Certbot)..."
+sudo certbot certonly --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}" --webroot -w "\${WEBROOT}"
+
+CERT_DIR="/etc/letsencrypt/live/\${DOMAIN}"
+FULLCHAIN="\${CERT_DIR}/fullchain.pem"
+PRIVKEY="\${CERT_DIR}/privkey.pem"
+CHAIN="\${CERT_DIR}/chain.pem"
+
+echo "[7/8] Write FINAL canonical config (HTTP${forceHttps ? ' redirect' : ''} + HTTPS serve)..."
 TMP="/tmp/\${DOMAIN}.nginx.tmp"
 sudo tee "\${TMP}" >/dev/null <<'NGINX'
 # =========================
-# __DOMAIN__
-# Unified config (http block varies by Force HTTPS)
+# __DOMAIN__ — canonical site
 # =========================
 
 __HTTP_BLOCK__
 
-# HTTPS: serve the site
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
@@ -354,7 +366,6 @@ server {
 }
 NGINX
 
-# Replace placeholders with runtime values (keep $uri/$host literal by using quoted heredoc above)
 sudo sed -i \
   -e "s|__DOMAIN__|${serverName}|g" \
   -e "s|__WEBROOT__|${rootDir || ''}|g" \
@@ -363,7 +374,6 @@ sudo sed -i \
   -e "s|__CHAIN__|\${CHAIN}|g" \
   "\${TMP}"
 
-# If WEBROOT came from default, rewrite placeholder with actual value now
 if [ -z "\${WEBROOT_INPUT}" ]; then
   sudo sed -i -e "s|root __WEBROOT__;|root \${WEBROOT};|g" "\${TMP}"
 fi
@@ -371,18 +381,57 @@ fi
 sudo mv "\${TMP}" "/etc/nginx/sites-available/\${DOMAIN}"
 sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
 
-echo "[6/6] Test & reload..."
+# Disable the temporary ACME site
+sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}-acme" || true
+sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}-acme" || true
+
+echo "[8/8] Test & reload..."
 sudo nginx -t
 sudo systemctl reload nginx
 
 echo
-echo "✅ Done. HTTP ${forceHttps ? 'redirects to HTTPS' : 'serves directly'}; HTTPS serves content."
+echo "✅ Done for \${DOMAIN}"
 echo "WEBROOT: \${WEBROOT}"
-echo "Quick checks:"
+echo "Try:"
 echo "  curl -I http://\${DOMAIN}"
 echo "  curl -I https://\${DOMAIN}"
+pause_if_tty
 `;
       return script.replace('__HTTP_BLOCK__', HTTP_BLOCK);
+    }
+
+    // --- Reverse proxy script remains the same ---
+    function genProxyServerBlock({serverName, backendIP, backendPort, websocketEnabled, maxUploadSize}){
+      const ws = websocketEnabled ? `        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\$http_upgrade;
+        proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
+      return `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+
+    client_max_body_size ${maxUploadSize};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+    }
+
+    location / {
+${ws}
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
+
+        proxy_read_timeout 300;
+        proxy_connect_timeout 60;
+        proxy_send_timeout 300;
+        proxy_buffering off;
+
+        proxy_pass http://${backendIP}:${backendPort};
+    }
+}`;
     }
 
     function gen(){
@@ -449,6 +498,7 @@ pause_if_tty
 
     function copy(){
       const text = outputTextarea.value || '';
+      const copyFeedback = document.getElementById('copyFeedback');
       if(!text){
         copyFeedback.textContent='Nothing to copy!';
         copyFeedback.classList.add('error');
@@ -476,9 +526,9 @@ sudo apt install -y nginx certbot python3-certbot-nginx`;
       navigator.clipboard.writeText(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e));
     }
 
-    generateBtn.addEventListener('click', gen);
-    copyBtn.addEventListener('click', copy);
-    recoveryBtn.addEventListener('click', copyRecovery);
+    document.getElementById('generateBtn').addEventListener('click', gen);
+    document.getElementById('copyBtn').addEventListener('click', copy);
+    document.getElementById('recoveryBtn').addEventListener('click', copyRecovery);
     [serverNameInput,emailInput,backendIPInput,backendPortInput,rootDirInput,maxUploadInput].forEach(el=>{
       el && el.addEventListener('keydown', e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') gen(); });
     });

@@ -41,7 +41,6 @@
     .row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
     .pill{ display:inline-block; padding:5px 11px; border:1px solid #4b5563; border-radius:999px; font-size:.95em; background:#111827; cursor:pointer; }
     .pill input{ margin-right:6px; transform:translateY(1px); }
-    /* tiny toast for JS errors */
     .toast{ position:fixed; right:16px; bottom:16px; background:#111827; color:#fef3c7; border:1px solid #78350f; padding:10px 12px; border-radius:6px; font-size:.9em; display:none; max-width:70vw; }
   </style>
 </head>
@@ -138,7 +137,7 @@
 
   <script>
   (function () {
-    // --- utilities ---
+    // utilities
     const $ = (sel) => document.querySelector(sel);
     const show = (el) => el && (el.style.display = 'block');
     const hide = (el) => el && (el.style.display = 'none');
@@ -152,7 +151,7 @@
     }
     window.addEventListener('error', e => notify(`JS error: ${e.message}`));
 
-    // --- elements (null-safe) ---
+    // elements
     const modeProxy = $('#modeProxy');
     const modeStatic = $('#modeStatic');
     const proxyFields = $('#proxyFields');
@@ -180,14 +179,11 @@
     const copyFeedback = $('#copyFeedback');
     const ariaStatus = $('#ariaStatus');
 
-    // --- guards: if any must-have is missing, stop and tell user ---
+    // guards
     const mustHave = [generateBtn, copyBtn, recoveryBtn, outputTextarea, serverNameInput, emailInput];
-    if (mustHave.some(x => !x)) {
-      notify('Missing required UI elements. Please reload the page.');
-      return;
-    }
+    if (mustHave.some(x => !x)) { notify('Missing required UI elements. Please reload the page.'); return; }
 
-    // --- validators ---
+    // validators
     const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
     const ipv6Regex = /^[0-9a-fA-F:]+$/;
     const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
@@ -195,15 +191,15 @@
 
     function setModeUI() {
       const isStatic = modeStatic && modeStatic.checked;
-      if (proxyFields) proxyFields.classList.toggle('hidden', isStatic);
-      if (staticFields) staticFields.classList.toggle('hidden', !isStatic);
-      if (backendIPInput) backendIPInput.required = !isStatic;
-      if (backendPortInput) backendPortInput.required = !isStatic;
-      if (rootDirInput) rootDirInput.required = isStatic;
-      if (forceHttpsToggle) forceHttpsToggle.disabled = isStatic; // static flow uses no-redirect config
+      proxyFields.classList.toggle('hidden', isStatic);
+      staticFields.classList.toggle('hidden', !isStatic);
+      backendIPInput.required = !isStatic;
+      backendPortInput.required = !isStatic;
+      rootDirInput.required = isStatic;
+      forceHttpsToggle.disabled = isStatic; // static flow uses no-redirect config
     }
-    modeProxy && modeProxy.addEventListener('change', setModeUI);
-    modeStatic && modeStatic.addEventListener('change', setModeUI);
+    modeProxy.addEventListener('change', setModeUI);
+    modeStatic.addEventListener('change', setModeUI);
     setModeUI();
 
     function validateMaxUploadSize(size) {
@@ -214,7 +210,7 @@
     function validateInputs() {
       const serverName = (serverNameInput.value || '').trim();
       const email = (emailInput.value || '').trim();
-      const isStatic = modeStatic && modeStatic.checked;
+      const isStatic = modeStatic.checked;
 
       if (!serverName) { alert('Server Name (Domain) is required.'); serverNameInput.focus(); return false; }
       if (!hostnameRegex.test(serverName)) { alert('Please enter a valid server name (domain).'); serverNameInput.focus(); return false; }
@@ -247,7 +243,7 @@
       return true;
     }
 
-    // ---------- Reverse Proxy generator (unchanged) ----------
+    // Reverse Proxy server block (unchanged)
     function genProxyServerBlock(opts) {
       const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
       const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
@@ -284,7 +280,7 @@ ${wsHeaders}
 }`;
     }
 
-    // ---------- Static-site generator (unified, no-redirect) ----------
+    // Static-site generator (UNIFIED, NO-REDIRECT) — all bash ${...} escaped as \${...}
     function genStaticFullScript({ serverName, email, rootDir }) {
       return `#!/bin/bash
 # Setup for ${serverName} — static site on ${rootDir}
@@ -315,24 +311,24 @@ sudo apt-get update -y
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 sudo rm -f /etc/nginx/sites-enabled/default || true
 
-CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
-if [ ! -f "${CERT_DIR}/fullchain.pem" ] || [ ! -f "${CERT_DIR}/privkey.pem" ]; then
+CERT_DIR="/etc/letsencrypt/live/\${DOMAIN}"
+if [ ! -f "\${CERT_DIR}/fullchain.pem" ] || [ ! -f "\${CERT_DIR}/privkey.pem" ]; then
   echo "[3b/6] Obtaining certificate..."
-  sudo certbot --nginx --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
+  sudo certbot --nginx --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}" || true
 fi
 
-FULLCHAIN="${CERT_DIR}/fullchain.pem"
-PRIVKEY="${CERT_DIR}/privkey.pem"
-CHAIN="${CERT_DIR}/chain.pem"
+FULLCHAIN="\${CERT_DIR}/fullchain.pem"
+PRIVKEY="\${CERT_DIR}/privkey.pem"
+CHAIN="\${CERT_DIR}/chain.pem"
 
 echo "[4/6] Remove duplicate/old site configs for this domain..."
-sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "${DOMAIN}-*" -delete || true
-sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "${DOMAIN}-*" -delete || true
-sudo rm -f "/etc/nginx/sites-available/${DOMAIN}" || true
-sudo rm -f "/etc/nginx/sites-enabled/${DOMAIN}" || true
+sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "\${DOMAIN}-*" -delete || true
+sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "\${DOMAIN}-*" -delete || true
+sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}" || true
+sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
 
 echo "[5/6] Write a SINGLE canonical config (HTTP and HTTPS serve; no redirects)..."
-TMP="/tmp/${DOMAIN}.nginx.tmp"
+TMP="/tmp/\${DOMAIN}.nginx.tmp"
 sudo tee "$TMP" >/dev/null <<'NGINX'
 # =========================
 # __DOMAIN__
@@ -378,15 +374,15 @@ server {
 NGINX
 
 sudo sed -i \
-  -e "s|__DOMAIN__|${DOMAIN}|g" \
-  -e "s|__WEBROOT__|${WEBROOT}|g" \
-  -e "s|__FULLCHAIN__|${FULLCHAIN}|g" \
-  -e "s|__PRIVKEY__|${PRIVKEY}|g" \
-  -e "s|__CHAIN__|${CHAIN}|g" \
+  -e "s|__DOMAIN__|${serverName}|g" \
+  -e "s|__WEBROOT__|${rootDir}|g" \
+  -e "s|__FULLCHAIN__|\${FULLCHAIN}|g" \
+  -e "s|__PRIVKEY__|\${PRIVKEY}|g" \
+  -e "s|__CHAIN__|\${CHAIN}|g" \
   "$TMP"
 
-sudo mv "$TMP" "/etc/nginx/sites-available/${DOMAIN}"
-sudo ln -sf "/etc/nginx/sites-available/${DOMAIN}" "/etc/nginx/sites-enabled/${DOMAIN}"
+sudo mv "$TMP" "/etc/nginx/sites-available/\${DOMAIN}"
+sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
 
 echo "[6/6] Test & reload..."
 sudo nginx -t
@@ -395,33 +391,31 @@ sudo systemctl reload nginx
 echo
 echo "✅ Fixed. HTTP and HTTPS both serve content (no redirects)."
 echo "Quick checks:"
-echo "  curl -I http://${DOMAIN}"
-echo "  curl -I https://${DOMAIN}"
+echo "  curl -I http://\${DOMAIN}"
+echo "  curl -I https://\${DOMAIN}"
 `;
     }
 
-    // ---------- generation ----------
+    // generation
     function generateScript() {
       try {
         if (!validateInputs()) return;
 
-        const isStatic = modeStatic && modeStatic.checked;
+        const isStatic = modeStatic.checked;
         const serverName = (serverNameInput.value || '').trim();
         const email = (emailInput.value || '').trim();
         const maxUploadSize = (maxUploadInput.value || '').trim() || '1G';
-        const backendIP = (backendIPInput?.value || '').trim();
-        const backendPort = (backendPortInput?.value || '').trim();
-        const websocketEnabled = !!(websocketToggle && websocketToggle.checked);
-        const rootDir = (rootDirInput?.value || '').trim();
-        const forceHttps = !!(forceHttpsToggle && forceHttpsToggle.checked); // proxy only
+        const backendIP = (backendIPInput.value || '').trim();
+        const backendPort = (backendPortInput.value || '').trim();
+        const websocketEnabled = !!websocketToggle.checked;
+        const rootDir = (rootDirInput.value || '').trim();
+        const forceHttps = !!document.getElementById('forceHttpsToggle').checked; // proxy only
 
         let script = '';
 
         if (isStatic) {
-          // Unified, no-redirect config (fixes loops)
           script = genStaticFullScript({ serverName, email, rootDir });
         } else {
-          // Reverse proxy path (UNCHANGED)
           const mainServerBlock = genProxyServerBlock({
             serverName, backendIP, backendPort, websocketEnabled, maxUploadSize
           });
@@ -474,16 +468,16 @@ pause_if_tty
         }
 
         outputTextarea.value = script.trim();
-        if (outputContainer) show(outputContainer);
-        if (copyBtn) copyBtn.disabled = false;
-        if (ariaStatus) ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
+        outputContainer.style.display = "block";
+        document.getElementById('copyBtn').disabled = false;
+        ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
+        outputTextarea.focus(); outputTextarea.select();
       } catch (err) {
         notify('Generation failed: ' + (err?.message || err));
       }
     }
 
     function showCopyFeedback(message, isError = false) {
-      if (!copyFeedback) { notify(message, isError); return; }
       copyFeedback.textContent = message;
       copyFeedback.classList.toggle('error', !!isError);
       copyFeedback.style.display = 'block';
@@ -511,16 +505,14 @@ sudo apt install -y nginx certbot python3-certbot-nginx`;
         .catch(err => alert('Failed to copy recovery commands: ' + err));
     }
 
-    // --- wire up buttons (null-safe) ---
-    generateBtn && generateBtn.addEventListener('click', generateScript);
-    copyBtn && copyBtn.addEventListener('click', copyToClipboard);
-    recoveryBtn && recoveryBtn.addEventListener('click', copyRecovery);
+    // wire up
+    generateBtn.addEventListener('click', generateScript);
+    copyBtn.addEventListener('click', copyToClipboard);
+    recoveryBtn.addEventListener('click', copyRecovery);
 
-    // Keyboard shortcut: Ctrl/Cmd + Enter triggers generation
+    // Ctrl/Cmd + Enter generates
     [serverNameInput, emailInput, backendIPInput, backendPortInput, rootDirInput, maxUploadInput].forEach(el => {
-      el && el.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generateScript();
-      });
+      el && el.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generateScript(); });
     });
   })();
   </script>

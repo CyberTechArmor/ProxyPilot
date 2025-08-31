@@ -194,7 +194,6 @@
     if (isStatic) {
       const rootDir = rootDirInput.value.trim();
       if (!rootDir) { alert('Root Directory is required in Static Site mode.'); rootDirInput.focus(); return false; }
-      // Allow ~ expansion now; still require absolute after expansion in the script runtime
     } else {
       const backendIP = backendIPInput.value.trim();
       const backendPort = backendPortInput.value.trim();
@@ -261,7 +260,7 @@ ${wsHeaders}
 }`;
   }
 
-  // Static block (HTTP only first)
+  // Static block (HTTP only first with placeholder root)
   function genStaticServerBlock(opts) {
     const { serverName, rootDir, spa, gzip, maxUploadSize } = opts;
     const tryFiles = spa ? 'try_files \\$uri \\$uri/ /index.html;' : 'try_files \\$uri \\$uri/ =404;';
@@ -312,11 +311,13 @@ ${wsHeaders}
 
     let mainServerBlock = '';
     let preface = '';
+    let postWritePatch = '';
 
     if (isStatic) {
-      mainServerBlock = genStaticServerBlock({ serverName, rootDir: '${ROOT_DIR}', spa, gzip, maxUploadSize });
+      // Use placeholder __ROOT__ in the nginx block, then sed-replace with normalized $ROOT_DIR
+      mainServerBlock = genStaticServerBlock({ serverName, rootDir: '__ROOT__', spa, gzip, maxUploadSize });
 
-      // Robust creation: expand ~, strip trailing slashes, verify, umask 022, install -d, sanity checks
+      // Robust creation + normalization + AppArmor
       preface = `# --- Normalize and create webroot ---
 set -euo pipefail
 umask 022
@@ -324,8 +325,8 @@ umask 022
 ROOT_DIR_RAW="${rootDirRaw}"
 # Expand leading ~ safely
 case "$ROOT_DIR_RAW" in
-  "~/"* ) ROOT_DIR="${HOME}${ROOT_DIR_RAW#\~}";;
-  "~"   ) ROOT_DIR="${HOME}";;
+  "~/"* ) ROOT_DIR="\${HOME}\${ROOT_DIR_RAW#\\~}";;
+  "~"   ) ROOT_DIR="\${HOME}";;
   *     ) ROOT_DIR="$ROOT_DIR_RAW";;
 esac
 # Strip trailing slashes (but not if the path is just "/")
@@ -377,13 +378,20 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
   fi
 fi
 `;
+
+      // Replace __ROOT__ with the normalized $ROOT_DIR in the nginx file
+      postWritePatch = `# Substitute placeholder with resolved ROOT_DIR
+sudo sed -i "s#__ROOT__#\\\${ROOT_DIR//&/\\\\&}#g" /etc/nginx/sites-available/${serverName}
+`;
     } else {
       mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
 
+      // Ensure ACME webroot for proxy flow
       preface = `# Proxy mode: ACME directory for nginx
 sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
+      postWritePatch = ``;
     }
 
     const script =
@@ -406,7 +414,7 @@ cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
 ${mainServerBlock}
 EOL
 
-sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
+${postWritePatch}sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
 sudo nginx -t
 sudo systemctl reload nginx
 
@@ -422,10 +430,7 @@ echo "✅ All done for ${serverName}."
 pause_if_tty
 `;
 
-    // Replace placeholder ${ROOT_DIR} inside server block with the normalized variable name (runtime)
-    const finalized = script.replace('${ROOT_DIR}', '"$ROOT_DIR"');
-
-    outputTextarea.value = finalized.trim();
+    outputTextarea.value = script.trim();
     outputContainer.style.display = "block";
     outputTextarea.focus();
     outputTextarea.select();

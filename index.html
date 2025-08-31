@@ -1,315 +1,420 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NGINX Config Script Generator</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
-  <style>
-    body{font-family:'Inter',sans-serif;background:#1f2937;color:#f3f4f6;display:flex;flex-direction:column;align-items:center;padding:20px;margin:0;min-height:100vh}
-    .container{max-width:720px;width:100%;background:#374151;border-radius:8px;padding:22px 28px 30px;box-shadow:0 4px 14px rgba(0,0,0,.25)}
-    .rocket{font-size:3.5rem;margin:0 0 6px}
-    h1{margin:0 0 14px}
-    .input-group{margin-bottom:14px}
-    label{display:block;margin-bottom:6px;font-weight:600}
-    input[type="text"],input[type="email"],input[type="number"],textarea{
-      width:100%;padding:10px;border:1px solid #4b5563;border-radius:6px;background:#111827;color:#f3f4f6}
-    input:focus,textarea:focus{outline:none;border-color:#10b981}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .radio-row,.toggle-row{display:flex;flex-wrap:wrap;gap:10px}
-    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #4b5563;border-radius:999px;background:#111827}
-    .note{font-size:.9em;color:#9ca3af;margin-top:6px}
-    .btn{display:inline-block;padding:11px 14px;border:none;border-radius:6px;background:#10b981;color:#fff;font-weight:700;cursor:pointer}
-    .btn:hover{background:#059669}
-    .btn.secondary{background:#3b82f6}.btn.secondary:hover{background:#2563eb}
-    .btn.danger{background:#dc2626}.btn.danger:hover{background:#b91c1c}
-    .toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
-    .hidden{display:none}
-    .output{margin-top:16px}
-    .output textarea{height:280px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .banner{margin-top:10px;padding:8px 10px;border-radius:6px;background:#0b1220;color:#e5e7eb;display:none}
-    .error{background:#3b0d0d}
-  </style>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NGINX Config Script Generator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937;
+            color: #f3f4f6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            margin: 0;
+            justify-content: flex-start;
+            min-height: 100vh;
+            overflow-y: auto;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background-color: #374151;
+            border-radius: 8px;
+            padding: 20px 30px 30px 30px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+            text-align: center;
+        }
+        .rocket { font-size: 5rem; margin-bottom: 0.25em; user-select: none; line-height: 1; }
+        h1 { margin-bottom: 20px; user-select: none; }
+        .input-group { margin-bottom: 15px; text-align: left; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; cursor: pointer; }
+        input[type="text"], input[type="email"], input[type="number"], textarea {
+            width: calc(100% - 20px);
+            padding: 10px;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            background-color: #1f2937;
+            color: #f3f4f6;
+            outline: none;
+            transition: border-color 0.3s;
+            margin: 0 auto;
+            display: block;
+            font-family: inherit;
+        }
+        input:focus, textarea:focus { border-color: #10b981; }
+        textarea {
+            height: 200px;
+            resize: none;
+            font-family: monospace, monospace;
+            font-size: 0.9em;
+            color: #d1d5db;
+            background-color: #111827;
+        }
+        .btn {
+            display: block; width: 100%; padding: 12px; text-align: center; border: none;
+            border-radius: 4px; background-color: #10b981; color: #fff; font-weight: bold;
+            cursor: pointer; transition: background-color 0.3s; margin-top: 10px; font-family: inherit; user-select: none;
+        }
+        .btn:hover:not(:disabled) { background-color: #059669; }
+        .btn:disabled { background-color: #4b5563; cursor: not-allowed; }
+        .recovery-btn { background-color: #dc2626; }
+        .recovery-btn:hover:not(:disabled) { background-color: #b91c1c; }
+        .output-container {
+            display: none; margin-top: 20px; background-color: #1f2937; padding: 15px;
+            border-radius: 8px; text-align: left; font-family: monospace, monospace;
+            font-size: 0.9em; white-space: pre-wrap;
+        }
+        .copy-btn { margin-top: 10px; background-color: #3b82f6; }
+        .copy-btn:hover:not(:disabled) { background-color: #2563eb; }
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+            overflow: hidden; clip: rect(0,0,0,0); border: 0;
+        }
+        .feedback { margin-top: 6px; font-size: 0.9em; text-align: center; color: #10b981; display: none; }
+        .feedback.error { color: #dc2626; }
+        .toggle-group, .radio-row { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; user-select: none; flex-wrap: wrap; }
+        .toggle-group input[type="checkbox"] { height: 0; width: 0; visibility: hidden; position: absolute; }
+        .toggle-label {
+            background: #4b5563; border-radius: 20px; cursor: pointer; width: 50px; height: 26px;
+            position: relative; transition: background-color 0.3s; display: inline-block; vertical-align: middle;
+        }
+        .toggle-label::after {
+            content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+            background: #f3f4f6; border-radius: 50%; transition: 0.3s;
+        }
+        .toggle-group input[type="checkbox"]:checked + .toggle-label { background: #10b981; }
+        .toggle-group input[type="checkbox"]:checked + .toggle-label::after { left: calc(100% - 23px); }
+        .toggle-text { font-weight: bold; cursor: pointer; color: #f3f4f6; user-select: none; }
+        .note { font-size: 0.9em; color: #9ca3af; margin-top: -10px; margin-bottom: 10px; text-align: left; }
+        .hidden { display: none; }
+        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .pill {
+            display:inline-block; padding:4px 10px; border:1px solid #4b5563; border-radius:999px; font-size:.9em;
+            background:#111827; cursor:pointer;
+        }
+        .pill input { margin-right:6px; transform: translateY(1px); }
+    </style>
 </head>
 <body>
-  <div class="container" role="main">
+<div class="container" role="main">
     <div class="rocket" aria-hidden="true">🚀</div>
     <h1>NGINX Setup Script Generator</h1>
 
-    <!-- Mode -->
+    <!-- Deployment Mode -->
     <div class="input-group">
-      <label>Deployment Mode</label>
-      <div class="radio-row" role="radiogroup" aria-label="Deployment Mode">
-        <label class="pill"><input type="radio" name="mode" id="modeProxy" value="proxy" checked> Reverse Proxy (address:port)</label>
-        <label class="pill"><input type="radio" name="mode" id="modeStatic" value="static"> Static Site (directory)</label>
-      </div>
-      <div class="note">Static Site will create the folder + an <code>index.html</code>, fix <code>/home</code> permissions, and allow AppArmor.</div>
+        <label>Deployment Mode</label>
+        <div class="radio-row" role="radiogroup" aria-label="Deployment Mode">
+            <label class="pill"><input type="radio" name="mode" id="modeProxy" value="proxy" checked /> Reverse Proxy (address:port)</label>
+            <label class="pill"><input type="radio" name="mode" id="modeStatic" value="static" /> Static Site (directory)</label>
+        </div>
+        <div class="note">Choose “Static Site” to serve files directly from a folder (no upstream app).</div>
     </div>
 
     <!-- Common -->
     <div class="input-group">
-      <label for="serverName">Server Name (domain)</label>
-      <input id="serverName" type="text" placeholder="e.g., site.example.com">
+        <label for="serverName">Server Name (Domain)</label>
+        <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required aria-describedby="serverName-desc" />
     </div>
     <div class="input-group">
-      <label for="email">Email for Let's Encrypt</label>
-      <input id="email" type="email" placeholder="you@example.com">
+        <label for="email">Your Email (for Let's Encrypt SSL)</label>
+        <input type="email" id="email" placeholder="you@example.com" required />
     </div>
     <div class="input-group">
-      <label for="maxUploadSize">Max Upload Size (optional; default 1G)</label>
-      <input id="maxUploadSize" type="text" placeholder="e.g., 50M or 1G">
+        <label for="maxUploadSize">Max Upload Size (optional, default 1G)</label>
+        <input type="text" id="maxUploadSize" placeholder="e.g., 50M, 1G" aria-describedby="maxUploadDesc" />
+        <div id="maxUploadDesc" class="note sr-only">May include M for megabytes, G for gigabytes.</div>
     </div>
 
-    <!-- Proxy fields -->
-    <div id="proxyFields" class="input-group">
-      <div class="row">
-        <div>
-          <label for="backendIP">Backend IP/Host</label>
-          <input id="backendIP" type="text" placeholder="127.0.0.1 / localhost / internal host">
+    <!-- Reverse Proxy fields -->
+    <div id="proxyFields">
+        <div class="input-group">
+            <label for="backendIP">Backend IP Address, Hostname, or 'localhost'</label>
+            <input type="text" id="backendIP" placeholder="e.g., 127.0.0.1 or localhost or backend.internal" />
         </div>
-        <div>
-          <label for="backendPort">Backend Port</label>
-          <input id="backendPort" type="number" min="1" max="65535" placeholder="3000">
+        <div class="input-group">
+            <label for="backendPort">Backend Port</label>
+            <input type="number" id="backendPort" placeholder="e.g., 3000" min="1" max="65535" />
         </div>
-      </div>
-      <div class="toggle-row" style="margin-top:8px">
-        <label class="pill"><input type="checkbox" id="websocketToggle" checked> Enable WebSocket headers</label>
-      </div>
+        <div class="toggle-group">
+            <input type="checkbox" id="websocketToggle" checked aria-describedby="websocketLabel" />
+            <label class="toggle-label" for="websocketToggle" tabindex="0"></label>
+            <label class="toggle-text" id="websocketLabel" for="websocketToggle">Enable WebSocket Support</label>
+        </div>
     </div>
 
-    <!-- Static fields -->
-    <div id="staticFields" class="input-group hidden">
-      <label for="rootDir">Root Directory (absolute path)</label>
-      <input id="rootDir" type="text" placeholder="/home/thomas/websites/mysite">
-      <div class="row" style="margin-top:8px">
-        <label class="pill"><input type="checkbox" id="spaToggle"> SPA fallback to <code>index.html</code></label>
-        <label class="pill"><input type="checkbox" id="gzipToggle"> Enable gzip</label>
-      </div>
+    <!-- Static Site fields -->
+    <div id="staticFields" class="hidden">
+        <div class="input-group">
+            <label for="rootDir">Root Directory (absolute path)</label>
+            <input type="text" id="rootDir" placeholder="/home/thomas/websites/mysite" />
+        </div>
+        <div class="row">
+            <div class="toggle-group">
+                <input type="checkbox" id="spaToggle" aria-describedby="spaLabel" />
+                <label class="toggle-label" for="spaToggle" tabindex="0"></label>
+                <label class="toggle-text" id="spaLabel" for="spaToggle">SPA Fallback (route everything to index.html)</label>
+            </div>
+            <div class="toggle-group">
+                <input type="checkbox" id="gzipToggle" aria-describedby="gzipLabel" />
+                <label class="toggle-label" for="gzipToggle" tabindex="0"></label>
+                <label class="toggle-text" id="gzipLabel" for="gzipToggle">Enable gzip</label>
+            </div>
+        </div>
+        <div class="note">We’ll create the folder if missing and place a basic <code>index.html</code> if empty. If the path is under <code>/home/…</code>, the script also fixes parent directory execute bits and adds an AppArmor override for nginx.</div>
     </div>
 
-    <div class="toggle-row input-group">
-      <label class="pill"><input type="checkbox" id="forceHttpsToggle"> Force HTTPS (Certbot adds redirect)</label>
+    <!-- Force HTTPS applies to both modes -->
+    <div class="toggle-group">
+        <input type="checkbox" id="forceHttpsToggle" aria-describedby="forceHttpsLabel" />
+        <label class="toggle-label" for="forceHttpsToggle" tabindex="0"></label>
+        <label class="toggle-text" id="forceHttpsLabel" for="forceHttpsToggle">Force HTTPS</label>
     </div>
 
-    <div class="toolbar">
-      <button id="generateBtn" class="btn">Generate Script</button>
-      <button id="copyBtn" class="btn secondary" disabled>Copy Script</button>
-      <button id="recoveryBtn" class="btn danger">+Recovery (NGINX & Certbot only)</button>
+    <button class="btn" id="generateBtn" type="button">Generate Script</button>
+    <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
+
+    <div role="region" aria-live="polite" class="sr-only" id="ariaStatus"></div>
+    <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script container">
+        <label for="output">Generated Script</label>
+        <textarea id="output" readonly rows="18" spellcheck="false" aria-describedby="output-desc"></textarea>
+        <div id="output-desc" class="note sr-only">Copy and paste this script to configure your NGINX server.</div>
+        <button class="btn copy-btn" id="copyBtn" type="button">Copy to Clipboard</button>
+        <div id="copyFeedback" class="feedback" role="alert"></div>
     </div>
+</div>
 
-    <div id="banner" class="banner" role="alert"></div>
+<script>
+(function () {
+    // UI elements
+    const modeProxy = document.getElementById('modeProxy');
+    const modeStatic = document.getElementById('modeStatic');
+    const proxyFields = document.getElementById('proxyFields');
+    const staticFields = document.getElementById('staticFields');
 
-    <div class="output hidden" id="outputWrap">
-      <label for="output">Generated Script</label>
-      <textarea id="output" readonly spellcheck="false"></textarea>
-    </div>
-  </div>
+    const serverNameInput = document.getElementById('serverName');
+    const emailInput = document.getElementById('email');
+    const maxUploadInput = document.getElementById('maxUploadSize');
 
-  <script>
-    (function () {
-      'use strict';
+    const backendIPInput = document.getElementById('backendIP');
+    const backendPortInput = document.getElementById('backendPort');
+    const websocketToggle = document.getElementById('websocketToggle');
 
-      // --- Elements
-      const modeProxy = document.getElementById('modeProxy');
-      const modeStatic = document.getElementById('modeStatic');
-      const proxyFields = document.getElementById('proxyFields');
-      const staticFields = document.getElementById('staticFields');
+    const rootDirInput = document.getElementById('rootDir');
+    const spaToggle = document.getElementById('spaToggle');
+    const gzipToggle = document.getElementById('gzipToggle');
 
-      const serverNameInput = document.getElementById('serverName');
-      const emailInput = document.getElementById('email');
-      const maxUploadInput = document.getElementById('maxUploadSize');
+    const forceHttpsToggle = document.getElementById('forceHttpsToggle');
 
-      const backendIPInput = document.getElementById('backendIP');
-      const backendPortInput = document.getElementById('backendPort');
-      const websocketToggle = document.getElementById('websocketToggle');
+    const generateBtn = document.getElementById('generateBtn');
+    const recoveryBtn = document.getElementById('recoveryBtn');
+    const outputContainer = document.getElementById('outputContainer');
+    const outputTextarea = document.getElementById('output');
+    const copyBtn = document.getElementById('copyBtn');
+    const copyFeedback = document.getElementById('copyFeedback');
+    const ariaStatus = document.getElementById('ariaStatus');
 
-      const rootDirInput = document.getElementById('rootDir');
-      const spaToggle = document.getElementById('spaToggle');
-      const gzipToggle = document.getElementById('gzipToggle');
+    // Validation helpers
+    const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const ipv6Regex = /^[0-9a-fA-F:]+$/;
+    const hostnameRegex = /^[a-zA-Z0-9.-]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-      const forceHttpsToggle = document.getElementById('forceHttpsToggle');
-
-      const generateBtn = document.getElementById('generateBtn');
-      const copyBtn = document.getElementById('copyBtn');
-      const recoveryBtn = document.getElementById('recoveryBtn');
-
-      const outputWrap = document.getElementById('outputWrap');
-      const outputArea = document.getElementById('output');
-      const banner = document.getElementById('banner');
-
-      // --- Helpers
-      function showBanner(msg, isError=false) {
-        banner.textContent = msg;
-        banner.classList.toggle('error', !!isError);
-        banner.style.display = 'block';
-        setTimeout(() => { banner.style.display = 'none'; }, 3500);
-      }
-
-      window.addEventListener('error', (e) => {
-        console.error(e.error || e.message);
-        showBanner('JS error: ' + (e.message || 'unknown'), true);
-      });
-
-      function setModeUI() {
+    function setModeUI() {
         const isStatic = modeStatic.checked;
         proxyFields.classList.toggle('hidden', isStatic);
         staticFields.classList.toggle('hidden', !isStatic);
-      }
-      modeProxy.addEventListener('change', setModeUI);
-      modeStatic.addEventListener('change', setModeUI);
-      setModeUI();
+        backendIPInput.required = !isStatic;
+        backendPortInput.required = !isStatic;
+        rootDirInput.required = isStatic;
+    }
+    modeProxy.addEventListener('change', setModeUI);
+    modeStatic.addEventListener('change', setModeUI);
+    setModeUI();
 
-      function validEmail(x){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x); }
-      function validHost(x){ return /^[a-zA-Z0-9.-]+$/.test(x); }
-      function validIPv4(x){ return /^(\d{1,3}\.){3}\d{1,3}$/.test(x) && x.split('.').every(o=>+o>=0&&+o<=255); }
+    function validateMaxUploadSize(size) {
+        if (!size) return true; // optional, defaults to 1G
+        return /^[1-9][0-9]*[MG]$/i.test(size.trim());
+    }
 
-      function validate() {
-        const domain = serverNameInput.value.trim();
+    function validateInputs() {
+        const serverName = serverNameInput.value.trim();
         const email = emailInput.value.trim();
-        if (!domain || !validHost(domain)) return 'Enter a valid Server Name (domain).';
-        if (!email || !validEmail(email)) return 'Enter a valid email for Let\'s Encrypt.';
+        const isStatic = modeStatic.checked;
 
-        if (modeStatic.checked) {
-          if (!rootDirInput.value.trim()) return 'Root Directory is required for Static Site mode.';
+        if (!serverName) { alert('Server Name (Domain) is required.'); serverNameInput.focus(); return false; }
+        if (!hostnameRegex.test(serverName)) { alert('Please enter a valid server name (domain).'); serverNameInput.focus(); return false; }
+        if (!email) { alert("Email is required for Let's Encrypt SSL."); emailInput.focus(); return false; }
+        if (!emailRegex.test(email)) { alert('Please enter a valid email address.'); emailInput.focus(); return false; }
+
+        if (isStatic) {
+            const rootDir = rootDirInput.value.trim();
+            if (!rootDir) { alert('Root Directory is required in Static Site mode.'); rootDirInput.focus(); return false; }
+            if (!rootDir.startsWith('/')) { alert('Root Directory must be an absolute path (e.g., /home/thomas/websites/site).'); rootDirInput.focus(); return false; }
         } else {
-          const host = backendIPInput.value.trim();
-          const port = backendPortInput.value.trim();
-          if (!host || !port) return 'Backend host and port are required.';
-          if (!(host.toLowerCase()==='localhost' || validHost(host) || validIPv4(host))) return 'Enter a valid backend host/IP.';
-          const p = Number(port);
-          if (!Number.isInteger(p) || p<1 || p>65535) return 'Enter a valid backend port (1–65535).';
+            const backendIP = backendIPInput.value.trim();
+            const backendPort = backendPortInput.value.trim();
+            if (!backendIP) { alert('Backend IP/Host is required in Reverse Proxy mode.'); backendIPInput.focus(); return false; }
+            if (!backendPort) { alert('Backend Port is required in Reverse Proxy mode.'); backendPortInput.focus(); return false; }
+
+            const backendLower = backendIP.toLowerCase();
+            const isLocalhost = backendLower === 'localhost';
+            if (!isLocalhost && !ipv4Regex.test(backendIP) && !ipv6Regex.test(backendIP) && !hostnameRegex.test(backendIP)) {
+                alert('Enter a valid Backend IP (IPv4, IPv6), hostname, or "localhost".');
+                backendIPInput.focus(); return false;
+            }
+            if (ipv4Regex.test(backendIP)) {
+                const octets = backendIP.split(".");
+                for (const octet of octets) {
+                    const val = Number(octet);
+                    if (val < 0 || val > 255) { alert('Invalid IPv4 address.'); backendIPInput.focus(); return false; }
+                }
+            }
+            const portNum = Number(backendPort);
+            if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+                alert("Enter a valid port number (1-65535).");
+                backendPortInput.focus(); return false;
+            }
         }
-        const mus = maxUploadInput.value.trim();
-        if (mus && !/^[1-9][0-9]*[MG]$/i.test(mus)) return 'Max Upload Size must look like 50M or 1G.';
-        return '';
-      }
 
-      // --- Blocks
-      function buildProxyBlock({serverName, backendIP, backendPort, websocketEnabled, maxUpload}) {
-        const ws = websocketEnabled
-          ? '        proxy_set_header Upgrade \\$http_upgrade;\\n        proxy_set_header Connection "upgrade";'
-          : '';
-        return [
-`server {`,
-`    listen 80;`,
-`    listen [::]:80;`,
-`    server_name ${serverName};`,
-`    client_max_body_size ${maxUpload};`,
-`    # ACME to nginx directly`,
-`    location ^~ /.well-known/acme-challenge/ {`,
-`        root /var/www/letsencrypt;`,
-`        default_type "text/plain";`,
-`    }`,
-`    location / {`,
-`        proxy_http_version 1.1;`,
-ws,
-`        proxy_set_header Host \\$host;`,
-`        proxy_set_header X-Real-IP \\$remote_addr;`,
-`        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;`,
-`        proxy_set_header X-Forwarded-Proto \\$scheme;`,
-`        proxy_read_timeout 300;`,
-`        proxy_connect_timeout 60;`,
-`        proxy_send_timeout 300;`,
-`        proxy_buffering off;`,
-`        proxy_pass http://${backendIP}:${backendPort};`,
-`    }`,
-`}`
-        ].filter(Boolean).join('\n');
-      }
+        const maxUploadRaw = maxUploadInput.value.trim();
+        if (!validateMaxUploadSize(maxUploadRaw)) {
+            alert('Enter a valid Max Upload Size like 50M or 1G.');
+            maxUploadInput.focus(); return false;
+        }
+        return true;
+    }
 
-      function buildStaticBlock({serverName, spa, gzip, maxUpload}) {
-        const tryLine = spa ? 'try_files \\$uri \\$uri/ /index.html;' : 'try_files \\$uri \\$uri/ =404;';
+    // Proxy mode: ACME served by nginx (never proxied), sane timeouts
+    function genProxyServerBlock(opts) {
+        const { serverName, backendIP, backendPort, websocketEnabled, maxUploadSize } = opts;
+        const wsHeaders = websocketEnabled ? `        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\$http_upgrade;
+        proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
+
+        return `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+
+    client_max_body_size ${maxUploadSize};
+
+    # ACME to nginx directly
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+    }
+
+    location / {
+${wsHeaders}
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
+
+        proxy_read_timeout 300;
+        proxy_connect_timeout 60;
+        proxy_send_timeout 300;
+        proxy_buffering off;
+
+        proxy_pass http://${backendIP}:${backendPort};
+    }
+}`;
+    }
+
+    // Static mode: HTTP-only block first; Certbot will add HTTPS (+ optional redirect)
+    function genStaticServerBlock(opts) {
+        const { serverName, rootDir, spa, gzip, maxUploadSize } = opts;
+
+        const tryFiles = spa
+            ? 'try_files \\$uri \\$uri/ /index.html;'
+            : 'try_files \\$uri \\$uri/ =404;';
+
         const gzipBlock = gzip ? `
     gzip on;
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;` : '';
-        return [
-`server {`,
-`    listen 80;`,
-`    listen [::]:80;`,
-`    server_name ${serverName};`,
-`    client_max_body_size ${maxUpload};`,
-`    root __ROOT__;`,
-`    index index.html;${gzipBlock}`,
-`    location ^~ /.well-known/acme-challenge/ {`,
-`        root __ROOT__;`,
-`        default_type "text/plain";`,
-`    }`,
-`    location / {`,
-`        ${tryLine}`,
-`    }`,
-`}`
-        ].join('\n');
-      }
 
-      function generateScript() {
-        try {
-          const err = validate();
-          if (err) { showBanner(err, true); return; }
+        return `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+    client_max_body_size ${maxUploadSize};
+    root ${rootDir};
+    index index.html;${gzipBlock}
 
-          const isStatic = modeStatic.checked;
-          const serverName = serverNameInput.value.trim();
-          const email = emailInput.value.trim();
-          const maxUpload = (maxUploadInput.value.trim() || '1G');
-          const forceHttps = !!forceHttpsToggle.checked;
+    # ACME challenge must be reachable on :80
+    location ^~ /.well-known/acme-challenge/ {
+        root ${rootDir};
+        default_type "text/plain";
+    }
 
-          const backendIP = (backendIPInput.value || '').trim();
-          const backendPort = (backendPortInput.value || '').trim();
-          const websocketEnabled = !!websocketToggle.checked;
+    location / {
+        ${tryFiles}
+    }
+}`;
+    }
 
-          const rootDirRaw = (rootDirInput.value || '').trim();
-          const spa = !!spaToggle?.checked;
-          const gzip = !!gzipToggle?.checked;
+    // Generator: Static adds It-works page + /home fixes + AppArmor; Proxy adds ACME webroot.
+    function generateScript() {
+        if (!validateInputs()) return;
 
-          const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
+        const isStatic = modeStatic.checked;
+        const serverName = serverNameInput.value.trim();
+        const email = emailInput.value.trim();
+        const maxUploadSize = (maxUploadInput.value.trim() || '1G');
+        const forceHttps = forceHttpsToggle.checked;
 
-          let preface = '';
-          let mainBlock = '';
-          let afterWrite = '';
+        const backendIP = (backendIPInput || {}).value?.trim?.() ?? '';
+        const backendPort = (backendPortInput || {}).value?.trim?.() ?? '';
+        const websocketEnabled = (websocketToggle || {}).checked ?? true;
 
-          if (isStatic) {
-            mainBlock = buildStaticBlock({serverName, spa, gzip, maxUpload});
-            preface = `# --- Normalize and create webroot ---
-set -euo pipefail
-umask 022
+        const rootDir = (rootDirInput || {}).value?.trim?.() ?? '';
+        const spa = (spaToggle || {}).checked ?? false;
+        const gzip = (gzipToggle || {}).checked ?? false;
 
-ROOT_DIR_RAW="${rootDirRaw}"
-case "$ROOT_DIR_RAW" in
-  "~/"*) ROOT_DIR="\${HOME}\${ROOT_DIR_RAW#\\~}";;
-  "~")   ROOT_DIR="\${HOME}";;
-  *)     ROOT_DIR="$ROOT_DIR_RAW";;
-esac
-if [ "$ROOT_DIR" != "/" ]; then ROOT_DIR="\${ROOT_DIR%/}"; fi
+        const certbotCmd = `sudo certbot --nginx --non-interactive --agree-tos --email ${email} -d ${serverName} ${forceHttps ? '--redirect' : ''}`.trim();
 
-if [ -z "$ROOT_DIR" ]; then echo "ERROR: Root directory not provided."; exit 1; fi
-case "$ROOT_DIR" in
-  /*) ;;  # absolute OK
-  *) echo "ERROR: Root directory must be absolute (got: $ROOT_DIR_RAW -> $ROOT_DIR)"; exit 1;;
-esac
+        let mainServerBlock = '';
+        let preface = '';
 
-echo "[create] ROOT_DIR resolved to: $ROOT_DIR"
-sudo install -d -m 755 "$ROOT_DIR"
+        if (isStatic) {
+            mainServerBlock = genStaticServerBlock({ serverName, rootDir, spa, gzip, maxUploadSize });
 
-# Starter index if missing
-if [ ! -e "$ROOT_DIR/index.html" ]; then
+            // Create webroot, starter index, perms, /home exec bits, AppArmor allow
+            preface = `# Ensure root directory exists and has an index.html
+ROOT_DIR="${rootDir}"
+sudo mkdir -p "$ROOT_DIR"
+if [ ! -f "$ROOT_DIR/index.html" ]; then
   sudo tee "$ROOT_DIR/index.html" >/dev/null <<'HTML'
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${serverName}</title></head><body style="font-family:system-ui;margin:2rem"><h1>It works! ✨</h1><p>Serving static files for ${serverName}</p></body></html>
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>${serverName}</title></head><body><h1>It works!</h1><p>Serving static files for ${serverName}</p></body></html>
 HTML
 fi
 
+echo "Setting safe ownership & permissions..."
 sudo chown -R www-data:www-data "$ROOT_DIR" || true
 sudo find "$ROOT_DIR" -type d -exec chmod 755 {} \\;
 sudo find "$ROOT_DIR" -type f -exec chmod 644 {} \\;
 
-# If serving from /home/..., fix parent execute bits & AppArmor
+# If serving from /home/..., make sure nginx can traverse parents and allow via AppArmor
 if [[ "$ROOT_DIR" == /home/*/* ]]; then
-  sudo chmod 755 /home "/home/$(echo "$ROOT_DIR" | cut -d/ -f3)" "/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)" || true
+  echo "Adjusting parent directory execute bits under /home..."
+  PARENT1="/home"
+  USERDIR="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)"
+  TOPSUB="/home/$(echo "$ROOT_DIR" | cut -d/ -f3)/$(echo "$ROOT_DIR" | cut -d/ -f4)"
+  sudo chmod 755 "$PARENT1" "$USERDIR" "$TOPSUB" || true
+
   if [ -f /etc/apparmor.d/usr.sbin.nginx ]; then
+    echo "Adding AppArmor allowlist for nginx to read $ROOT_DIR ..."
     sudo mkdir -p /etc/apparmor.d/local
-    LINE="$ROOT_DIR/** r,"; LINE2="$ROOT_DIR/** rix,"
+    LINE="$ROOT_DIR/** r,"
+    LINE2="$ROOT_DIR/** rix,"
     sudo bash -c 'grep -qxF '"'"'$LINE'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
     sudo bash -c 'grep -qxF '"'"'$LINE2'"'"' /etc/apparmor.d/local/usr.sbin.nginx || echo '"'"'$LINE2'"'"' >> /etc/apparmor.d/local/usr.sbin.nginx'
     sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx 2>/dev/null || true
@@ -317,101 +422,100 @@ if [[ "$ROOT_DIR" == /home/*/* ]]; then
   fi
 fi
 `;
+        } else {
+            mainServerBlock = genProxyServerBlock({ serverName, backendIP, backendPort, websocketEnabled, maxUploadSize });
 
-            // Replace __ROOT__ with the resolved path (escape \ / & | to be safe for sed)
-            afterWrite = `ESCAPED_ROOT="$(printf '%s' "$ROOT_DIR" | sed -e 's/[\\\\/&|]/\\\\&/g')"
-sudo sed -i "s|__ROOT__|${ESCAPED_ROOT}|g" /etc/nginx/sites-available/${serverName}
-`;
-          } else {
-            mainBlock = buildProxyBlock({serverName, backendIP, backendPort, websocketEnabled, maxUpload});
+            // Ensure local ACME directory exists for proxy flow
             preface = `sudo mkdir -p /var/www/letsencrypt
 sudo chown -R www-data:www-data /var/www/letsencrypt || true
 `;
-          }
-
-          // Final script
-          const script = [
-`#!/bin/bash`,
-`# Generated by NGINX Setup Script Generator`,
-`set -euo pipefail`,
-``,
-`pause_if_tty(){ if [ -t 1 ]; then echo; read -rp "Press Enter to close..." _; fi; }`,
-`trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR`,
-``,
-`echo "[install] Installing NGINX & Certbot (if needed)..."`,
-`sudo apt update`,
-`sudo apt install -y nginx certbot python3-certbot-nginx`,
-``,
-`# Remove default to avoid conflicts`,
-`sudo rm -f /etc/nginx/sites-enabled/default || true`,
-``,
-preface.trim(),
-``,
-`echo "[nginx] Writing initial HTTP server (no redirect) so Certbot can validate..."`,
-`cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}`,
-mainBlock,
-`EOL`,
-``,
-afterWrite.trim(),
-`sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}`,
-`sudo nginx -t`,
-`sudo systemctl reload nginx`,
-``,
-`echo "[certbot] Requesting/Installing certificate..."`,
-certbotCmd,
-``,
-`echo "[renew] Testing auto-renewal (dry run)..."`,
-`sudo certbot renew --dry-run || true`,
-`sudo systemctl enable certbot.timer || true`,
-``,
-`echo "✅ All done for ${serverName}."`,
-`pause_if_tty`
-          ].join('\n').trim();
-
-          outputArea.value = script;
-          outputWrap.classList.remove('hidden');
-          copyBtn.disabled = false;
-          showBanner('Script generated. Review and copy when ready.');
-        } catch (e) {
-          console.error(e);
-          showBanner('Could not generate script: ' + e.message, true);
         }
-      }
 
-      function copyScript() {
-        const text = outputArea.value || '';
-        if (!text) return;
-        // try modern clipboard API, fall back to execCommand
-        navigator.clipboard?.writeText(text)
-          .then(()=>showBanner('Script copied to clipboard.'))
-          .catch(()=>{
-            outputArea.select();
-            document.execCommand('copy');
-            showBanner('Script copied.');
-          });
-      }
+        const script = `#!/bin/bash
+# Generated by NGINX Setup Script Generator
+set -uo pipefail
 
-      function copyRecovery() {
-        const recovery = [
-          '# Recovery: install NGINX & Certbot',
-          'sudo apt update',
-          'sudo apt install -y nginx certbot python3-certbot-nginx'
-        ].join('\n');
-        navigator.clipboard?.writeText(recovery).then(()=>showBanner('Recovery commands copied.'));
-      }
+pause_if_tty() {
+  if [ -t 1 ]; then
+    echo
+    read -rp "Press Enter to close..." _
+  fi
+}
+trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 
-      // Bind buttons
-      generateBtn.addEventListener('click', generateScript);
-      copyBtn.addEventListener('click', copyScript);
-      recoveryBtn.addEventListener('click', copyRecovery);
+echo "Installing NGINX & Certbot (if needed)..."
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx
 
-      // Keyboard shortcut: Ctrl/Cmd+Enter to generate
-      [serverNameInput, emailInput, backendIPInput, backendPortInput, rootDirInput].forEach(el=>{
-        el?.addEventListener('keydown', e=>{
-          if ((e.ctrlKey||e.metaKey) && e.key==='Enter') generateScript();
+# Remove default to avoid conflicts
+sudo rm -f /etc/nginx/sites-enabled/default || true
+
+${preface}echo "Writing initial HTTP server (no redirect) so Certbot can validate..."
+cat <<'EOL' | sudo tee /etc/nginx/sites-available/${serverName}
+${mainServerBlock}
+EOL
+
+sudo ln -sf /etc/nginx/sites-available/${serverName} /etc/nginx/sites-enabled/${serverName}
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo "Running Certbot..."
+${certbotCmd}
+
+echo "Testing auto-renewal (dry run)..."
+sudo certbot renew --dry-run || true
+
+sudo systemctl enable certbot.timer || true
+
+echo "All done for ${serverName}."
+pause_if_tty
+`;
+
+        outputTextarea.value = script.trim();
+        document.getElementById('outputContainer').style.display = "block";
+        outputTextarea.focus();
+        outputTextarea.select();
+        ariaStatus.textContent = `NGINX config script generated for ${serverName}`;
+    }
+
+    function copyToClipboard() {
+        const text = outputTextarea.value;
+        if (!text) { displayCopyFeedback('Nothing to copy!', true); return; }
+        navigator.clipboard.writeText(text)
+            .then(() => displayCopyFeedback('Script copied to clipboard!'))
+            .catch(err => displayCopyFeedback('Failed to copy: ' + err, true));
+    }
+
+    function copyRecovery() {
+        const recoveryCmds = `# Recovery: install NGINX & Certbot
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx`;
+        navigator.clipboard.writeText(recoveryCmds)
+            .then(() => alert('Recovery commands copied to clipboard!'))
+            .catch(err => alert('Failed to copy recovery commands: ' + err));
+    }
+
+    function displayCopyFeedback(message, isError = false) {
+        copyFeedback.textContent = message;
+        copyFeedback.classList.toggle('error', isError);
+        copyFeedback.style.display = 'block';
+        setTimeout(() => {
+            copyFeedback.style.display = 'none';
+            copyFeedback.textContent = '';
+            copyFeedback.classList.remove('error');
+        }, 3000);
+    }
+
+    generateBtn.addEventListener('click', generateScript);
+    copyBtn.addEventListener('click', copyToClipboard);
+    recoveryBtn.addEventListener('click', copyRecovery);
+
+    [serverNameInput, emailInput, backendIPInput, backendPortInput, rootDirInput].forEach(el => {
+        el.addEventListener('keydown', function (e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generateScript();
         });
-      });
-    })();
-  </script>
+    });
+})();
+</script>
 </body>
 </html>

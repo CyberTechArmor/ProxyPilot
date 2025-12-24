@@ -122,6 +122,37 @@ docker compose -f /opt/proxypilot/docker-compose.yml down
 docker compose -f /opt/proxypilot/docker-compose.yml up -d
 ```
 
+### Reset/Recovery Tool
+
+If you lose access to the dashboard, use the reset tool:
+
+```bash
+# Interactive menu
+sudo /opt/proxypilot/reset.sh
+
+# Reset password only
+sudo /opt/proxypilot/reset.sh password
+
+# Reset TOTP only
+sudo /opt/proxypilot/reset.sh totp
+
+# Full reset (password + TOTP)
+sudo /opt/proxypilot/reset.sh full
+
+# Show current credentials
+sudo /opt/proxypilot/reset.sh show
+
+# Show status and logs
+sudo /opt/proxypilot/reset.sh status
+```
+
+The reset tool provides:
+- Password reset with new secure password generation
+- TOTP reset with QR code display
+- Full credential reset
+- Display of current saved credentials
+- Service status and log viewing
+
 ---
 
 ## Standalone Script Generator

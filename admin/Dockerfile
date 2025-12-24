@@ -7,7 +7,7 @@ WORKDIR /app/frontend
 
 # Copy frontend package files
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm install
 
 # Copy frontend source and build
 COPY frontend/ ./
@@ -22,7 +22,7 @@ RUN apk add --no-cache python3 make g++
 
 # Copy backend package files
 COPY backend/package*.json ./
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
 # Stage 3: Production image
 FROM node:20-alpine

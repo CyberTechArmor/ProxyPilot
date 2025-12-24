@@ -45,9 +45,17 @@ generate_password() {
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9!@#$%^&*' | head -c "$length"
 }
 
-# Generate TOTP secret
+# Generate TOTP secret (valid base32, 32 characters = 160 bits)
 generate_totp_secret() {
-    openssl rand -base64 20 | tr -dc 'A-Z2-7' | head -c 32
+    # Generate 20 random bytes (160 bits) and encode as base32
+    # This produces exactly 32 base32 characters
+    python3 -c "
+import secrets
+import base64
+random_bytes = secrets.token_bytes(20)
+secret = base64.b32encode(random_bytes).decode('ascii').rstrip('=')
+print(secret[:32])
+"
 }
 
 # Generate QR code for TOTP (ASCII)

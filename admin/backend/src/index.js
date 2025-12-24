@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { existsSync } from 'fs';
 import { initDatabase } from './db.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
@@ -20,22 +21,25 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Security middleware
+// Determine frontend path - check multiple locations
+const possibleFrontendPaths = [
+  join(__dirname, '../../frontend/dist'),
+  join(__dirname, '../../../frontend/dist'),
+  '/app/frontend/dist',
+];
+const FRONTEND_PATH = possibleFrontendPaths.find(p => existsSync(p)) || possibleFrontendPaths[0];
+console.log('Frontend path:', FRONTEND_PATH, '- exists:', existsSync(FRONTEND_PATH));
+
+// Security middleware - relaxed CSP for production
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-    },
-  },
+  contentSecurityPolicy: false, // Disable CSP to avoid blocking frontend
+  crossOriginEmbedderPolicy: false,
 }));
 
 // CORS configuration
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? `https://${process.env.DOMAIN}`
+    ? [`https://${process.env.DOMAIN}`, `http://${process.env.DOMAIN}`]
     : ['http://localhost:5173', 'http://localhost:3000'],
   credentials: true,
 }));
@@ -65,7 +69,7 @@ initDatabase();
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), frontendPath: FRONTEND_PATH });
 });
 
 // API Routes
@@ -75,11 +79,18 @@ app.use('/api/user', authenticateToken, userRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(join(__dirname, '../../frontend/dist')));
+  console.log('Serving static files from:', FRONTEND_PATH);
+  app.use(express.static(FRONTEND_PATH));
 
-  // Handle SPA routing
+  // Handle SPA routing - serve index.html for all non-API routes
   app.get('*', (req, res) => {
-    res.sendFile(join(__dirname, '../../frontend/dist/index.html'));
+    const indexPath = join(FRONTEND_PATH, 'index.html');
+    if (existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      console.error('index.html not found at:', indexPath);
+      res.status(404).send('Frontend not found. Please rebuild the application.');
+    }
   });
 }
 
@@ -93,11 +104,8 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
-
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV}`);
+  console.log(`Frontend path: ${FRONTEND_PATH}`);
 });

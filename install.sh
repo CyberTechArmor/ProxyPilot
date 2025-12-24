@@ -1,0 +1,495 @@
+#!/bin/bash
+# ProxyPilot Admin Dashboard Installer
+# This script installs and configures the ProxyPilot admin dashboard
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Check if running as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root (use sudo)"
+        exit 1
+    fi
+}
+
+# Generate secure random password
+generate_password() {
+    local length=${1:-32}
+    openssl rand -base64 48 | tr -dc 'a-zA-Z0-9!@#$%^&*' | head -c "$length"
+}
+
+# Generate TOTP secret
+generate_totp_secret() {
+    # Generate a base32 encoded secret for TOTP
+    openssl rand -base64 20 | tr -dc 'A-Z2-7' | head -c 32
+}
+
+# Generate QR code for TOTP (ASCII)
+generate_totp_qr() {
+    local secret=$1
+    local username=$2
+    local issuer="ProxyPilot"
+    local uri="otpauth://totp/${issuer}:${username}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30"
+
+    if command -v qrencode &> /dev/null; then
+        echo ""
+        log_info "Scan this QR code with your authenticator app:"
+        echo ""
+        qrencode -t ANSIUTF8 "$uri"
+        echo ""
+    else
+        log_warn "qrencode not installed. Install it with: apt install qrencode"
+    fi
+
+    echo -e "${CYAN}Manual entry details:${NC}"
+    echo -e "  Secret Key: ${GREEN}${secret}${NC}"
+    echo -e "  Account: ${username}"
+    echo -e "  Issuer: ${issuer}"
+    echo -e "  Algorithm: SHA1"
+    echo -e "  Digits: 6"
+    echo -e "  Period: 30 seconds"
+    echo ""
+    echo -e "${YELLOW}IMPORTANT: Save this secret key securely! You will need it to recover access.${NC}"
+}
+
+# Check and install NGINX
+install_nginx() {
+    log_info "Checking NGINX installation..."
+
+    if command -v nginx &> /dev/null; then
+        log_success "NGINX is already installed ($(nginx -v 2>&1 | cut -d'/' -f2))"
+    else
+        log_info "Installing NGINX..."
+        apt-get update -y
+        apt-get install -y nginx
+        systemctl enable nginx
+        systemctl start nginx
+        log_success "NGINX installed successfully"
+    fi
+}
+
+# Configure NGINX global settings
+configure_nginx_global() {
+    local max_upload=$1
+
+    log_info "Configuring NGINX global settings..."
+
+    # Backup original config
+    if [[ ! -f /etc/nginx/nginx.conf.backup ]]; then
+        cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
+    fi
+
+    # Check if client_max_body_size is already set in http block
+    if grep -q "client_max_body_size" /etc/nginx/nginx.conf; then
+        sed -i "s/client_max_body_size.*/client_max_body_size ${max_upload};/" /etc/nginx/nginx.conf
+    else
+        # Add it inside http block
+        sed -i "/http {/a\\    client_max_body_size ${max_upload};" /etc/nginx/nginx.conf
+    fi
+
+    nginx -t && systemctl reload nginx
+    log_success "NGINX configured with max upload size: ${max_upload}"
+}
+
+# Check and install Docker
+install_docker() {
+    log_info "Checking Docker installation..."
+
+    if command -v docker &> /dev/null; then
+        log_success "Docker is already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
+    else
+        log_info "Installing Docker..."
+
+        # Install prerequisites
+        apt-get update -y
+        apt-get install -y ca-certificates curl gnupg lsb-release
+
+        # Add Docker's official GPG key
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+
+        # Set up the repository
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+          tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        # Install Docker Engine
+        apt-get update -y
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+        systemctl enable docker
+        systemctl start docker
+
+        log_success "Docker installed successfully"
+    fi
+}
+
+# Check Docker Compose
+check_docker_compose() {
+    log_info "Checking Docker Compose..."
+
+    if docker compose version &> /dev/null; then
+        log_success "Docker Compose is available ($(docker compose version --short))"
+    else
+        log_error "Docker Compose plugin not found"
+        exit 1
+    fi
+}
+
+# Install additional dependencies
+install_dependencies() {
+    log_info "Installing additional dependencies..."
+    apt-get install -y certbot python3-certbot-nginx qrencode jq
+    log_success "Dependencies installed"
+}
+
+# Setup SSL certificate
+setup_ssl() {
+    local domain=$1
+    local email=$2
+
+    log_info "Setting up SSL certificate for ${domain}..."
+
+    # Create temporary NGINX config for ACME challenge
+    cat > "/etc/nginx/sites-available/${domain}-acme" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 404;
+    }
+}
+EOF
+
+    mkdir -p /var/www/letsencrypt
+    ln -sf "/etc/nginx/sites-available/${domain}-acme" "/etc/nginx/sites-enabled/${domain}"
+    nginx -t && systemctl reload nginx
+
+    # Obtain certificate
+    certbot certonly --webroot -w /var/www/letsencrypt \
+        -d "$domain" --agree-tos -m "$email" --non-interactive
+
+    # Remove temporary config
+    rm -f "/etc/nginx/sites-enabled/${domain}"
+    rm -f "/etc/nginx/sites-available/${domain}-acme"
+
+    log_success "SSL certificate obtained for ${domain}"
+}
+
+# Create ProxyPilot NGINX config
+create_proxypilot_nginx_config() {
+    local domain=$1
+    local port=$2
+
+    log_info "Creating NGINX configuration for ProxyPilot..."
+
+    cat > "/etc/nginx/sites-available/${domain}" <<EOF
+# ProxyPilot Admin Dashboard
+# Domain: ${domain}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${domain};
+
+    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300;
+        proxy_connect_timeout 60;
+        proxy_send_timeout 300;
+    }
+}
+EOF
+
+    ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/${domain}"
+    nginx -t && systemctl reload nginx
+
+    log_success "NGINX configuration created for ${domain}"
+}
+
+# Create environment file
+create_env_file() {
+    local install_dir=$1
+    local port=$2
+    local admin_user=$3
+    local admin_pass=$4
+    local totp_secret=$5
+    local domain=$6
+    local jwt_secret=$(generate_password 64)
+    local session_secret=$(generate_password 64)
+
+    log_info "Creating environment configuration..."
+
+    cat > "${install_dir}/.env" <<EOF
+# ProxyPilot Configuration
+# Generated on $(date)
+
+# Server Configuration
+PORT=${port}
+NODE_ENV=production
+DOMAIN=${domain}
+
+# Authentication
+JWT_SECRET=${jwt_secret}
+SESSION_SECRET=${session_secret}
+
+# Admin User (hashed on first run)
+ADMIN_USERNAME=${admin_user}
+ADMIN_PASSWORD=${admin_pass}
+ADMIN_TOTP_SECRET=${totp_secret}
+
+# Database
+DATABASE_PATH=/data/proxypilot.db
+
+# NGINX Configuration Path
+NGINX_SITES_AVAILABLE=/etc/nginx/sites-available
+NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
+EOF
+
+    chmod 600 "${install_dir}/.env"
+    log_success "Environment file created"
+}
+
+# Create Docker Compose file
+create_docker_compose() {
+    local install_dir=$1
+    local port=$2
+
+    log_info "Creating Docker Compose configuration..."
+
+    cat > "${install_dir}/docker-compose.yml" <<EOF
+version: '3.8'
+
+services:
+  proxypilot:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    container_name: proxypilot-admin
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${port}:${port}"
+    volumes:
+      - ./data:/data
+      - /etc/nginx/sites-available:/etc/nginx/sites-available
+      - /etc/nginx/sites-enabled:/etc/nginx/sites-enabled
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    networks:
+      - proxypilot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${port}/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  proxypilot-net:
+    driver: bridge
+EOF
+
+    log_success "Docker Compose file created"
+}
+
+# Main installation function
+main() {
+    clear
+    echo -e "${CYAN}"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║                                                               ║"
+    echo "║     🚀 ProxyPilot Admin Dashboard Installer                   ║"
+    echo "║                                                               ║"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo ""
+
+    check_root
+
+    # Get installation directory
+    INSTALL_DIR="/opt/proxypilot"
+
+    # Gather user input
+    echo -e "${CYAN}=== Configuration ===${NC}"
+    echo ""
+
+    # NGINX Max Upload Size
+    read -rp "Enter default NGINX max upload size [1G]: " MAX_UPLOAD
+    MAX_UPLOAD=${MAX_UPLOAD:-1G}
+
+    # Port
+    read -rp "Enter port for ProxyPilot dashboard [3001]: " PORT
+    PORT=${PORT:-3001}
+
+    # Admin username
+    read -rp "Enter admin username: " ADMIN_USER
+    while [[ -z "$ADMIN_USER" ]]; do
+        log_error "Username cannot be empty"
+        read -rp "Enter admin username: " ADMIN_USER
+    done
+
+    # Generate password
+    ADMIN_PASS=$(generate_password 24)
+    echo ""
+    log_info "Generated secure password for admin user"
+
+    # Generate TOTP secret
+    TOTP_SECRET=$(generate_totp_secret)
+
+    # Domain
+    read -rp "Enter domain for admin dashboard (e.g., admin.example.com): " DOMAIN
+    while [[ -z "$DOMAIN" ]]; do
+        log_error "Domain cannot be empty"
+        read -rp "Enter domain for admin dashboard: " DOMAIN
+    done
+
+    # Email for Let's Encrypt
+    read -rp "Enter email for Let's Encrypt SSL: " EMAIL
+    while [[ -z "$EMAIL" ]]; do
+        log_error "Email cannot be empty"
+        read -rp "Enter email for Let's Encrypt SSL: " EMAIL
+    done
+
+    echo ""
+    echo -e "${CYAN}=== Installation Summary ===${NC}"
+    echo "  Max Upload Size: ${MAX_UPLOAD}"
+    echo "  Dashboard Port: ${PORT}"
+    echo "  Admin Username: ${ADMIN_USER}"
+    echo "  Domain: ${DOMAIN}"
+    echo "  Email: ${EMAIL}"
+    echo ""
+
+    read -rp "Proceed with installation? [Y/n]: " CONFIRM
+    CONFIRM=${CONFIRM:-Y}
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        log_warn "Installation cancelled"
+        exit 0
+    fi
+
+    echo ""
+    echo -e "${CYAN}=== Starting Installation ===${NC}"
+    echo ""
+
+    # Install components
+    install_nginx
+    configure_nginx_global "$MAX_UPLOAD"
+    install_docker
+    check_docker_compose
+    install_dependencies
+
+    # Create installation directory
+    log_info "Creating installation directory..."
+    mkdir -p "$INSTALL_DIR/data"
+
+    # Copy admin files
+    log_info "Copying ProxyPilot files..."
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
+
+    # Create configuration files
+    create_env_file "$INSTALL_DIR" "$PORT" "$ADMIN_USER" "$ADMIN_PASS" "$TOTP_SECRET" "$DOMAIN"
+    create_docker_compose "$INSTALL_DIR" "$PORT"
+
+    # Setup SSL
+    setup_ssl "$DOMAIN" "$EMAIL"
+
+    # Create NGINX config
+    create_proxypilot_nginx_config "$DOMAIN" "$PORT"
+
+    # Build and start Docker container
+    log_info "Building and starting ProxyPilot..."
+    cd "$INSTALL_DIR"
+    docker compose build
+    docker compose up -d
+
+    # Wait for container to be healthy
+    log_info "Waiting for ProxyPilot to start..."
+    sleep 10
+
+    # Final output
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                                                               ║${NC}"
+    echo -e "${GREEN}║     ✅ ProxyPilot Installation Complete!                      ║${NC}"
+    echo -e "${GREEN}║                                                               ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${CYAN}=== Access Details ===${NC}"
+    echo ""
+    echo -e "  Dashboard URL: ${GREEN}https://${DOMAIN}${NC}"
+    echo -e "  Admin Username: ${GREEN}${ADMIN_USER}${NC}"
+    echo -e "  Admin Password: ${GREEN}${ADMIN_PASS}${NC}"
+    echo ""
+    echo -e "${CYAN}=== TOTP Setup ===${NC}"
+    generate_totp_qr "$TOTP_SECRET" "$ADMIN_USER"
+    echo ""
+    echo -e "${CYAN}=== Important Notes ===${NC}"
+    echo "  - Save the admin password and TOTP secret securely!"
+    echo "  - Configuration files are in: ${INSTALL_DIR}"
+    echo "  - Logs: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f"
+    echo "  - Restart: docker compose -f ${INSTALL_DIR}/docker-compose.yml restart"
+    echo ""
+    echo -e "${YELLOW}Press Enter to close...${NC}"
+    read -r
+}
+
+# Run main function
+main "$@"

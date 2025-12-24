@@ -148,9 +148,12 @@
     const outputContainer = $('#outputContainer'), outputTextarea = $('#output'), ariaStatus = $('#ariaStatus');
 
     const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
-    const ipv6 = /^[0-9a-fA-F:]+$/;
-    const hostRe = /^[a-zA-Z0-9.-]+$/;
+    // IPv6: simplified pattern - allows compressed notation like ::1, fe80::1, etc.
+    const ipv6 = /^([0-9a-fA-F]{1,4}:){0,7}[0-9a-fA-F]{0,4}$|^([0-9a-fA-F]{1,4}:){1,7}:$|^::[0-9a-fA-F]{0,4}$|^::([0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}$/;
+    const hostRe = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
     const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // Shell-safe pattern for paths and domains - no backticks, $, semicolons, etc.
+    const shellSafe = /^[a-zA-Z0-9_.:\/-]+$/;
 
     function setModeUI(){
       const isStatic = modeStatic.checked;
@@ -170,12 +173,13 @@
       const name = serverNameInput.value.trim();
       const email = emailInput.value.trim();
       if(!name || !hostRe.test(name)){ alert('Enter a valid Server Name (domain).'); serverNameInput.focus(); return false; }
-      if(!email || !emailRe.test(email)){ alert('Enter a valid email for Let’s Encrypt.'); emailInput.focus(); return false; }
+      if(!email || !emailRe.test(email)){ alert("Enter a valid email for Let's Encrypt."); emailInput.focus(); return false; }
 
       if(modeStatic.checked){
         const rd = (rootDirInput.value||'').trim();
         if(!rd){ alert('Root Directory is required for Static mode.'); rootDirInput.focus(); return false; }
         if(!rd.startsWith('/')){ alert('Root Directory must be an absolute path.'); rootDirInput.focus(); return false; }
+        if(!shellSafe.test(rd)){ alert('Root Directory contains invalid characters. Use only letters, numbers, dots, underscores, colons, slashes, and hyphens.'); rootDirInput.focus(); return false; }
       }else{
         const ip = backendIPInput.value.trim(), port = backendPortInput.value.trim();
         if(!ip || !port){ alert('Backend host and port are required.'); return false; }
@@ -187,32 +191,58 @@
       return true;
     }
 
-    function httpBlock(forceHttps){
+    function httpBlock(forceHttps, maxUpload){
+      const uploadDirective = maxUpload ? `\n    client_max_body_size ${maxUpload};` : '';
       return forceHttps ? `server {
     listen 80;
     listen [::]:80;
     server_name __DOMAIN__;
     root __WEBROOT__;
-    index index.html;
+    index index.html;${uploadDirective}
     location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { return 301 https://$host$request_uri; }
+    location / { return 301 https://\\$host\\$request_uri; }
 }
 ` : `server {
     listen 80;
     listen [::]:80;
     server_name __DOMAIN__;
     root __WEBROOT__;
-    index index.html;
+    index index.html;${uploadDirective}
     location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { try_files $uri $uri/ /index.html; }
+    location / { try_files \\$uri \\$uri/ /index.html; }
 }
 `;
     }
 
     // --- Static-site script (webroot challenge; path REQUIRED) ---
-    function genStaticFullScript({serverName, email, rootDir, forceHttps}){
-      const HTTP_BLOCK = httpBlock(forceHttps);
-      let script = `#!/bin/bash
+    function genStaticFullScript({serverName, email, rootDir, forceHttps, maxUploadSize}){
+      const maxUpload = maxUploadSize || '1G';
+      const redirectLabel = forceHttps ? ' redirect' : '';
+
+      // Generate HTTP block directly with proper escaping
+      const httpBlockContent = forceHttps
+        ? `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+    root ${rootDir};
+    index index.html;
+    client_max_body_size ${maxUpload};
+    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
+    location / { return 301 https://\\$host\\$request_uri; }
+}`
+        : `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${serverName};
+    root ${rootDir};
+    index index.html;
+    client_max_body_size ${maxUpload};
+    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
+    location / { try_files \\$uri \\$uri/ /index.html; }
+}`;
+
+      return `#!/bin/bash
 # Setup for ${serverName} — static site (WEBROOT required)
 set -euo pipefail
 
@@ -222,6 +252,7 @@ trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 DOMAIN="${serverName}"
 WEBROOT="${rootDir}"
 EMAIL="${email}"
+MAX_UPLOAD="${maxUpload}"
 
 echo "[1/8] Ensure webroot + sample index at \${WEBROOT}..."
 sudo mkdir -p "\${WEBROOT}"
@@ -269,23 +300,22 @@ sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
 
 echo "[5/8] Write TEMPORARY HTTP-only config for ACME..."
 TMPHTTP="/tmp/\${DOMAIN}.acme.http.tmp"
-sudo tee "\${TMPHTTP}" >/dev/null <<'NGINX'
+sudo tee "\${TMPHTTP}" >/dev/null <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name __DOMAIN__;
-    root __WEBROOT__;
+    server_name \${DOMAIN};
+    root \${WEBROOT};
     index index.html;
 
     location ^~ /.well-known/acme-challenge/ {
-        root __WEBROOT__;
+        root \${WEBROOT};
         default_type "text/plain";
     }
 
-    location / { try_files $uri $uri/ /index.html; }
+    location / { try_files \\$uri \\$uri/ /index.html; }
 }
-NGINX
-sudo sed -i -e "s|__DOMAIN__|${serverName}|g" -e "s|__WEBROOT__|${rootDir}|g" "\${TMPHTTP}"
+EOF
 sudo mv "\${TMPHTTP}" "/etc/nginx/sites-available/\${DOMAIN}-acme"
 sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}-acme" "/etc/nginx/sites-enabled/\${DOMAIN}-acme"
 sudo nginx -t && sudo systemctl reload nginx
@@ -298,38 +328,31 @@ FULLCHAIN="\${CERT_DIR}/fullchain.pem"
 PRIVKEY="\${CERT_DIR}/privkey.pem"
 CHAIN="\${CERT_DIR}/chain.pem"
 
-echo "[7/8] Write FINAL canonical config (HTTP${forceHttps ? ' redirect' : ''} + HTTPS serve)..."
+echo "[7/8] Write FINAL canonical config (HTTP${redirectLabel} + HTTPS serve)..."
 TMP="/tmp/\${DOMAIN}.nginx.tmp"
-sudo tee "\${TMP}" >/dev/null <<'NGINX'
+sudo tee "\${TMP}" >/dev/null <<EOF
 # =========================
-# __DOMAIN__ — canonical site
+# \${DOMAIN} — canonical site
 # =========================
 
-__HTTP_BLOCK__
+${httpBlockContent}
 
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name __DOMAIN__;
-    root __WEBROOT__;
+    server_name ${serverName};
+    root ${rootDir};
     index index.html;
+    client_max_body_size ${maxUpload};
 
-    ssl_certificate           __FULLCHAIN__;
-    ssl_certificate_key       __PRIVKEY__;
+    ssl_certificate           \${FULLCHAIN};
+    ssl_certificate_key       \${PRIVKEY};
     include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_trusted_certificate   __CHAIN__;
+    ssl_trusted_certificate   \${CHAIN};
 
-    location / { try_files $uri $uri/ /index.html; }
+    location / { try_files \\$uri \\$uri/ /index.html; }
 }
-NGINX
-
-sudo sed -i \
-  -e "s|__DOMAIN__|${serverName}|g" \
-  -e "s|__WEBROOT__|${rootDir}|g" \
-  -e "s|__FULLCHAIN__|\${FULLCHAIN}|g" \
-  -e "s|__PRIVKEY__|\${PRIVKEY}|g" \
-  -e "s|__CHAIN__|\${CHAIN}|g" \
-  "\${TMP}"
+EOF
 
 sudo mv "\${TMP}" "/etc/nginx/sites-available/\${DOMAIN}"
 sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
@@ -350,11 +373,13 @@ echo "  curl -I http://\${DOMAIN}"
 echo "  curl -I https://\${DOMAIN}"
 pause_if_tty
 `;
-      return script.replace('__HTTP_BLOCK__', HTTP_BLOCK);
     }
 
-    // NEW: full reverse-proxy script generator (webroot-only, two-phase, WS-ready, optional redirect)
+    // Full reverse-proxy script generator (webroot-only, two-phase, WS-ready, optional redirect)
     function genProxyFullScript({ serverName, email, backendIP, backendPort, websocketEnabled, maxUploadSize, forceHttps }) {
+      const maxUpload = maxUploadSize || '1G';
+      const redirectLabel = forceHttps ? 'on' : 'off';
+
       const ws = websocketEnabled ? `        proxy_http_version 1.1;
         proxy_set_header Upgrade \\$http_upgrade;
         proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
@@ -378,7 +403,7 @@ server {
     listen [::]:80;
     server_name ${serverName};
 
-    client_max_body_size ${maxUploadSize};
+    client_max_body_size ${maxUpload};
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
@@ -412,7 +437,7 @@ EMAIL="${email}"
 ACME_ROOT="/var/www/letsencrypt"
 APP_HOST="${backendIP}"
 APP_PORT="${backendPort}"
-MAX_UPLOAD="${maxUploadSize || '1G'}"
+MAX_UPLOAD="${maxUpload}"
 
 echo "[1/6] Install NGINX & Certbot..."
 sudo apt-get update -y
@@ -453,7 +478,7 @@ if [ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]; then
     -O /etc/letsencrypt/options-ssl-nginx.conf
 fi
 
-echo "[5/6] Final HTTPS vhost (redirect=${forceHttps ? 'on' : 'off'})..."
+echo "[5/6] Final HTTPS vhost (redirect=${redirectLabel})..."
 sudo tee /etc/nginx/sites-available/$DOMAIN >/dev/null <<EOF
 ${httpFinalBlock}
 
@@ -467,14 +492,14 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/${serverName}/privkey.pem;
     include /etc/letsencrypt/options-ssl-nginx.conf;
 
-    client_max_body_size ${maxUploadSize};
+    client_max_body_size ${maxUpload};
 
     location / {
 ${ws}
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
 
         proxy_read_timeout 300;
         proxy_connect_timeout 60;
@@ -515,7 +540,7 @@ pause_if_tty`;
 
       let script = '';
       if(isStatic){
-        script = genStaticFullScript({ serverName:name, email, rootDir, forceHttps });
+        script = genStaticFullScript({ serverName:name, email, rootDir, forceHttps, maxUploadSize: maxUpload });
       }else{
         script = genProxyFullScript({
           serverName: name,
@@ -536,6 +561,32 @@ pause_if_tty`;
       outputTextarea.focus(); outputTextarea.select();
     }
 
+    // Clipboard fallback for older browsers
+    function copyToClipboard(text){
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        return navigator.clipboard.writeText(text);
+      }
+      // Fallback for older browsers
+      return new Promise((resolve, reject) => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+          const success = document.execCommand('copy');
+          document.body.removeChild(textarea);
+          if(success) resolve();
+          else reject(new Error('execCommand copy failed'));
+        } catch(e) {
+          document.body.removeChild(textarea);
+          reject(e);
+        }
+      });
+    }
+
     function copy(){
       const text = outputTextarea.value || '';
       const copyFeedback = document.getElementById('copyFeedback');
@@ -546,7 +597,7 @@ pause_if_tty`;
         setTimeout(()=>{copyFeedback.style.display='none'; copyFeedback.classList.remove('error');},2400);
         return;
       }
-      navigator.clipboard.writeText(text).then(()=>{
+      copyToClipboard(text).then(()=>{
         copyFeedback.textContent='Script copied to clipboard!';
         copyFeedback.classList.remove('error');
         copyFeedback.style.display='block';
@@ -563,7 +614,7 @@ pause_if_tty`;
       const s=`# Recovery: install NGINX & Certbot
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx`;
-      navigator.clipboard.writeText(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e));
+      copyToClipboard(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e));
     }
 
     document.getElementById('generateBtn').addEventListener('click', gen);
@@ -571,6 +622,17 @@ sudo apt install -y nginx certbot python3-certbot-nginx`;
     document.getElementById('recoveryBtn').addEventListener('click', copyRecovery);
     [serverNameInput,emailInput,backendIPInput,backendPortInput,rootDirInput,maxUploadInput].forEach(el=>{
       el && el.addEventListener('keydown', e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') gen(); });
+    });
+
+    // Keyboard accessibility for toggle switches
+    document.querySelectorAll('.toggle-label[tabindex="0"]').forEach(label => {
+      label.addEventListener('keydown', e => {
+        if(e.key === ' ' || e.key === 'Enter'){
+          e.preventDefault();
+          const checkbox = document.getElementById(label.getAttribute('for'));
+          if(checkbox) checkbox.click();
+        }
+      });
     });
   })();
   </script>

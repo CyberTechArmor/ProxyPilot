@@ -217,6 +217,36 @@ export const api = {
   discoverDockerCompose: () => request('/services/discover/docker-compose'),
 
   getDockerComposeServices: () => request('/services/docker-compose/services'),
+
+  // User Management (Admin only)
+  getUsers: () => request('/user/users'),
+
+  createUser: (data) => request('/user/users', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  updateUser: (id, data) => request(`/user/users/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+
+  deleteUser: (id, totpCode) => request(`/user/users/${id}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totpCode }),
+  }),
+
+  getUserAccess: (id) => request(`/user/users/${id}/access`),
+
+  updateUserAccess: (id, access) => request(`/user/users/${id}/access`, {
+    method: 'PUT',
+    body: JSON.stringify({ access }),
+  }),
+
+  changeInitialPassword: (data) => request('/user/change-initial-password', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 };
 
 export { ApiError };

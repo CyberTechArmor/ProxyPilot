@@ -266,6 +266,16 @@ export default function Dashboard() {
     dbPort: '7001',
   });
 
+  // Terminal tab state (terminal vs editor)
+  const [terminalActiveTab, setTerminalActiveTab] = useState('terminal'); // 'terminal' or 'editor'
+  const [editorFilePath, setEditorFilePath] = useState('');
+  const [editorContent, setEditorContent] = useState('');
+  const [editorOriginalContent, setEditorOriginalContent] = useState('');
+  const [editorVersions, setEditorVersions] = useState([]);
+  const [editorShowVersions, setEditorShowVersions] = useState(false);
+  const [editorLoadingVersions, setEditorLoadingVersions] = useState(false);
+  const [editorSaving, setEditorSaving] = useState(false);
+
   const { toast } = useToast();
 
   // Filtered and sorted services
@@ -364,6 +374,22 @@ export default function Dashboard() {
     fetchServices();
     fetchComposeServices();
   }, []);
+
+  // Keyboard shortcut handler for editor (Ctrl+S)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        // Only handle if terminal is open and editor tab is active with a file
+        if (terminalOpen && terminalActiveTab === 'editor' && editorFilePath && editorContent !== editorOriginalContent) {
+          e.preventDefault();
+          handleEditorSave();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [terminalOpen, terminalActiveTab, editorFilePath, editorContent, editorOriginalContent]);
 
   // Discovery functions
   const discoverSites = async () => {
@@ -650,9 +676,13 @@ export default function Dashboard() {
     }
   };
 
-  const openTerminal = async () => {
+  const openTerminal = async (initialDir = null) => {
+    const startDir = initialDir || terminalCwd || '/';
+    setTerminalCwd(startDir);
     setTerminalOpen(true);
-    setTerminalOutput([{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }]);
+    setTerminalFullscreen(true); // Always fullscreen
+    setTerminalOutput(prev => prev.length === 0 ? [{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }] : prev);
+
     // Fetch system info and containers
     try {
       const [sysInfo, containerList] = await Promise.all([
@@ -661,10 +691,38 @@ export default function Dashboard() {
       ]);
       setSystemInfo(sysInfo);
       setContainers(containerList.containers || []);
-      // Fetch initial directory contents
-      fetchTerminalDirectory('/');
+      // Fetch directory contents for the starting directory
+      fetchTerminalDirectory(startDir);
+      // Also fetch docker-compose containers for current directory
+      fetchComposeContainersForDir(startDir);
     } catch (e) {
       console.error('Failed to fetch terminal info:', e);
+    }
+  };
+
+  // Fetch docker-compose containers for a specific directory
+  const fetchComposeContainersForDir = async (dir) => {
+    try {
+      // Check if docker-compose.yml exists in the directory
+      const checkResult = await api.executeCommand(`test -f "${dir}/docker-compose.yml" && echo "exists" || echo "no"`, '/');
+      if (checkResult.output?.trim() === 'exists') {
+        // Get compose project name from directory
+        const projectName = dir.split('/').pop();
+        // Get containers for this compose project
+        const result = await api.executeCommand(
+          `docker compose -f "${dir}/docker-compose.yml" ps --format '{{.Name}}\\t{{.Image}}\\t{{.Status}}' 2>/dev/null || echo ""`,
+          '/'
+        );
+        if (result.output?.trim()) {
+          const composeContainers = result.output.trim().split('\n').filter(Boolean).map(line => {
+            const [name, image, status] = line.split('\t');
+            return { name, image, status, isRunning: status?.includes('Up') };
+          });
+          setContainers(composeContainers);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch compose containers:', e);
     }
   };
 
@@ -730,29 +788,21 @@ export default function Dashboard() {
       return;
     }
 
-    // Intercept nano command and open built-in editor
-    if (cmd.startsWith('nano ') || cmd === 'nano') {
-      const filePath = cmd === 'nano' ? '' : cmd.substring(5).trim();
+    // Intercept nano/vim/vi command and open built-in editor
+    if (cmd.startsWith('nano ') || cmd === 'nano' || cmd.startsWith('vim ') || cmd.startsWith('vi ')) {
+      const cmdName = cmd.split(' ')[0];
+      const filePath = cmd === 'nano' ? '' : cmd.substring(cmdName.length + 1).trim();
       if (!filePath) {
-        setTerminalOutput(prev => [...prev, { type: 'error', text: 'Usage: nano <filename>' }]);
+        setTerminalOutput(prev => [...prev, { type: 'error', text: `Usage: ${cmdName} <filename>` }]);
         terminalInputRef.current?.focus();
         return;
       }
 
       // Resolve full path based on current directory
       const fullPath = filePath.startsWith('/') ? filePath : `${terminalCwd}/${filePath}`.replace(/\/+/g, '/');
-      setNanoFilePath(fullPath);
 
-      // Try to read the file content
-      try {
-        const result = await api.executeCommand(`cat "${fullPath}" 2>/dev/null || echo ""`, '/');
-        setNanoFileContent(result.output || '');
-      } catch (e) {
-        setNanoFileContent('');
-      }
-
-      setNanoEditorOpen(true);
-      setTerminalOutput(prev => [...prev, { type: 'system', text: `Opening ${filePath} in ProxyPilot editor...` }]);
+      // Open in the editor tab
+      openFileInEditor(fullPath);
       terminalInputRef.current?.focus();
       return;
     }
@@ -770,6 +820,7 @@ export default function Dashboard() {
           const newCwd = result.output.trim();
           setTerminalCwd(newCwd);
           fetchTerminalDirectory(newCwd); // Refresh file browser
+          fetchComposeContainersForDir(newCwd); // Refresh docker-compose containers
           setTerminalOutput(prev => [
             ...prev,
             { type: 'system', text: `Changed directory to: ${newCwd}` },
@@ -896,6 +947,111 @@ export default function Dashboard() {
     }
   };
 
+  // Open file in the editor tab (within terminal dialog)
+  const openFileInEditor = async (filePath) => {
+    setEditorFilePath(filePath);
+    setTerminalActiveTab('editor');
+    setEditorShowVersions(false);
+
+    try {
+      const result = await api.executeCommand(`cat "${filePath}" 2>/dev/null || echo ""`, '/');
+      const content = result.output || '';
+      setEditorContent(content);
+      setEditorOriginalContent(content);
+      setTerminalOutput(prev => [...prev, { type: 'system', text: `Opening ${filePath} in editor...` }]);
+    } catch (e) {
+      setEditorContent('');
+      setEditorOriginalContent('');
+    }
+  };
+
+  // Save file from editor tab
+  const handleEditorSave = async () => {
+    if (!editorFilePath) return;
+    setEditorSaving(true);
+
+    try {
+      const result = await api.writeFile(editorFilePath, editorContent, true);
+
+      if (result.success) {
+        toast({
+          title: 'File Saved',
+          description: `Successfully saved ${editorFilePath}`,
+        });
+        setEditorOriginalContent(editorContent);
+        setTerminalOutput(prev => [...prev, { type: 'system', text: `File saved: ${editorFilePath}` }]);
+        // Refresh file browser to show any new files
+        fetchTerminalDirectory(terminalCwd);
+      } else {
+        throw new Error(result.error || 'Failed to save file');
+      }
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to save file: ' + error.message,
+      });
+    } finally {
+      setEditorSaving(false);
+    }
+  };
+
+  // Fetch version history for a file in editor
+  const fetchEditorVersions = async () => {
+    if (!editorFilePath) return;
+    setEditorLoadingVersions(true);
+
+    try {
+      // Try to get git log for the file
+      const result = await api.executeCommand(
+        `cd "$(dirname "${editorFilePath}")" && git log --oneline -20 -- "$(basename "${editorFilePath}")" 2>/dev/null || echo "no_git"`,
+        '/'
+      );
+
+      if (result.output?.trim() === 'no_git' || !result.output?.trim()) {
+        setEditorVersions([]);
+      } else {
+        const versions = result.output.trim().split('\n').map(line => {
+          const [hash, ...messageParts] = line.split(' ');
+          return { hash, message: messageParts.join(' ') };
+        });
+        setEditorVersions(versions);
+      }
+    } catch (e) {
+      setEditorVersions([]);
+    } finally {
+      setEditorLoadingVersions(false);
+    }
+  };
+
+  // Revert editor to a specific git version
+  const revertEditorToVersion = async (hash) => {
+    if (!editorFilePath || !hash) return;
+
+    try {
+      const result = await api.executeCommand(
+        `cd "$(dirname "${editorFilePath}")" && git show ${hash}:"$(basename "${editorFilePath}")" 2>/dev/null`,
+        '/'
+      );
+
+      if (result.success && result.output !== undefined) {
+        setEditorContent(result.output);
+        toast({
+          title: 'Version Loaded',
+          description: `Loaded version ${hash}. Save to apply changes.`,
+        });
+      } else {
+        throw new Error('Failed to load version');
+      }
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to load version: ' + error.message,
+      });
+    }
+  };
+
   // Generate strong random password
   const generatePassword = (length = 24) => {
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -941,18 +1097,14 @@ export default function Dashboard() {
     const rootPassword = generatePassword();
 
     try {
-      // Check and find available ports
-      let wpPort = parseInt(oneClickForm.wordpressPort);
-      let dbPort = parseInt(oneClickForm.dbPort);
+      // Always find first available ports starting from defaults
+      const wpPort = await findNextAvailablePort(parseInt(oneClickForm.wordpressPort) || 7000);
+      const dbPort = await findNextAvailablePort(parseInt(oneClickForm.dbPort) || 7001);
 
-      if (!(await checkPortAvailable(wpPort))) {
-        wpPort = await findNextAvailablePort(wpPort + 1);
-        toast({ title: 'Port Changed', description: `WordPress port changed to ${wpPort} (original was in use)` });
-      }
-      if (!(await checkPortAvailable(dbPort))) {
-        dbPort = await findNextAvailablePort(dbPort + 1);
-        toast({ title: 'Port Changed', description: `Database port changed to ${dbPort} (original was in use)` });
-      }
+      // Update form to show actual ports being used
+      setOneClickForm(prev => ({ ...prev, wordpressPort: wpPort.toString(), dbPort: dbPort.toString() }));
+
+      toast({ title: 'Ports Selected', description: `Using WordPress port ${wpPort}, Database port ${dbPort}` });
 
       // Create directory
       const installDir = `/root/docker/${safeName}`;
@@ -969,27 +1121,30 @@ DB_PASSWORD=${dbPassword}
 `;
       await api.writeFile(`${installDir}/.env`, envContent);
 
-      // Create docker-compose.yml
+      // Create docker-compose.yml with proper networking and health checks
       const composeContent = `version: '3.8'
 
 services:
-  wp_${safeName}:
+  wordpress:
     image: wordpress:latest
     container_name: wp_${safeName}_app
     ports:
       - "\${WORDPRESS_PORT}:80"
     environment:
-      WORDPRESS_DB_HOST: wp_${safeName}_db
+      WORDPRESS_DB_HOST: database:3306
       WORDPRESS_DB_USER: \${DB_USER}
       WORDPRESS_DB_PASSWORD: \${DB_PASSWORD}
       WORDPRESS_DB_NAME: \${DB_NAME}
     volumes:
-      - wp_${safeName}_data:/var/www/html
+      - wordpress_data:/var/www/html
     depends_on:
-      - wp_${safeName}_db
+      database:
+        condition: service_healthy
     restart: always
+    networks:
+      - wp_network
 
-  wp_${safeName}_db:
+  database:
     image: mysql:5.7
     container_name: wp_${safeName}_db
     ports:
@@ -1000,29 +1155,50 @@ services:
       MYSQL_USER: \${DB_USER}
       MYSQL_PASSWORD: \${DB_PASSWORD}
     volumes:
-      - wp_${safeName}_db_data:/var/lib/mysql
+      - db_data:/var/lib/mysql
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
-      interval: 10s
-      retries: 5
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p\${DB_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - wp_network
+
+networks:
+  wp_network:
+    driver: bridge
 
 volumes:
-  wp_${safeName}_data:
-  wp_${safeName}_db_data:
+  wordpress_data:
+  db_data:
 `;
       await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
 
       // Start docker compose
-      setTerminalOutput(prev => [...prev, { type: 'system', text: `Starting WordPress installation for ${oneClickForm.siteName}...` }]);
-      const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/');
+      toast({ title: 'Starting Installation', description: 'This may take a minute while MySQL initializes...' });
+      const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/', 120000);
 
       if (!startResult.success) {
         throw new Error(startResult.output || 'Failed to start containers');
       }
 
-      // Wait for containers to start
-      await new Promise(r => setTimeout(r, 3000));
+      // Wait for MySQL to be healthy (check health status)
+      toast({ title: 'Waiting for Database', description: 'Waiting for MySQL to be ready...' });
+      let dbReady = false;
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const healthCheck = await api.executeCommand(`docker inspect --format='{{.State.Health.Status}}' wp_${safeName}_db 2>/dev/null || echo "starting"`, '/');
+        if (healthCheck.output?.trim() === 'healthy') {
+          dbReady = true;
+          break;
+        }
+      }
+
+      if (!dbReady) {
+        toast({ variant: 'destructive', title: 'Warning', description: 'Database may still be initializing. WordPress might need a moment.' });
+      }
 
       // Create ProxyPilot service
       try {
@@ -1405,6 +1581,23 @@ volumes:
     }
   };
 
+  // Get directory path for opening terminal
+  const getServiceDirectory = (service) => {
+    switch (service.type) {
+      case 'static':
+        return service.rootDir || service.dataDir || '/';
+      case 'docker':
+        // Try to derive from container name pattern (wp_sitename_app -> /root/docker/sitename)
+        if (service.containerName?.startsWith('wp_') && service.containerName?.endsWith('_app')) {
+          const siteName = service.containerName.slice(3, -4);
+          return `/root/docker/${siteName}`;
+        }
+        return service.dataDir || '/root/docker';
+      default:
+        return '/';
+    }
+  };
+
   const renderFileTree = (items, depth = 0) => {
     return items.map((item) => (
       <div key={item.path} className="group">
@@ -1709,6 +1902,14 @@ volumes:
                     <>
                       <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
                         <FileText className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => openTerminal(getServiceDirectory(service))}
+                        title="Open Terminal"
+                      >
+                        <Terminal className="h-4 w-4" />
                       </Button>
                       <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
                         <Trash2 className="h-4 w-4" />
@@ -2025,6 +2226,7 @@ volumes:
                             const parentDir = terminalCwd.split('/').slice(0, -1).join('/') || '/';
                             setTerminalCwd(parentDir);
                             fetchTerminalDirectory(parentDir);
+                            fetchComposeContainersForDir(parentDir);
                             setTerminalOutput(prev => [...prev, { type: 'system', text: `Changed directory to: ${parentDir}` }]);
                           }}
                         >
@@ -2041,19 +2243,12 @@ volumes:
                               const newPath = `${terminalCwd}/${item.name}`.replace(/\/+/g, '/');
                               setTerminalCwd(newPath);
                               fetchTerminalDirectory(newPath);
+                              fetchComposeContainersForDir(newPath);
                               setTerminalOutput(prev => [...prev, { type: 'system', text: `Changed directory to: ${newPath}` }]);
                             } else {
-                              // Open file in nano editor
+                              // Open file in editor tab
                               const fullPath = `${terminalCwd}/${item.name}`.replace(/\/+/g, '/');
-                              setNanoFilePath(fullPath);
-                              try {
-                                const result = await api.executeCommand(`cat "${fullPath}" 2>/dev/null || echo ""`, '/');
-                                setNanoFileContent(result.output || '');
-                              } catch (e) {
-                                setNanoFileContent('');
-                              }
-                              setNanoEditorOpen(true);
-                              setTerminalOutput(prev => [...prev, { type: 'system', text: `Opening ${item.name} in editor...` }]);
+                              openFileInEditor(fullPath);
                             }
                           }}
                           title={`${item.perms} ${item.size}`}
@@ -2113,93 +2308,268 @@ volumes:
               </div>
             </div>
 
-            {/* Terminal Output */}
+            {/* Terminal/Editor Tabbed Panel */}
             <div className="flex-1 flex flex-col border rounded min-h-0">
-              <div ref={terminalOutputRef} className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
-                {terminalOutput.map((line, i) => (
-                  <div key={i} className={`whitespace-pre-wrap ${
-                    line.type === 'input' ? 'text-cyan-400 font-bold' :
-                    line.type === 'error' ? 'text-red-400' :
-                    line.type === 'system' ? 'text-blue-400' :
-                    'text-green-400'
-                  }`}>
-                    {line.text}
-                    {line.duration !== undefined && (
-                      <span className="text-gray-500 text-xs ml-2">({line.duration}ms)</span>
+              {/* Tab Bar */}
+              <div className="flex border-b bg-muted shrink-0">
+                <button
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    terminalActiveTab === 'terminal'
+                      ? 'border-primary text-primary bg-background'
+                      : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
+                  onClick={() => setTerminalActiveTab('terminal')}
+                >
+                  <Terminal className="h-4 w-4 inline-block mr-2" />
+                  Terminal
+                </button>
+                <button
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    terminalActiveTab === 'editor'
+                      ? 'border-primary text-primary bg-background'
+                      : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
+                  onClick={() => setTerminalActiveTab('editor')}
+                >
+                  <Code className="h-4 w-4 inline-block mr-2" />
+                  Editor
+                  {editorFilePath && editorContent !== editorOriginalContent && (
+                    <span className="ml-1 text-yellow-500">●</span>
+                  )}
+                </button>
+              </div>
+
+              {/* Terminal Tab Content */}
+              {terminalActiveTab === 'terminal' && (
+                <>
+                  <div ref={terminalOutputRef} className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
+                    {terminalOutput.map((line, i) => (
+                      <div key={i} className={`whitespace-pre-wrap ${
+                        line.type === 'input' ? 'text-cyan-400 font-bold' :
+                        line.type === 'error' ? 'text-red-400' :
+                        line.type === 'system' ? 'text-blue-400' :
+                        'text-green-400'
+                      }`}>
+                        {line.text}
+                        {line.duration !== undefined && (
+                          <span className="text-gray-500 text-xs ml-2">({line.duration}ms)</span>
+                        )}
+                      </div>
+                    ))}
+                    {terminalRunning && (
+                      <div className="flex items-center gap-2 text-yellow-400">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Running...
+                      </div>
                     )}
                   </div>
-                ))}
-                {terminalRunning && (
-                  <div className="flex items-center gap-2 text-yellow-400">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    Running...
-                  </div>
-                )}
-              </div>
-              {/* Tab suggestions */}
-              {showTabSuggestions && tabSuggestions.length > 0 && (
-                <div className="border-t bg-gray-800 p-2 flex flex-wrap gap-1">
-                  {tabSuggestions.map((s, i) => (
-                    <span
-                      key={i}
-                      className="text-xs font-mono px-1.5 py-0.5 bg-gray-700 rounded cursor-pointer hover:bg-gray-600 text-cyan-300"
-                      onClick={() => {
-                        const parts = terminalCommand.split(/\s+/);
-                        const lastPart = parts[parts.length - 1] || '';
-                        const prefix = lastPart.includes('/') ? lastPart.substring(0, lastPart.lastIndexOf('/') + 1) : '';
-                        parts[parts.length - 1] = prefix + s;
-                        setTerminalCommand(parts.join(' '));
-                        setShowTabSuggestions(false);
-                        terminalInputRef.current?.focus();
+                  {/* Tab suggestions */}
+                  {showTabSuggestions && tabSuggestions.length > 0 && (
+                    <div className="border-t bg-gray-800 p-2 flex flex-wrap gap-1">
+                      {tabSuggestions.map((s, i) => (
+                        <span
+                          key={i}
+                          className="text-xs font-mono px-1.5 py-0.5 bg-gray-700 rounded cursor-pointer hover:bg-gray-600 text-cyan-300"
+                          onClick={() => {
+                            const parts = terminalCommand.split(/\s+/);
+                            const lastPart = parts[parts.length - 1] || '';
+                            const prefix = lastPart.includes('/') ? lastPart.substring(0, lastPart.lastIndexOf('/') + 1) : '';
+                            parts[parts.length - 1] = prefix + s;
+                            setTerminalCommand(parts.join(' '));
+                            setShowTabSuggestions(false);
+                            terminalInputRef.current?.focus();
+                          }}
+                        >
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="border-t p-2 flex gap-2 bg-gray-900">
+                    <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
+                    <Input
+                      ref={terminalInputRef}
+                      value={terminalCommand}
+                      onChange={(e) => { setTerminalCommand(e.target.value); setShowTabSuggestions(false); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          executeTerminalCommand();
+                        } else if (e.key === 'Tab') {
+                          e.preventDefault();
+                          handleTabComplete();
+                        } else if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          if (commandHistory.length > 0) {
+                            const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
+                            setHistoryIndex(newIndex);
+                            setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
+                          }
+                        } else if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          if (historyIndex > 0) {
+                            const newIndex = historyIndex - 1;
+                            setHistoryIndex(newIndex);
+                            setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
+                          } else if (historyIndex === 0) {
+                            setHistoryIndex(-1);
+                            setTerminalCommand('');
+                          }
+                        } else if (e.key === 'Escape') {
+                          setShowTabSuggestions(false);
+                        }
                       }}
-                    >
-                      {s}
-                    </span>
-                  ))}
+                      placeholder="Enter command... (Tab=complete, ↑↓=history)"
+                      className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0 h-8"
+                      disabled={terminalRunning}
+                      autoFocus
+                    />
+                    <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()} size="sm">
+                      {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
+                    </Button>
+                  </div>
+                </>
+              )}
+
+              {/* Editor Tab Content */}
+              {terminalActiveTab === 'editor' && (
+                <div className="flex-1 flex flex-col min-h-0">
+                  {editorFilePath ? (
+                    <>
+                      {/* Editor Header */}
+                      <div className="flex items-center justify-between p-2 border-b bg-muted/50 shrink-0">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <Code className="h-4 w-4 shrink-0" />
+                          <span className="font-mono text-sm truncate" title={editorFilePath}>{editorFilePath}</span>
+                          {editorContent !== editorOriginalContent && (
+                            <span className="text-yellow-500 text-xs">(unsaved)</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setEditorShowVersions(!editorShowVersions);
+                              if (!editorShowVersions) fetchEditorVersions();
+                            }}
+                            title="Version history"
+                          >
+                            <History className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setEditorFilePath('');
+                              setEditorContent('');
+                              setEditorOriginalContent('');
+                              setTerminalActiveTab('terminal');
+                            }}
+                            title="Close editor"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {/* Version History Panel */}
+                      {editorShowVersions && (
+                        <div className="border-b bg-muted/30 p-2 max-h-32 overflow-auto shrink-0">
+                          <div className="text-xs font-medium mb-1 flex items-center gap-2">
+                            <History className="h-3 w-3" />
+                            Git History
+                            {editorLoadingVersions && <Loader2 className="h-3 w-3 animate-spin" />}
+                          </div>
+                          {editorVersions.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">
+                              {editorLoadingVersions ? 'Loading...' : 'No git history found for this file'}
+                            </p>
+                          ) : (
+                            <div className="space-y-1">
+                              {editorVersions.map((v) => (
+                                <div
+                                  key={v.hash}
+                                  className="flex items-center gap-2 text-xs px-1 py-0.5 rounded hover:bg-muted cursor-pointer"
+                                  onClick={() => revertEditorToVersion(v.hash)}
+                                >
+                                  <code className="text-blue-400">{v.hash.substring(0, 7)}</code>
+                                  <span className="truncate">{v.message}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Code Editor */}
+                      <div className="flex-1 min-h-0 overflow-hidden">
+                        <CodeMirror
+                          value={editorContent}
+                          onChange={setEditorContent}
+                          height="100%"
+                          theme={oneDark}
+                          extensions={[
+                            getLanguageFromFile(editorFilePath || 'txt') === 'javascript' ? javascript() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'html' ? html() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'css' ? css() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'json' ? json() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'yaml' ? yaml() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'python' ? python() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'markdown' ? markdown() :
+                            getLanguageFromFile(editorFilePath || 'txt') === 'xml' ? xml() : []
+                          ].filter(Boolean)}
+                          className="h-full overflow-auto text-sm"
+                          basicSetup={{
+                            lineNumbers: true,
+                            foldGutter: true,
+                            highlightActiveLineGutter: true,
+                            highlightActiveLine: true,
+                          }}
+                        />
+                      </div>
+
+                      {/* Editor Footer */}
+                      <div className="flex items-center justify-between p-2 border-t bg-muted/50 shrink-0">
+                        <div className="text-xs text-muted-foreground">
+                          <kbd className="px-1.5 py-0.5 bg-muted rounded">Ctrl+S</kbd> Save
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setEditorContent(editorOriginalContent);
+                            }}
+                            disabled={editorContent === editorOriginalContent}
+                          >
+                            <RotateCcw className="h-4 w-4 mr-1" />
+                            Revert
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={handleEditorSave}
+                            disabled={editorSaving || editorContent === editorOriginalContent}
+                          >
+                            {editorSaving ? (
+                              <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Saving...</>
+                            ) : (
+                              <><Save className="h-4 w-4 mr-1" />Save</>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                      <div className="text-center">
+                        <Code className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                        <p>No file open</p>
+                        <p className="text-sm mt-1">Double-click a file in the file browser or use <code className="bg-muted px-1 rounded">nano</code>/<code className="bg-muted px-1 rounded">vim</code> command</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-              <div className="border-t p-2 flex gap-2 bg-gray-900">
-                <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
-                <Input
-                  ref={terminalInputRef}
-                  value={terminalCommand}
-                  onChange={(e) => { setTerminalCommand(e.target.value); setShowTabSuggestions(false); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      executeTerminalCommand();
-                    } else if (e.key === 'Tab') {
-                      e.preventDefault();
-                      handleTabComplete();
-                    } else if (e.key === 'ArrowUp') {
-                      e.preventDefault();
-                      if (commandHistory.length > 0) {
-                        const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
-                        setHistoryIndex(newIndex);
-                        setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
-                      }
-                    } else if (e.key === 'ArrowDown') {
-                      e.preventDefault();
-                      if (historyIndex > 0) {
-                        const newIndex = historyIndex - 1;
-                        setHistoryIndex(newIndex);
-                        setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
-                      } else if (historyIndex === 0) {
-                        setHistoryIndex(-1);
-                        setTerminalCommand('');
-                      }
-                    } else if (e.key === 'Escape') {
-                      setShowTabSuggestions(false);
-                    }
-                  }}
-                  placeholder="Enter command... (Tab=complete, ↑↓=history)"
-                  className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0 h-8"
-                  disabled={terminalRunning}
-                  autoFocus
-                />
-                <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()} size="sm">
-                  {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
-                </Button>
-              </div>
             </div>
           </div>
 

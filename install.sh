@@ -881,6 +881,14 @@ main() {
     # Build and start Docker container
     log_info "Building and starting ProxyPilot..."
     cd "$INSTALL_DIR"
+
+    # Stop and remove existing containers to avoid ContainerConfig error with docker-compose v1
+    log_info "Cleaning up any existing containers..."
+    docker stop proxypilot-admin 2>/dev/null || true
+    docker rm proxypilot-admin 2>/dev/null || true
+    # Also try compose down to clean up any orphaned resources
+    run_docker_compose down --remove-orphans 2>/dev/null || true
+
     run_docker_compose build
     run_docker_compose up -d
 

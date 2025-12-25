@@ -30,12 +30,13 @@ export function initDatabase() {
   `);
 
   // Create services table
+  // Note: 'proxy' type is kept for the admin dashboard service but not available for new user services
   db.exec(`
     CREATE TABLE IF NOT EXISTS services (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       domain TEXT UNIQUE NOT NULL,
-      type TEXT NOT NULL CHECK(type IN ('static', 'docker')),
+      type TEXT NOT NULL CHECK(type IN ('proxy', 'static', 'docker')),
       target TEXT,
       port INTEGER,
       root_dir TEXT,

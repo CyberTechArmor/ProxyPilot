@@ -35,6 +35,7 @@ import {
   ChevronDown,
   FilePlus,
   Check,
+  Server,
 } from 'lucide-react';
 
 export default function Dashboard() {
@@ -377,6 +378,8 @@ export default function Dashboard() {
 
   const getServiceIcon = (type) => {
     switch (type) {
+      case 'proxy':
+        return <Server className="h-5 w-5" />;
       case 'static':
         return <FolderOpen className="h-5 w-5" />;
       case 'docker':
@@ -388,6 +391,8 @@ export default function Dashboard() {
 
   const getServiceLocation = (service) => {
     switch (service.type) {
+      case 'proxy':
+        return `${service.target || '127.0.0.1'}:${service.port}`;
       case 'static':
         return service.rootDir || service.dataDir;
       case 'docker':

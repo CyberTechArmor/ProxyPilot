@@ -1693,7 +1693,18 @@ volumes:
           <Button
             variant="outline"
             className="text-green-600 border-green-600 hover:bg-green-600/10"
-            onClick={() => setOneClickDialogOpen(true)}
+            onClick={async () => {
+              setOneClickDialogOpen(true);
+              setOneClickService(null);
+              // Auto-detect available ports
+              const wpPort = await findNextAvailablePort(7000);
+              const dbPort = await findNextAvailablePort(wpPort + 1);
+              setOneClickForm(prev => ({
+                ...prev,
+                wordpressPort: wpPort.toString(),
+                dbPort: dbPort.toString(),
+              }));
+            }}
             title="One-Click Install Services"
           >
             <Rocket className="h-4 w-4 mr-2" />
@@ -2032,14 +2043,30 @@ volumes:
                       <Boxes className="h-4 w-4 text-purple-500" />
                       <CardTitle className="text-lg">{project.projectName}</CardTitle>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 w-7 p-0"
-                      onClick={() => setExpandedProjects(prev => ({ ...prev, [project.projectName]: !prev[project.projectName] }))}
-                    >
-                      {expandedProjects[project.projectName] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => {
+                          // Find the directory for this compose project
+                          const firstService = project.services[0];
+                          const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
+                          openTerminal(composeDir);
+                        }}
+                        title="Open Terminal"
+                      >
+                        <Terminal className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => setExpandedProjects(prev => ({ ...prev, [project.projectName]: !prev[project.projectName] }))}
+                      >
+                        {expandedProjects[project.projectName] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                      </Button>
+                    </div>
                   </div>
                   <CardDescription>
                     {project.services.length} container{project.services.length !== 1 ? 's' : ''} • {project.isRunning ? 'Running' : 'Stopped'}
@@ -2168,7 +2195,7 @@ volumes:
 
       {/* Terminal Dialog */}
       <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
-        <DialogContent className={`${terminalFullscreen ? 'max-w-full h-full m-0 rounded-none' : 'max-w-5xl h-[85vh]'} flex flex-col`}>
+        <DialogContent className={`${terminalFullscreen ? 'max-w-[100vw] w-screen h-screen max-h-screen m-0 rounded-none' : 'max-w-5xl h-[85vh]'} flex flex-col overflow-hidden`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>
@@ -2193,7 +2220,7 @@ volumes:
             </div>
           </DialogHeader>
 
-          <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0`}>
+          <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0 overflow-hidden`}>
             {/* Left Panel: File Browser + Docker Containers */}
             <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 ${terminalFullscreen ? '' : 'max-h-64 md:max-h-none'}`}>
               {/* Current View - File Browser */}

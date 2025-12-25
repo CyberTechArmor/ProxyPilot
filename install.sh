@@ -86,19 +86,96 @@ install_nginx() {
         log_success "NGINX installed successfully"
     fi
 
-    # Ensure NGINX is enabled and running
+    # Clean up any broken NGINX configurations before starting
+    cleanup_broken_nginx_configs
+
+    # Ensure NGINX is enabled
     systemctl enable nginx 2>/dev/null || true
+
+    # Test NGINX config before starting
+    if ! nginx -t 2>/dev/null; then
+        log_warn "NGINX config test failed, attempting to fix..."
+        fix_nginx_config
+    fi
+
+    # Start NGINX
     systemctl start nginx 2>/dev/null || true
 
     # Verify NGINX is running
     if ! systemctl is-active --quiet nginx; then
-        log_warn "NGINX service not running, attempting to start..."
+        log_warn "NGINX service not running, attempting recovery..."
+        # Last resort: restore default config
+        if [[ -f /etc/nginx/nginx.conf.backup ]]; then
+            cp /etc/nginx/nginx.conf.backup /etc/nginx/nginx.conf
+        fi
+        # Remove all custom sites
+        rm -f /etc/nginx/sites-enabled/* 2>/dev/null || true
+        ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
+
         systemctl start nginx || {
             log_error "Failed to start NGINX. Check: journalctl -xeu nginx"
             exit 1
         }
     fi
     log_success "NGINX is running"
+}
+
+# Clean up broken NGINX configurations
+cleanup_broken_nginx_configs() {
+    log_info "Cleaning up any broken NGINX configurations..."
+
+    # Remove broken symlinks in sites-enabled
+    if [[ -d /etc/nginx/sites-enabled ]]; then
+        find /etc/nginx/sites-enabled -xtype l -delete 2>/dev/null || true
+    fi
+
+    # Remove configs that reference missing SSL certificates
+    for conf in /etc/nginx/sites-enabled/*.conf; do
+        [[ -f "$conf" ]] || continue
+
+        # Check if config references SSL cert that doesn't exist
+        if grep -q "ssl_certificate" "$conf" 2>/dev/null; then
+            cert_path=$(grep -oP "ssl_certificate\s+\K[^;]+" "$conf" | head -1)
+            if [[ -n "$cert_path" && ! -f "$cert_path" ]]; then
+                log_warn "Removing config with missing SSL cert: $(basename "$conf")"
+                rm -f "$conf"
+                # Also remove from sites-available
+                rm -f "/etc/nginx/sites-available/$(basename "$conf")" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # Ensure default site exists if no other sites
+    if [[ -z "$(ls -A /etc/nginx/sites-enabled 2>/dev/null)" ]]; then
+        if [[ -f /etc/nginx/sites-available/default ]]; then
+            ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+            log_info "Re-enabled default NGINX site"
+        fi
+    fi
+}
+
+# Fix NGINX configuration issues
+fix_nginx_config() {
+    log_info "Attempting to fix NGINX configuration..."
+
+    # Temporarily disable all custom sites
+    for conf in /etc/nginx/sites-enabled/*.conf; do
+        [[ -f "$conf" ]] || continue
+        log_warn "Disabling problematic config: $(basename "$conf")"
+        rm -f "$conf"
+    done
+
+    # Ensure default site is enabled
+    if [[ -f /etc/nginx/sites-available/default ]]; then
+        ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
+    fi
+
+    # Test again
+    if nginx -t 2>/dev/null; then
+        log_success "NGINX configuration fixed"
+    else
+        log_error "Could not fix NGINX configuration automatically"
+    fi
 }
 
 # Configure NGINX global settings

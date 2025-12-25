@@ -385,6 +385,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - NODE_ENV=production
+      - SERVICES_DATA_DIR=/data/services
     env_file:
       - .env
     networks:

@@ -70,6 +70,31 @@ export const api = {
 
   getDockerContainers: () => request('/services/docker/containers'),
 
+  // File Management
+  getFiles: (serviceId) => request(`/services/${serviceId}/files`),
+
+  getFileContent: (serviceId, filePath) => request(`/services/${serviceId}/files/${filePath}`),
+
+  saveFile: (serviceId, filePath, content) => request(`/services/${serviceId}/files/${filePath}`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  }),
+
+  deleteFile: (serviceId, filePath) => request(`/services/${serviceId}/files/${filePath}`, {
+    method: 'DELETE',
+  }),
+
+  // Export/Import
+  exportServices: (serviceIds = [], includeFiles = false) => request('/services/export', {
+    method: 'POST',
+    body: JSON.stringify({ serviceIds, includeFiles }),
+  }),
+
+  importServices: (services, overwrite = false) => request('/services/import', {
+    method: 'POST',
+    body: JSON.stringify({ services, overwrite }),
+  }),
+
   // User
   getProfile: () => request('/user/profile'),
 

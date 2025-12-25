@@ -90,8 +90,6 @@ import {
   MemoryStick,
   Activity,
   Clock,
-  ChevronDown,
-  ChevronRight,
 } from 'lucide-react';
 
 // Language detection based on file extension

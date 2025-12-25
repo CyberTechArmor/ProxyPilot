@@ -77,6 +77,20 @@ export function initDatabase() {
     )
   `);
 
+  // Create user_folder_access table for folder-level permissions
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_folder_access (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      folder_path TEXT NOT NULL,
+      can_view INTEGER DEFAULT 1,
+      can_write INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(user_id, folder_path)
+    )
+  `);
+
   // Create services table
   // Note: 'proxy' type is kept for the admin dashboard service but not available for new user services
   db.exec(`

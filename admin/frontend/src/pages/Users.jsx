@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3 } from 'lucide-react';
+import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
 export default function UsersPage() {
@@ -41,9 +41,15 @@ export default function UsersPage() {
   const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [userAccess, setUserAccess] = useState([]);
+  const [userFolderAccess, setUserFolderAccess] = useState([]);
   const [loadingAccess, setLoadingAccess] = useState(false);
   const [savingAccess, setSavingAccess] = useState(false);
   const [copiedPassword, setCopiedPassword] = useState(false);
+  const [accessTab, setAccessTab] = useState('services'); // 'services' or 'folders'
+  const [serviceFolders, setServiceFolders] = useState(() => {
+    const saved = localStorage.getItem('serviceFolders');
+    return saved ? JSON.parse(saved) : {};
+  });
 
   const { toast } = useToast();
 
@@ -134,12 +140,15 @@ export default function UsersPage() {
     setSelectedUser(user);
     setAccessDialogOpen(true);
     setLoadingAccess(true);
+    setAccessTab('services');
 
     try {
       const result = await api.getUserAccess(user.id);
       if (result.isAdmin) {
         setUserAccess([]);
+        setUserFolderAccess([]);
       } else {
+        // Service access
         const accessMap = {};
         result.access.forEach(a => {
           accessMap[a.serviceId] = { canView: a.canView, canWrite: a.canWrite };
@@ -150,6 +159,19 @@ export default function UsersPage() {
           domain: s.domain,
           canView: accessMap[s.id]?.canView || false,
           canWrite: accessMap[s.id]?.canWrite || false,
+        })));
+
+        // Folder access
+        const folderAccessMap = {};
+        (result.folderAccess || []).forEach(f => {
+          folderAccessMap[f.folderPath] = { canView: f.canView, canWrite: f.canWrite };
+        });
+        setUserFolderAccess(Object.entries(serviceFolders).map(([path, folder]) => ({
+          folderPath: path,
+          folderName: folder.name,
+          serviceCount: folder.services?.length || 0,
+          canView: folderAccessMap[path]?.canView || false,
+          canWrite: folderAccessMap[path]?.canWrite || false,
         })));
       }
     } catch (error) {
@@ -168,11 +190,19 @@ export default function UsersPage() {
 
     setSavingAccess(true);
     try {
-      await api.updateUserAccess(selectedUser.id, userAccess.map(a => ({
-        serviceId: a.serviceId,
-        canView: a.canView,
-        canWrite: a.canWrite,
-      })));
+      // Save both service access and folder access
+      await Promise.all([
+        api.updateUserAccess(selectedUser.id, userAccess.map(a => ({
+          serviceId: a.serviceId,
+          canView: a.canView,
+          canWrite: a.canWrite,
+        }))),
+        api.updateUserFolderAccess(selectedUser.id, userFolderAccess.map(f => ({
+          folderPath: f.folderPath,
+          canView: f.canView,
+          canWrite: f.canWrite,
+        }))),
+      ]);
       toast({
         title: 'Success',
         description: 'User access updated',
@@ -464,9 +494,9 @@ export default function UsersPage() {
       <Dialog open={accessDialogOpen} onOpenChange={setAccessDialogOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Service Access for {selectedUser?.username}</DialogTitle>
+            <DialogTitle>Access Control for {selectedUser?.username}</DialogTitle>
             <DialogDescription>
-              Configure which services this user can view or modify
+              Configure which services and folders this user can view or modify
             </DialogDescription>
           </DialogHeader>
 
@@ -477,54 +507,133 @@ export default function UsersPage() {
           ) : selectedUser?.role === 'admin' ? (
             <div className="text-center py-8 text-muted-foreground">
               <Shield className="h-12 w-12 mx-auto mb-2 opacity-50" />
-              <p>Admin users have full access to all services.</p>
+              <p>Admin users have full access to all services and folders.</p>
               <p className="text-sm mt-1">Change the user's role to "User" to set granular permissions.</p>
             </div>
           ) : (
-            <div className="space-y-2 max-h-96 overflow-auto">
-              {userAccess.length === 0 ? (
-                <p className="text-center text-muted-foreground py-4">No services available</p>
+            <>
+              {/* Tab Navigation */}
+              <div className="flex gap-1 p-1 bg-muted rounded-lg mb-4">
+                <button
+                  className={`flex-1 px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                    accessTab === 'services' ? 'bg-background shadow' : 'hover:bg-background/50'
+                  }`}
+                  onClick={() => setAccessTab('services')}
+                >
+                  Individual Services ({userAccess.length})
+                </button>
+                <button
+                  className={`flex-1 px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                    accessTab === 'folders' ? 'bg-background shadow' : 'hover:bg-background/50'
+                  }`}
+                  onClick={() => setAccessTab('folders')}
+                >
+                  Folders ({userFolderAccess.length})
+                </button>
+              </div>
+
+              {accessTab === 'services' ? (
+                <div className="space-y-2 max-h-80 overflow-auto">
+                  {userAccess.length === 0 ? (
+                    <p className="text-center text-muted-foreground py-4">No services available</p>
+                  ) : (
+                    userAccess.map((access, index) => (
+                      <div key={access.serviceId} className="flex items-center justify-between p-3 border rounded-lg">
+                        <div>
+                          <p className="font-medium">{access.serviceName}</p>
+                          <p className="text-sm text-muted-foreground">{access.domain}</p>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-2">
+                            <Eye className="h-4 w-4 text-muted-foreground" />
+                            <Label htmlFor={`view-${access.serviceId}`} className="text-sm">View</Label>
+                            <Switch
+                              id={`view-${access.serviceId}`}
+                              checked={access.canView}
+                              onCheckedChange={(checked) => {
+                                const newAccess = [...userAccess];
+                                newAccess[index].canView = checked;
+                                if (!checked) newAccess[index].canWrite = false;
+                                setUserAccess(newAccess);
+                              }}
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Edit3 className="h-4 w-4 text-muted-foreground" />
+                            <Label htmlFor={`write-${access.serviceId}`} className="text-sm">Write</Label>
+                            <Switch
+                              id={`write-${access.serviceId}`}
+                              checked={access.canWrite}
+                              disabled={!access.canView}
+                              onCheckedChange={(checked) => {
+                                const newAccess = [...userAccess];
+                                newAccess[index].canWrite = checked;
+                                setUserAccess(newAccess);
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               ) : (
-                userAccess.map((access, index) => (
-                  <div key={access.serviceId} className="flex items-center justify-between p-3 border rounded-lg">
-                    <div>
-                      <p className="font-medium">{access.serviceName}</p>
-                      <p className="text-sm text-muted-foreground">{access.domain}</p>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        <Eye className="h-4 w-4 text-muted-foreground" />
-                        <Label htmlFor={`view-${access.serviceId}`} className="text-sm">View</Label>
-                        <Switch
-                          id={`view-${access.serviceId}`}
-                          checked={access.canView}
-                          onCheckedChange={(checked) => {
-                            const newAccess = [...userAccess];
-                            newAccess[index].canView = checked;
-                            if (!checked) newAccess[index].canWrite = false;
-                            setUserAccess(newAccess);
-                          }}
-                        />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Edit3 className="h-4 w-4 text-muted-foreground" />
-                        <Label htmlFor={`write-${access.serviceId}`} className="text-sm">Write</Label>
-                        <Switch
-                          id={`write-${access.serviceId}`}
-                          checked={access.canWrite}
-                          disabled={!access.canView}
-                          onCheckedChange={(checked) => {
-                            const newAccess = [...userAccess];
-                            newAccess[index].canWrite = checked;
-                            setUserAccess(newAccess);
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))
+                <div className="space-y-2 max-h-80 overflow-auto">
+                  {userFolderAccess.length === 0 ? (
+                    <p className="text-center text-muted-foreground py-4">
+                      No folders created yet. Create folders on the Dashboard to assign folder-level permissions.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-sm text-muted-foreground mb-2">
+                        Folder access grants permissions to all services within that folder.
+                      </p>
+                      {userFolderAccess.map((folderAccess, index) => (
+                        <div key={folderAccess.folderPath} className="flex items-center justify-between p-3 border rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <Folder className="h-4 w-4 text-yellow-500" />
+                            <div>
+                              <p className="font-medium">{folderAccess.folderName}</p>
+                              <p className="text-sm text-muted-foreground">{folderAccess.serviceCount} services</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                              <Eye className="h-4 w-4 text-muted-foreground" />
+                              <Label htmlFor={`folder-view-${index}`} className="text-sm">View</Label>
+                              <Switch
+                                id={`folder-view-${index}`}
+                                checked={folderAccess.canView}
+                                onCheckedChange={(checked) => {
+                                  const newAccess = [...userFolderAccess];
+                                  newAccess[index].canView = checked;
+                                  if (!checked) newAccess[index].canWrite = false;
+                                  setUserFolderAccess(newAccess);
+                                }}
+                              />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Edit3 className="h-4 w-4 text-muted-foreground" />
+                              <Label htmlFor={`folder-write-${index}`} className="text-sm">Write</Label>
+                              <Switch
+                                id={`folder-write-${index}`}
+                                checked={folderAccess.canWrite}
+                                disabled={!folderAccess.canView}
+                                onCheckedChange={(checked) => {
+                                  const newAccess = [...userFolderAccess];
+                                  newAccess[index].canWrite = checked;
+                                  setUserFolderAccess(newAccess);
+                                }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
               )}
-            </div>
+            </>
           )}
 
           <DialogFooter>

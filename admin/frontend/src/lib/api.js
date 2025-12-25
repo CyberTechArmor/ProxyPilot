@@ -248,6 +248,13 @@ export const api = {
     body: JSON.stringify({ access }),
   }),
 
+  getUserFolderAccess: (id) => request(`/user/users/${id}/folder-access`),
+
+  updateUserFolderAccess: (id, folderAccess) => request(`/user/users/${id}/folder-access`, {
+    method: 'PUT',
+    body: JSON.stringify({ folderAccess }),
+  }),
+
   changeInitialPassword: (data) => request('/user/change-initial-password', {
     method: 'POST',
     body: JSON.stringify(data),

@@ -152,6 +152,27 @@ export const api = {
     body: JSON.stringify({ services, overwrite }),
   }),
 
+  // Terminal
+  executeCommand: (command, workingDir, timeout) => request('/services/terminal/execute', {
+    method: 'POST',
+    body: JSON.stringify({ command, workingDir, timeout }),
+  }),
+
+  getSystemInfo: () => request('/services/terminal/system-info'),
+
+  // Docker
+  listContainers: () => request('/services/docker/containers'),
+
+  containerAction: (action, containerId, containerName) => request(`/services/docker/container/${action}`, {
+    method: 'POST',
+    body: JSON.stringify({ containerId, containerName }),
+  }),
+
+  dockerCompose: (action, path, serviceName) => request('/services/docker/compose', {
+    method: 'POST',
+    body: JSON.stringify({ action, path, serviceName }),
+  }),
+
   // User
   getProfile: () => request('/user/profile'),
 

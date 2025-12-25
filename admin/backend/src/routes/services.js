@@ -1771,6 +1771,64 @@ servicesRouter.post('/terminal/execute', async (req, res) => {
   }
 });
 
+// File write endpoint - bypasses terminal command size limits
+const fileWriteSchema = z.object({
+  filePath: z.string().min(1).max(4096),
+  content: z.string().max(50 * 1024 * 1024), // 50MB max content
+  createDirs: z.boolean().optional().default(true),
+});
+
+servicesRouter.post('/terminal/write-file', async (req, res) => {
+  try {
+    const { filePath, content, createDirs } = fileWriteSchema.parse(req.body);
+
+    // Security: prevent writing to dangerous paths
+    const dangerousPaths = ['/etc/passwd', '/etc/shadow', '/etc/sudoers', '/root/.ssh/authorized_keys'];
+    if (dangerousPaths.some(p => filePath.includes(p))) {
+      return res.status(403).json({ error: 'Writing to this path is not allowed' });
+    }
+
+    // Create directory if needed
+    if (createDirs) {
+      const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
+      if (dirPath) {
+        if (isInDocker) {
+          await execOnHost(`mkdir -p ${JSON.stringify(dirPath)}`);
+        } else {
+          await mkdir(dirPath, { recursive: true });
+        }
+      }
+    }
+
+    // Write file
+    if (isInDocker) {
+      // Use base64 to safely transfer content through nsenter
+      const base64Content = Buffer.from(content).toString('base64');
+      await execOnHost(`echo ${JSON.stringify(base64Content)} | base64 -d > ${JSON.stringify(filePath)}`, { timeout: 60000 });
+    } else {
+      await writeFile(filePath, content, 'utf8');
+    }
+
+    // Log the action
+    logAudit(req.user.id, 'FILE_WRITE', 'system', null, {
+      filePath,
+      size: content.length,
+    }, req.ip);
+
+    res.json({
+      success: true,
+      message: `File written successfully: ${filePath}`,
+      size: content.length,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('File write error:', error);
+    res.status(500).json({ error: 'Failed to write file: ' + error.message });
+  }
+});
+
 // Get system info
 servicesRouter.get('/terminal/system-info', async (req, res) => {
   try {

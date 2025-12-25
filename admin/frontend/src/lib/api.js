@@ -158,6 +158,11 @@ export const api = {
     body: JSON.stringify({ command, workingDir, timeout }),
   }),
 
+  writeFile: (filePath, content, createDirs = true) => request('/services/terminal/write-file', {
+    method: 'POST',
+    body: JSON.stringify({ filePath, content, createDirs }),
+  }),
+
   getSystemInfo: () => request('/services/terminal/system-info'),
 
   // Docker

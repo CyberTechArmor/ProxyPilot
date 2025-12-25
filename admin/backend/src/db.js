@@ -21,11 +21,46 @@ export function initDatabase() {
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
+      display_name TEXT,
       password_hash TEXT NOT NULL,
       totp_secret TEXT NOT NULL,
       totp_enabled INTEGER DEFAULT 1,
+      role TEXT DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+      password_change_required INTEGER DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Add new columns if they don't exist (migration for existing DBs)
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin' CHECK(role IN ('admin', 'user'))`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN password_change_required INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists
+  }
+
+  // Create user_service_access table for granular permissions
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_service_access (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      service_id TEXT NOT NULL,
+      can_view INTEGER DEFAULT 1,
+      can_write INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+      UNIQUE(user_id, service_id)
     )
   `);
 

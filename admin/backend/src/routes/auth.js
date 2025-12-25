@@ -62,7 +62,10 @@ authRouter.post('/login', async (req, res) => {
       user: {
         id: user.id,
         username: user.username,
+        displayName: user.display_name,
+        role: user.role || 'admin',
         totpEnabled: !!user.totp_enabled,
+        passwordChangeRequired: !!user.password_change_required,
       },
     });
   } catch (error) {
@@ -77,7 +80,7 @@ authRouter.post('/login', async (req, res) => {
 // Verify token endpoint
 authRouter.get('/verify', authenticateToken, (req, res) => {
   const db = getDb();
-  const user = db.prepare('SELECT id, username, totp_enabled FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare('SELECT id, username, display_name, role, totp_enabled, password_change_required FROM users WHERE id = ?').get(req.user.id);
 
   if (!user) {
     return res.status(401).json({ error: 'User not found' });
@@ -87,7 +90,10 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
     user: {
       id: user.id,
       username: user.username,
+      displayName: user.display_name,
+      role: user.role || 'admin',
       totpEnabled: !!user.totp_enabled,
+      passwordChangeRequired: !!user.password_change_required,
     },
   });
 });

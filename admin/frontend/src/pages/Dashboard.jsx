@@ -159,6 +159,7 @@ export default function Dashboard() {
     forceHttps: true,
     websocketEnabled: false,
     maxUploadSize: '1G',
+    obtainCertificate: false,
   });
 
   // File management state
@@ -347,6 +348,28 @@ export default function Dashboard() {
     }
   };
 
+  const [regeneratingAll, setRegeneratingAll] = useState(false);
+
+  const handleRegenerateAllConfigs = async () => {
+    setRegeneratingAll(true);
+    try {
+      const result = await api.regenerateAllConfigs();
+      toast({
+        title: result.nginxReloaded ? 'Success' : 'Partial Success',
+        description: `Regenerated ${result.results.success.length} configs${result.results.failed.length > 0 ? `, ${result.results.failed.length} failed` : ''}. NGINX ${result.nginxReloaded ? 'reloaded' : 'reload failed'}`,
+      });
+      fetchServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setRegeneratingAll(false);
+    }
+  };
+
   const handleRegenerateConfig = async (service, e) => {
     e.stopPropagation();
     try {
@@ -367,6 +390,29 @@ export default function Dashboard() {
     }
   };
 
+  const [obtainingCert, setObtainingCert] = useState(null);
+
+  const handleObtainCertificate = async (service, e) => {
+    e.stopPropagation();
+    setObtainingCert(service.id);
+    try {
+      const result = await api.obtainCertificate(service.id);
+      toast({
+        title: result.success ? 'Success' : 'Warning',
+        description: result.message || (result.success ? 'SSL certificate obtained' : 'Failed to obtain certificate'),
+      });
+      fetchServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setObtainingCert(null);
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       name: '',
@@ -379,6 +425,7 @@ export default function Dashboard() {
       forceHttps: true,
       websocketEnabled: false,
       maxUploadSize: '1G',
+      obtainCertificate: false,
     });
     setWizardStep(0);
   };
@@ -799,6 +846,14 @@ export default function Dashboard() {
           <Button variant="outline" onClick={handleReloadNginx} title="Reload NGINX">
             <RefreshCw className="h-4 w-4" />
           </Button>
+          <Button
+            variant="outline"
+            onClick={handleRegenerateAllConfigs}
+            disabled={regeneratingAll}
+            title="Regenerate All NGINX Configs"
+          >
+            {regeneratingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+          </Button>
           <Button variant="outline" onClick={() => { setExportServiceIds([]); setExportDialogOpen(true); }}>
             <Download className="h-4 w-4 mr-2" />
             Export
@@ -882,6 +937,15 @@ export default function Dashboard() {
                     <Label htmlFor="sslEnabled">SSL Enabled</Label>
                     <Switch id="sslEnabled" checked={formData.sslEnabled} onCheckedChange={(checked) => setFormData({ ...formData, sslEnabled: checked })} />
                   </div>
+                  {formData.sslEnabled && (
+                    <div className="flex items-center justify-between pl-4 border-l-2 border-primary/20">
+                      <div>
+                        <Label htmlFor="obtainCertificate">Auto-obtain Certificate</Label>
+                        <p className="text-xs text-muted-foreground">Get Let's Encrypt certificate automatically</p>
+                      </div>
+                      <Switch id="obtainCertificate" checked={formData.obtainCertificate} onCheckedChange={(checked) => setFormData({ ...formData, obtainCertificate: checked })} />
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <Label htmlFor="forceHttps">Force HTTPS</Label>
                     <Switch id="forceHttps" checked={formData.forceHttps} onCheckedChange={(checked) => setFormData({ ...formData, forceHttps: checked })} />
@@ -1009,15 +1073,30 @@ export default function Dashboard() {
                         <>
                           <ShieldAlert className="h-3 w-3 text-yellow-500" />
                           <span className="text-yellow-500" title="SSL enabled but certificate not found">Pending</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 ml-1"
-                            onClick={(e) => handleRegenerateConfig(service, e)}
-                            title="Regenerate config (after obtaining certificate)"
-                          >
-                            <RefreshCcw className="h-3 w-3" />
-                          </Button>
+                          {obtainingCert === service.id ? (
+                            <Loader2 className="h-3 w-3 ml-1 animate-spin" />
+                          ) : (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-5 w-5 ml-1"
+                                onClick={(e) => handleObtainCertificate(service, e)}
+                                title="Obtain SSL Certificate"
+                              >
+                                <Shield className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-5 w-5"
+                                onClick={(e) => handleRegenerateConfig(service, e)}
+                                title="Regenerate config"
+                              >
+                                <RefreshCcw className="h-3 w-3" />
+                              </Button>
+                            </>
+                          )}
                         </>
                       )
                     ) : (

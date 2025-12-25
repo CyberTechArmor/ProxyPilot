@@ -79,9 +79,17 @@ export const api = {
     method: 'POST',
   }),
 
+  regenerateAllConfigs: () => request('/services/nginx/regenerate-all', {
+    method: 'POST',
+  }),
+
   checkSslStatus: (domain) => request(`/services/ssl-status/${domain}`),
 
   regenerateConfig: (serviceId) => request(`/services/${serviceId}/regenerate-config`, {
+    method: 'POST',
+  }),
+
+  obtainCertificate: (serviceId) => request(`/services/${serviceId}/obtain-certificate`, {
     method: 'POST',
   }),
 

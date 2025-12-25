@@ -199,6 +199,19 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ totpCode }),
   }),
+
+  // Discover existing sites
+  discoverNginxSites: () => request('/services/discover/nginx-sites'),
+
+  importDiscoveredSite: (site) => request('/services/discover/import', {
+    method: 'POST',
+    body: JSON.stringify(site),
+  }),
+
+  // Docker Compose services
+  discoverDockerCompose: () => request('/services/discover/docker-compose'),
+
+  getDockerComposeServices: () => request('/services/docker-compose/services'),
 };
 
 export { ApiError };

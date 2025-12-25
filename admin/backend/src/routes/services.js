@@ -1949,6 +1949,295 @@ servicesRouter.post('/system/secure', async (req, res) => {
   }
 });
 
+// ==================== DISCOVER EXISTING SITES ====================
+
+// Discover existing NGINX sites from sites-available
+servicesRouter.get('/discover/nginx-sites', async (req, res) => {
+  try {
+    const db = getDb();
+    const existingDomains = db.prepare('SELECT domain FROM services').all().map(s => s.domain);
+
+    const discoveredSites = [];
+
+    // Read sites-available directory
+    if (existsSync(NGINX_SITES_AVAILABLE)) {
+      const files = await readdir(NGINX_SITES_AVAILABLE);
+
+      for (const file of files) {
+        if (file === 'default') continue; // Skip default site
+
+        const configPath = join(NGINX_SITES_AVAILABLE, file);
+        const stats = await stat(configPath);
+        if (!stats.isFile()) continue;
+
+        try {
+          const content = await readFile(configPath, 'utf-8');
+
+          // Extract domain from server_name directive
+          const serverNameMatch = content.match(/server_name\s+([^\s;]+)/);
+          const domain = serverNameMatch ? serverNameMatch[1] : file;
+
+          // Skip if already in database
+          if (existingDomains.includes(domain)) continue;
+
+          // Determine type based on config content
+          let type = 'static';
+          let rootDir = null;
+          let port = null;
+          let target = null;
+
+          // Check for proxy_pass (indicates docker/proxy type)
+          const proxyMatch = content.match(/proxy_pass\s+http:\/\/([^:\/]+):?(\d+)?/);
+          if (proxyMatch) {
+            type = 'docker';
+            target = proxyMatch[1] || '127.0.0.1';
+            port = proxyMatch[2] ? parseInt(proxyMatch[2], 10) : 80;
+          }
+
+          // Check for root directive (static site)
+          const rootMatch = content.match(/root\s+([^;]+);/);
+          if (rootMatch && type === 'static') {
+            rootDir = rootMatch[1].trim();
+          }
+
+          // Check for SSL
+          const sslEnabled = content.includes('ssl_certificate') || content.includes('listen 443');
+
+          // Try to find index.html for static sites
+          let hasIndexHtml = false;
+          if (rootDir && existsSync(rootDir)) {
+            hasIndexHtml = existsSync(join(rootDir, 'index.html'));
+          }
+
+          discoveredSites.push({
+            domain,
+            name: domain.split('.')[0], // Use first part of domain as name
+            type,
+            rootDir,
+            target,
+            port,
+            sslEnabled,
+            hasIndexHtml,
+            configFile: file,
+          });
+        } catch (e) {
+          console.log(`Could not parse ${file}:`, e.message);
+        }
+      }
+    }
+
+    res.json({ sites: discoveredSites });
+  } catch (error) {
+    console.error('Error discovering sites:', error);
+    res.status(500).json({ error: 'Failed to discover sites' });
+  }
+});
+
+// Import a discovered NGINX site
+servicesRouter.post('/discover/import', async (req, res) => {
+  try {
+    const { domain, name, type, rootDir, target, port, sslEnabled } = req.body;
+
+    if (!domain || !name) {
+      return res.status(400).json({ error: 'Domain and name are required' });
+    }
+
+    const db = getDb();
+
+    // Check if already exists
+    const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(domain);
+    if (existing) {
+      return res.status(400).json({ error: 'Service with this domain already exists' });
+    }
+
+    const id = uuidv4();
+    const safeDir = toSafeDirectoryName(name);
+    let dataDir = join(SERVICES_DATA_DIR, safeDir);
+    let actualRootDir = rootDir;
+
+    // For static sites, copy files to our data directory if they exist elsewhere
+    if (type === 'static' && rootDir && rootDir !== dataDir) {
+      await mkdir(dataDir, { recursive: true });
+
+      // Copy index.html if it exists
+      const sourceIndex = join(rootDir, 'index.html');
+      if (existsSync(sourceIndex)) {
+        const content = await readFile(sourceIndex, 'utf-8');
+        await writeFile(join(dataDir, 'index.html'), content);
+
+        // Save as version 1
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), id, 'index.html', content, 1, 'Imported from existing site', req.user.id);
+      }
+
+      // Update root dir to our managed location
+      actualRootDir = dataDir;
+
+      // Regenerate NGINX config with new root
+      const nginxConfig = generateNginxConfig({
+        domain,
+        type,
+        rootDir: dataDir,
+        target,
+        port,
+        sslEnabled,
+        forceHttps: sslEnabled,
+        websocketEnabled: false,
+        maxUploadSize: '1G',
+      });
+
+      await writeFile(join(NGINX_SITES_AVAILABLE, domain), nginxConfig);
+      await reloadNginx();
+    } else if (type === 'static') {
+      // Create data dir and link to existing root
+      await mkdir(dataDir, { recursive: true });
+      actualRootDir = rootDir || dataDir;
+    }
+
+    // Insert into database
+    db.prepare(`
+      INSERT INTO services (
+        id, name, domain, type, target, port, root_dir, container_name,
+        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    `).run(
+      id, name, domain, type, target || null, port || null,
+      actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
+      0, '1G', dataDir
+    );
+
+    logAudit(req.user.id, 'SERVICE_IMPORTED', 'service', id, { domain, type }, req.ip);
+
+    res.json({
+      success: true,
+      service: { id, name, domain, type, rootDir: actualRootDir, dataDir },
+    });
+  } catch (error) {
+    console.error('Error importing site:', error);
+    res.status(500).json({ error: 'Failed to import site: ' + error.message });
+  }
+});
+
+// ==================== DOCKER COMPOSE SERVICES ====================
+
+// Discover docker compose projects and their services
+servicesRouter.get('/discover/docker-compose', async (req, res) => {
+  try {
+    // Get all running containers with their compose project info
+    const result = await execOnHost(`docker ps -a --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Labels}}' 2>/dev/null || echo ""`);
+
+    const composeProjects = {};
+    const lines = result.stdout.trim().split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      const [id, name, image, status, ports, labels] = line.split('\t');
+
+      // Parse labels to find compose project
+      const labelPairs = labels ? labels.split(',') : [];
+      let projectName = null;
+      let serviceName = null;
+      let composeFile = null;
+
+      for (const label of labelPairs) {
+        if (label.startsWith('com.docker.compose.project=')) {
+          projectName = label.split('=')[1];
+        }
+        if (label.startsWith('com.docker.compose.service=')) {
+          serviceName = label.split('=')[1];
+        }
+        if (label.startsWith('com.docker.compose.project.config_files=')) {
+          composeFile = label.split('=')[1];
+        }
+      }
+
+      // Parse port mappings to get exposed port
+      let exposedPort = null;
+      if (ports) {
+        const portMatch = ports.match(/:(\d+)->/);
+        if (portMatch) {
+          exposedPort = parseInt(portMatch[1], 10);
+        }
+      }
+
+      if (projectName) {
+        if (!composeProjects[projectName]) {
+          composeProjects[projectName] = {
+            projectName,
+            composeFile,
+            services: [],
+          };
+        }
+
+        composeProjects[projectName].services.push({
+          containerId: id,
+          containerName: name,
+          serviceName: serviceName || name,
+          image,
+          status,
+          ports,
+          exposedPort,
+          isRunning: status.includes('Up'),
+        });
+      }
+    }
+
+    res.json({ projects: Object.values(composeProjects) });
+  } catch (error) {
+    console.error('Error discovering docker compose:', error);
+    res.status(500).json({ error: 'Failed to discover docker compose projects' });
+  }
+});
+
+// Get all docker compose services (for display in services list)
+servicesRouter.get('/docker-compose/services', async (req, res) => {
+  try {
+    // Get containers that are part of a compose project
+    const result = await execOnHost(`docker ps -a --filter "label=com.docker.compose.project" --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.service"}}' 2>/dev/null || echo ""`);
+
+    const services = [];
+    const lines = result.stdout.trim().split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      const [id, containerName, image, status, ports, projectName, serviceName] = line.split('\t');
+
+      // Skip proxypilot container itself
+      if (containerName === 'proxypilot-admin') continue;
+
+      // Parse port
+      let exposedPort = null;
+      let hostBinding = null;
+      if (ports) {
+        const portMatch = ports.match(/(?:(\d+\.\d+\.\d+\.\d+):)?(\d+)->(\d+)/);
+        if (portMatch) {
+          hostBinding = portMatch[1] || '0.0.0.0';
+          exposedPort = parseInt(portMatch[2], 10);
+        }
+      }
+
+      services.push({
+        id,
+        containerName,
+        serviceName: serviceName || containerName,
+        projectName: projectName || 'unknown',
+        image,
+        status,
+        ports,
+        exposedPort,
+        hostBinding,
+        isRunning: status.includes('Up'),
+        type: 'docker-compose',
+      });
+    }
+
+    res.json({ services });
+  } catch (error) {
+    console.error('Error getting docker compose services:', error);
+    res.status(500).json({ error: 'Failed to get docker compose services', services: [] });
+  }
+});
+
 // Check if SSL certificate exists for a domain
 function sslCertExists(domain) {
   const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;

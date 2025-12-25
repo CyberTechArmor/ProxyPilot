@@ -71,6 +71,9 @@ import {
   Play,
   Square,
   RotateCw,
+  Radar,
+  Import,
+  Boxes,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -211,6 +214,21 @@ export default function Dashboard() {
   const [killSwitchDialogOpen, setKillSwitchDialogOpen] = useState(false);
   const [securingSystem, setSecuringSystem] = useState(false);
 
+  // Discovery state
+  const [discoverDialogOpen, setDiscoverDialogOpen] = useState(false);
+  const [discoveredSites, setDiscoveredSites] = useState([]);
+  const [discoveringNginx, setDiscoveringNginx] = useState(false);
+  const [importingSite, setImportingSite] = useState(null);
+
+  // Docker Compose services state
+  const [composeServices, setComposeServices] = useState([]);
+
+  // Nano editor state (for terminal intercept)
+  const [nanoEditorOpen, setNanoEditorOpen] = useState(false);
+  const [nanoFilePath, setNanoFilePath] = useState('');
+  const [nanoFileContent, setNanoFileContent] = useState('');
+  const [nanoSaving, setNanoSaving] = useState(false);
+
   const { toast } = useToast();
 
   // Filtered and sorted services
@@ -278,9 +296,57 @@ export default function Dashboard() {
     }
   };
 
+  const fetchComposeServices = async () => {
+    try {
+      const { services: compose } = await api.getDockerComposeServices();
+      setComposeServices(compose || []);
+    } catch (error) {
+      console.error('Failed to fetch compose services:', error);
+    }
+  };
+
   useEffect(() => {
     fetchServices();
+    fetchComposeServices();
   }, []);
+
+  // Discovery functions
+  const discoverSites = async () => {
+    setDiscoveringNginx(true);
+    try {
+      const { sites } = await api.discoverNginxSites();
+      setDiscoveredSites(sites || []);
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to discover sites: ' + error.message,
+      });
+    } finally {
+      setDiscoveringNginx(false);
+    }
+  };
+
+  const importSite = async (site) => {
+    setImportingSite(site.domain);
+    try {
+      await api.importDiscoveredSite(site);
+      toast({
+        title: 'Success',
+        description: `Imported ${site.name} successfully`,
+      });
+      setDiscoveredSites(prev => prev.filter(s => s.domain !== site.domain));
+      fetchServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to import: ' + error.message,
+      });
+    } finally {
+      setImportingSite(null);
+    }
+  };
 
   const handleTypeSelect = (type) => {
     setFormData({ ...formData, type });
@@ -523,6 +589,33 @@ export default function Dashboard() {
       return;
     }
 
+    // Intercept nano command and open built-in editor
+    if (cmd.startsWith('nano ') || cmd === 'nano') {
+      const filePath = cmd === 'nano' ? '' : cmd.substring(5).trim();
+      if (!filePath) {
+        setTerminalOutput(prev => [...prev, { type: 'error', text: 'Usage: nano <filename>' }]);
+        terminalInputRef.current?.focus();
+        return;
+      }
+
+      // Resolve full path based on current directory
+      const fullPath = filePath.startsWith('/') ? filePath : `${terminalCwd}/${filePath}`.replace(/\/+/g, '/');
+      setNanoFilePath(fullPath);
+
+      // Try to read the file content
+      try {
+        const result = await api.executeCommand(`cat "${fullPath}" 2>/dev/null || echo ""`, '/');
+        setNanoFileContent(result.output || '');
+      } catch (e) {
+        setNanoFileContent('');
+      }
+
+      setNanoEditorOpen(true);
+      setTerminalOutput(prev => [...prev, { type: 'system', text: `Opening ${filePath} in ProxyPilot editor...` }]);
+      terminalInputRef.current?.focus();
+      return;
+    }
+
     setTerminalRunning(true);
 
     try {
@@ -628,6 +721,44 @@ export default function Dashboard() {
       });
     } finally {
       setSecuringSystem(false);
+    }
+  };
+
+  // Nano Editor Save Function
+  const handleNanoSave = async () => {
+    if (!nanoFilePath) return;
+    setNanoSaving(true);
+
+    try {
+      // Get directory path and ensure it exists
+      const dirPath = nanoFilePath.substring(0, nanoFilePath.lastIndexOf('/'));
+      if (dirPath) {
+        await api.executeCommand(`mkdir -p "${dirPath}"`, '/');
+      }
+
+      // Write file content using a heredoc approach
+      const escapedContent = nanoFileContent.replace(/'/g, "'\\''");
+      const writeCmd = `cat > "${nanoFilePath}" << 'PROXYPILOT_EOF'\n${nanoFileContent}\nPROXYPILOT_EOF`;
+      const result = await api.executeCommand(writeCmd, '/');
+
+      if (result.success || result.exitCode === 0) {
+        toast({
+          title: 'File Saved',
+          description: `Successfully saved ${nanoFilePath}`,
+        });
+        setNanoEditorOpen(false);
+        setTerminalOutput(prev => [...prev, { type: 'system', text: `File saved: ${nanoFilePath}` }]);
+      } else {
+        throw new Error(result.output || 'Failed to save file');
+      }
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to save file: ' + error.message,
+      });
+    } finally {
+      setNanoSaving(false);
     }
   };
 
@@ -1056,6 +1187,10 @@ export default function Dashboard() {
           <Button variant="outline" onClick={() => { setImportData(''); setImportDialogOpen(true); }}>
             <Upload className="h-4 w-4 mr-2" />
             Import
+          </Button>
+          <Button variant="outline" onClick={() => { setDiscoverDialogOpen(true); discoverSites(); }}>
+            <Radar className="h-4 w-4 mr-2" />
+            Discover
           </Button>
           <Button variant="outline" onClick={openTerminal}>
             <Terminal className="h-4 w-4 mr-2" />
@@ -1844,6 +1979,162 @@ export default function Dashboard() {
                 <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Securing...</>
               ) : (
                 <><ShieldAlert className="mr-2 h-4 w-4" />Secure System</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Discover Dialog */}
+      <Dialog open={discoverDialogOpen} onOpenChange={setDiscoverDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Radar className="h-5 w-5" />
+              Discover Existing Sites
+            </DialogTitle>
+            <DialogDescription>
+              Discover and import existing NGINX sites and Docker Compose services from this server.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto space-y-4 py-4">
+            {discoveringNginx ? (
+              <div className="flex items-center justify-center p-8">
+                <Loader2 className="h-8 w-8 animate-spin" />
+                <span className="ml-2">Scanning for sites...</span>
+              </div>
+            ) : discoveredSites.length === 0 ? (
+              <div className="text-center p-8 text-muted-foreground">
+                <Radar className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>No new sites discovered</p>
+                <p className="text-sm">All existing NGINX sites are already imported.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">Found {discoveredSites.length} site(s) that can be imported:</p>
+                {discoveredSites.map((site) => (
+                  <Card key={site.domain} className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          {site.type === 'static' ? (
+                            <FolderOpen className="h-4 w-4 text-blue-500" />
+                          ) : (
+                            <Container className="h-4 w-4 text-purple-500" />
+                          )}
+                          <span className="font-medium">{site.name}</span>
+                          <span className="text-xs px-2 py-0.5 rounded bg-muted">{site.type}</span>
+                          {site.sslEnabled && <ShieldCheck className="h-4 w-4 text-green-500" />}
+                        </div>
+                        <p className="text-sm text-muted-foreground mt-1">{site.domain}</p>
+                        {site.rootDir && <p className="text-xs text-muted-foreground">Root: {site.rootDir}</p>}
+                        {site.port && <p className="text-xs text-muted-foreground">Port: {site.port}</p>}
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => importSite(site)}
+                        disabled={importingSite === site.domain}
+                      >
+                        {importingSite === site.domain ? (
+                          <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Importing</>
+                        ) : (
+                          <><Import className="h-4 w-4 mr-1" />Import</>
+                        )}
+                      </Button>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            )}
+
+            {/* Docker Compose Services Section */}
+            {composeServices.length > 0 && (
+              <div className="mt-6 border-t pt-4">
+                <h3 className="font-medium flex items-center gap-2 mb-3">
+                  <Boxes className="h-4 w-4" />
+                  Docker Compose Services
+                </h3>
+                <div className="space-y-2">
+                  {composeServices.map((svc) => (
+                    <Card key={svc.id} className="p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${svc.isRunning ? 'bg-green-500' : 'bg-gray-400'}`} />
+                          <span className="font-medium">{svc.containerName}</span>
+                          <span className="text-xs px-2 py-0.5 rounded bg-muted">{svc.projectName}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <span>{svc.image?.split(':')[0]}</span>
+                          {svc.exposedPort && <span className="text-xs">:{svc.exposedPort}</span>}
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="shrink-0">
+            <Button variant="outline" onClick={() => discoverSites()}>
+              <RefreshCcw className="h-4 w-4 mr-2" />
+              Refresh
+            </Button>
+            <Button variant="outline" onClick={() => setDiscoverDialogOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Nano Editor Dialog */}
+      <Dialog open={nanoEditorOpen} onOpenChange={setNanoEditorOpen}>
+        <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle className="flex items-center gap-2 font-mono">
+              <Code className="h-5 w-5" />
+              {nanoFilePath || 'New File'}
+            </DialogTitle>
+            <DialogDescription>
+              ProxyPilot File Editor (nano replacement)
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <CodeMirror
+              value={nanoFileContent}
+              onChange={setNanoFileContent}
+              height="100%"
+              theme={oneDark}
+              extensions={[
+                getLanguageFromFile(nanoFilePath || 'txt') === 'javascript' ? javascript() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'html' ? html() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'css' ? css() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'json' ? json() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'yaml' ? yaml() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'python' ? python() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'markdown' ? markdown() :
+                getLanguageFromFile(nanoFilePath || 'txt') === 'xml' ? xml() : []
+              ].filter(Boolean)}
+              className="h-full overflow-auto text-sm"
+              basicSetup={{
+                lineNumbers: true,
+                foldGutter: true,
+                highlightActiveLineGutter: true,
+                highlightActiveLine: true,
+              }}
+            />
+          </div>
+          <DialogFooter className="shrink-0">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground mr-auto">
+              <kbd className="px-2 py-1 bg-muted rounded text-xs">Ctrl+S</kbd> Save
+            </div>
+            <Button variant="outline" onClick={() => setNanoEditorOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleNanoSave} disabled={nanoSaving}>
+              {nanoSaving ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>
+              ) : (
+                <><Save className="mr-2 h-4 w-4" />Save</>
               )}
             </Button>
           </DialogFooter>

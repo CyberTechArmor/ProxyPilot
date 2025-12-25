@@ -465,6 +465,7 @@ services:
     environment:
       - NODE_ENV=production
       - SERVICES_DATA_DIR=/data/services
+      - NGINX_STATIC_ROOT=${INSTALL_DIR}/data/services
     env_file:
       - .env
     networks:

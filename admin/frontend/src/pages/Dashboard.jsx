@@ -129,9 +129,11 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [removeCertDialogOpen, setRemoveCertDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [serviceToDelete, setServiceToDelete] = useState(null);
+  const [serviceToRemoveCert, setServiceToRemoveCert] = useState(null);
   const [selectedService, setSelectedService] = useState(null);
   const [totpCode, setTotpCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -159,7 +161,7 @@ export default function Dashboard() {
     forceHttps: true,
     websocketEnabled: false,
     maxUploadSize: '1G',
-    obtainCertificate: false,
+    obtainCertificate: true,
   });
 
   // File management state
@@ -425,7 +427,7 @@ export default function Dashboard() {
       forceHttps: true,
       websocketEnabled: false,
       maxUploadSize: '1G',
-      obtainCertificate: false,
+      obtainCertificate: true,
     });
     setWizardStep(0);
   };
@@ -434,6 +436,38 @@ export default function Dashboard() {
     setServiceToDelete(service);
     setTotpCode('');
     setDeleteDialogOpen(true);
+  };
+
+  const openRemoveCertDialog = (service, e) => {
+    e.stopPropagation();
+    setServiceToRemoveCert(service);
+    setTotpCode('');
+    setRemoveCertDialogOpen(true);
+  };
+
+  const confirmRemoveCertificate = async () => {
+    if (!serviceToRemoveCert || !totpCode) return;
+
+    setSubmitting(true);
+    try {
+      await api.removeCertificate(serviceToRemoveCert.id, totpCode);
+      toast({
+        title: 'Certificate Removed',
+        description: `SSL certificate for ${serviceToRemoveCert.domain} has been removed`,
+      });
+      setRemoveCertDialogOpen(false);
+      setServiceToRemoveCert(null);
+      setTotpCode('');
+      fetchServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   // File Management Functions
@@ -1068,6 +1102,15 @@ export default function Dashboard() {
                         <>
                           <ShieldCheck className="h-3 w-3 text-green-500" />
                           <span className="text-green-500">Active</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 ml-1 text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                            onClick={(e) => openRemoveCertDialog(service, e)}
+                            title="Remove SSL Certificate"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
                         </>
                       ) : (
                         <>
@@ -1145,6 +1188,37 @@ export default function Dashboard() {
             <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
             <Button variant="destructive" onClick={handleDeleteService} disabled={totpCode.length !== 6 || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Deleting...</> : 'Delete Service'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Certificate Confirmation Dialog */}
+      <Dialog open={removeCertDialogOpen} onOpenChange={setRemoveCertDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove SSL Certificate</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove the SSL certificate for "{serviceToRemoveCert?.domain}"?
+              This will disable HTTPS for this service. Enter your TOTP code to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="removeCertTotp">TOTP Code</Label>
+              <Input
+                id="removeCertTotp"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveCertDialogOpen(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmRemoveCertificate} disabled={totpCode.length !== 6 || submitting}>
+              {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Removing...</> : 'Remove Certificate'}
             </Button>
           </DialogFooter>
         </DialogContent>

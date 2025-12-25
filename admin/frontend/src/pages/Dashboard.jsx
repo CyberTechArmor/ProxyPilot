@@ -100,6 +100,9 @@ const getLanguageFromFile = (filename) => {
   return langMap[ext] || 'plaintext';
 };
 
+// Default docker-compose template
+const DEFAULT_COMPOSE_CONTENT = "version: '3.8'\nservices:\n  app:\n    image: nginx:alpine\n    ports:\n      - \"8080:80\"\n    restart: unless-stopped\n";
+
 // Syntax highlighting colors by language
 const getLanguageColor = (lang) => {
   const colors = {
@@ -293,14 +296,7 @@ export default function Dashboard() {
   const [composeCreateOpen, setComposeCreateOpen] = useState(false);
   const [composeCreateForm, setComposeCreateForm] = useState({
     serviceName: '',
-    composeContent: `version: '3.8'
-services:
-  app:
-    image: nginx:alpine
-    ports:
-      - "8080:80"
-    restart: unless-stopped
-`,
+    composeContent: DEFAULT_COMPOSE_CONTENT,
   });
   const [composeCreating, setComposeCreating] = useState(false);
 
@@ -1985,14 +1981,7 @@ volumes:
                     setComposeCreateOpen(true);
                     setComposeCreateForm({
                       serviceName: '',
-                      composeContent: `version: '3.8'
-services:
-  app:
-    image: nginx:alpine
-    ports:
-      - "8080:80"
-    restart: unless-stopped
-`,
+                      composeContent: DEFAULT_COMPOSE_CONTENT,
                     });
                   }}>
                     <CardHeader className="text-center pb-2">

@@ -68,7 +68,16 @@ export const api = {
     body: JSON.stringify({ totpCode }),
   }),
 
+  toggleFavorite: (id) => request(`/services/${id}/favorite`, {
+    method: 'POST',
+  }),
+
   getDockerContainers: () => request('/services/docker/containers'),
+
+  // NGINX
+  reloadNginx: () => request('/services/nginx/reload', {
+    method: 'POST',
+  }),
 
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
@@ -84,7 +93,31 @@ export const api = {
     method: 'DELETE',
   }),
 
-  // Export/Import
+  uploadFile: (serviceId, filePath, content, encoding = 'text') => request(`/services/${serviceId}/upload/${filePath}`, {
+    method: 'POST',
+    body: JSON.stringify({ content, encoding }),
+  }),
+
+  downloadFile: (serviceId, filePath) => request(`/services/${serviceId}/download/${filePath}`),
+
+  // File Version Control
+  getFileVersions: (serviceId, filePath) => request(`/services/${serviceId}/versions/${filePath}`),
+
+  getVersionContent: (serviceId, versionId) => request(`/services/${serviceId}/version/${versionId}`),
+
+  revertToVersion: (serviceId, versionId) => request(`/services/${serviceId}/revert/${versionId}`, {
+    method: 'POST',
+  }),
+
+  // File Export/Import (per service)
+  exportServiceFiles: (serviceId) => request(`/services/${serviceId}/export-files`),
+
+  importServiceFiles: (serviceId, files) => request(`/services/${serviceId}/import-files`, {
+    method: 'POST',
+    body: JSON.stringify({ files }),
+  }),
+
+  // Export/Import Services
   exportServices: (serviceIds = [], includeFiles = false) => request('/services/export', {
     method: 'POST',
     body: JSON.stringify({ serviceIds, includeFiles }),

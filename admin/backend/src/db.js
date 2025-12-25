@@ -60,6 +60,34 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add is_favorite column if it doesn't exist
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN is_favorite INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists
+  }
+
+  // Create file versions table for version control
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS file_versions (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      created_by TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+
+  // Create index for faster file version lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_file_versions_lookup
+    ON file_versions(service_id, file_path, version DESC)
+  `);
+
   // Create audit log table
   db.exec(`
     CREATE TABLE IF NOT EXISTS audit_log (

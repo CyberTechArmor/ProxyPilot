@@ -79,6 +79,12 @@ export const api = {
     method: 'POST',
   }),
 
+  checkSslStatus: (domain) => request(`/services/ssl-status/${domain}`),
+
+  regenerateConfig: (serviceId) => request(`/services/${serviceId}/regenerate-config`, {
+    method: 'POST',
+  }),
+
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
 

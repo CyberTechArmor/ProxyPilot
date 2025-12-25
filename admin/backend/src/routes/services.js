@@ -70,6 +70,74 @@ async function reloadNginx() {
   }
 }
 
+// Check SSL certificate status for a domain
+servicesRouter.get('/ssl-status/:domain', (req, res) => {
+  try {
+    const domain = req.params.domain;
+    const exists = sslCertExists(domain);
+    const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+
+    res.json({
+      domain,
+      certificateExists: exists,
+      certificatePath: certPath,
+      command: exists ? null : `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}`,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to check SSL status' });
+  }
+});
+
+// Regenerate NGINX config for a service (useful after obtaining SSL certificates)
+servicesRouter.post('/:id/regenerate-config', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare(`
+      SELECT * FROM services WHERE id = ?
+    `).get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    // Build service config object
+    const serviceConfig = {
+      domain: service.domain,
+      type: service.type,
+      target: service.target,
+      port: service.port,
+      rootDir: service.root_dir,
+      websocketEnabled: !!service.websocket_enabled,
+      forceHttps: !!service.force_https,
+      maxUploadSize: service.max_upload_size,
+      sslEnabled: !!service.ssl_enabled,
+    };
+
+    // Generate and write new NGINX config
+    const nginxConfig = generateNginxConfig(serviceConfig);
+    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+    await writeFile(configPath, nginxConfig);
+
+    // Test and reload NGINX
+    const reloadResult = await reloadNginx();
+
+    const sslStatus = service.ssl_enabled && sslCertExists(service.domain);
+
+    logAudit(req.user.id, 'CONFIG_REGENERATED', 'service', req.params.id, { sslStatus }, req.ip);
+
+    res.json({
+      success: true,
+      message: reloadResult.success ? 'Configuration regenerated and NGINX reloaded' : 'Configuration regenerated but NGINX reload failed',
+      sslCertificateExists: sslStatus,
+      nginxReloaded: reloadResult.success,
+      nginxError: reloadResult.error,
+    });
+  } catch (error) {
+    console.error('Error regenerating config:', error);
+    res.status(500).json({ error: 'Failed to regenerate config: ' + error.message });
+  }
+});
+
 // NGINX reload endpoint
 servicesRouter.post('/nginx/reload', async (req, res) => {
   try {
@@ -111,7 +179,7 @@ servicesRouter.get('/', (req, res) => {
       ORDER BY is_favorite DESC, created_at DESC
     `).all();
 
-    // Convert integer booleans to actual booleans
+    // Convert integer booleans to actual booleans and check SSL cert status
     const formattedServices = services.map(s => ({
       ...s,
       sslEnabled: !!s.sslEnabled,
@@ -119,6 +187,7 @@ servicesRouter.get('/', (req, res) => {
       websocketEnabled: !!s.websocketEnabled,
       isAdmin: !!s.isAdmin,
       isFavorite: !!s.isFavorite,
+      sslCertificateExists: s.sslEnabled ? sslCertExists(s.domain) : null,
     }));
 
     res.json({ services: formattedServices });
@@ -308,9 +377,17 @@ services:
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 
+    // Check SSL certificate status
+    const sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
+    const sslMessage = data.sslEnabled && !sslCertificateExists
+      ? `SSL enabled but certificate not found. Run: certbot certonly --webroot -w /var/www/letsencrypt -d ${data.domain}`
+      : null;
+
     res.status(201).json({
       success: true,
       service: { id, ...data, dataDir },
+      sslCertificateExists,
+      sslMessage,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -1192,9 +1269,21 @@ servicesRouter.post('/import', async (req, res) => {
   }
 });
 
+// Check if SSL certificate exists for a domain
+function sslCertExists(domain) {
+  const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+  const keyPath = `/etc/letsencrypt/live/${domain}/privkey.pem`;
+  return existsSync(certPath) && existsSync(keyPath);
+}
+
 // Generate NGINX config based on service type
 function generateNginxConfig(service) {
   const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
+
+  // Check if SSL certificates actually exist
+  const certsExist = sslEnabled && sslCertExists(domain);
+  // Only force HTTPS redirect if SSL is enabled AND certificates exist
+  const actualForceHttps = forceHttps && certsExist;
 
   let locationBlock = '';
   let rootBlock = '';
@@ -1232,7 +1321,7 @@ function generateNginxConfig(service) {
       break;
   }
 
-  const httpBlock = forceHttps
+  const httpBlock = actualForceHttps
     ? `
 server {
     listen 80;
@@ -1262,7 +1351,8 @@ server {
 ${locationBlock}
 }`;
 
-  const httpsBlock = sslEnabled ? `
+  // Only include HTTPS block if certificates exist
+  const httpsBlock = certsExist ? `
 
 server {
     listen 443 ssl http2;
@@ -1281,10 +1371,15 @@ server {
 ${locationBlock}
 }` : '';
 
+  // Add comment about SSL status
+  const sslComment = sslEnabled && !certsExist
+    ? `# SSL: Enabled but certificates not found - run: certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}\n`
+    : '';
+
   return `# ProxyPilot Managed Configuration
 # Domain: ${domain}
 # Type: ${type}
 # Generated: ${new Date().toISOString()}
-${httpBlock}${httpsBlock}
+${sslComment}${httpBlock}${httpsBlock}
 `;
 }

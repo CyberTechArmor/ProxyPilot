@@ -64,6 +64,9 @@ import {
   Code,
   MessageSquare,
   Edit3,
+  ShieldAlert,
+  ShieldCheck,
+  RefreshCcw,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -335,6 +338,26 @@ export default function Dashboard() {
         title: 'Success',
         description: 'NGINX reloaded successfully',
       });
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    }
+  };
+
+  const handleRegenerateConfig = async (service, e) => {
+    e.stopPropagation();
+    try {
+      const result = await api.regenerateConfig(service.id);
+      toast({
+        title: result.sslCertificateExists ? 'Success' : 'Config Updated',
+        description: result.sslCertificateExists
+          ? 'Configuration regenerated with SSL enabled'
+          : 'Configuration regenerated. SSL certificate still missing - run certbot to obtain certificate.',
+      });
+      fetchServices();
     } catch (error) {
       toast({
         variant: 'destructive',
@@ -973,9 +996,34 @@ export default function Dashboard() {
                   <span className="text-muted-foreground">Location</span>
                   <span className="font-mono text-xs truncate max-w-[150px]">{getServiceLocation(service)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">SSL</span>
-                  <span>{service.sslEnabled ? 'Enabled' : 'Disabled'}</span>
+                  <span className="flex items-center gap-1">
+                    {service.sslEnabled ? (
+                      service.sslCertificateExists ? (
+                        <>
+                          <ShieldCheck className="h-3 w-3 text-green-500" />
+                          <span className="text-green-500">Active</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldAlert className="h-3 w-3 text-yellow-500" />
+                          <span className="text-yellow-500" title="SSL enabled but certificate not found">Pending</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 ml-1"
+                            onClick={(e) => handleRegenerateConfig(service, e)}
+                            title="Regenerate config (after obtaining certificate)"
+                          >
+                            <RefreshCcw className="h-3 w-3" />
+                          </Button>
+                        </>
+                      )
+                    ) : (
+                      <span>Disabled</span>
+                    )}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Status</span>

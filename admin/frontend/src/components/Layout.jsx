@@ -14,6 +14,10 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
 
+  // Check admin status from user context and localStorage fallback
+  const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
@@ -21,7 +25,7 @@ export default function Layout() {
   ];
 
   const filteredNavigation = navigation.filter(item =>
-    !item.adminOnly || user?.role === 'admin'
+    !item.adminOnly || isAdmin
   );
 
   return (

@@ -786,13 +786,13 @@ export default function Dashboard() {
   };
 
   const openTerminal = async (initialDir = null) => {
-    const startDir = initialDir || terminalCwd || '/root';
+    // Always start with /root if no directory specified
+    const startDir = initialDir || '/root';
     setTerminalCwd(startDir);
     setTerminalFullscreen(true);
+    setTerminalOutput(prev => prev.length === 0 ? [{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }] : prev);
+    // Open dialog after state is set
     setTerminalOpen(true);
-    if (terminalOutput.length === 0) {
-      setTerminalOutput([{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }]);
-    }
 
     // Fetch system info and containers
     try {
@@ -800,8 +800,8 @@ export default function Dashboard() {
         api.getSystemInfo().catch(() => null),
         api.listContainers().catch(() => ({ containers: [] })),
       ]);
-      setSystemInfo(sysInfo);
-      setContainers(containerList.containers || []);
+      setSystemInfo(sysInfo || null);
+      setContainers(containerList?.containers || []);
       // Fetch directory contents for the starting directory
       fetchTerminalDirectory(startDir);
       // Also fetch docker-compose containers for current directory
@@ -2834,7 +2834,7 @@ volumes:
                 </DialogTitle>
                 <DialogDescription>
                   Execute commands on the host system
-                  {systemInfo && ` - ${systemInfo.hostname}`}
+                  {systemInfo?.hostname ? ` - ${systemInfo.hostname}` : ''}
                 </DialogDescription>
               </div>
               <div className="flex gap-2">
@@ -3005,7 +3005,7 @@ volumes:
                         line.type === 'system' ? 'text-blue-400' :
                         'text-green-400'
                       }`}>
-                        {line.text}
+                        {String(line.text || '')}
                         {line.duration !== undefined && (
                           <span className="text-gray-500 text-xs ml-2">({line.duration}ms)</span>
                         )}

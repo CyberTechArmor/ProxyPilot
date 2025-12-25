@@ -1470,6 +1470,98 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* Running Docker Compose Services Section */}
+      {composeServices.length > 0 && (
+        <div className="mt-8">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              <Boxes className="h-5 w-5" />
+              Running Docker Compose Services
+            </h2>
+            <Button variant="outline" size="sm" onClick={fetchComposeServices}>
+              <RefreshCw className="h-4 w-4 mr-1" />
+              Refresh
+            </Button>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {composeServices.map((svc) => {
+              // Check if there's already a ProxyPilot service for this port
+              const existingService = services.find(s => s.port === svc.exposedPort && s.type === 'docker');
+              return (
+                <Card key={svc.id} className="border-dashed">
+                  <CardHeader className="pb-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-3 h-3 rounded-full ${svc.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                        <Container className="h-4 w-4 text-purple-500" />
+                        <CardTitle className="text-lg">{svc.serviceName || svc.containerName}</CardTitle>
+                      </div>
+                      <span className="text-xs px-2 py-0.5 rounded bg-purple-500/10 text-purple-500">{svc.projectName}</span>
+                    </div>
+                    <CardDescription className="truncate" title={svc.containerName}>
+                      {svc.containerName}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Image</span>
+                        <span className="font-mono text-xs truncate max-w-[150px]" title={svc.image}>{svc.image?.split(':')[0]}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Port</span>
+                        <span className={svc.exposedPort ? 'text-green-500' : 'text-muted-foreground'}>
+                          {svc.exposedPort || 'Not exposed'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Status</span>
+                        <span className={svc.isRunning ? 'text-green-500' : 'text-red-500'}>
+                          {svc.isRunning ? 'Running' : 'Stopped'}
+                        </span>
+                      </div>
+                      {existingService ? (
+                        <div className="pt-2 border-t">
+                          <span className="text-xs text-green-500 flex items-center gap-1">
+                            <Check className="h-3 w-3" />
+                            Proxied via {existingService.domain}
+                          </span>
+                        </div>
+                      ) : svc.exposedPort ? (
+                        <Button
+                          size="sm"
+                          className="w-full mt-2"
+                          onClick={() => {
+                            setFormData({
+                              name: svc.serviceName || svc.containerName,
+                              domain: '',
+                              type: 'docker',
+                              target: '127.0.0.1',
+                              port: svc.exposedPort.toString(),
+                              containerName: svc.containerName,
+                              sslEnabled: true,
+                              forceHttps: true,
+                              websocketEnabled: false,
+                              maxUploadSize: '1G',
+                              obtainCertificate: true,
+                            });
+                            setWizardStep(1);
+                            setAddDialogOpen(true);
+                          }}
+                        >
+                          <Plus className="h-4 w-4 mr-1" />
+                          Create Proxy
+                        </Button>
+                      ) : null}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Delete Confirmation Dialog */}
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>

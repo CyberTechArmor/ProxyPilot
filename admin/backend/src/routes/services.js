@@ -2017,77 +2017,108 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 
     const discoveredSites = [];
 
-    // Read sites-available directory
-    if (existsSync(NGINX_SITES_AVAILABLE)) {
-      const files = await readdir(NGINX_SITES_AVAILABLE);
+    // Use execOnHost to read from host filesystem when running in Docker
+    const sitesDir = NGINX_SITES_AVAILABLE;
 
-      for (const file of files) {
-        if (file === 'default') continue; // Skip default site
+    // Get list of files in sites-available
+    let files = [];
+    try {
+      if (isInDocker) {
+        const result = await execOnHost(`ls -1 ${JSON.stringify(sitesDir)} 2>/dev/null || echo ""`);
+        files = result.stdout.trim().split('\n').filter(Boolean);
+      } else if (existsSync(sitesDir)) {
+        files = await readdir(sitesDir);
+      }
+    } catch (e) {
+      console.log('Could not read sites-available directory:', e.message);
+    }
 
-        const configPath = join(NGINX_SITES_AVAILABLE, file);
-        const stats = await stat(configPath);
-        if (!stats.isFile()) continue;
+    console.log(`NGINX discovery found ${files.length} files in ${sitesDir}`);
 
-        try {
-          const content = await readFile(configPath, 'utf-8');
+    for (const file of files) {
+      if (file === 'default' || file === '.' || file === '..') continue; // Skip default site
 
-          // Extract domain from server_name directive
-          const serverNameMatch = content.match(/server_name\s+([^\s;]+)/);
-          const domain = serverNameMatch ? serverNameMatch[1] : file;
-
-          // Skip if already in database
-          if (existingDomains.includes(domain)) continue;
-
-          // Determine type based on config content
-          let type = 'static';
-          let rootDir = null;
-          let port = null;
-          let target = null;
-
-          // Check for proxy_pass (indicates docker/proxy type)
-          const proxyMatch = content.match(/proxy_pass\s+http:\/\/([^:\/]+):?(\d+)?/);
-          if (proxyMatch) {
-            type = 'docker';
-            target = proxyMatch[1] || '127.0.0.1';
-            port = proxyMatch[2] ? parseInt(proxyMatch[2], 10) : 80;
-          }
-
-          // Check for root directive (static site)
-          const rootMatch = content.match(/root\s+([^;]+);/);
-          if (rootMatch && type === 'static') {
-            rootDir = rootMatch[1].trim();
-          }
-
-          // Check for SSL
-          const sslEnabled = content.includes('ssl_certificate') || content.includes('listen 443');
-
-          // Try to find index.html for static sites
-          let hasIndexHtml = false;
-          if (rootDir && existsSync(rootDir)) {
-            hasIndexHtml = existsSync(join(rootDir, 'index.html'));
-          }
-
-          discoveredSites.push({
-            domain,
-            name: domain.split('.')[0], // Use first part of domain as name
-            type,
-            rootDir,
-            target,
-            port,
-            sslEnabled,
-            hasIndexHtml,
-            configFile: file,
-          });
-        } catch (e) {
-          console.log(`Could not parse ${file}:`, e.message);
+      try {
+        // Read config content
+        let content = '';
+        if (isInDocker) {
+          const result = await execOnHost(`cat ${JSON.stringify(join(sitesDir, file))} 2>/dev/null || echo ""`);
+          content = result.stdout;
+        } else {
+          const configPath = join(sitesDir, file);
+          const stats = await stat(configPath);
+          if (!stats.isFile()) continue;
+          content = await readFile(configPath, 'utf-8');
         }
+
+        if (!content.trim()) continue;
+
+        // Extract domain from server_name directive
+        const serverNameMatch = content.match(/server_name\s+([^\s;]+)/);
+        const domain = serverNameMatch ? serverNameMatch[1] : file;
+
+        // Skip if already in database
+        if (existingDomains.includes(domain)) continue;
+
+        // Determine type based on config content
+        let type = 'static';
+        let rootDir = null;
+        let port = null;
+        let target = null;
+
+        // Check for proxy_pass (indicates docker/proxy type)
+        const proxyMatch = content.match(/proxy_pass\s+http:\/\/([^:\/]+):?(\d+)?/);
+        if (proxyMatch) {
+          type = 'docker';
+          target = proxyMatch[1] || '127.0.0.1';
+          port = proxyMatch[2] ? parseInt(proxyMatch[2], 10) : 80;
+        }
+
+        // Check for root directive (static site)
+        const rootMatch = content.match(/root\s+([^;]+);/);
+        if (rootMatch && type === 'static') {
+          rootDir = rootMatch[1].trim();
+        }
+
+        // Check for SSL
+        const sslEnabled = content.includes('ssl_certificate') || content.includes('listen 443');
+
+        // Try to find index.html for static sites
+        let hasIndexHtml = false;
+        if (rootDir) {
+          try {
+            if (isInDocker) {
+              const indexResult = await execOnHost(`test -f ${JSON.stringify(join(rootDir, 'index.html'))} && echo "exists" || echo ""`);
+              hasIndexHtml = indexResult.stdout.trim() === 'exists';
+            } else if (existsSync(rootDir)) {
+              hasIndexHtml = existsSync(join(rootDir, 'index.html'));
+            }
+          } catch (e) {
+            // Ignore
+          }
+        }
+
+        discoveredSites.push({
+          domain,
+          name: domain.split('.')[0], // Use first part of domain as name
+          type,
+          rootDir,
+          target,
+          port,
+          sslEnabled,
+          hasIndexHtml,
+          configFile: file,
+        });
+      } catch (e) {
+        console.log(`Could not parse ${file}:`, e.message);
       }
     }
 
+    console.log(`Returning ${discoveredSites.length} discovered NGINX sites`);
     res.json({ sites: discoveredSites });
   } catch (error) {
     console.error('Error discovering sites:', error);
-    res.status(500).json({ error: 'Failed to discover sites' });
+    res.status(500).json({ error: 'Failed to discover sites: ' + error.message });
   }
 });
 
@@ -2251,48 +2282,71 @@ servicesRouter.get('/discover/docker-compose', async (req, res) => {
 // Get all docker compose services (for display in services list)
 servicesRouter.get('/docker-compose/services', async (req, res) => {
   try {
-    // Get containers that are part of a compose project
-    const result = await execOnHost(`docker ps -a --filter "label=com.docker.compose.project" --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.service"}}' 2>/dev/null || echo ""`);
+    // Get all containers (not just compose-labelled ones, in case labels are missing)
+    const result = await execOnHost(`docker ps -a --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.Labels}}' 2>/dev/null || echo ""`);
 
     const services = [];
     const lines = result.stdout.trim().split('\n').filter(Boolean);
 
+    console.log(`Docker compose discovery found ${lines.length} containers`);
+
     for (const line of lines) {
-      const [id, containerName, image, status, ports, projectName, serviceName] = line.split('\t');
+      const parts = line.split('\t');
+      const [id, containerName, image, status, ports, labelsStr] = parts;
 
-      // Skip proxypilot container itself
-      if (containerName === 'proxypilot-admin') continue;
+      // Skip proxypilot containers
+      if (containerName && (containerName.includes('proxypilot') || containerName === 'proxypilot-admin')) continue;
 
-      // Parse port
-      let exposedPort = null;
-      let hostBinding = null;
-      if (ports) {
-        const portMatch = ports.match(/(?:(\d+\.\d+\.\d+\.\d+):)?(\d+)->(\d+)/);
-        if (portMatch) {
-          hostBinding = portMatch[1] || '0.0.0.0';
-          exposedPort = parseInt(portMatch[2], 10);
+      // Parse labels to find compose project info
+      let projectName = null;
+      let serviceName = null;
+
+      if (labelsStr) {
+        const labels = labelsStr.split(',');
+        for (const label of labels) {
+          const [key, value] = label.split('=');
+          if (key === 'com.docker.compose.project') projectName = value;
+          if (key === 'com.docker.compose.service') serviceName = value;
         }
       }
 
-      services.push({
-        id,
-        containerName,
-        serviceName: serviceName || containerName,
-        projectName: projectName || 'unknown',
-        image,
-        status,
-        ports,
-        exposedPort,
-        hostBinding,
-        isRunning: status.includes('Up'),
-        type: 'docker-compose',
-      });
+      // Parse port - handle various formats:
+      // 0.0.0.0:7000->80/tcp, 127.0.0.1:7000->80/tcp, :::7000->80/tcp, 7000->80/tcp
+      let exposedPort = null;
+      let hostBinding = '0.0.0.0';
+      if (ports) {
+        // Match patterns like: 0.0.0.0:7000->80, 127.0.0.1:7000->80, :::7000->80, 7000->80
+        const portMatches = ports.matchAll(/(?:(\d+\.\d+\.\d+\.\d+|:::?):)?(\d+)->(\d+)(?:\/\w+)?/g);
+        for (const match of portMatches) {
+          if (match[1]) hostBinding = match[1];
+          exposedPort = parseInt(match[2], 10);
+          break; // Take the first port mapping
+        }
+      }
+
+      // Include container if it has compose labels OR has exposed ports
+      if (projectName || exposedPort) {
+        services.push({
+          id,
+          containerName,
+          serviceName: serviceName || containerName,
+          projectName: projectName || 'standalone',
+          image,
+          status,
+          ports,
+          exposedPort,
+          hostBinding,
+          isRunning: status && status.includes('Up'),
+          type: projectName ? 'docker-compose' : 'docker',
+        });
+      }
     }
 
+    console.log(`Returning ${services.length} docker compose services`);
     res.json({ services });
   } catch (error) {
     console.error('Error getting docker compose services:', error);
-    res.status(500).json({ error: 'Failed to get docker compose services', services: [] });
+    res.status(500).json({ error: 'Failed to get docker compose services: ' + error.message, services: [] });
   }
 });
 

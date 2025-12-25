@@ -88,9 +88,29 @@ async function reloadNginx() {
   }
 }
 
+// Check if certbot is installed
+async function isCertbotInstalled() {
+  try {
+    await execAsync('which certbot 2>/dev/null || command -v certbot 2>/dev/null');
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Helper function to obtain SSL certificate using certbot
 async function obtainSslCertificate(domain) {
   try {
+    // Check if certbot is installed
+    const certbotAvailable = await isCertbotInstalled();
+    if (!certbotAvailable) {
+      return {
+        success: false,
+        error: 'Certbot is not installed. Install it with: apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
+        certbotMissing: true,
+      };
+    }
+
     // Create letsencrypt webroot directory if it doesn't exist
     await mkdir('/var/www/letsencrypt/.well-known/acme-challenge', { recursive: true });
 
@@ -177,20 +197,41 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 });
 
 // Check SSL certificate status for a domain
-servicesRouter.get('/ssl-status/:domain', (req, res) => {
+servicesRouter.get('/ssl-status/:domain', async (req, res) => {
   try {
     const domain = req.params.domain;
     const exists = sslCertExists(domain);
     const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+    const certbotInstalled = await isCertbotInstalled();
 
     res.json({
       domain,
       certificateExists: exists,
       certificatePath: certPath,
+      certbotInstalled,
       command: exists ? null : `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}`,
+      installCertbotCommand: certbotInstalled ? null : 'apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to check SSL status' });
+  }
+});
+
+// Check system requirements (certbot, etc.)
+servicesRouter.get('/system-check', async (req, res) => {
+  try {
+    const certbotInstalled = await isCertbotInstalled();
+
+    res.json({
+      certbotInstalled,
+      installInstructions: certbotInstalled ? null : {
+        debian: 'sudo apt install certbot',
+        rhel: 'sudo yum install certbot',
+        alpine: 'sudo apk add certbot',
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to check system' });
   }
 });
 

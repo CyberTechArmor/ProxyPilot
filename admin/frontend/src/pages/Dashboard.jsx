@@ -1,5 +1,15 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { api } from '@/lib/api';
+import CodeMirror from '@uiw/react-codemirror';
+import { javascript } from '@codemirror/lang-javascript';
+import { html } from '@codemirror/lang-html';
+import { css } from '@codemirror/lang-css';
+import { json } from '@codemirror/lang-json';
+import { python } from '@codemirror/lang-python';
+import { yaml } from '@codemirror/lang-yaml';
+import { markdown } from '@codemirror/lang-markdown';
+import { xml } from '@codemirror/lang-xml';
+import { oneDark } from '@codemirror/theme-one-dark';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -52,6 +62,8 @@ import {
   Maximize2,
   Minimize2,
   Code,
+  MessageSquare,
+  Edit3,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -80,6 +92,33 @@ const getLanguageColor = (lang) => {
     rust: '#dea584', java: '#007396', dockerfile: '#2496ed',
   };
   return colors[lang] || '#6b7280';
+};
+
+// Get CodeMirror language extension
+const getLanguageExtension = (lang) => {
+  switch (lang) {
+    case 'javascript':
+    case 'typescript':
+      return javascript({ jsx: true, typescript: lang === 'typescript' });
+    case 'html':
+      return html();
+    case 'css':
+      return css();
+    case 'json':
+      return json();
+    case 'python':
+      return python();
+    case 'yaml':
+      return yaml();
+    case 'markdown':
+      return markdown();
+    case 'xml':
+    case 'nginx':
+    case 'dockerfile':
+      return xml();
+    default:
+      return [];
+  }
 };
 
 export default function Dashboard() {
@@ -134,6 +173,9 @@ export default function Dashboard() {
   const [versions, setVersions] = useState([]);
   const [showVersions, setShowVersions] = useState(false);
   const [loadingVersions, setLoadingVersions] = useState(false);
+  const [editingNotes, setEditingNotes] = useState(null);
+  const [noteText, setNoteText] = useState('');
+  const [saveNotes, setSaveNotes] = useState('');
 
   // Export/Import state
   const [exportServiceIds, setExportServiceIds] = useState([]);
@@ -385,8 +427,9 @@ export default function Dashboard() {
     setSavingFile(true);
 
     try {
-      const result = await api.saveFile(selectedService.id, selectedFile.path, fileContent);
+      const result = await api.saveFile(selectedService.id, selectedFile.path, fileContent, saveNotes || null);
       setOriginalContent(fileContent);
+      setSaveNotes('');
       toast({
         title: 'Success',
         description: result.nginxReloaded
@@ -510,6 +553,30 @@ export default function Dashboard() {
         description: error.message,
       });
     }
+  };
+
+  const updateVersionNotes = async (version) => {
+    try {
+      await api.updateVersionNotes(selectedService.id, version.id, noteText);
+      setEditingNotes(null);
+      setNoteText('');
+      toast({
+        title: 'Success',
+        description: 'Notes updated',
+      });
+      loadVersions();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    }
+  };
+
+  const startEditingNotes = (version) => {
+    setEditingNotes(version.id);
+    setNoteText(version.notes || '');
   };
 
   // File Import/Export in editor
@@ -1037,6 +1104,14 @@ export default function Dashboard() {
                       <History className="h-4 w-4 mr-1" />
                       History
                     </Button>
+                    {hasUnsavedChanges && (
+                      <Input
+                        className="w-40 h-7 text-xs"
+                        placeholder="Version notes..."
+                        value={saveNotes}
+                        onChange={(e) => setSaveNotes(e.target.value)}
+                      />
+                    )}
                     <Button size="sm" onClick={saveFile} disabled={savingFile || !hasUnsavedChanges}>
                       {savingFile ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
                     </Button>
@@ -1046,15 +1121,43 @@ export default function Dashboard() {
 
               <div className="flex-1 flex min-h-0">
                 {/* Code Editor */}
-                <div className="flex-1 relative">
-                  <textarea
-                    className={`absolute inset-0 w-full h-full p-4 font-mono text-sm resize-none bg-background focus:outline-none ${hasUnsavedChanges ? 'border-l-2 border-yellow-500' : ''}`}
-                    value={fileContent}
-                    onChange={(e) => setFileContent(e.target.value)}
-                    placeholder={selectedFile ? '' : 'Select a file from the tree to view and edit its contents'}
-                    disabled={!selectedFile}
-                    spellCheck={false}
-                  />
+                <div className={`flex-1 relative overflow-hidden ${hasUnsavedChanges ? 'border-l-2 border-yellow-500' : ''}`}>
+                  {selectedFile ? (
+                    <CodeMirror
+                      value={fileContent}
+                      height="100%"
+                      theme={oneDark}
+                      extensions={[getLanguageExtension(selectedLanguage)].flat()}
+                      onChange={(value) => setFileContent(value)}
+                      className="h-full text-sm"
+                      basicSetup={{
+                        lineNumbers: true,
+                        highlightActiveLineGutter: true,
+                        highlightSpecialChars: true,
+                        foldGutter: true,
+                        drawSelection: true,
+                        dropCursor: true,
+                        allowMultipleSelections: true,
+                        indentOnInput: true,
+                        bracketMatching: true,
+                        closeBrackets: true,
+                        autocompletion: true,
+                        rectangularSelection: true,
+                        crosshairCursor: true,
+                        highlightActiveLine: true,
+                        highlightSelectionMatches: true,
+                        closeBracketsKeymap: true,
+                        searchKeymap: true,
+                        foldKeymap: true,
+                        completionKeymap: true,
+                        lintKeymap: true,
+                      }}
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-muted-foreground">
+                      Select a file from the tree to view and edit its contents
+                    </div>
+                  )}
                 </div>
 
                 {/* Version History Panel */}
@@ -1085,6 +1188,38 @@ export default function Dashboard() {
                               <p className="text-xs text-muted-foreground">
                                 {new Date(v.createdAt).toLocaleString()}
                               </p>
+                              {/* Notes section */}
+                              {editingNotes === v.id ? (
+                                <div className="mt-2 space-y-1">
+                                  <textarea
+                                    className="w-full p-1 text-xs border rounded bg-background resize-none"
+                                    placeholder="Add notes..."
+                                    value={noteText}
+                                    onChange={(e) => setNoteText(e.target.value)}
+                                    rows={2}
+                                  />
+                                  <div className="flex gap-1">
+                                    <Button size="sm" className="h-6 text-xs px-2" onClick={() => updateVersionNotes(v)}>
+                                      <Check className="h-3 w-3 mr-1" />Save
+                                    </Button>
+                                    <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => { setEditingNotes(null); setNoteText(''); }}>
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="mt-1 flex items-start gap-1">
+                                  {v.notes ? (
+                                    <p className="text-xs text-muted-foreground italic flex-1 line-clamp-2" title={v.notes}>
+                                      <MessageSquare className="h-3 w-3 inline mr-1" />
+                                      {v.notes}
+                                    </p>
+                                  ) : null}
+                                  <Button variant="ghost" size="icon" className="h-5 w-5 shrink-0" onClick={() => startEditingNotes(v)} title="Edit notes">
+                                    <Edit3 className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>

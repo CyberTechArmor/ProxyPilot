@@ -53,12 +53,20 @@ const fileSchema = z.object({
 // Helper function to reload NGINX
 async function reloadNginx() {
   try {
-    await execAsync('nginx -t 2>&1');
-    await execAsync('systemctl reload nginx || nginx -s reload');
+    // Test NGINX configuration first
+    const testResult = await execAsync('nginx -t 2>&1');
+    console.log('NGINX test output:', testResult.stdout, testResult.stderr);
+
+    // Reload NGINX
+    const reloadResult = await execAsync('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+    console.log('NGINX reload output:', reloadResult.stdout, reloadResult.stderr);
+
     return { success: true };
   } catch (error) {
-    console.error('NGINX reload failed:', error);
-    return { success: false, error: error.message };
+    // Extract the actual error message from stderr or stdout
+    const errorOutput = error.stderr || error.stdout || error.message;
+    console.error('NGINX reload failed:', errorOutput);
+    return { success: false, error: errorOutput };
   }
 }
 
@@ -70,11 +78,21 @@ servicesRouter.post('/nginx/reload', async (req, res) => {
       logAudit(req.user.id, 'NGINX_RELOADED', 'system', null, {}, req.ip);
       res.json({ success: true, message: 'NGINX reloaded successfully' });
     } else {
-      res.status(500).json({ error: 'NGINX reload failed', details: result.error });
+      // Parse NGINX error output for more readable message
+      let errorMessage = result.error || 'Unknown error';
+      // Extract key error info if present
+      const errorMatch = errorMessage.match(/nginx:.*error.*|emerg\].*|syntax error.*/i);
+      if (errorMatch) {
+        errorMessage = errorMatch[0];
+      }
+      res.status(500).json({
+        error: `NGINX reload failed: ${errorMessage}`,
+        details: result.error
+      });
     }
   } catch (error) {
     console.error('Error reloading NGINX:', error);
-    res.status(500).json({ error: 'Failed to reload NGINX' });
+    res.status(500).json({ error: 'Failed to reload NGINX: ' + error.message });
   }
 });
 
@@ -565,7 +583,7 @@ servicesRouter.get('/:id/files/*', async (req, res) => {
 // Create or update a file (with version control)
 servicesRouter.put('/:id/files/*', async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, notes } = req.body;
     if (typeof content !== 'string') {
       return res.status(400).json({ error: 'Content is required' });
     }
@@ -604,9 +622,9 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
 
         // Save old content as a version
         db.prepare(`
-          INSERT INTO file_versions (id, service_id, file_path, content, version, created_by)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), req.params.id, filePath, oldContent, nextVersion, req.user.id);
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), req.params.id, filePath, oldContent, nextVersion, notes || null, req.user.id);
 
         // Keep only last 50 versions per file
         db.prepare(`
@@ -699,7 +717,7 @@ servicesRouter.get('/:id/versions/*', (req, res) => {
 
     const filePath = req.params[0];
     const versions = db.prepare(`
-      SELECT id, version, created_at as createdAt, created_by as createdBy
+      SELECT id, version, notes, created_at as createdAt, created_by as createdBy
       FROM file_versions
       WHERE service_id = ? AND file_path = ?
       ORDER BY version DESC
@@ -795,6 +813,36 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
   } catch (error) {
     console.error('Error reverting file:', error);
     res.status(500).json({ error: 'Failed to revert file' });
+  }
+});
+
+// Update version notes
+servicesRouter.put('/:id/version/:versionId/notes', (req, res) => {
+  try {
+    const { notes } = req.body;
+    const db = getDb();
+
+    const version = db.prepare(`
+      SELECT id FROM file_versions WHERE id = ? AND service_id = ?
+    `).get(req.params.versionId, req.params.id);
+
+    if (!version) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    db.prepare(`
+      UPDATE file_versions SET notes = ? WHERE id = ?
+    `).run(notes || null, req.params.versionId);
+
+    logAudit(req.user.id, 'VERSION_NOTES_UPDATED', 'service', req.params.id, {
+      versionId: req.params.versionId,
+      notes,
+    }, req.ip);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating version notes:', error);
+    res.status(500).json({ error: 'Failed to update notes' });
   }
 });
 

@@ -459,6 +459,8 @@ services:
       - ./data:/data
       - /etc/nginx/sites-available:/etc/nginx/sites-available
       - /etc/nginx/sites-enabled:/etc/nginx/sites-enabled
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/www/letsencrypt:/var/www/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - NODE_ENV=production

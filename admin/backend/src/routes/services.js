@@ -16,6 +16,9 @@ export const servicesRouter = Router();
 const NGINX_SITES_AVAILABLE = process.env.NGINX_SITES_AVAILABLE || '/etc/nginx/sites-available';
 const NGINX_SITES_ENABLED = process.env.NGINX_SITES_ENABLED || '/etc/nginx/sites-enabled';
 const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
+// NGINX_STATIC_ROOT is the host path that NGINX uses to serve static files
+// This may differ from SERVICES_DATA_DIR when running in Docker
+const NGINX_STATIC_ROOT = process.env.NGINX_STATIC_ROOT || SERVICES_DATA_DIR;
 
 // Helper to create safe directory name from service name
 function toSafeDirectoryName(name) {
@@ -39,7 +42,7 @@ const createServiceSchema = z.object({
   forceHttps: z.boolean().default(true),
   websocketEnabled: z.boolean().default(false),
   maxUploadSize: z.string().regex(/^[1-9][0-9]*[MG]$/i).default('1G'),
-  obtainCertificate: z.boolean().default(false),
+  obtainCertificate: z.boolean().default(true),
 });
 
 const deleteServiceSchema = z.object({
@@ -238,6 +241,91 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
   } catch (error) {
     console.error('Error obtaining certificate:', error);
     res.status(500).json({ error: 'Failed to obtain certificate: ' + error.message });
+  }
+});
+
+// Remove SSL certificate for a service (requires TOTP)
+servicesRouter.delete('/:id/certificate', async (req, res) => {
+  try {
+    const { totpCode } = deleteServiceSchema.parse(req.body);
+    const db = getDb();
+
+    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    // Check if certificate exists
+    if (!sslCertExists(service.domain)) {
+      return res.status(400).json({ error: 'No SSL certificate found for this domain' });
+    }
+
+    // Verify TOTP
+    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    if (user && user.totp_secret) {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'ProxyPilot',
+        label: req.user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    // Remove certificate using certbot
+    try {
+      await execAsync(`certbot delete --cert-name ${service.domain} --non-interactive 2>&1`);
+    } catch (certbotError) {
+      // If certbot delete fails, try manual removal
+      const certDir = `/etc/letsencrypt/live/${service.domain}`;
+      const renewalConf = `/etc/letsencrypt/renewal/${service.domain}.conf`;
+      const archiveDir = `/etc/letsencrypt/archive/${service.domain}`;
+
+      await rm(certDir, { recursive: true, force: true }).catch(() => {});
+      await unlink(renewalConf).catch(() => {});
+      await rm(archiveDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    // Regenerate NGINX config without HTTPS
+    const serviceConfig = {
+      domain: service.domain,
+      type: service.type,
+      target: service.target,
+      port: service.port,
+      rootDir: service.root_dir,
+      websocketEnabled: !!service.websocket_enabled,
+      forceHttps: false, // Can't force HTTPS without cert
+      maxUploadSize: service.max_upload_size,
+      sslEnabled: false, // Disable SSL since cert is removed
+    };
+
+    const nginxConfig = generateNginxConfig(serviceConfig);
+    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+    await writeFile(configPath, nginxConfig);
+
+    // Reload NGINX
+    const reloadResult = await reloadNginx();
+
+    logAudit(req.user.id, 'SSL_CERTIFICATE_REMOVED', 'service', req.params.id, { domain: service.domain }, req.ip);
+
+    res.json({
+      success: true,
+      message: 'SSL certificate removed and NGINX reconfigured',
+      nginxReloaded: reloadResult.success,
+      nginxError: reloadResult.error,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error removing certificate:', error);
+    res.status(500).json({ error: 'Failed to remove certificate: ' + error.message });
   }
 });
 
@@ -1552,6 +1640,13 @@ function generateNginxConfig(service) {
   // Only force HTTPS redirect if SSL is enabled AND certificates exist
   const actualForceHttps = forceHttps && certsExist;
 
+  // Convert container path to host path for NGINX
+  // If rootDir starts with SERVICES_DATA_DIR, replace with NGINX_STATIC_ROOT
+  let nginxRootDir = rootDir;
+  if (rootDir && rootDir.startsWith(SERVICES_DATA_DIR)) {
+    nginxRootDir = rootDir.replace(SERVICES_DATA_DIR, NGINX_STATIC_ROOT);
+  }
+
   let locationBlock = '';
   let rootBlock = '';
 
@@ -1579,7 +1674,7 @@ function generateNginxConfig(service) {
 
     case 'static':
       rootBlock = `
-    root ${rootDir};
+    root ${nginxRootDir};
     index index.html index.htm;`;
       locationBlock = `
     location / {

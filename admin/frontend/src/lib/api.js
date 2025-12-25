@@ -93,6 +93,11 @@ export const api = {
     method: 'POST',
   }),
 
+  removeCertificate: (serviceId, totpCode) => request(`/services/${serviceId}/certificate`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totpCode }),
+  }),
+
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
 

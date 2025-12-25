@@ -9,6 +9,7 @@ WORKDIR /app/frontend
 ENV NODE_OPTIONS="--max-old-space-size=512"
 ENV GENERATE_SOURCEMAP=false
 ENV CI=true
+ENV UV_THREADPOOL_SIZE=1
 
 # Copy frontend package files
 COPY frontend/package*.json ./

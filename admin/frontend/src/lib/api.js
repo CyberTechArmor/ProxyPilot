@@ -165,6 +165,8 @@ export const api = {
 
   getSystemInfo: () => request('/services/terminal/system-info'),
 
+  getSystemStats: () => request('/services/system/stats'),
+
   // Docker
   listContainers: () => request('/services/docker/containers'),
 

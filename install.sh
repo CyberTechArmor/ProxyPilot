@@ -78,6 +78,16 @@ check_root() {
     fi
 }
 
+# Check and install curl if not present
+check_curl() {
+    if ! command -v curl &> /dev/null; then
+        log_info "curl not found, installing..."
+        apt-get update -y
+        apt-get install -y curl
+        log_success "curl installed"
+    fi
+}
+
 # Generate secure random password
 generate_password() {
     local length=${1:-32}
@@ -297,16 +307,37 @@ install_docker() {
 check_docker_compose() {
     log_info "Checking Docker Compose..."
 
-    # Check for docker compose plugin (v2)
+    # Check for docker compose plugin (v2) - PREFERRED
     if docker compose version &> /dev/null; then
         log_success "Docker Compose plugin is available ($(docker compose version --short 2>/dev/null || echo 'v2'))"
+        DOCKER_COMPOSE_CMD="docker compose"
         return 0
     fi
 
-    # Check for standalone docker-compose (v1)
+    # Check for standalone docker-compose (v1) - has compatibility issues with newer Docker
     if command -v docker-compose &> /dev/null; then
-        log_warn "Found standalone docker-compose. Consider upgrading to Docker Compose plugin."
-        log_success "Docker Compose is available ($(docker-compose version --short 2>/dev/null || echo 'v1'))"
+        local dc_version=$(docker-compose version --short 2>/dev/null || echo "1.0.0")
+        log_warn "Found standalone docker-compose v${dc_version}"
+        log_warn "This version may have compatibility issues (KeyError: ContainerConfig)"
+        log_info "Installing Docker Compose plugin (v2) for better compatibility..."
+
+        # Try to install the plugin version
+        if command -v apt-get &> /dev/null; then
+            apt-get update -y
+            if apt-get install -y docker-compose-plugin 2>/dev/null; then
+                # Verify plugin works
+                if docker compose version &> /dev/null; then
+                    log_success "Docker Compose plugin installed ($(docker compose version --short 2>/dev/null || echo 'v2'))"
+                    DOCKER_COMPOSE_CMD="docker compose"
+                    return 0
+                fi
+            fi
+        fi
+
+        # If plugin install failed, continue with v1 but warn
+        log_warn "Could not install Docker Compose plugin, using standalone version"
+        log_warn "If you see 'ContainerConfig' errors, run: apt-get install docker-compose-plugin"
+        DOCKER_COMPOSE_CMD="docker-compose"
         return 0
     fi
 
@@ -336,11 +367,13 @@ check_docker_compose() {
         exit 1
     fi
 
-    # Verify installation
+    # Verify installation and set command
     if docker compose version &> /dev/null; then
         log_success "Docker Compose plugin installed successfully"
+        DOCKER_COMPOSE_CMD="docker compose"
     elif command -v docker-compose &> /dev/null; then
         log_success "Docker Compose installed successfully"
+        DOCKER_COMPOSE_CMD="docker-compose"
     else
         log_error "Docker Compose installation verification failed"
         exit 1
@@ -703,6 +736,7 @@ main() {
     echo ""
 
     check_root
+    check_curl
 
     # Get installation directory
     INSTALL_DIR="/opt/proxypilot"

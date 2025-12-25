@@ -200,6 +200,15 @@ export default function Dashboard() {
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [containers, setContainers] = useState([]);
   const [systemInfo, setSystemInfo] = useState(null);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const [terminalCwd, setTerminalCwd] = useState('/');
+  const terminalOutputRef = useCallback(node => {
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [terminalOutput]);
+
+  // Kill switch state
+  const [killSwitchDialogOpen, setKillSwitchDialogOpen] = useState(false);
+  const [securingSystem, setSecuringSystem] = useState(false);
 
   const { toast } = useToast();
 
@@ -503,21 +512,50 @@ export default function Dashboard() {
     if (!terminalCommand.trim() || terminalRunning) return;
 
     const cmd = terminalCommand.trim();
-    setTerminalOutput(prev => [...prev, { type: 'input', text: `$ ${cmd}` }]);
+    setTerminalOutput(prev => [...prev, { type: 'input', text: `${terminalCwd}$ ${cmd}` }]);
     setTerminalCommand('');
+
+    // Handle special commands locally
+    if (cmd === 'clear') {
+      setTerminalOutput([]);
+      return;
+    }
+
     setTerminalRunning(true);
 
     try {
-      const result = await api.executeCommand(cmd);
-      setTerminalOutput(prev => [
-        ...prev,
-        {
-          type: result.success ? 'output' : 'error',
-          text: result.output || '(no output)',
-          exitCode: result.exitCode,
-          duration: result.duration,
-        },
-      ]);
+      // Handle cd command - need to track directory
+      if (cmd.startsWith('cd ') || cmd === 'cd') {
+        const targetDir = cmd === 'cd' ? '~' : cmd.substring(3).trim();
+        // Execute cd and pwd to get the new directory
+        const cdCmd = `cd ${terminalCwd} && cd ${targetDir} && pwd`;
+        const result = await api.executeCommand(cdCmd, '/');
+        if (result.success && result.output) {
+          const newCwd = result.output.trim();
+          setTerminalCwd(newCwd);
+          setTerminalOutput(prev => [
+            ...prev,
+            { type: 'system', text: `Changed directory to: ${newCwd}` },
+          ]);
+        } else {
+          setTerminalOutput(prev => [
+            ...prev,
+            { type: 'error', text: result.output || 'Failed to change directory' },
+          ]);
+        }
+      } else {
+        // Execute command in current working directory
+        const result = await api.executeCommand(cmd, terminalCwd);
+        setTerminalOutput(prev => [
+          ...prev,
+          {
+            type: result.success ? 'output' : 'error',
+            text: result.output || '(no output)',
+            exitCode: result.exitCode,
+            duration: result.duration,
+          },
+        ]);
+      }
     } catch (error) {
       setTerminalOutput(prev => [
         ...prev,
@@ -558,6 +596,34 @@ export default function Dashboard() {
         title: 'Error',
         description: 'Failed to refresh containers',
       });
+    }
+  };
+
+  // Kill Switch Function
+  const handleSecureSystem = async () => {
+    if (!totpCode || totpCode.length !== 6) return;
+    setSecuringSystem(true);
+
+    try {
+      await api.secureSystem(totpCode);
+      toast({
+        title: 'System Secured',
+        description: 'ProxyPilot is being secured. The dashboard will become unavailable.',
+      });
+      setKillSwitchDialogOpen(false);
+      setTotpCode('');
+      // Wait a moment then redirect to show secured page
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setSecuringSystem(false);
     }
   };
 
@@ -991,6 +1057,15 @@ export default function Dashboard() {
             <Terminal className="h-4 w-4 mr-2" />
             Terminal
           </Button>
+          <Button
+            variant="outline"
+            className="text-red-500 border-red-500 hover:bg-red-500/10"
+            onClick={() => { setTotpCode(''); setKillSwitchDialogOpen(true); }}
+            title="Secure/Shutdown ProxyPilot"
+          >
+            <ShieldAlert className="h-4 w-4 mr-2" />
+            Kill Switch
+          </Button>
           <Dialog open={addDialogOpen} onOpenChange={(open) => { setAddDialogOpen(open); if (!open) resetForm(); }}>
             <DialogTrigger asChild>
               <Button>
@@ -1321,28 +1396,34 @@ export default function Dashboard() {
 
       {/* Terminal Dialog */}
       <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
-        <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
+        <DialogContent className={`${terminalFullscreen ? 'max-w-full h-full m-0 rounded-none' : 'max-w-5xl h-[85vh]'} flex flex-col`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>
                 <DialogTitle className="flex items-center gap-2">
                   <Terminal className="h-5 w-5" />
                   Host Terminal
+                  <span className="text-xs font-normal text-muted-foreground ml-2">{terminalCwd}</span>
                 </DialogTitle>
                 <DialogDescription>
                   Execute commands on the host system
                   {systemInfo && ` - ${systemInfo.hostname}`}
                 </DialogDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={refreshContainers}>
-                <RefreshCw className="h-4 w-4" />
-              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={refreshContainers} title="Refresh containers">
+                  <RefreshCw className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setTerminalFullscreen(!terminalFullscreen)} title="Toggle fullscreen">
+                  {terminalFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </Button>
+              </div>
             </div>
           </DialogHeader>
 
-          <div className="flex gap-4 flex-1 min-h-0">
+          <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0`}>
             {/* Docker Containers Panel */}
-            <div className="w-64 shrink-0 border rounded flex flex-col">
+            <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 border rounded flex flex-col ${terminalFullscreen ? '' : 'max-h-48 md:max-h-none'}`}>
               <div className="p-2 border-b bg-muted shrink-0">
                 <span className="font-medium text-sm flex items-center gap-2">
                   <Container className="h-4 w-4" />
@@ -1383,11 +1464,11 @@ export default function Dashboard() {
             </div>
 
             {/* Terminal Output */}
-            <div className="flex-1 flex flex-col border rounded">
-              <div className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
+            <div className="flex-1 flex flex-col border rounded min-h-0">
+              <div ref={terminalOutputRef} className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
                 {terminalOutput.map((line, i) => (
                   <div key={i} className={`whitespace-pre-wrap ${
-                    line.type === 'input' ? 'text-white' :
+                    line.type === 'input' ? 'text-cyan-400 font-bold' :
                     line.type === 'error' ? 'text-red-400' :
                     line.type === 'system' ? 'text-blue-400' :
                     'text-green-400'
@@ -1405,17 +1486,18 @@ export default function Dashboard() {
                   </div>
                 )}
               </div>
-              <div className="border-t p-2 flex gap-2">
-                <span className="text-green-400 font-mono">$</span>
+              <div className="border-t p-2 flex gap-2 bg-gray-900">
+                <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
                 <Input
                   value={terminalCommand}
                   onChange={(e) => setTerminalCommand(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && executeTerminalCommand()}
-                  placeholder="Enter command..."
-                  className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0"
+                  placeholder="Enter command... (type 'clear' to clear output)"
+                  className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0 h-8"
                   disabled={terminalRunning}
+                  autoFocus
                 />
-                <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()}>
+                <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()} size="sm">
                   {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
                 </Button>
               </div>
@@ -1423,8 +1505,8 @@ export default function Dashboard() {
           </div>
 
           <DialogFooter className="shrink-0">
-            <Button variant="outline" onClick={() => setTerminalOutput([])}>
-              Clear Output
+            <Button variant="outline" onClick={() => { setTerminalOutput([]); setTerminalCwd('/'); }}>
+              Clear & Reset
             </Button>
             <Button variant="outline" onClick={() => setTerminalOpen(false)}>
               Close
@@ -1707,6 +1789,57 @@ export default function Dashboard() {
             <Button variant="outline" onClick={() => setImportDialogOpen(false)}>Cancel</Button>
             <Button onClick={handleImport} disabled={!importData || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Importing...</> : <><Upload className="mr-2 h-4 w-4" />Import</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Kill Switch Dialog */}
+      <Dialog open={killSwitchDialogOpen} onOpenChange={setKillSwitchDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-500">
+              <ShieldAlert className="h-5 w-5" />
+              Secure System - Kill Switch
+            </DialogTitle>
+            <DialogDescription>
+              This will stop the ProxyPilot admin container. All your services, NGINX configurations,
+              and Docker containers will continue running. The admin dashboard will become unavailable
+              until the container is manually restarted.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg">
+              <p className="text-sm text-red-500 font-medium">Warning:</p>
+              <ul className="text-sm text-muted-foreground mt-2 space-y-1 list-disc list-inside">
+                <li>Admin dashboard will be inaccessible</li>
+                <li>A secure landing page will be shown to visitors</li>
+                <li>To restore, run: <code className="bg-muted px-1 rounded">docker start proxypilot-admin</code></li>
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="killSwitchTotp">TOTP Code</Label>
+              <Input
+                id="killSwitchTotp"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setKillSwitchDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={handleSecureSystem}
+              disabled={totpCode.length !== 6 || securingSystem}
+            >
+              {securingSystem ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Securing...</>
+              ) : (
+                <><ShieldAlert className="mr-2 h-4 w-4" />Secure System</>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

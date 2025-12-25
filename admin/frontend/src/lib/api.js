@@ -193,6 +193,12 @@ export const api = {
 
   getAuditLog: (limit = 50, offset = 0) =>
     request(`/user/audit-log?limit=${limit}&offset=${offset}`),
+
+  // System Security
+  secureSystem: (totpCode) => request('/services/system/secure', {
+    method: 'POST',
+    body: JSON.stringify({ totpCode }),
+  }),
 };
 
 export { ApiError };

@@ -35,7 +35,7 @@ export function initDatabase() {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       domain TEXT UNIQUE NOT NULL,
-      type TEXT NOT NULL CHECK(type IN ('proxy', 'static', 'docker')),
+      type TEXT NOT NULL CHECK(type IN ('static', 'docker')),
       target TEXT,
       port INTEGER,
       root_dir TEXT,
@@ -44,12 +44,20 @@ export function initDatabase() {
       force_https INTEGER DEFAULT 1,
       websocket_enabled INTEGER DEFAULT 0,
       max_upload_size TEXT DEFAULT '1G',
+      data_dir TEXT,
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
       is_admin INTEGER DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Add data_dir column if it doesn't exist (migration for existing DBs)
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN data_dir TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
 
   // Create audit log table
   db.exec(`

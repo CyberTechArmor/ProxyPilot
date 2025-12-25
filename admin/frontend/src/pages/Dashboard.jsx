@@ -1983,7 +1983,7 @@ volumes:
             <Radar className="h-4 w-4 mr-2" />
             Discover
           </Button>
-          <Button variant="outline" onClick={openTerminal}>
+          <Button variant="outline" onClick={() => openTerminal()}>
             <Terminal className="h-4 w-4 mr-2" />
             Terminal
           </Button>

@@ -49,6 +49,19 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Fix existing admin users that were created without role set
+  // The first user or any user without a role should be admin
+  try {
+    db.exec(`UPDATE users SET role = 'admin' WHERE role IS NULL OR role = ''`);
+    // Also ensure the first created user is always admin
+    const firstUser = db.prepare('SELECT id FROM users ORDER BY created_at ASC LIMIT 1').get();
+    if (firstUser) {
+      db.prepare('UPDATE users SET role = ? WHERE id = ?').run('admin', firstUser.id);
+    }
+  } catch (e) {
+    console.error('Error fixing user roles:', e);
+  }
+
   // Create user_service_access table for granular permissions
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_service_access (
@@ -154,8 +167,8 @@ export function initDatabase() {
     const userId = uuidv4();
 
     db.prepare(`
-      INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled)
-      VALUES (?, ?, ?, ?, 1)
+      INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled, role)
+      VALUES (?, ?, ?, ?, 1, 'admin')
     `).run(userId, process.env.ADMIN_USERNAME, passwordHash, process.env.ADMIN_TOTP_SECRET || '');
 
     console.log('Admin user created');

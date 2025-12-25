@@ -50,6 +50,34 @@ const fileSchema = z.object({
   content: z.string().max(10 * 1024 * 1024), // 10MB max
 });
 
+// Helper function to reload NGINX
+async function reloadNginx() {
+  try {
+    await execAsync('nginx -t 2>&1');
+    await execAsync('systemctl reload nginx || nginx -s reload');
+    return { success: true };
+  } catch (error) {
+    console.error('NGINX reload failed:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// NGINX reload endpoint
+servicesRouter.post('/nginx/reload', async (req, res) => {
+  try {
+    const result = await reloadNginx();
+    if (result.success) {
+      logAudit(req.user.id, 'NGINX_RELOADED', 'system', null, {}, req.ip);
+      res.json({ success: true, message: 'NGINX reloaded successfully' });
+    } else {
+      res.status(500).json({ error: 'NGINX reload failed', details: result.error });
+    }
+  } catch (error) {
+    console.error('Error reloading NGINX:', error);
+    res.status(500).json({ error: 'Failed to reload NGINX' });
+  }
+});
+
 // Get all services
 servicesRouter.get('/', (req, res) => {
   try {
@@ -59,9 +87,10 @@ servicesRouter.get('/', (req, res) => {
              container_name as containerName, ssl_enabled as sslEnabled,
              force_https as forceHttps, websocket_enabled as websocketEnabled,
              max_upload_size as maxUploadSize, status, is_admin as isAdmin,
-             data_dir as dataDir, created_at as createdAt, updated_at as updatedAt
+             is_favorite as isFavorite, data_dir as dataDir,
+             created_at as createdAt, updated_at as updatedAt
       FROM services
-      ORDER BY created_at DESC
+      ORDER BY is_favorite DESC, created_at DESC
     `).all();
 
     // Convert integer booleans to actual booleans
@@ -71,6 +100,7 @@ servicesRouter.get('/', (req, res) => {
       forceHttps: !!s.forceHttps,
       websocketEnabled: !!s.websocketEnabled,
       isAdmin: !!s.isAdmin,
+      isFavorite: !!s.isFavorite,
     }));
 
     res.json({ services: formattedServices });
@@ -89,7 +119,8 @@ servicesRouter.get('/:id', (req, res) => {
              container_name as containerName, ssl_enabled as sslEnabled,
              force_https as forceHttps, websocket_enabled as websocketEnabled,
              max_upload_size as maxUploadSize, status, is_admin as isAdmin,
-             data_dir as dataDir, created_at as createdAt, updated_at as updatedAt
+             is_favorite as isFavorite, data_dir as dataDir,
+             created_at as createdAt, updated_at as updatedAt
       FROM services WHERE id = ?
     `).get(req.params.id);
 
@@ -104,11 +135,32 @@ servicesRouter.get('/:id', (req, res) => {
         forceHttps: !!service.forceHttps,
         websocketEnabled: !!service.websocketEnabled,
         isAdmin: !!service.isAdmin,
+        isFavorite: !!service.isFavorite,
       },
     });
   } catch (error) {
     console.error('Error fetching service:', error);
     res.status(500).json({ error: 'Failed to fetch service' });
+  }
+});
+
+// Toggle favorite status
+servicesRouter.post('/:id/favorite', (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT id, is_favorite FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const newValue = service.is_favorite ? 0 : 1;
+    db.prepare('UPDATE services SET is_favorite = ? WHERE id = ?').run(newValue, req.params.id);
+
+    res.json({ success: true, isFavorite: !!newValue });
+  } catch (error) {
+    console.error('Error toggling favorite:', error);
+    res.status(500).json({ error: 'Failed to toggle favorite' });
   }
 });
 
@@ -510,7 +562,7 @@ servicesRouter.get('/:id/files/*', async (req, res) => {
   }
 });
 
-// Create or update a file
+// Create or update a file (with version control)
 servicesRouter.put('/:id/files/*', async (req, res) => {
   try {
     const { content } = req.body;
@@ -519,7 +571,7 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
     }
 
     const db = getDb();
-    const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
+    const service = db.prepare('SELECT data_dir, type FROM services WHERE id = ?').get(req.params.id);
 
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
@@ -539,6 +591,35 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
       return res.status(400).json({ error: 'Invalid filename' });
     }
 
+    // Save current version before overwriting (if file exists)
+    if (existsSync(fullPath)) {
+      try {
+        const oldContent = await readFile(fullPath, 'utf-8');
+        // Get the next version number
+        const lastVersion = db.prepare(`
+          SELECT MAX(version) as maxVersion FROM file_versions
+          WHERE service_id = ? AND file_path = ?
+        `).get(req.params.id, filePath);
+        const nextVersion = (lastVersion?.maxVersion || 0) + 1;
+
+        // Save old content as a version
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, created_by)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), req.params.id, filePath, oldContent, nextVersion, req.user.id);
+
+        // Keep only last 50 versions per file
+        db.prepare(`
+          DELETE FROM file_versions WHERE service_id = ? AND file_path = ? AND version NOT IN (
+            SELECT version FROM file_versions WHERE service_id = ? AND file_path = ?
+            ORDER BY version DESC LIMIT 50
+          )
+        `).run(req.params.id, filePath, req.params.id, filePath);
+      } catch (e) {
+        // File might be binary, skip versioning
+      }
+    }
+
     // Create directory if needed
     const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
     await mkdir(dirPath, { recursive: true });
@@ -547,7 +628,14 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
 
     logAudit(req.user.id, 'FILE_UPDATED', 'service', req.params.id, { path: filePath }, req.ip);
 
-    res.json({ success: true, path: filePath });
+    // Auto-reload NGINX for static sites
+    let nginxReloaded = false;
+    if (service.type === 'static') {
+      const reloadResult = await reloadNginx();
+      nginxReloaded = reloadResult.success;
+    }
+
+    res.json({ success: true, path: filePath, nginxReloaded });
   } catch (error) {
     console.error('Error writing file:', error);
     res.status(500).json({ error: 'Failed to write file' });
@@ -594,6 +682,286 @@ servicesRouter.delete('/:id/files/*', async (req, res) => {
   } catch (error) {
     console.error('Error deleting file:', error);
     res.status(500).json({ error: 'Failed to delete file' });
+  }
+});
+
+// ==================== FILE VERSION CONTROL ====================
+
+// Get file versions
+servicesRouter.get('/:id/versions/*', (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT id FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const filePath = req.params[0];
+    const versions = db.prepare(`
+      SELECT id, version, created_at as createdAt, created_by as createdBy
+      FROM file_versions
+      WHERE service_id = ? AND file_path = ?
+      ORDER BY version DESC
+      LIMIT 50
+    `).all(req.params.id, filePath);
+
+    res.json({ versions, filePath });
+  } catch (error) {
+    console.error('Error fetching versions:', error);
+    res.status(500).json({ error: 'Failed to fetch versions' });
+  }
+});
+
+// Get specific version content
+servicesRouter.get('/:id/version/:versionId', (req, res) => {
+  try {
+    const db = getDb();
+    const version = db.prepare(`
+      SELECT fv.*, s.data_dir
+      FROM file_versions fv
+      JOIN services s ON s.id = fv.service_id
+      WHERE fv.id = ? AND fv.service_id = ?
+    `).get(req.params.versionId, req.params.id);
+
+    if (!version) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    res.json({
+      content: version.content,
+      version: version.version,
+      filePath: version.file_path,
+      createdAt: version.created_at,
+    });
+  } catch (error) {
+    console.error('Error fetching version:', error);
+    res.status(500).json({ error: 'Failed to fetch version' });
+  }
+});
+
+// Revert to a specific version
+servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
+  try {
+    const db = getDb();
+    const version = db.prepare(`
+      SELECT fv.*, s.data_dir, s.type
+      FROM file_versions fv
+      JOIN services s ON s.id = fv.service_id
+      WHERE fv.id = ? AND fv.service_id = ?
+    `).get(req.params.versionId, req.params.id);
+
+    if (!version) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    const fullPath = join(version.data_dir, version.file_path);
+
+    // Save current as new version before reverting
+    if (existsSync(fullPath)) {
+      try {
+        const currentContent = await readFile(fullPath, 'utf-8');
+        const lastVersion = db.prepare(`
+          SELECT MAX(version) as maxVersion FROM file_versions
+          WHERE service_id = ? AND file_path = ?
+        `).get(req.params.id, version.file_path);
+        const nextVersion = (lastVersion?.maxVersion || 0) + 1;
+
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, created_by)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), req.params.id, version.file_path, currentContent, nextVersion, req.user.id);
+      } catch (e) {
+        // Skip if can't read
+      }
+    }
+
+    // Write the reverted content
+    await writeFile(fullPath, version.content);
+
+    logAudit(req.user.id, 'FILE_REVERTED', 'service', req.params.id, {
+      path: version.file_path,
+      toVersion: version.version,
+    }, req.ip);
+
+    // Reload NGINX for static sites
+    let nginxReloaded = false;
+    if (version.type === 'static') {
+      const reloadResult = await reloadNginx();
+      nginxReloaded = reloadResult.success;
+    }
+
+    res.json({ success: true, revertedToVersion: version.version, nginxReloaded });
+  } catch (error) {
+    console.error('Error reverting file:', error);
+    res.status(500).json({ error: 'Failed to revert file' });
+  }
+});
+
+// ==================== FILE UPLOAD/DOWNLOAD ====================
+
+// Upload file (for binary or large files)
+servicesRouter.post('/:id/upload/*', async (req, res) => {
+  try {
+    const { content, encoding } = req.body; // content can be base64 encoded
+
+    const db = getDb();
+    const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const filePath = req.params[0];
+    const fullPath = join(service.data_dir, filePath);
+
+    // Security check
+    if (!fullPath.startsWith(service.data_dir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Create directory if needed
+    const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
+    await mkdir(dirPath, { recursive: true });
+
+    // Write file (handle base64 if specified)
+    if (encoding === 'base64') {
+      await writeFile(fullPath, Buffer.from(content, 'base64'));
+    } else {
+      await writeFile(fullPath, content);
+    }
+
+    logAudit(req.user.id, 'FILE_UPLOADED', 'service', req.params.id, { path: filePath }, req.ip);
+
+    res.json({ success: true, path: filePath });
+  } catch (error) {
+    console.error('Error uploading file:', error);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+// Download file as base64
+servicesRouter.get('/:id/download/*', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT data_dir FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const filePath = req.params[0];
+    const fullPath = join(service.data_dir, filePath);
+
+    // Security check
+    if (!fullPath.startsWith(service.data_dir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const stats = await stat(fullPath);
+    if (stats.isDirectory()) {
+      return res.status(400).json({ error: 'Cannot download directory' });
+    }
+
+    // Limit size
+    if (stats.size > 50 * 1024 * 1024) { // 50MB
+      return res.status(400).json({ error: 'File too large' });
+    }
+
+    const content = await readFile(fullPath);
+    res.json({
+      content: content.toString('base64'),
+      encoding: 'base64',
+      filename: basename(filePath),
+      size: stats.size,
+    });
+  } catch (error) {
+    console.error('Error downloading file:', error);
+    res.status(500).json({ error: 'Failed to download file' });
+  }
+});
+
+// Export service files as JSON
+servicesRouter.get('/:id/export-files', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    if (!service.data_dir || !existsSync(service.data_dir)) {
+      return res.json({ files: [] });
+    }
+
+    const files = await exportFilesRecursive(service.data_dir, service.data_dir);
+
+    res.json({
+      serviceName: service.name,
+      exportedAt: new Date().toISOString(),
+      files,
+    });
+  } catch (error) {
+    console.error('Error exporting files:', error);
+    res.status(500).json({ error: 'Failed to export files' });
+  }
+});
+
+// Import files to service
+servicesRouter.post('/:id/import-files', async (req, res) => {
+  try {
+    const { files } = req.body;
+
+    if (!files || !Array.isArray(files)) {
+      return res.status(400).json({ error: 'Invalid files data' });
+    }
+
+    const db = getDb();
+    const service = db.prepare('SELECT data_dir, type FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const results = { imported: [], errors: [] };
+
+    for (const file of files) {
+      try {
+        const fullPath = join(service.data_dir, file.path);
+
+        // Security check
+        if (!fullPath.startsWith(service.data_dir)) {
+          results.errors.push({ path: file.path, error: 'Access denied' });
+          continue;
+        }
+
+        // Create directory
+        const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
+        await mkdir(dirPath, { recursive: true });
+
+        await writeFile(fullPath, file.content);
+        results.imported.push(file.path);
+      } catch (err) {
+        results.errors.push({ path: file.path, error: err.message });
+      }
+    }
+
+    logAudit(req.user.id, 'FILES_IMPORTED', 'service', req.params.id, results, req.ip);
+
+    // Reload NGINX for static sites
+    if (service.type === 'static' && results.imported.length > 0) {
+      await reloadNginx();
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error('Error importing files:', error);
+    res.status(500).json({ error: 'Failed to import files' });
   }
 });
 

@@ -730,18 +730,10 @@ export default function Dashboard() {
     setNanoSaving(true);
 
     try {
-      // Get directory path and ensure it exists
-      const dirPath = nanoFilePath.substring(0, nanoFilePath.lastIndexOf('/'));
-      if (dirPath) {
-        await api.executeCommand(`mkdir -p "${dirPath}"`, '/');
-      }
+      // Use dedicated file write API endpoint (bypasses terminal command limits)
+      const result = await api.writeFile(nanoFilePath, nanoFileContent, true);
 
-      // Write file content using a heredoc approach
-      const escapedContent = nanoFileContent.replace(/'/g, "'\\''");
-      const writeCmd = `cat > "${nanoFilePath}" << 'PROXYPILOT_EOF'\n${nanoFileContent}\nPROXYPILOT_EOF`;
-      const result = await api.executeCommand(writeCmd, '/');
-
-      if (result.success || result.exitCode === 0) {
+      if (result.success) {
         toast({
           title: 'File Saved',
           description: `Successfully saved ${nanoFilePath}`,
@@ -749,7 +741,7 @@ export default function Dashboard() {
         setNanoEditorOpen(false);
         setTerminalOutput(prev => [...prev, { type: 'system', text: `File saved: ${nanoFilePath}` }]);
       } else {
-        throw new Error(result.output || 'Failed to save file');
+        throw new Error(result.error || 'Failed to save file');
       }
     } catch (error) {
       toast({

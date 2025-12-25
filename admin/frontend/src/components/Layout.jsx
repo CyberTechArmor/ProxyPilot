@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import {
   LayoutDashboard,
   User,
+  Users,
   LogOut,
   Rocket,
 } from 'lucide-react';
@@ -15,8 +16,13 @@ export default function Layout() {
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+    { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
+
+  const filteredNavigation = navigation.filter(item =>
+    !item.adminOnly || user?.role === 'admin'
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -31,7 +37,7 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className="flex-1 px-4 py-4 space-y-1">
-            {navigation.map((item) => {
+            {filteredNavigation.map((item) => {
               const isActive = location.pathname === item.href;
               return (
                 <Link

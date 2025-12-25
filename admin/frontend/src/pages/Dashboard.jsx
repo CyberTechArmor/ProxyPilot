@@ -231,6 +231,13 @@ export default function Dashboard() {
   const [discoveringNginx, setDiscoveringNginx] = useState(false);
   const [importingSite, setImportingSite] = useState(null);
 
+  // Remove site dialog state
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
+  const [siteToRemove, setSiteToRemove] = useState(null);
+  const [removeOptions, setRemoveOptions] = useState({ files: true, docker: false, cert: false });
+  const [removingConfirmation, setRemovingConfirmation] = useState('');
+  const [removingSite, setRemovingSite] = useState(false);
+
   // Docker Compose services state
   const [composeServices, setComposeServices] = useState([]);
 
@@ -460,6 +467,74 @@ export default function Dashboard() {
       });
     } finally {
       setImportingSite(null);
+    }
+  };
+
+  const openRemoveDialog = (site) => {
+    setSiteToRemove(site);
+    setRemoveOptions({
+      files: true,
+      docker: site.type === 'docker',
+      cert: site.sslEnabled || false,
+    });
+    setRemovingConfirmation('');
+    setRemoveDialogOpen(true);
+  };
+
+  const handleRemoveSite = async () => {
+    if (!siteToRemove || removingConfirmation !== siteToRemove.domain) return;
+
+    setRemovingSite(true);
+    try {
+      const commands = [];
+
+      // Remove NGINX config files
+      if (removeOptions.files) {
+        commands.push(`rm -f /etc/nginx/sites-available/${siteToRemove.domain}`);
+        commands.push(`rm -f /etc/nginx/sites-enabled/${siteToRemove.domain}`);
+        if (siteToRemove.rootDir && siteToRemove.type === 'static') {
+          commands.push(`rm -rf "${siteToRemove.rootDir}"`);
+        }
+      }
+
+      // Remove Docker containers, images, and volumes
+      if (removeOptions.docker && siteToRemove.composePath) {
+        commands.push(`cd "${siteToRemove.composePath}" && docker compose down -v --rmi local 2>/dev/null || true`);
+        commands.push(`rm -rf "${siteToRemove.composePath}"`);
+      }
+
+      // Remove SSL certificate
+      if (removeOptions.cert && siteToRemove.sslEnabled) {
+        commands.push(`certbot delete --cert-name ${siteToRemove.domain} --non-interactive 2>/dev/null || true`);
+        commands.push(`rm -rf /etc/letsencrypt/live/${siteToRemove.domain}`);
+        commands.push(`rm -rf /etc/letsencrypt/archive/${siteToRemove.domain}`);
+        commands.push(`rm -f /etc/letsencrypt/renewal/${siteToRemove.domain}.conf`);
+      }
+
+      // Execute removal commands
+      for (const cmd of commands) {
+        await api.executeCommand(cmd, '/');
+      }
+
+      // Reload NGINX
+      await api.executeCommand('nginx -t && nginx -s reload 2>/dev/null || true', '/');
+
+      toast({
+        title: 'Success',
+        description: `Removed ${siteToRemove.name} successfully`,
+      });
+
+      setRemoveDialogOpen(false);
+      setSiteToRemove(null);
+      discoverSites(); // Refresh the discover list
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to remove: ' + error.message,
+      });
+    } finally {
+      setRemovingSite(false);
     }
   };
 
@@ -713,11 +788,11 @@ export default function Dashboard() {
   const openTerminal = async (initialDir = null) => {
     const startDir = initialDir || terminalCwd || '/root';
     setTerminalCwd(startDir);
-    // Set fullscreen first, then open to avoid rendering issues
     setTerminalFullscreen(true);
-    // Small delay to let state settle before opening dialog
-    setTimeout(() => setTerminalOpen(true), 0);
-    setTerminalOutput(prev => prev.length === 0 ? [{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }] : prev);
+    setTerminalOpen(true);
+    if (terminalOutput.length === 0) {
+      setTerminalOutput([{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }]);
+    }
 
     // Fetch system info and containers
     try {
@@ -3026,7 +3101,7 @@ volumes:
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           <Button
-                            variant="ghost"
+                            variant={editorShowVersions ? "default" : "ghost"}
                             size="sm"
                             onClick={() => {
                               setEditorShowVersions(!editorShowVersions);
@@ -3052,60 +3127,83 @@ volumes:
                         </div>
                       </div>
 
-                      {/* Version History Panel */}
-                      {editorShowVersions && (
-                        <div className="border-b bg-muted/30 p-2 max-h-32 overflow-auto shrink-0">
-                          <div className="text-xs font-medium mb-1 flex items-center gap-2">
-                            <History className="h-3 w-3" />
-                            Git History
-                            {editorLoadingVersions && <Loader2 className="h-3 w-3 animate-spin" />}
-                          </div>
-                          {editorVersions.length === 0 ? (
-                            <p className="text-xs text-muted-foreground">
-                              {editorLoadingVersions ? 'Loading...' : 'No git history found for this file'}
-                            </p>
-                          ) : (
-                            <div className="space-y-1">
-                              {editorVersions.map((v) => (
-                                <div
-                                  key={v.hash}
-                                  className="flex items-center gap-2 text-xs px-1 py-0.5 rounded hover:bg-muted cursor-pointer"
-                                  onClick={() => revertEditorToVersion(v.hash)}
-                                >
-                                  <code className="text-blue-400">{v.hash.substring(0, 7)}</code>
-                                  <span className="truncate">{v.message}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
+                      {/* Editor + Version History Sidebar */}
+                      <div className="flex-1 flex min-h-0 overflow-hidden">
+                        {/* Code Editor */}
+                        <div className="flex-1 min-h-0 overflow-hidden">
+                          <CodeMirror
+                            value={editorContent}
+                            onChange={setEditorContent}
+                            height="100%"
+                            theme={oneDark}
+                            extensions={[
+                              getLanguageFromFile(editorFilePath || 'txt') === 'javascript' ? javascript() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'html' ? html() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'css' ? css() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'json' ? json() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'yaml' ? yaml() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'python' ? python() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'markdown' ? markdown() :
+                              getLanguageFromFile(editorFilePath || 'txt') === 'xml' ? xml() : []
+                            ].filter(Boolean)}
+                            className="h-full overflow-auto text-sm"
+                            basicSetup={{
+                              lineNumbers: true,
+                              foldGutter: true,
+                              highlightActiveLineGutter: true,
+                              highlightActiveLine: true,
+                            }}
+                          />
                         </div>
-                      )}
 
-                      {/* Code Editor */}
-                      <div className="flex-1 min-h-0 overflow-hidden">
-                        <CodeMirror
-                          value={editorContent}
-                          onChange={setEditorContent}
-                          height="100%"
-                          theme={oneDark}
-                          extensions={[
-                            getLanguageFromFile(editorFilePath || 'txt') === 'javascript' ? javascript() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'html' ? html() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'css' ? css() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'json' ? json() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'yaml' ? yaml() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'python' ? python() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'markdown' ? markdown() :
-                            getLanguageFromFile(editorFilePath || 'txt') === 'xml' ? xml() : []
-                          ].filter(Boolean)}
-                          className="h-full overflow-auto text-sm"
-                          basicSetup={{
-                            lineNumbers: true,
-                            foldGutter: true,
-                            highlightActiveLineGutter: true,
-                            highlightActiveLine: true,
-                          }}
-                        />
+                        {/* Version History Right Sidebar */}
+                        {editorShowVersions && (
+                          <div className="w-64 border-l bg-muted/30 flex flex-col shrink-0">
+                            <div className="p-2 border-b bg-muted/50 flex items-center justify-between shrink-0">
+                              <span className="text-sm font-medium flex items-center gap-2">
+                                <History className="h-4 w-4" />
+                                Git History
+                              </span>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 w-6 p-0"
+                                onClick={fetchEditorVersions}
+                              >
+                                <RefreshCw className={`h-3 w-3 ${editorLoadingVersions ? 'animate-spin' : ''}`} />
+                              </Button>
+                            </div>
+                            <div className="flex-1 overflow-auto p-2">
+                              {editorLoadingVersions ? (
+                                <div className="flex items-center justify-center py-8">
+                                  <Loader2 className="h-5 w-5 animate-spin" />
+                                </div>
+                              ) : editorVersions.length === 0 ? (
+                                <p className="text-xs text-muted-foreground text-center py-4">
+                                  No git history found for this file
+                                </p>
+                              ) : (
+                                <div className="space-y-1">
+                                  {editorVersions.map((v, index) => (
+                                    <div
+                                      key={v.hash}
+                                      className="p-2 rounded border bg-card hover:bg-accent cursor-pointer transition-colors"
+                                      onClick={() => revertEditorToVersion(v.hash)}
+                                    >
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <code className="text-xs text-blue-400 font-mono">{v.hash.substring(0, 7)}</code>
+                                        {index === 0 && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-500">latest</span>
+                                        )}
+                                      </div>
+                                      <p className="text-xs text-muted-foreground line-clamp-2">{v.message}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Editor Footer */}
@@ -3539,17 +3637,26 @@ volumes:
                         {site.rootDir && <p className="text-xs text-muted-foreground">Root: {site.rootDir}</p>}
                         {site.port && <p className="text-xs text-muted-foreground">Port: {site.port}</p>}
                       </div>
-                      <Button
-                        size="sm"
-                        onClick={() => importSite(site)}
-                        disabled={importingSite === site.domain}
-                      >
-                        {importingSite === site.domain ? (
-                          <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Importing</>
-                        ) : (
-                          <><Import className="h-4 w-4 mr-1" />Import</>
-                        )}
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => importSite(site)}
+                          disabled={importingSite === site.domain}
+                        >
+                          {importingSite === site.domain ? (
+                            <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Importing</>
+                          ) : (
+                            <><Import className="h-4 w-4 mr-1" />Import</>
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => openRemoveDialog(site)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   </Card>
                 ))}
@@ -3590,6 +3697,97 @@ volumes:
             </Button>
             <Button variant="outline" onClick={() => setDiscoverDialogOpen(false)}>
               Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Site Dialog */}
+      <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-500">
+              <Trash2 className="h-5 w-5" />
+              Remove Site
+            </DialogTitle>
+            <DialogDescription>
+              Remove <strong>{siteToRemove?.name}</strong> ({siteToRemove?.domain}) and its associated resources.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">What to remove:</Label>
+
+              <div className="flex items-center justify-between p-3 border rounded-lg">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="h-4 w-4 text-blue-500" />
+                  <div>
+                    <p className="font-medium text-sm">NGINX Config & Files</p>
+                    <p className="text-xs text-muted-foreground">Site config and root directory</p>
+                  </div>
+                </div>
+                <Switch
+                  checked={removeOptions.files}
+                  onCheckedChange={(checked) => setRemoveOptions({ ...removeOptions, files: checked })}
+                />
+              </div>
+
+              {siteToRemove?.type === 'docker' && (
+                <div className="flex items-center justify-between p-3 border rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <Container className="h-4 w-4 text-purple-500" />
+                    <div>
+                      <p className="font-medium text-sm">Docker Resources</p>
+                      <p className="text-xs text-muted-foreground">Containers, images & volumes</p>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={removeOptions.docker}
+                    onCheckedChange={(checked) => setRemoveOptions({ ...removeOptions, docker: checked })}
+                  />
+                </div>
+              )}
+
+              {siteToRemove?.sslEnabled && (
+                <div className="flex items-center justify-between p-3 border rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-green-500" />
+                    <div>
+                      <p className="font-medium text-sm">SSL Certificate</p>
+                      <p className="text-xs text-muted-foreground">Let's Encrypt certificate</p>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={removeOptions.cert}
+                    onCheckedChange={(checked) => setRemoveOptions({ ...removeOptions, cert: checked })}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 pt-2 border-t">
+              <Label className="text-sm">Type <strong>{siteToRemove?.domain}</strong> to confirm:</Label>
+              <Input
+                value={removingConfirmation}
+                onChange={(e) => setRemovingConfirmation(e.target.value)}
+                placeholder={siteToRemove?.domain}
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={handleRemoveSite}
+              disabled={removingSite || removingConfirmation !== siteToRemove?.domain || (!removeOptions.files && !removeOptions.docker && !removeOptions.cert)}
+            >
+              {removingSite ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Removing...</>
+              ) : (
+                <><Trash2 className="h-4 w-4 mr-2" />Remove Site</>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

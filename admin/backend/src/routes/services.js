@@ -39,6 +39,7 @@ const createServiceSchema = z.object({
   forceHttps: z.boolean().default(true),
   websocketEnabled: z.boolean().default(false),
   maxUploadSize: z.string().regex(/^[1-9][0-9]*[MG]$/i).default('1G'),
+  obtainCertificate: z.boolean().default(false),
 });
 
 const deleteServiceSchema = z.object({
@@ -50,25 +51,130 @@ const fileSchema = z.object({
   content: z.string().max(10 * 1024 * 1024), // 10MB max
 });
 
-// Helper function to reload NGINX
+// Helper function to reload or start NGINX
 async function reloadNginx() {
   try {
     // Test NGINX configuration first
     const testResult = await execAsync('nginx -t 2>&1');
     console.log('NGINX test output:', testResult.stdout, testResult.stderr);
 
-    // Reload NGINX
-    const reloadResult = await execAsync('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
-    console.log('NGINX reload output:', reloadResult.stdout, reloadResult.stderr);
+    // Check if NGINX is running
+    let nginxRunning = false;
+    try {
+      await execAsync('pgrep -x nginx');
+      nginxRunning = true;
+    } catch (e) {
+      // NGINX not running
+      nginxRunning = false;
+    }
+
+    if (nginxRunning) {
+      // Reload NGINX
+      const reloadResult = await execAsync('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+      console.log('NGINX reload output:', reloadResult.stdout, reloadResult.stderr);
+    } else {
+      // Start NGINX
+      console.log('NGINX not running, starting...');
+      const startResult = await execAsync('systemctl start nginx 2>&1 || nginx 2>&1');
+      console.log('NGINX start output:', startResult.stdout, startResult.stderr);
+    }
 
     return { success: true };
   } catch (error) {
     // Extract the actual error message from stderr or stdout
     const errorOutput = error.stderr || error.stdout || error.message;
-    console.error('NGINX reload failed:', errorOutput);
+    console.error('NGINX reload/start failed:', errorOutput);
     return { success: false, error: errorOutput };
   }
 }
+
+// Helper function to obtain SSL certificate using certbot
+async function obtainSslCertificate(domain) {
+  try {
+    // Create letsencrypt webroot directory if it doesn't exist
+    await mkdir('/var/www/letsencrypt/.well-known/acme-challenge', { recursive: true });
+
+    // Run certbot in non-interactive mode
+    const certbotCmd = `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain} --non-interactive --agree-tos --register-unsafely-without-email 2>&1`;
+    console.log('Running certbot:', certbotCmd);
+    const result = await execAsync(certbotCmd, { timeout: 120000 }); // 2 minute timeout
+    console.log('Certbot output:', result.stdout, result.stderr);
+
+    // Check if certificate was obtained
+    if (sslCertExists(domain)) {
+      return { success: true, message: 'SSL certificate obtained successfully' };
+    } else {
+      return { success: false, error: 'Certificate files not found after certbot' };
+    }
+  } catch (error) {
+    const errorOutput = error.stderr || error.stdout || error.message;
+    console.error('Certbot failed:', errorOutput);
+    return { success: false, error: errorOutput };
+  }
+}
+
+// Obtain SSL certificate for a service
+servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    // Check if certificate already exists
+    if (sslCertExists(service.domain)) {
+      return res.json({
+        success: true,
+        message: 'SSL certificate already exists',
+        alreadyExists: true,
+      });
+    }
+
+    // Obtain certificate
+    const certResult = await obtainSslCertificate(service.domain);
+
+    if (certResult.success) {
+      // Regenerate NGINX config now that we have certificates
+      const serviceConfig = {
+        domain: service.domain,
+        type: service.type,
+        target: service.target,
+        port: service.port,
+        rootDir: service.root_dir,
+        websocketEnabled: !!service.websocket_enabled,
+        forceHttps: !!service.force_https,
+        maxUploadSize: service.max_upload_size,
+        sslEnabled: !!service.ssl_enabled,
+      };
+
+      const nginxConfig = generateNginxConfig(serviceConfig);
+      const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+      await writeFile(configPath, nginxConfig);
+
+      // Reload NGINX
+      const reloadResult = await reloadNginx();
+
+      logAudit(req.user.id, 'SSL_CERTIFICATE_OBTAINED', 'service', req.params.id, { domain: service.domain }, req.ip);
+
+      res.json({
+        success: true,
+        message: 'SSL certificate obtained and NGINX configured',
+        nginxReloaded: reloadResult.success,
+        nginxError: reloadResult.error,
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to obtain certificate: ' + certResult.error,
+      });
+    }
+  } catch (error) {
+    console.error('Error obtaining certificate:', error);
+    res.status(500).json({ error: 'Failed to obtain certificate: ' + error.message });
+  }
+});
 
 // Check SSL certificate status for a domain
 servicesRouter.get('/ssl-status/:domain', (req, res) => {
@@ -135,6 +241,59 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
   } catch (error) {
     console.error('Error regenerating config:', error);
     res.status(500).json({ error: 'Failed to regenerate config: ' + error.message });
+  }
+});
+
+// Regenerate all NGINX configs
+servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
+  try {
+    const db = getDb();
+    const services = db.prepare('SELECT * FROM services').all();
+
+    const results = { success: [], failed: [] };
+
+    for (const service of services) {
+      try {
+        const serviceConfig = {
+          domain: service.domain,
+          type: service.type,
+          target: service.target,
+          port: service.port,
+          rootDir: service.root_dir,
+          websocketEnabled: !!service.websocket_enabled,
+          forceHttps: !!service.force_https,
+          maxUploadSize: service.max_upload_size,
+          sslEnabled: !!service.ssl_enabled,
+        };
+
+        const nginxConfig = generateNginxConfig(serviceConfig);
+        const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+        await writeFile(configPath, nginxConfig);
+
+        // Ensure symlink exists
+        const enabledPath = `${NGINX_SITES_ENABLED}/${service.domain}`;
+        await execAsync(`ln -sf "${configPath}" "${enabledPath}"`).catch(() => {});
+
+        results.success.push(service.domain);
+      } catch (err) {
+        results.failed.push({ domain: service.domain, error: err.message });
+      }
+    }
+
+    // Reload NGINX
+    const reloadResult = await reloadNginx();
+
+    logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATED', 'system', null, results, req.ip);
+
+    res.json({
+      success: true,
+      results,
+      nginxReloaded: reloadResult.success,
+      nginxError: reloadResult.error,
+    });
+  } catch (error) {
+    console.error('Error regenerating all configs:', error);
+    res.status(500).json({ error: 'Failed to regenerate configs: ' + error.message });
   }
 });
 
@@ -359,8 +518,8 @@ services:
       return res.status(400).json({ error: 'Invalid NGINX configuration generated: ' + testErr.message });
     }
 
-    // Reload NGINX
-    await execAsync('systemctl reload nginx || nginx -s reload').catch(() => {});
+    // Reload/start NGINX
+    const nginxResult = await reloadNginx();
 
     // Insert into database
     db.prepare(`
@@ -377,17 +536,39 @@ services:
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 
-    // Check SSL certificate status
-    const sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
-    const sslMessage = data.sslEnabled && !sslCertificateExists
-      ? `SSL enabled but certificate not found. Run: certbot certonly --webroot -w /var/www/letsencrypt -d ${data.domain}`
-      : null;
+    // Check if we should obtain SSL certificate
+    let sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
+    let sslMessage = null;
+    let certObtained = false;
+
+    if (data.sslEnabled && data.obtainCertificate && !sslCertificateExists) {
+      // Try to obtain certificate
+      const certResult = await obtainSslCertificate(data.domain);
+      if (certResult.success) {
+        certObtained = true;
+        sslCertificateExists = true;
+
+        // Regenerate NGINX config with SSL now that we have certificates
+        const updatedNginxConfig = generateNginxConfig(data);
+        await writeFile(configPath, updatedNginxConfig);
+        await reloadNginx();
+
+        sslMessage = 'SSL certificate obtained and configured successfully';
+      } else {
+        sslMessage = `Failed to obtain certificate: ${certResult.error}`;
+      }
+    } else if (data.sslEnabled && !sslCertificateExists) {
+      sslMessage = `SSL enabled but certificate not found. Run: certbot certonly --webroot -w /var/www/letsencrypt -d ${data.domain}`;
+    }
 
     res.status(201).json({
       success: true,
       service: { id, ...data, dataDir },
       sslCertificateExists,
       sslMessage,
+      certObtained,
+      nginxReloaded: nginxResult.success,
+      nginxError: nginxResult.error,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

@@ -58,25 +58,70 @@ async function reloadNginx() {
     const testResult = await execAsync('nginx -t 2>&1');
     console.log('NGINX test output:', testResult.stdout, testResult.stderr);
 
-    // Check if NGINX is running
+    // Check if NGINX master process is running (more reliable than pgrep -x)
     let nginxRunning = false;
+    let nginxPid = null;
     try {
-      await execAsync('pgrep -x nginx');
-      nginxRunning = true;
+      // Check for nginx.pid file first (most reliable)
+      const pidResult = await execAsync('cat /var/run/nginx.pid 2>/dev/null || cat /run/nginx.pid 2>/dev/null');
+      nginxPid = pidResult.stdout.trim();
+      if (nginxPid) {
+        // Verify the process actually exists
+        await execAsync(`kill -0 ${nginxPid} 2>/dev/null`);
+        nginxRunning = true;
+      }
     } catch (e) {
-      // NGINX not running
-      nginxRunning = false;
+      // PID file doesn't exist or process isn't running, try pgrep
+      try {
+        const pgrepResult = await execAsync('pgrep -o nginx 2>/dev/null');
+        if (pgrepResult.stdout.trim()) {
+          nginxRunning = true;
+        }
+      } catch (e2) {
+        nginxRunning = false;
+      }
     }
 
     if (nginxRunning) {
-      // Reload NGINX
-      const reloadResult = await execAsync('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
-      console.log('NGINX reload output:', reloadResult.stdout, reloadResult.stderr);
+      // Reload NGINX using the most reliable method
+      console.log('NGINX is running, reloading...');
+      try {
+        await execAsync('nginx -s reload 2>&1');
+        console.log('NGINX reloaded via signal');
+      } catch (reloadErr) {
+        // Try systemctl as fallback
+        await execAsync('systemctl reload nginx 2>&1');
+        console.log('NGINX reloaded via systemctl');
+      }
     } else {
+      // NGINX not running - clean up any stale processes/pid files before starting
+      console.log('NGINX not running, cleaning up and starting...');
+
+      // Kill any orphaned nginx processes that might be holding ports
+      try {
+        await execAsync('pkill -9 nginx 2>/dev/null || true');
+        // Small delay to ensure ports are released
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (e) {
+        // Ignore - no processes to kill
+      }
+
+      // Remove stale PID files
+      try {
+        await execAsync('rm -f /var/run/nginx.pid /run/nginx.pid 2>/dev/null || true');
+      } catch (e) {
+        // Ignore
+      }
+
       // Start NGINX
-      console.log('NGINX not running, starting...');
-      const startResult = await execAsync('systemctl start nginx 2>&1 || nginx 2>&1');
-      console.log('NGINX start output:', startResult.stdout, startResult.stderr);
+      try {
+        await execAsync('systemctl start nginx 2>&1');
+        console.log('NGINX started via systemctl');
+      } catch (startErr) {
+        // Systemctl failed, try direct start
+        await execAsync('nginx 2>&1');
+        console.log('NGINX started directly');
+      }
     }
 
     return { success: true };

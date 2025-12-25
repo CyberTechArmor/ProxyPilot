@@ -28,7 +28,11 @@ const createServiceSchema = z.object({
   domain: z.string().regex(/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/, 'Invalid domain'),
   type: z.enum(['static', 'docker']),
   target: z.string().optional(),
-  port: z.number().int().min(1).max(65535).optional(),
+  port: z.union([z.number().int().min(1).max(65535), z.string(), z.null()]).optional().transform(val => {
+    if (val === null || val === undefined || val === '') return undefined;
+    const num = typeof val === 'string' ? parseInt(val, 10) : val;
+    return isNaN(num) ? undefined : num;
+  }),
   rootDir: z.string().optional(),
   containerName: z.string().optional(),
   sslEnabled: z.boolean().default(true),

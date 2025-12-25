@@ -832,6 +832,18 @@ main() {
     # Create NGINX config
     create_proxypilot_nginx_config "$DOMAIN" "$PORT"
 
+    # Build frontend on host (faster than building in Docker)
+    log_info "Building frontend..."
+    cd "${INSTALL_DIR}/admin/frontend"
+    if ! command -v node &> /dev/null; then
+        log_info "Installing Node.js..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+    fi
+    npm ci
+    NODE_ENV=production npm run build
+    log_success "Frontend built successfully"
+
     # Build and start Docker container
     log_info "Building and starting ProxyPilot..."
     cd "$INSTALL_DIR"

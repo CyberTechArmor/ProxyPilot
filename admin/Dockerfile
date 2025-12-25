@@ -5,6 +5,9 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
+# Increase Node.js memory for larger builds
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+
 # Copy frontend package files
 COPY frontend/package*.json ./
 RUN npm install

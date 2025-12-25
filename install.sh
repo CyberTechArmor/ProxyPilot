@@ -18,6 +18,58 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Docker compose command wrapper - detects and uses correct version
+DOCKER_COMPOSE_CMD=""
+get_docker_compose_cmd() {
+    if [[ -n "$DOCKER_COMPOSE_CMD" ]]; then
+        echo "$DOCKER_COMPOSE_CMD"
+        return
+    fi
+
+    if docker compose version &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    else
+        log_error "Docker Compose not found!"
+        exit 1
+    fi
+    echo "$DOCKER_COMPOSE_CMD"
+}
+
+# Run docker compose with the correct command
+run_docker_compose() {
+    local cmd=$(get_docker_compose_cmd)
+    $cmd "$@"
+}
+
+# Check if a port is in use
+is_port_in_use() {
+    local port=$1
+    if command -v ss &> /dev/null; then
+        ss -tuln | grep -q ":${port} " && return 0
+    elif command -v netstat &> /dev/null; then
+        netstat -tuln | grep -q ":${port} " && return 0
+    elif command -v lsof &> /dev/null; then
+        lsof -i ":${port}" &> /dev/null && return 0
+    fi
+    return 1
+}
+
+# Find next available port
+find_available_port() {
+    local start_port=$1
+    local port=$start_port
+    while is_port_in_use $port; do
+        ((port++))
+        if [[ $port -gt 65535 ]]; then
+            echo ""
+            return 1
+        fi
+    done
+    echo $port
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -663,9 +715,41 @@ main() {
     read -rp "Enter default NGINX max upload size [1G]: " MAX_UPLOAD
     MAX_UPLOAD=${MAX_UPLOAD:-1G}
 
-    # Port
-    read -rp "Enter port for ProxyPilot dashboard [3001]: " PORT
-    PORT=${PORT:-3001}
+    # Port with availability check
+    DEFAULT_PORT=3001
+    if is_port_in_use $DEFAULT_PORT; then
+        SUGGESTED_PORT=$(find_available_port $DEFAULT_PORT)
+        log_warn "Port $DEFAULT_PORT is already in use!"
+        if [[ -n "$SUGGESTED_PORT" ]]; then
+            echo -e "  Suggested available port: ${GREEN}${SUGGESTED_PORT}${NC}"
+        fi
+    fi
+
+    while true; do
+        read -rp "Enter port for ProxyPilot dashboard [${SUGGESTED_PORT:-$DEFAULT_PORT}]: " PORT
+        PORT=${PORT:-${SUGGESTED_PORT:-$DEFAULT_PORT}}
+
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 ]] || [[ "$PORT" -gt 65535 ]]; then
+            log_error "Invalid port number. Please enter a number between 1 and 65535."
+            continue
+        fi
+
+        if is_port_in_use $PORT; then
+            log_warn "Port $PORT is already in use!"
+            NEXT_PORT=$(find_available_port $PORT)
+            if [[ -n "$NEXT_PORT" ]]; then
+                echo -e "  Next available port: ${GREEN}${NEXT_PORT}${NC}"
+            fi
+            read -rp "Use a different port? [Y/n]: " CHANGE_PORT
+            CHANGE_PORT=${CHANGE_PORT:-Y}
+            if [[ "$CHANGE_PORT" =~ ^[Nn]$ ]]; then
+                log_warn "Proceeding with port $PORT (may cause conflicts)"
+                break
+            fi
+        else
+            break
+        fi
+    done
 
     # Admin username
     read -rp "Enter admin username: " ADMIN_USER
@@ -751,8 +835,8 @@ main() {
     # Build and start Docker container
     log_info "Building and starting ProxyPilot..."
     cd "$INSTALL_DIR"
-    docker compose build
-    docker compose up -d
+    run_docker_compose build
+    run_docker_compose up -d
 
     # Wait for container to be healthy
     log_info "Waiting for ProxyPilot to start..."
@@ -791,21 +875,27 @@ main() {
     generate_totp_qr "$TOTP_SECRET" "$ADMIN_USER"
     echo ""
     echo ""
+    # Determine correct docker compose command for display
+    local dc_cmd=$(get_docker_compose_cmd)
+
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║${NC}                    ${BLUE}USEFUL COMMANDS${NC}                              ${BLUE}║${NC}"
     echo -e "${BLUE}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  View logs:                                                    ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}    docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}    ${dc_cmd} -f ${INSTALL_DIR}/docker-compose.yml logs -f"
     echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  Restart:                                                      ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}    docker compose -f ${INSTALL_DIR}/docker-compose.yml restart ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}    ${dc_cmd} -f ${INSTALL_DIR}/docker-compose.yml restart"
+    echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  Start (after kill switch):                                    ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}    sudo docker start proxypilot-admin"
     echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  Reset password/TOTP (if you lose access):                     ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}    sudo ${INSTALL_DIR}/reset.sh                                ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}    sudo ${INSTALL_DIR}/reset.sh"
     echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  Show saved credentials:                                       ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}    sudo ${INSTALL_DIR}/reset.sh show                           ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}    sudo ${INSTALL_DIR}/reset.sh show"
     echo -e "${BLUE}║${NC}                                                                ${BLUE}║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""

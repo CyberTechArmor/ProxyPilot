@@ -12,7 +12,7 @@ ENV CI=true
 
 # Copy frontend package files
 COPY frontend/package*.json ./
-RUN npm ci --ignore-scripts || npm install
+RUN npm ci
 
 # Copy frontend source and build with reduced memory usage
 COPY frontend/ ./

@@ -41,7 +41,7 @@ userRouter.get('/profile', (req, res) => {
   try {
     const db = getDb();
     const user = db.prepare(`
-      SELECT id, username, totp_enabled, created_at, updated_at
+      SELECT id, username, display_name, role, totp_enabled, created_at, updated_at
       FROM users WHERE id = ?
     `).get(req.user.id);
 
@@ -53,6 +53,8 @@ userRouter.get('/profile', (req, res) => {
       user: {
         id: user.id,
         username: user.username,
+        displayName: user.display_name,
+        role: user.role || 'admin',
         totpEnabled: !!user.totp_enabled,
         createdAt: user.created_at,
         updatedAt: user.updated_at,

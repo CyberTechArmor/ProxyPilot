@@ -83,10 +83,22 @@ install_nginx() {
         log_info "Installing NGINX..."
         apt-get update -y
         apt-get install -y nginx
-        systemctl enable nginx
-        systemctl start nginx
         log_success "NGINX installed successfully"
     fi
+
+    # Ensure NGINX is enabled and running
+    systemctl enable nginx 2>/dev/null || true
+    systemctl start nginx 2>/dev/null || true
+
+    # Verify NGINX is running
+    if ! systemctl is-active --quiet nginx; then
+        log_warn "NGINX service not running, attempting to start..."
+        systemctl start nginx || {
+            log_error "Failed to start NGINX. Check: journalctl -xeu nginx"
+            exit 1
+        }
+    fi
+    log_success "NGINX is running"
 }
 
 # Configure NGINX global settings
@@ -108,8 +120,13 @@ configure_nginx_global() {
         sed -i "/http {/a\\    client_max_body_size ${max_upload};" /etc/nginx/nginx.conf
     fi
 
-    nginx -t && systemctl reload nginx
-    log_success "NGINX configured with max upload size: ${max_upload}"
+    # Test and reload NGINX
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
+        log_success "NGINX configured with max upload size: ${max_upload}"
+    else
+        log_warn "NGINX config test failed, but continuing (will be fixed after SSL setup)"
+    fi
 }
 
 # Check and install Docker
@@ -164,6 +181,36 @@ install_dependencies() {
     log_info "Installing additional dependencies..."
     apt-get install -y certbot python3-certbot-nginx qrencode jq
     log_success "Dependencies installed"
+}
+
+# Ensure SSL options file exists (created by certbot or manually)
+ensure_ssl_options() {
+    local ssl_options="/etc/letsencrypt/options-ssl-nginx.conf"
+    local ssl_dhparams="/etc/letsencrypt/ssl-dhparams.pem"
+
+    if [[ ! -f "$ssl_options" ]]; then
+        log_info "Creating SSL options file..."
+        mkdir -p /etc/letsencrypt
+
+        cat > "$ssl_options" <<'SSLOPTS'
+# Certbot SSL options for NGINX
+ssl_session_cache shared:le_nginx_SSL:10m;
+ssl_session_timeout 1440m;
+ssl_session_tickets off;
+
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+
+ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+SSLOPTS
+        log_success "SSL options file created"
+    fi
+
+    if [[ ! -f "$ssl_dhparams" ]]; then
+        log_info "Creating DH parameters (this may take a moment)..."
+        openssl dhparam -out "$ssl_dhparams" 2048 2>/dev/null
+        log_success "DH parameters created"
+    fi
 }
 
 # Setup SSL certificate
@@ -454,6 +501,9 @@ main() {
     # Create configuration files
     create_env_file "$INSTALL_DIR" "$PORT" "$ADMIN_USER" "$ADMIN_PASS" "$TOTP_SECRET" "$DOMAIN"
     create_docker_compose "$INSTALL_DIR" "$PORT"
+
+    # Ensure SSL options file exists before setting up SSL
+    ensure_ssl_options
 
     # Setup SSL
     setup_ssl "$DOMAIN" "$EMAIL"

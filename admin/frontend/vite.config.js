@@ -27,6 +27,8 @@ export default defineConfig({
     target: 'es2020',
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
+      // Disable parallel processing to prevent hangs in constrained environments
+      maxParallelFileOps: 1,
       output: {
         manualChunks: {
           vendor: ['react', 'react-dom', 'react-router-dom'],

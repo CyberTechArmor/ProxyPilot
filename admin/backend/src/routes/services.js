@@ -2032,6 +2032,79 @@ servicesRouter.post('/docker/compose/destroy', async (req, res) => {
   }
 });
 
+// Get real-time system stats (CPU, RAM, Network, Disk)
+servicesRouter.get('/system/stats', async (req, res) => {
+  try {
+    // Execute multiple commands to gather system stats
+    const commands = {
+      // CPU usage - get overall CPU usage percentage
+      cpu: `top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}' 2>/dev/null || echo "0"`,
+      // Memory usage
+      memory: `free -b | awk '/^Mem:/ {printf "%.0f %.0f %.0f %.0f", $2, $3, $4, $7}'`,
+      // Disk usage
+      disk: `df -B1 / | awk 'NR==2 {printf "%.0f %.0f %.0f", $2, $3, $4}'`,
+      // Network stats (bytes in/out) - use first non-lo interface
+      network: `cat /proc/net/dev | awk 'NR>2 && $1 !~ /lo:/ {gsub(":","",$1); rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}'`,
+      // Load average
+      load: `cat /proc/loadavg | awk '{print $1, $2, $3}'`,
+      // Uptime in seconds
+      uptime: `cat /proc/uptime | awk '{print $1}'`,
+    };
+
+    const results = {};
+
+    for (const [key, cmd] of Object.entries(commands)) {
+      try {
+        const result = await execOnHost(cmd);
+        results[key] = result.stdout.trim();
+      } catch (e) {
+        results[key] = '';
+      }
+    }
+
+    // Parse the results
+    const [memTotal, memUsed, memFree, memAvailable] = results.memory.split(' ').map(Number);
+    const [diskTotal, diskUsed, diskFree] = results.disk.split(' ').map(Number);
+    const [netRx, netTx] = results.network.split(' ').map(Number);
+    const [load1, load5, load15] = results.load.split(' ').map(Number);
+
+    const stats = {
+      cpu: {
+        usage: parseFloat(results.cpu) || 0,
+      },
+      memory: {
+        total: memTotal || 0,
+        used: memUsed || 0,
+        free: memFree || 0,
+        available: memAvailable || 0,
+        usagePercent: memTotal ? ((memUsed / memTotal) * 100).toFixed(1) : 0,
+      },
+      disk: {
+        total: diskTotal || 0,
+        used: diskUsed || 0,
+        free: diskFree || 0,
+        usagePercent: diskTotal ? ((diskUsed / diskTotal) * 100).toFixed(1) : 0,
+      },
+      network: {
+        bytesReceived: netRx || 0,
+        bytesSent: netTx || 0,
+      },
+      load: {
+        avg1: load1 || 0,
+        avg5: load5 || 0,
+        avg15: load15 || 0,
+      },
+      uptime: parseFloat(results.uptime) || 0,
+      timestamp: Date.now(),
+    };
+
+    res.json({ success: true, stats });
+  } catch (error) {
+    console.error('Error getting system stats:', error);
+    res.status(500).json({ error: 'Failed to get system stats' });
+  }
+});
+
 // Kill switch - secure the ProxyPilot dashboard (requires TOTP)
 servicesRouter.post('/system/secure', async (req, res) => {
   try {

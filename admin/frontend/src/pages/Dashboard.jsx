@@ -82,6 +82,16 @@ import {
   Eye,
   ArrowUp,
   ArrowDown,
+  FolderPlus,
+  GripVertical,
+  Cpu,
+  HardDrive,
+  Wifi,
+  MemoryStick,
+  Activity,
+  Clock,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -274,8 +284,6 @@ export default function Dashboard() {
     domain: '',
     wordpressPort: '7000',
     dbPort: '7001',
-    // n8n specific
-    n8nPort: '5678',
   });
 
   // Terminal tab state (terminal vs editor)
@@ -319,6 +327,20 @@ export default function Dashboard() {
   const [selectedServiceForFolder, setSelectedServiceForFolder] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
   const [selectedFolderFilter, setSelectedFolderFilter] = useState(null); // null = all, '' = unfoldered, 'path' = specific folder
+  const [selectedParentFolder, setSelectedParentFolder] = useState(null);
+  const [draggedFolder, setDraggedFolder] = useState(null);
+  const [draggedService, setDraggedService] = useState(null);
+  const [dragOverFolder, setDragOverFolder] = useState(null);
+
+  // Dashboard view state - tabs for Resources, Services, Compose
+  const [dashboardTab, setDashboardTab] = useState(() => {
+    return localStorage.getItem('dashboardDefaultTab') || 'resources';
+  });
+
+  // System stats state for resource utilization
+  const [systemStats, setSystemStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const statsIntervalRef = useRef(null);
 
   const { toast } = useToast();
 
@@ -445,6 +467,35 @@ export default function Dashboard() {
     fetchServices();
     fetchComposeServices();
   }, []);
+
+  // Fetch system stats for resource utilization
+  const fetchSystemStats = async () => {
+    try {
+      const result = await api.getSystemStats();
+      if (result.success) {
+        setSystemStats(result.stats);
+      }
+    } catch (error) {
+      console.error('Failed to fetch system stats:', error);
+    }
+  };
+
+  // Effect to fetch stats on interval when resources tab is active
+  useEffect(() => {
+    if (dashboardTab === 'resources') {
+      setStatsLoading(true);
+      fetchSystemStats().finally(() => setStatsLoading(false));
+
+      // Refresh every 2 seconds
+      statsIntervalRef.current = setInterval(fetchSystemStats, 2000);
+
+      return () => {
+        if (statsIntervalRef.current) {
+          clearInterval(statsIntervalRef.current);
+        }
+      };
+    }
+  }, [dashboardTab]);
 
   // Keyboard shortcut handler for editor (Ctrl+S)
   useEffect(() => {
@@ -1174,11 +1225,11 @@ export default function Dashboard() {
     localStorage.setItem('serviceFolders', JSON.stringify(folders));
   };
 
-  const createFolder = (name, parentPath = '') => {
+  const createFolder = (name, parentPath = null) => {
     const newPath = parentPath ? `${parentPath}/${name}` : name;
     saveServiceFolders({
       ...serviceFolders,
-      [newPath]: { name, services: [], subfolders: [] },
+      [newPath]: { name, services: [], parentPath },
     });
   };
 
@@ -1197,10 +1248,129 @@ export default function Dashboard() {
     saveServiceFolders(newFolders);
   };
 
+  const moveFolderToFolder = (sourcePath, targetPath) => {
+    // Don't allow moving to itself or its children
+    if (sourcePath === targetPath || targetPath?.startsWith(sourcePath + '/')) {
+      return false;
+    }
+
+    const newFolders = { ...serviceFolders };
+    const sourceFolder = newFolders[sourcePath];
+    if (!sourceFolder) return false;
+
+    // Create new path
+    const folderName = sourceFolder.name;
+    const newPath = targetPath ? `${targetPath}/${folderName}` : folderName;
+
+    // Move the folder and all its subfolders
+    const foldersToMove = Object.entries(newFolders).filter(([path]) =>
+      path === sourcePath || path.startsWith(sourcePath + '/')
+    );
+
+    foldersToMove.forEach(([oldPath, folder]) => {
+      const relativePath = oldPath.slice(sourcePath.length);
+      const updatedPath = newPath + relativePath;
+      const newParent = updatedPath.includes('/')
+        ? updatedPath.slice(0, updatedPath.lastIndexOf('/'))
+        : null;
+
+      delete newFolders[oldPath];
+      newFolders[updatedPath] = { ...folder, parentPath: newParent };
+    });
+
+    saveServiceFolders(newFolders);
+    return true;
+  };
+
   const deleteFolder = (folderPath) => {
     const newFolders = { ...serviceFolders };
-    delete newFolders[folderPath];
+    // Delete the folder and all subfolders
+    Object.keys(newFolders).forEach(path => {
+      if (path === folderPath || path.startsWith(folderPath + '/')) {
+        delete newFolders[path];
+      }
+    });
     saveServiceFolders(newFolders);
+  };
+
+  // Get root folders (folders without parent)
+  const getRootFolders = () => {
+    return Object.entries(serviceFolders).filter(([path, folder]) => !folder.parentPath);
+  };
+
+  // Get subfolders of a folder
+  const getSubfolders = (parentPath) => {
+    return Object.entries(serviceFolders).filter(([path, folder]) => folder.parentPath === parentPath);
+  };
+
+  // Drag and drop handlers for services
+  const handleServiceDragStart = (e, service) => {
+    setDraggedService(service);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleServiceDragEnd = () => {
+    setDraggedService(null);
+    setDragOverFolder(null);
+  };
+
+  // Drag and drop handlers for folders
+  const handleFolderDragStart = (e, folderPath) => {
+    setDraggedFolder(folderPath);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleFolderDragEnd = () => {
+    setDraggedFolder(null);
+    setDragOverFolder(null);
+  };
+
+  const handleFolderDragOver = (e, folderPath) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverFolder(folderPath);
+  };
+
+  const handleFolderDragLeave = () => {
+    setDragOverFolder(null);
+  };
+
+  const handleFolderDrop = (e, targetPath) => {
+    e.preventDefault();
+    setDragOverFolder(null);
+
+    if (draggedService) {
+      moveServiceToFolder(draggedService.id, targetPath);
+      toast({
+        title: 'Service moved',
+        description: `"${draggedService.name}" moved to "${serviceFolders[targetPath]?.name || 'root'}"`
+      });
+      setDraggedService(null);
+    } else if (draggedFolder && draggedFolder !== targetPath) {
+      if (moveFolderToFolder(draggedFolder, targetPath)) {
+        toast({
+          title: 'Folder moved',
+          description: `Folder moved to "${serviceFolders[targetPath]?.name || 'root'}"`
+        });
+      }
+      setDraggedFolder(null);
+    }
+  };
+
+  const handleRootDrop = (e) => {
+    e.preventDefault();
+    setDragOverFolder(null);
+
+    if (draggedService) {
+      moveServiceToFolder(draggedService.id, null);
+      toast({ title: 'Service moved', description: `"${draggedService.name}" removed from folder` });
+      setDraggedService(null);
+    } else if (draggedFolder) {
+      if (moveFolderToFolder(draggedFolder, null)) {
+        toast({ title: 'Folder moved', description: 'Folder moved to root' });
+      }
+      setDraggedFolder(null);
+    }
   };
 
   // Get services in a specific folder
@@ -1426,7 +1596,7 @@ export default function Dashboard() {
     return port;
   };
 
-  // One-Click Install WordPress or n8n
+  // One-Click Install WordPress
   const handleOneClickInstall = async () => {
     if (!oneClickForm.siteName || !oneClickForm.domain) {
       toast({ variant: 'destructive', title: 'Error', description: 'Site name and domain are required' });
@@ -1439,13 +1609,11 @@ export default function Dashboard() {
     try {
       if (oneClickService === 'wordpress') {
         await installWordPress(safeName);
-      } else if (oneClickService === 'n8n') {
-        await installN8n(safeName);
       }
 
       setOneClickDialogOpen(false);
       setOneClickService(null);
-      setOneClickForm({ siteName: '', domain: '', wordpressPort: '7000', dbPort: '7001', n8nPort: '5678' });
+      setOneClickForm({ siteName: '', domain: '', wordpressPort: '7000', dbPort: '7001' });
       fetchServices();
       fetchComposeServices();
     } catch (error) {
@@ -1589,120 +1757,6 @@ volumes:
     toast({
       title: 'WordPress Installed!',
       description: `${oneClickForm.siteName} is now running at ${oneClickForm.domain}`,
-    });
-  };
-
-  // Install n8n helper
-  const installN8n = async (safeName) => {
-    const n8nPassword = generatePassword();
-    const encryptionKey = generatePassword(32);
-
-    // Find available port
-    const n8nPort = await findNextAvailablePort(parseInt(oneClickForm.n8nPort) || 5678);
-    setOneClickForm(prev => ({ ...prev, n8nPort: n8nPort.toString() }));
-
-    toast({ title: 'Port Selected', description: `Using n8n port ${n8nPort}` });
-
-    // Create directory
-    const installDir = `/root/docker/${safeName}`;
-    await api.executeCommand(`mkdir -p "${installDir}"`, '/');
-
-    // Create .env file with secure passwords
-    const envContent = `# ${oneClickForm.siteName} Environment Variables
-N8N_PORT=${n8nPort}
-N8N_BASIC_AUTH_USER=admin
-N8N_BASIC_AUTH_PASSWORD=${n8nPassword}
-N8N_ENCRYPTION_KEY=${encryptionKey}
-WEBHOOK_URL=https://${oneClickForm.domain}/
-DOMAIN=${oneClickForm.domain}
-`;
-    await api.writeFile(`${installDir}/.env`, envContent);
-
-    // Create docker-compose.yml for n8n with MCP support
-    const composeContent = `version: '3.8'
-
-services:
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: n8n_${safeName}
-    ports:
-      - "\${N8N_PORT}:5678"
-    environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
-      - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=\${DOMAIN}
-      - N8N_PROTOCOL=https
-      - WEBHOOK_URL=\${WEBHOOK_URL}
-      - GENERIC_TIMEZONE=America/New_York
-      - TZ=America/New_York
-      # MCP Integration Support
-      - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      - N8N_REINSTALL_MISSING_PACKAGES=true
-    volumes:
-      - n8n_data:/home/node/.n8n
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-volumes:
-  n8n_data:
-`;
-    await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
-
-    // Start docker compose
-    toast({ title: 'Starting n8n Installation', description: 'Starting n8n automation platform...' });
-    const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/', 120000);
-
-    if (!startResult.success) {
-      throw new Error(startResult.output || 'Failed to start n8n container');
-    }
-
-    // Wait for n8n to be healthy
-    toast({ title: 'Waiting for n8n', description: 'Waiting for n8n to be ready...' });
-    let n8nReady = false;
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      const healthCheck = await api.executeCommand(`docker inspect --format='{{.State.Health.Status}}' n8n_${safeName} 2>/dev/null || echo "starting"`, '/');
-      if (healthCheck.output?.trim() === 'healthy') {
-        n8nReady = true;
-        break;
-      }
-    }
-
-    if (!n8nReady) {
-      toast({ title: 'Note', description: 'n8n is starting up. It may take a moment to be fully ready.' });
-    }
-
-    // Create ProxyPilot service
-    try {
-      await api.createService({
-        name: oneClickForm.siteName,
-        domain: oneClickForm.domain,
-        type: 'docker',
-        target: '127.0.0.1',
-        port: n8nPort,
-        containerName: `n8n_${safeName}`,
-        sslEnabled: true,
-        forceHttps: true,
-        websocketEnabled: true,
-        maxUploadSize: '100M',
-        obtainCertificate: true,
-      });
-    } catch (e) {
-      console.error('Service creation warning:', e);
-    }
-
-    // Show credentials
-    toast({
-      title: 'n8n Installed!',
-      description: `Login with admin / ${n8nPassword} at ${oneClickForm.domain}`,
-      duration: 15000,
     });
   };
 
@@ -2303,6 +2357,232 @@ volumes:
         </div>
       </div>
 
+      {/* Dashboard Tabs */}
+      <div className="flex items-center gap-2 border-b pb-2">
+        <div className="flex gap-1 p-1 bg-muted rounded-lg">
+          <Button
+            variant={dashboardTab === 'resources' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setDashboardTab('resources')}
+            className="gap-2"
+          >
+            <Activity className="h-4 w-4" />
+            Resources
+          </Button>
+          <Button
+            variant={dashboardTab === 'services' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setDashboardTab('services')}
+            className="gap-2"
+          >
+            <LayoutGrid className="h-4 w-4" />
+            Services
+          </Button>
+          <Button
+            variant={dashboardTab === 'compose' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setDashboardTab('compose')}
+            className="gap-2"
+          >
+            <Container className="h-4 w-4" />
+            Compose
+          </Button>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Default view:</span>
+          <select
+            className="text-xs border rounded px-2 py-1 bg-background"
+            value={localStorage.getItem('dashboardDefaultTab') || 'resources'}
+            onChange={(e) => {
+              localStorage.setItem('dashboardDefaultTab', e.target.value);
+              toast({ title: 'Preference saved', description: `Default view set to ${e.target.value}` });
+            }}
+          >
+            <option value="resources">Resources</option>
+            <option value="services">Services</option>
+            <option value="compose">Compose</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Resources View - System Stats */}
+      {dashboardTab === 'resources' && (
+        <div className="space-y-4">
+          {statsLoading && !systemStats ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : systemStats ? (
+            <>
+              {/* System Uptime */}
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Clock className="h-4 w-4" />
+                System uptime: {Math.floor(systemStats.uptime / 86400)}d {Math.floor((systemStats.uptime % 86400) / 3600)}h {Math.floor((systemStats.uptime % 3600) / 60)}m
+              </div>
+
+              {/* Stats Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* CPU Usage */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm font-medium flex items-center gap-2">
+                      <Cpu className="h-4 w-4 text-blue-500" />
+                      CPU Usage
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-3xl font-bold text-blue-500">
+                      {systemStats.cpu.usage.toFixed(1)}%
+                    </div>
+                    <div className="mt-2 h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500 transition-all duration-500"
+                        style={{ width: `${Math.min(systemStats.cpu.usage, 100)}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Load: {systemStats.load.avg1.toFixed(2)} / {systemStats.load.avg5.toFixed(2)} / {systemStats.load.avg15.toFixed(2)}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Memory Usage */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm font-medium flex items-center gap-2">
+                      <MemoryStick className="h-4 w-4 text-green-500" />
+                      Memory
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-3xl font-bold text-green-500">
+                      {systemStats.memory.usagePercent}%
+                    </div>
+                    <div className="mt-2 h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 transition-all duration-500"
+                        style={{ width: `${systemStats.memory.usagePercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      {(systemStats.memory.used / 1024 / 1024 / 1024).toFixed(1)} GB / {(systemStats.memory.total / 1024 / 1024 / 1024).toFixed(1)} GB
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Disk Usage */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm font-medium flex items-center gap-2">
+                      <HardDrive className="h-4 w-4 text-orange-500" />
+                      Disk Usage
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-3xl font-bold text-orange-500">
+                      {systemStats.disk.usagePercent}%
+                    </div>
+                    <div className="mt-2 h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-orange-500 transition-all duration-500"
+                        style={{ width: `${systemStats.disk.usagePercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      {(systemStats.disk.used / 1024 / 1024 / 1024).toFixed(1)} GB / {(systemStats.disk.total / 1024 / 1024 / 1024).toFixed(1)} GB
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Network */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm font-medium flex items-center gap-2">
+                      <Wifi className="h-4 w-4 text-purple-500" />
+                      Network I/O
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">↓ Received</span>
+                        <span className="text-sm font-medium text-purple-500">
+                          {(systemStats.network.bytesReceived / 1024 / 1024 / 1024).toFixed(2)} GB
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">↑ Sent</span>
+                        <span className="text-sm font-medium text-purple-500">
+                          {(systemStats.network.bytesSent / 1024 / 1024 / 1024).toFixed(2)} GB
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Total: {((systemStats.network.bytesReceived + systemStats.network.bytesSent) / 1024 / 1024 / 1024).toFixed(2)} GB
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Quick Stats */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-blue-500/10 rounded-lg">
+                      <Container className="h-5 w-5 text-blue-500" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold">{services.length}</div>
+                      <div className="text-xs text-muted-foreground">Services</div>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-green-500/10 rounded-lg">
+                      <FolderTree className="h-5 w-5 text-green-500" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold">{Object.keys(serviceFolders).length}</div>
+                      <div className="text-xs text-muted-foreground">Folders</div>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-orange-500/10 rounded-lg">
+                      <Package className="h-5 w-5 text-orange-500" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold">{composeServices.length}</div>
+                      <div className="text-xs text-muted-foreground">Compose Stacks</div>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-yellow-500/10 rounded-lg">
+                      <Star className="h-5 w-5 text-yellow-500" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold">{services.filter(s => s.isFavorite).length}</div>
+                      <div className="text-xs text-muted-foreground">Favorites</div>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-12 text-muted-foreground">
+              Failed to load system stats. Retrying...
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Services View */}
+      {dashboardTab === 'services' && (
+        <>
       {/* Search/Filter/Sort Bar */}
       <div className="flex flex-wrap gap-3 items-center bg-muted/50 p-3 rounded-lg">
         <div className="flex-1 min-w-[200px] relative">
@@ -2348,17 +2628,6 @@ volumes:
           <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? 'fill-current' : ''}`} />
           Favorites
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setNewFolderName('');
-            setFolderDialogOpen(true);
-          }}
-        >
-          <FolderTree className="h-4 w-4 mr-1" />
-          Folders
-        </Button>
         <div className="flex items-center gap-1 border rounded-md p-1">
           <Button
             variant={viewMode === 'grid' ? 'default' : 'ghost'}
@@ -2394,6 +2663,19 @@ volumes:
                 <FolderTree className="h-4 w-4" />
                 Folders
               </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0"
+                onClick={() => {
+                  setNewFolderName('');
+                  setSelectedParentFolder(null);
+                  setFolderDialogOpen(true);
+                }}
+                title="Create new folder"
+              >
+                <FolderPlus className="h-4 w-4" />
+              </Button>
             </div>
             <div className="p-2 space-y-1">
               {/* All Services */}
@@ -2406,10 +2688,18 @@ volumes:
                 <span className="ml-auto text-xs opacity-70">{services.length}</span>
               </div>
 
-              {/* Unfoldered */}
+              {/* Unfoldered - Drop zone to remove from folders */}
               <div
-                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${selectedFolderFilter === '' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm transition-colors ${
+                  selectedFolderFilter === '' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+                } ${dragOverFolder === 'unfoldered' ? 'ring-2 ring-primary ring-offset-1' : ''}`}
                 onClick={() => setSelectedFolderFilter('')}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOverFolder('unfoldered');
+                }}
+                onDragLeave={() => setDragOverFolder(null)}
+                onDrop={handleRootDrop}
               >
                 <File className="h-4 w-4" />
                 <span>Unfoldered</span>
@@ -2418,37 +2708,89 @@ volumes:
                 </span>
               </div>
 
-              {/* Folder List */}
+              {/* Folder List with Nested Support */}
               {Object.entries(serviceFolders).length > 0 && (
                 <div className="border-t my-2 pt-2">
-                  {Object.entries(serviceFolders).map(([folderPath, folder]) => {
-                    const folderServiceCount = folder.services?.length || 0;
-                    const isSelected = selectedFolderFilter === folderPath;
-                    return (
-                      <div
-                        key={folderPath}
-                        className={`group flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
-                        onClick={() => setSelectedFolderFilter(folderPath)}
-                      >
-                        <Folder className={`h-4 w-4 ${isSelected ? '' : 'text-yellow-500'}`} />
-                        <span className="truncate flex-1">{folder.name}</span>
-                        <span className="text-xs opacity-70">{folderServiceCount}</span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-red-300' : 'text-red-500'}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteFolder(folderPath);
-                            if (isSelected) setSelectedFolderFilter(null);
-                          }}
-                          title="Delete folder"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    );
-                  })}
+                  {(() => {
+                    // Recursive folder renderer
+                    const renderFolder = (folderPath, folder, depth = 0) => {
+                      const folderServiceCount = folder.services?.length || 0;
+                      const isSelected = selectedFolderFilter === folderPath;
+                      const isExpanded = expandedFolders[folderPath];
+                      const subfolders = getSubfolders(folderPath);
+                      const hasSubfolders = subfolders.length > 0;
+                      const isDragOver = dragOverFolder === folderPath;
+
+                      return (
+                        <div key={folderPath}>
+                          <div
+                            draggable
+                            onDragStart={(e) => handleFolderDragStart(e, folderPath)}
+                            onDragEnd={handleFolderDragEnd}
+                            onDragOver={(e) => handleFolderDragOver(e, folderPath)}
+                            onDragLeave={handleFolderDragLeave}
+                            onDrop={(e) => handleFolderDrop(e, folderPath)}
+                            className={`group flex items-center gap-1 px-2 py-1.5 rounded cursor-pointer text-sm transition-colors ${
+                              isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+                            } ${isDragOver ? 'ring-2 ring-primary ring-offset-1' : ''} ${draggedFolder === folderPath ? 'opacity-50' : ''}`}
+                            style={{ paddingLeft: `${depth * 12 + 8}px` }}
+                            onClick={() => setSelectedFolderFilter(folderPath)}
+                          >
+                            {hasSubfolders ? (
+                              <button
+                                className="p-0.5 -ml-1 hover:bg-muted rounded"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedFolders(prev => ({ ...prev, [folderPath]: !prev[folderPath] }));
+                                }}
+                              >
+                                {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                              </button>
+                            ) : (
+                              <span className="w-4" />
+                            )}
+                            <GripVertical className="h-3 w-3 opacity-0 group-hover:opacity-50 cursor-grab" />
+                            <Folder className={`h-4 w-4 ${isSelected ? '' : 'text-yellow-500'}`} />
+                            <span className="truncate flex-1">{folder.name}</span>
+                            <span className="text-xs opacity-70">{folderServiceCount}</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedParentFolder(folderPath);
+                                setNewFolderName('');
+                                setFolderDialogOpen(true);
+                              }}
+                              title="Add subfolder"
+                            >
+                              <FolderPlus className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-red-300' : 'text-red-500'}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteFolder(folderPath);
+                                if (isSelected) setSelectedFolderFilter(null);
+                              }}
+                              title="Delete folder"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                          {isExpanded && subfolders.map(([subPath, subFolder]) =>
+                            renderFolder(subPath, subFolder, depth + 1)
+                          )}
+                        </div>
+                      );
+                    };
+
+                    // Render root folders
+                    return getRootFolders().map(([path, folder]) => renderFolder(path, folder));
+                  })()}
                 </div>
               )}
             </div>
@@ -2459,7 +2801,12 @@ volumes:
         <div className="flex-1">
           <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
             {filteredServices.map((service) => (
-          <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
+          <Card
+            key={service.id}
+            draggable
+            onDragStart={(e) => handleServiceDragStart(e, service)}
+            onDragEnd={handleServiceDragEnd}
+            className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''} ${draggedService?.id === service.id ? 'opacity-50' : ''} cursor-grab active:cursor-grabbing`}>
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -2608,20 +2955,23 @@ volumes:
           </div>
         </div>
       </div>
+        </>
+      )}
 
-      {/* Running Docker Compose Services Section - Grouped by Project */}
-      {groupedComposeProjects.length > 0 && (
-        <div className="mt-8">
+      {/* Compose View - Docker Compose Services */}
+      {dashboardTab === 'compose' && (
+        <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold flex items-center gap-2">
               <Boxes className="h-5 w-5" />
-              Running Docker Compose Services
+              Docker Compose Services
             </h2>
             <Button variant="outline" size="sm" onClick={fetchComposeServices}>
               <RefreshCw className="h-4 w-4 mr-1" />
               Refresh
             </Button>
           </div>
+          {groupedComposeProjects.length > 0 && (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {groupedComposeProjects.map((project) => (
               <Card key={project.projectName} className="border-dashed border-purple-500/30">
@@ -2783,6 +3133,15 @@ volumes:
               </Card>
             ))}
           </div>
+          )}
+
+          {groupedComposeProjects.length === 0 && (
+            <div className="text-center py-12 text-muted-foreground">
+              <Boxes className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <p>No Docker Compose services running.</p>
+              <p className="text-sm">Use the "One-Click" button to deploy WordPress or create a docker-compose.yml.</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -4022,7 +4381,7 @@ volumes:
           </DialogHeader>
 
           {!oneClickService ? (
-            <div className="grid grid-cols-2 gap-4 py-4">
+            <div className="grid grid-cols-1 gap-4 py-4">
               <Card
                 className="cursor-pointer hover:border-green-500 transition-colors"
                 onClick={() => setOneClickService('wordpress')}
@@ -4034,20 +4393,6 @@ volumes:
                 <CardContent>
                   <CardDescription className="text-center">
                     Full WordPress with MySQL, auto-configured SSL
-                  </CardDescription>
-                </CardContent>
-              </Card>
-              <Card
-                className="cursor-pointer hover:border-orange-500 transition-colors"
-                onClick={() => setOneClickService('n8n')}
-              >
-                <CardHeader className="text-center pb-2">
-                  <Boxes className="h-12 w-12 mx-auto text-orange-500" />
-                  <CardTitle className="text-lg">n8n</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <CardDescription className="text-center">
-                    Workflow automation with MCP support
                   </CardDescription>
                 </CardContent>
               </Card>
@@ -4123,74 +4468,6 @@ volumes:
                 </ul>
               </div>
             </div>
-          ) : oneClickService === 'n8n' ? (
-            <div className="space-y-4 py-4">
-              <div className="flex items-center gap-2 p-2 bg-muted rounded">
-                <Boxes className="h-5 w-5 text-orange-500" />
-                <span className="font-medium">n8n Installation</span>
-              </div>
-
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <Label htmlFor="siteName">Instance Name</Label>
-                  <Input
-                    id="siteName"
-                    value={oneClickForm.siteName}
-                    onChange={(e) => setOneClickForm({ ...oneClickForm, siteName: e.target.value })}
-                    placeholder="My Automation"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Used for container naming (e.g., n8n_myautomation)
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="domain">Domain</Label>
-                  <Input
-                    id="domain"
-                    value={oneClickForm.domain}
-                    onChange={(e) => setOneClickForm({ ...oneClickForm, domain: e.target.value })}
-                    placeholder="n8n.example.com"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    SSL certificate will be obtained automatically
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="n8nPort">n8n Port</Label>
-                  <Input
-                    id="n8nPort"
-                    type="number"
-                    value={oneClickForm.n8nPort}
-                    onChange={(e) => setOneClickForm({ ...oneClickForm, n8nPort: e.target.value })}
-                    placeholder="5678"
-                    className="w-32"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Port will be automatically adjusted if already in use
-                  </p>
-                </div>
-              </div>
-
-              <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-3 space-y-1 text-sm">
-                <p className="font-medium text-orange-600">What will be created:</p>
-                <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
-                  <li>Docker Compose stack with n8n automation platform</li>
-                  <li>.env file with secure auto-generated passwords</li>
-                  <li>MCP community packages enabled</li>
-                  <li>NGINX reverse proxy configuration</li>
-                  <li>SSL certificate via Let's Encrypt</li>
-                </ul>
-              </div>
-
-              <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-sm">
-                <p className="font-medium text-blue-600">Credentials:</p>
-                <p className="text-xs text-muted-foreground">
-                  A secure password will be auto-generated. Credentials will be shown after installation.
-                </p>
-              </div>
-            </div>
           ) : null}
 
           <DialogFooter>
@@ -4206,12 +4483,12 @@ volumes:
               <Button
                 onClick={handleOneClickInstall}
                 disabled={oneClickInstalling || !oneClickForm.siteName || !oneClickForm.domain}
-                className={oneClickService === 'n8n' ? 'bg-orange-600 hover:bg-orange-700' : 'bg-green-600 hover:bg-green-700'}
+                className="bg-green-600 hover:bg-green-700"
               >
                 {oneClickInstalling ? (
                   <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Installing...</>
                 ) : (
-                  <><Rocket className="mr-2 h-4 w-4" />Install {oneClickService === 'n8n' ? 'n8n' : 'WordPress'}</>
+                  <><Rocket className="mr-2 h-4 w-4" />Install WordPress</>
                 )}
               </Button>
             )}
@@ -4224,6 +4501,7 @@ volumes:
         setFolderDialogOpen(open);
         if (!open) {
           setSelectedServiceForFolder(null);
+          setSelectedParentFolder(null);
           setNewFolderName('');
         }
       }}>
@@ -4236,25 +4514,42 @@ volumes:
             <DialogDescription>
               {selectedServiceForFolder
                 ? `Move "${selectedServiceForFolder.name}" to a folder`
-                : 'Create folders to organize your services'}
+                : selectedParentFolder
+                  ? `Create subfolder in "${serviceFolders[selectedParentFolder]?.name}"`
+                  : 'Create folders to organize your services'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             {/* Create new folder */}
             <div className="space-y-2">
-              <Label>Create New Folder</Label>
+              <Label>Create New Folder{selectedParentFolder ? ` in "${serviceFolders[selectedParentFolder]?.name}"` : ''}</Label>
               <div className="flex gap-2">
                 <Input
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}
                   placeholder="Folder name"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newFolderName.trim()) {
+                      createFolder(newFolderName.trim(), selectedParentFolder);
+                      const desc = selectedParentFolder
+                        ? `Created subfolder "${newFolderName}" in "${serviceFolders[selectedParentFolder]?.name}"`
+                        : `Created folder "${newFolderName}"`;
+                      setNewFolderName('');
+                      setSelectedParentFolder(null);
+                      toast({ title: 'Folder created', description: desc });
+                    }
+                  }}
                 />
                 <Button
                   onClick={() => {
                     if (newFolderName.trim()) {
-                      createFolder(newFolderName.trim());
+                      createFolder(newFolderName.trim(), selectedParentFolder);
+                      const desc = selectedParentFolder
+                        ? `Created subfolder "${newFolderName}" in "${serviceFolders[selectedParentFolder]?.name}"`
+                        : `Created folder "${newFolderName}"`;
                       setNewFolderName('');
-                      toast({ title: 'Folder created', description: `Created folder "${newFolderName}"` });
+                      setSelectedParentFolder(null);
+                      toast({ title: 'Folder created', description: desc });
                     }
                   }}
                   disabled={!newFolderName.trim()}
@@ -4262,6 +4557,16 @@ volumes:
                   <Plus className="h-4 w-4" />
                 </Button>
               </div>
+              {selectedParentFolder && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedParentFolder(null)}
+                  className="text-xs"
+                >
+                  Create in root instead
+                </Button>
+              )}
             </div>
 
             {/* List existing folders */}

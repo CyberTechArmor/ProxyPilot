@@ -459,7 +459,7 @@ userRouter.delete('/users/:id', requireAdmin, (req, res) => {
   }
 });
 
-// Get user's service access
+// Get user's service access (includes folder access)
 userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
   try {
     const { id } = req.params;
@@ -475,15 +475,24 @@ userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
       return res.json({
         isAdmin: true,
         access: [],
-        message: 'Admin users have full access to all services',
+        folderAccess: [],
+        message: 'Admin users have full access to all services and folders',
       });
     }
 
+    // Get service access
     const access = db.prepare(`
       SELECT usa.service_id, usa.can_view, usa.can_write, s.name as service_name, s.domain
       FROM user_service_access usa
       INNER JOIN services s ON usa.service_id = s.id
       WHERE usa.user_id = ?
+    `).all(id);
+
+    // Get folder access
+    const folderAccess = db.prepare(`
+      SELECT folder_path, can_view, can_write
+      FROM user_folder_access
+      WHERE user_id = ?
     `).all(id);
 
     res.json({
@@ -494,6 +503,11 @@ userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
         domain: a.domain,
         canView: !!a.can_view,
         canWrite: !!a.can_write,
+      })),
+      folderAccess: folderAccess.map(f => ({
+        folderPath: f.folder_path,
+        canView: !!f.can_view,
+        canWrite: !!f.can_write,
       })),
     });
   } catch (error) {
@@ -556,6 +570,103 @@ userRouter.put('/users/:id/access', requireAdmin, (req, res) => {
     }
     console.error('Error updating user access:', error);
     res.status(500).json({ error: 'Failed to update user access' });
+  }
+});
+
+// Get user's folder access
+userRouter.get('/users/:id/folder-access', requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDb();
+
+    const user = db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // If admin, they have access to everything
+    if (user.role === 'admin') {
+      return res.json({
+        isAdmin: true,
+        folderAccess: [],
+        message: 'Admin users have full access to all folders',
+      });
+    }
+
+    const folderAccess = db.prepare(`
+      SELECT folder_path, can_view, can_write
+      FROM user_folder_access
+      WHERE user_id = ?
+    `).all(id);
+
+    res.json({
+      isAdmin: false,
+      folderAccess: folderAccess.map(f => ({
+        folderPath: f.folder_path,
+        canView: !!f.can_view,
+        canWrite: !!f.can_write,
+      })),
+    });
+  } catch (error) {
+    console.error('Error getting user folder access:', error);
+    res.status(500).json({ error: 'Failed to get user folder access' });
+  }
+});
+
+// Update folder access validation schema
+const updateFolderAccessSchema = z.object({
+  folderAccess: z.array(z.object({
+    folderPath: z.string().min(1),
+    canView: z.boolean(),
+    canWrite: z.boolean(),
+  })),
+});
+
+// Update user's folder access
+userRouter.put('/users/:id/folder-access', requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { folderAccess } = updateFolderAccessSchema.parse(req.body);
+    const db = getDb();
+
+    const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.role === 'admin') {
+      return res.status(400).json({ error: 'Cannot modify access for admin users - they have full access' });
+    }
+
+    // Start a transaction
+    const updateAccess = db.transaction(() => {
+      // Delete all existing folder access for this user
+      db.prepare('DELETE FROM user_folder_access WHERE user_id = ?').run(id);
+
+      // Insert new folder access entries
+      const insert = db.prepare(`
+        INSERT INTO user_folder_access (id, user_id, folder_path, can_view, can_write)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      for (const f of folderAccess) {
+        if (f.canView || f.canWrite) {
+          insert.run(uuidv4(), id, f.folderPath, f.canView ? 1 : 0, f.canWrite ? 1 : 0);
+        }
+      }
+    });
+
+    updateAccess();
+
+    logAudit(req.user.id, 'USER_FOLDER_ACCESS_UPDATED', 'user', id, { folderAccess }, req.ip);
+
+    res.json({ success: true, message: 'User folder access updated' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error updating user folder access:', error);
+    res.status(500).json({ error: 'Failed to update user folder access' });
   }
 });
 

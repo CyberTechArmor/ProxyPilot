@@ -274,6 +274,8 @@ export default function Dashboard() {
     domain: '',
     wordpressPort: '7000',
     dbPort: '7001',
+    // n8n specific
+    n8nPort: '5678',
   });
 
   // Terminal tab state (terminal vs editor)
@@ -316,12 +318,40 @@ export default function Dashboard() {
   const [newFolderName, setNewFolderName] = useState('');
   const [selectedServiceForFolder, setSelectedServiceForFolder] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
+  const [selectedFolderFilter, setSelectedFolderFilter] = useState(null); // null = all, '' = unfoldered, 'path' = specific folder
 
   const { toast } = useToast();
+
+  // Get folder for a service
+  const getServiceFolder = (serviceId) => {
+    for (const [path, folder] of Object.entries(serviceFolders)) {
+      if (folder.services?.includes(serviceId)) {
+        return path;
+      }
+    }
+    return null;
+  };
 
   // Filtered and sorted services
   const filteredServices = useMemo(() => {
     let result = [...services];
+
+    // Folder filter
+    if (selectedFolderFilter !== null) {
+      if (selectedFolderFilter === '') {
+        // Show unfoldered services
+        const folderedServiceIds = Object.values(serviceFolders).flatMap(f => f.services || []);
+        result = result.filter(s => !folderedServiceIds.includes(s.id));
+      } else {
+        // Show services in specific folder
+        const folder = serviceFolders[selectedFolderFilter];
+        if (folder?.services) {
+          result = result.filter(s => folder.services.includes(s.id));
+        } else {
+          result = [];
+        }
+      }
+    }
 
     // Search filter
     if (searchQuery) {
@@ -1271,6 +1301,17 @@ export default function Dashboard() {
       const result = await api.writeFile(editorFilePath, editorContent, true);
 
       if (result.success) {
+        // Auto-commit to git for version history
+        const dir = editorFilePath.substring(0, editorFilePath.lastIndexOf('/'));
+        const filename = editorFilePath.substring(editorFilePath.lastIndexOf('/') + 1);
+        const timestamp = new Date().toLocaleString();
+
+        // Initialize git repo if needed, add and commit the file
+        await api.executeCommand(
+          `cd "${dir}" && (git rev-parse --git-dir 2>/dev/null || git init) && git add "${filename}" && git commit -m "Update ${filename} - ${timestamp}" 2>/dev/null || true`,
+          '/'
+        );
+
         toast({
           title: 'File Saved',
           description: `Successfully saved ${editorFilePath}`,
@@ -1279,6 +1320,10 @@ export default function Dashboard() {
         setTerminalOutput(prev => [...prev, { type: 'system', text: `File saved: ${editorFilePath}` }]);
         // Refresh file browser to show any new files
         fetchTerminalDirectory(terminalCwd);
+        // Refresh version history if panel is open
+        if (editorShowVersions) {
+          fetchEditorVersions();
+        }
       } else {
         throw new Error(result.error || 'Failed to save file');
       }
@@ -1381,7 +1426,7 @@ export default function Dashboard() {
     return port;
   };
 
-  // One-Click Install WordPress
+  // One-Click Install WordPress or n8n
   const handleOneClickInstall = async () => {
     if (!oneClickForm.siteName || !oneClickForm.domain) {
       toast({ variant: 'destructive', title: 'Error', description: 'Site name and domain are required' });
@@ -1390,25 +1435,50 @@ export default function Dashboard() {
 
     setOneClickInstalling(true);
     const safeName = oneClickForm.siteName.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    try {
+      if (oneClickService === 'wordpress') {
+        await installWordPress(safeName);
+      } else if (oneClickService === 'n8n') {
+        await installN8n(safeName);
+      }
+
+      setOneClickDialogOpen(false);
+      setOneClickService(null);
+      setOneClickForm({ siteName: '', domain: '', wordpressPort: '7000', dbPort: '7001', n8nPort: '5678' });
+      fetchServices();
+      fetchComposeServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Installation Failed',
+        description: error.message,
+      });
+    } finally {
+      setOneClickInstalling(false);
+    }
+  };
+
+  // Install WordPress helper
+  const installWordPress = async (safeName) => {
     const dbPassword = generatePassword();
     const rootPassword = generatePassword();
 
-    try {
-      // Always find first available ports starting from defaults
-      const wpPort = await findNextAvailablePort(parseInt(oneClickForm.wordpressPort) || 7000);
-      const dbPort = await findNextAvailablePort(parseInt(oneClickForm.dbPort) || 7001);
+    // Always find first available ports starting from defaults
+    const wpPort = await findNextAvailablePort(parseInt(oneClickForm.wordpressPort) || 7000);
+    const dbPort = await findNextAvailablePort(parseInt(oneClickForm.dbPort) || 7001);
 
-      // Update form to show actual ports being used
-      setOneClickForm(prev => ({ ...prev, wordpressPort: wpPort.toString(), dbPort: dbPort.toString() }));
+    // Update form to show actual ports being used
+    setOneClickForm(prev => ({ ...prev, wordpressPort: wpPort.toString(), dbPort: dbPort.toString() }));
 
-      toast({ title: 'Ports Selected', description: `Using WordPress port ${wpPort}, Database port ${dbPort}` });
+    toast({ title: 'Ports Selected', description: `Using WordPress port ${wpPort}, Database port ${dbPort}` });
 
-      // Create directory
-      const installDir = `/root/docker/${safeName}`;
-      await api.executeCommand(`mkdir -p "${installDir}"`, '/');
+    // Create directory
+    const installDir = `/root/docker/${safeName}`;
+    await api.executeCommand(`mkdir -p "${installDir}"`, '/');
 
-      // Create .env file
-      const envContent = `# ${oneClickForm.siteName} Environment Variables
+    // Create .env file
+    const envContent = `# ${oneClickForm.siteName} Environment Variables
 WORDPRESS_PORT=${wpPort}
 DB_PORT=${dbPort}
 DB_ROOT_PASSWORD=${rootPassword}
@@ -1416,10 +1486,10 @@ DB_NAME=wp_${safeName}db
 DB_USER=wp_${safeName}user
 DB_PASSWORD=${dbPassword}
 `;
-      await api.writeFile(`${installDir}/.env`, envContent);
+    await api.writeFile(`${installDir}/.env`, envContent);
 
-      // Create docker-compose.yml with proper networking and health checks
-      const composeContent = `version: '3.8'
+    // Create docker-compose.yml with proper networking and health checks
+    const composeContent = `version: '3.8'
 
 services:
   wordpress:
@@ -1471,69 +1541,169 @@ volumes:
   wordpress_data:
   db_data:
 `;
-      await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
+    await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
 
-      // Start docker compose
-      toast({ title: 'Starting Installation', description: 'This may take a minute while MySQL initializes...' });
-      const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/', 120000);
+    // Start docker compose
+    toast({ title: 'Starting Installation', description: 'This may take a minute while MySQL initializes...' });
+    const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/', 120000);
 
-      if (!startResult.success) {
-        throw new Error(startResult.output || 'Failed to start containers');
-      }
-
-      // Wait for MySQL to be healthy (check health status)
-      toast({ title: 'Waiting for Database', description: 'Waiting for MySQL to be ready...' });
-      let dbReady = false;
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        const healthCheck = await api.executeCommand(`docker inspect --format='{{.State.Health.Status}}' wp_${safeName}_db 2>/dev/null || echo "starting"`, '/');
-        if (healthCheck.output?.trim() === 'healthy') {
-          dbReady = true;
-          break;
-        }
-      }
-
-      if (!dbReady) {
-        toast({ variant: 'destructive', title: 'Warning', description: 'Database may still be initializing. WordPress might need a moment.' });
-      }
-
-      // Create ProxyPilot service
-      try {
-        await api.createService({
-          name: oneClickForm.siteName,
-          domain: oneClickForm.domain,
-          type: 'docker',
-          target: '127.0.0.1',
-          port: wpPort,
-          containerName: `wp_${safeName}_app`,
-          sslEnabled: true,
-          forceHttps: true,
-          websocketEnabled: false,
-          maxUploadSize: '100M',
-          obtainCertificate: true,
-        });
-      } catch (e) {
-        console.error('Service creation warning:', e);
-      }
-
-      toast({
-        title: 'WordPress Installed!',
-        description: `${oneClickForm.siteName} is now running at ${oneClickForm.domain}`,
-      });
-
-      setOneClickDialogOpen(false);
-      setOneClickForm({ siteName: '', domain: '', wordpressPort: '7000', dbPort: '7001' });
-      fetchServices();
-      fetchComposeServices();
-    } catch (error) {
-      toast({
-        variant: 'destructive',
-        title: 'Installation Failed',
-        description: error.message,
-      });
-    } finally {
-      setOneClickInstalling(false);
+    if (!startResult.success) {
+      throw new Error(startResult.output || 'Failed to start containers');
     }
+
+    // Wait for MySQL to be healthy (check health status)
+    toast({ title: 'Waiting for Database', description: 'Waiting for MySQL to be ready...' });
+    let dbReady = false;
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const healthCheck = await api.executeCommand(`docker inspect --format='{{.State.Health.Status}}' wp_${safeName}_db 2>/dev/null || echo "starting"`, '/');
+      if (healthCheck.output?.trim() === 'healthy') {
+        dbReady = true;
+        break;
+      }
+    }
+
+    if (!dbReady) {
+      toast({ variant: 'destructive', title: 'Warning', description: 'Database may still be initializing. WordPress might need a moment.' });
+    }
+
+    // Create ProxyPilot service
+    try {
+      await api.createService({
+        name: oneClickForm.siteName,
+        domain: oneClickForm.domain,
+        type: 'docker',
+        target: '127.0.0.1',
+        port: wpPort,
+        containerName: `wp_${safeName}_app`,
+        sslEnabled: true,
+        forceHttps: true,
+        websocketEnabled: true,
+        maxUploadSize: '100M',
+        obtainCertificate: true,
+      });
+    } catch (e) {
+      console.error('Service creation warning:', e);
+    }
+
+    toast({
+      title: 'WordPress Installed!',
+      description: `${oneClickForm.siteName} is now running at ${oneClickForm.domain}`,
+    });
+  };
+
+  // Install n8n helper
+  const installN8n = async (safeName) => {
+    const n8nPassword = generatePassword();
+    const encryptionKey = generatePassword(32);
+
+    // Find available port
+    const n8nPort = await findNextAvailablePort(parseInt(oneClickForm.n8nPort) || 5678);
+    setOneClickForm(prev => ({ ...prev, n8nPort: n8nPort.toString() }));
+
+    toast({ title: 'Port Selected', description: `Using n8n port ${n8nPort}` });
+
+    // Create directory
+    const installDir = `/root/docker/${safeName}`;
+    await api.executeCommand(`mkdir -p "${installDir}"`, '/');
+
+    // Create .env file with secure passwords
+    const envContent = `# ${oneClickForm.siteName} Environment Variables
+N8N_PORT=${n8nPort}
+N8N_BASIC_AUTH_USER=admin
+N8N_BASIC_AUTH_PASSWORD=${n8nPassword}
+N8N_ENCRYPTION_KEY=${encryptionKey}
+WEBHOOK_URL=https://${oneClickForm.domain}/
+DOMAIN=${oneClickForm.domain}
+`;
+    await api.writeFile(`${installDir}/.env`, envContent);
+
+    // Create docker-compose.yml for n8n with MCP support
+    const composeContent = `version: '3.8'
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_${safeName}
+    ports:
+      - "\${N8N_PORT}:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
+      - N8N_HOST=\${DOMAIN}
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=\${WEBHOOK_URL}
+      - GENERIC_TIMEZONE=America/New_York
+      - TZ=America/New_York
+      # MCP Integration Support
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+      - N8N_REINSTALL_MISSING_PACKAGES=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  n8n_data:
+`;
+    await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
+
+    // Start docker compose
+    toast({ title: 'Starting n8n Installation', description: 'Starting n8n automation platform...' });
+    const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/', 120000);
+
+    if (!startResult.success) {
+      throw new Error(startResult.output || 'Failed to start n8n container');
+    }
+
+    // Wait for n8n to be healthy
+    toast({ title: 'Waiting for n8n', description: 'Waiting for n8n to be ready...' });
+    let n8nReady = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const healthCheck = await api.executeCommand(`docker inspect --format='{{.State.Health.Status}}' n8n_${safeName} 2>/dev/null || echo "starting"`, '/');
+      if (healthCheck.output?.trim() === 'healthy') {
+        n8nReady = true;
+        break;
+      }
+    }
+
+    if (!n8nReady) {
+      toast({ title: 'Note', description: 'n8n is starting up. It may take a moment to be fully ready.' });
+    }
+
+    // Create ProxyPilot service
+    try {
+      await api.createService({
+        name: oneClickForm.siteName,
+        domain: oneClickForm.domain,
+        type: 'docker',
+        target: '127.0.0.1',
+        port: n8nPort,
+        containerName: `n8n_${safeName}`,
+        sslEnabled: true,
+        forceHttps: true,
+        websocketEnabled: true,
+        maxUploadSize: '100M',
+        obtainCertificate: true,
+      });
+    } catch (e) {
+      console.error('Service creation warning:', e);
+    }
+
+    // Show credentials
+    toast({
+      title: 'n8n Installed!',
+      description: `Login with admin / ${n8nPassword} at ${oneClickForm.domain}`,
+      duration: 15000,
+    });
   };
 
   // File Management Functions
@@ -2214,103 +2384,81 @@ volumes:
         </span>
       </div>
 
-      {/* Folders Section */}
-      {Object.keys(serviceFolders).length > 0 && (
-        <div className="space-y-3 mb-4">
-          {Object.entries(serviceFolders).map(([folderPath, folder]) => {
-            const folderServices = getServicesInFolder(folderPath);
-            const isExpanded = expandedFolders[folderPath];
-            return (
-              <div key={folderPath} className="border rounded-lg">
-                <div
-                  className="flex items-center justify-between p-3 bg-muted/50 cursor-pointer hover:bg-muted/70"
-                  onClick={() => setExpandedFolders(prev => ({ ...prev, [folderPath]: !prev[folderPath] }))}
-                >
-                  <div className="flex items-center gap-2">
-                    {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    <Folder className="h-4 w-4 text-yellow-500" />
-                    <span className="font-medium">{folder.name}</span>
-                    <span className="text-sm text-muted-foreground">({folderServices.length} services)</span>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-red-500"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteFolder(folderPath);
-                    }}
-                    title="Delete folder"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-                {isExpanded && folderServices.length > 0 && (
-                  <div className={`p-3 ${viewMode === 'grid' ? 'grid gap-3 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}`}>
-                    {folderServices.map((service) => (
-                      <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
-                        <CardHeader className="pb-3">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              {getServiceIcon(service.type)}
-                              <CardTitle className="text-lg">{service.name}</CardTitle>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={(e) => handleToggleFavorite(service, e)}
-                                title={service.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                              >
-                                <Star className={`h-4 w-4 ${service.isFavorite ? 'fill-yellow-500 text-yellow-500' : ''}`} />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedServiceForFolder(service);
-                                  setFolderDialogOpen(true);
-                                }}
-                                title="Move to folder"
-                              >
-                                <Folder className="h-4 w-4" />
-                              </Button>
-                              {!service.isAdmin && (
-                                <>
-                                  <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
-                                    <FileText className="h-4 w-4" />
-                                  </Button>
-                                  <Button variant="ghost" size="icon" onClick={() => openTerminal(getServiceDirectory(service))} title="Open Terminal">
-                                    <Terminal className="h-4 w-4" />
-                                  </Button>
-                                  <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                          <CardDescription className="flex items-center gap-1">
-                            <Globe className="h-3 w-3" />
-                            <a href={`https://${service.domain}`} target="_blank" rel="noopener noreferrer" className="hover:underline truncate" onClick={(e) => e.stopPropagation()}>
-                              {service.domain}
-                            </a>
-                          </CardDescription>
-                        </CardHeader>
-                      </Card>
-                    ))}
-                  </div>
-                )}
+      {/* Main Content with Folder Sidebar */}
+      <div className="flex gap-4">
+        {/* Left Sidebar - Folder Navigation */}
+        <div className="w-56 shrink-0">
+          <div className="border rounded-lg sticky top-4">
+            <div className="p-3 border-b bg-muted/50 flex items-center justify-between">
+              <span className="font-medium text-sm flex items-center gap-2">
+                <FolderTree className="h-4 w-4" />
+                Folders
+              </span>
+            </div>
+            <div className="p-2 space-y-1">
+              {/* All Services */}
+              <div
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${selectedFolderFilter === null ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                onClick={() => setSelectedFolderFilter(null)}
+              >
+                <LayoutGrid className="h-4 w-4" />
+                <span>All Services</span>
+                <span className="ml-auto text-xs opacity-70">{services.length}</span>
               </div>
-            );
-          })}
-        </div>
-      )}
 
-      {/* Services Display - Grid or List (Unfoldered only) */}
-      <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
-        {getUnfolderedServices().map((service) => (
+              {/* Unfoldered */}
+              <div
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${selectedFolderFilter === '' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                onClick={() => setSelectedFolderFilter('')}
+              >
+                <File className="h-4 w-4" />
+                <span>Unfoldered</span>
+                <span className="ml-auto text-xs opacity-70">
+                  {services.filter(s => !Object.values(serviceFolders).some(f => f.services?.includes(s.id))).length}
+                </span>
+              </div>
+
+              {/* Folder List */}
+              {Object.entries(serviceFolders).length > 0 && (
+                <div className="border-t my-2 pt-2">
+                  {Object.entries(serviceFolders).map(([folderPath, folder]) => {
+                    const folderServiceCount = folder.services?.length || 0;
+                    const isSelected = selectedFolderFilter === folderPath;
+                    return (
+                      <div
+                        key={folderPath}
+                        className={`group flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                        onClick={() => setSelectedFolderFilter(folderPath)}
+                      >
+                        <Folder className={`h-4 w-4 ${isSelected ? '' : 'text-yellow-500'}`} />
+                        <span className="truncate flex-1">{folder.name}</span>
+                        <span className="text-xs opacity-70">{folderServiceCount}</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-red-300' : 'text-red-500'}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteFolder(folderPath);
+                            if (isSelected) setSelectedFolderFilter(null);
+                          }}
+                          title="Delete folder"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Services Grid/List */}
+        <div className="flex-1">
+          <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
+            {filteredServices.map((service) => (
           <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
@@ -2431,22 +2579,34 @@ volumes:
                   <span className="text-muted-foreground">Status</span>
                   <span className={`capitalize ${service.status === 'active' ? 'text-green-500' : 'text-red-500'}`}>{service.status}</span>
                 </div>
+                {/* Folder Badge */}
+                {getServiceFolder(service.id) && (
+                  <div className="flex justify-between items-center pt-1 border-t mt-2">
+                    <span className="text-muted-foreground">Folder</span>
+                    <span className="flex items-center gap-1 text-xs bg-yellow-500/10 text-yellow-600 px-2 py-0.5 rounded">
+                      <Folder className="h-3 w-3" />
+                      {serviceFolders[getServiceFolder(service.id)]?.name}
+                    </span>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
-        ))}
+            ))}
 
-        {filteredServices.length === 0 && (
-          <div className="col-span-full text-center py-12 text-muted-foreground">
-            <Globe className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>{searchQuery || filterType !== 'all' || showFavoritesOnly ? 'No services match your filters.' : 'No services configured yet.'}</p>
-            <p className="text-sm">
-              {searchQuery || filterType !== 'all' || showFavoritesOnly
-                ? 'Try adjusting your search or filters.'
-                : 'Click "Add Service" to create your first site.'}
-            </p>
+            {filteredServices.length === 0 && (
+              <div className="col-span-full text-center py-12 text-muted-foreground">
+                <Globe className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>{searchQuery || filterType !== 'all' || showFavoritesOnly || selectedFolderFilter !== null ? 'No services match your filters.' : 'No services configured yet.'}</p>
+                <p className="text-sm">
+                  {searchQuery || filterType !== 'all' || showFavoritesOnly || selectedFolderFilter !== null
+                    ? 'Try adjusting your search or filters.'
+                    : 'Click "Add Service" to create your first site.'}
+                </p>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
       {/* Running Docker Compose Services Section - Grouped by Project */}
@@ -3862,7 +4022,7 @@ volumes:
           </DialogHeader>
 
           {!oneClickService ? (
-            <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-4 py-4">
               <Card
                 className="cursor-pointer hover:border-green-500 transition-colors"
                 onClick={() => setOneClickService('wordpress')}
@@ -3873,15 +4033,26 @@ volumes:
                 </CardHeader>
                 <CardContent>
                   <CardDescription className="text-center">
-                    Full WordPress installation with MySQL database, auto-configured with SSL
+                    Full WordPress with MySQL, auto-configured SSL
                   </CardDescription>
                 </CardContent>
               </Card>
-              <p className="text-xs text-muted-foreground text-center">
-                More services coming soon...
-              </p>
+              <Card
+                className="cursor-pointer hover:border-orange-500 transition-colors"
+                onClick={() => setOneClickService('n8n')}
+              >
+                <CardHeader className="text-center pb-2">
+                  <Boxes className="h-12 w-12 mx-auto text-orange-500" />
+                  <CardTitle className="text-lg">n8n</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CardDescription className="text-center">
+                    Workflow automation with MCP support
+                  </CardDescription>
+                </CardContent>
+              </Card>
             </div>
-          ) : (
+          ) : oneClickService === 'wordpress' ? (
             <div className="space-y-4 py-4">
               <div className="flex items-center gap-2 p-2 bg-muted rounded">
                 <Package className="h-5 w-5 text-blue-500" />
@@ -3952,7 +4123,75 @@ volumes:
                 </ul>
               </div>
             </div>
-          )}
+          ) : oneClickService === 'n8n' ? (
+            <div className="space-y-4 py-4">
+              <div className="flex items-center gap-2 p-2 bg-muted rounded">
+                <Boxes className="h-5 w-5 text-orange-500" />
+                <span className="font-medium">n8n Installation</span>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="siteName">Instance Name</Label>
+                  <Input
+                    id="siteName"
+                    value={oneClickForm.siteName}
+                    onChange={(e) => setOneClickForm({ ...oneClickForm, siteName: e.target.value })}
+                    placeholder="My Automation"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Used for container naming (e.g., n8n_myautomation)
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="domain">Domain</Label>
+                  <Input
+                    id="domain"
+                    value={oneClickForm.domain}
+                    onChange={(e) => setOneClickForm({ ...oneClickForm, domain: e.target.value })}
+                    placeholder="n8n.example.com"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    SSL certificate will be obtained automatically
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="n8nPort">n8n Port</Label>
+                  <Input
+                    id="n8nPort"
+                    type="number"
+                    value={oneClickForm.n8nPort}
+                    onChange={(e) => setOneClickForm({ ...oneClickForm, n8nPort: e.target.value })}
+                    placeholder="5678"
+                    className="w-32"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Port will be automatically adjusted if already in use
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-3 space-y-1 text-sm">
+                <p className="font-medium text-orange-600">What will be created:</p>
+                <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
+                  <li>Docker Compose stack with n8n automation platform</li>
+                  <li>.env file with secure auto-generated passwords</li>
+                  <li>MCP community packages enabled</li>
+                  <li>NGINX reverse proxy configuration</li>
+                  <li>SSL certificate via Let's Encrypt</li>
+                </ul>
+              </div>
+
+              <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-sm">
+                <p className="font-medium text-blue-600">Credentials:</p>
+                <p className="text-xs text-muted-foreground">
+                  A secure password will be auto-generated. Credentials will be shown after installation.
+                </p>
+              </div>
+            </div>
+          ) : null}
 
           <DialogFooter>
             {oneClickService && (
@@ -3967,12 +4206,12 @@ volumes:
               <Button
                 onClick={handleOneClickInstall}
                 disabled={oneClickInstalling || !oneClickForm.siteName || !oneClickForm.domain}
-                className="bg-green-600 hover:bg-green-700"
+                className={oneClickService === 'n8n' ? 'bg-orange-600 hover:bg-orange-700' : 'bg-green-600 hover:bg-green-700'}
               >
                 {oneClickInstalling ? (
                   <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Installing...</>
                 ) : (
-                  <><Rocket className="mr-2 h-4 w-4" />Install WordPress</>
+                  <><Rocket className="mr-2 h-4 w-4" />Install {oneClickService === 'n8n' ? 'n8n' : 'WordPress'}</>
                 )}
               </Button>
             )}

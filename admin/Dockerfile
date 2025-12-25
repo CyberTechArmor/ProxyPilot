@@ -5,17 +5,18 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
-# Optimize for low-memory builds
+# Optimize for low-memory builds and CI mode
 ENV NODE_OPTIONS="--max-old-space-size=512"
 ENV GENERATE_SOURCEMAP=false
+ENV CI=true
 
 # Copy frontend package files
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci --ignore-scripts || npm install
 
 # Copy frontend source and build with reduced memory usage
 COPY frontend/ ./
-RUN NODE_ENV=production npm run build
+RUN NODE_ENV=production npm run build -- --logLevel info
 
 # Stage 2: Build backend dependencies
 FROM node:20-alpine AS backend-builder

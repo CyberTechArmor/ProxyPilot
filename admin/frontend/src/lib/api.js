@@ -79,14 +79,20 @@ export const api = {
     method: 'POST',
   }),
 
+  checkSslStatus: (domain) => request(`/services/ssl-status/${domain}`),
+
+  regenerateConfig: (serviceId) => request(`/services/${serviceId}/regenerate-config`, {
+    method: 'POST',
+  }),
+
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
 
   getFileContent: (serviceId, filePath) => request(`/services/${serviceId}/files/${filePath}`),
 
-  saveFile: (serviceId, filePath, content) => request(`/services/${serviceId}/files/${filePath}`, {
+  saveFile: (serviceId, filePath, content, notes) => request(`/services/${serviceId}/files/${filePath}`, {
     method: 'PUT',
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, notes }),
   }),
 
   deleteFile: (serviceId, filePath) => request(`/services/${serviceId}/files/${filePath}`, {
@@ -107,6 +113,11 @@ export const api = {
 
   revertToVersion: (serviceId, versionId) => request(`/services/${serviceId}/revert/${versionId}`, {
     method: 'POST',
+  }),
+
+  updateVersionNotes: (serviceId, versionId, notes) => request(`/services/${serviceId}/version/${versionId}/notes`, {
+    method: 'PUT',
+    body: JSON.stringify({ notes }),
   }),
 
   // File Export/Import (per service)

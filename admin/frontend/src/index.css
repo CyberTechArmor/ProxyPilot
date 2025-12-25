@@ -36,3 +36,16 @@
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
 }
+
+/* CodeMirror styles */
+.cm-editor {
+  height: 100% !important;
+}
+
+.cm-scroller {
+  overflow: auto !important;
+}
+
+.cm-content {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
+}

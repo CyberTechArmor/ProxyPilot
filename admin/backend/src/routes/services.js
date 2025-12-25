@@ -53,14 +53,90 @@ const fileSchema = z.object({
 // Helper function to reload NGINX
 async function reloadNginx() {
   try {
-    await execAsync('nginx -t 2>&1');
-    await execAsync('systemctl reload nginx || nginx -s reload');
+    // Test NGINX configuration first
+    const testResult = await execAsync('nginx -t 2>&1');
+    console.log('NGINX test output:', testResult.stdout, testResult.stderr);
+
+    // Reload NGINX
+    const reloadResult = await execAsync('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+    console.log('NGINX reload output:', reloadResult.stdout, reloadResult.stderr);
+
     return { success: true };
   } catch (error) {
-    console.error('NGINX reload failed:', error);
-    return { success: false, error: error.message };
+    // Extract the actual error message from stderr or stdout
+    const errorOutput = error.stderr || error.stdout || error.message;
+    console.error('NGINX reload failed:', errorOutput);
+    return { success: false, error: errorOutput };
   }
 }
+
+// Check SSL certificate status for a domain
+servicesRouter.get('/ssl-status/:domain', (req, res) => {
+  try {
+    const domain = req.params.domain;
+    const exists = sslCertExists(domain);
+    const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+
+    res.json({
+      domain,
+      certificateExists: exists,
+      certificatePath: certPath,
+      command: exists ? null : `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}`,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to check SSL status' });
+  }
+});
+
+// Regenerate NGINX config for a service (useful after obtaining SSL certificates)
+servicesRouter.post('/:id/regenerate-config', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare(`
+      SELECT * FROM services WHERE id = ?
+    `).get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    // Build service config object
+    const serviceConfig = {
+      domain: service.domain,
+      type: service.type,
+      target: service.target,
+      port: service.port,
+      rootDir: service.root_dir,
+      websocketEnabled: !!service.websocket_enabled,
+      forceHttps: !!service.force_https,
+      maxUploadSize: service.max_upload_size,
+      sslEnabled: !!service.ssl_enabled,
+    };
+
+    // Generate and write new NGINX config
+    const nginxConfig = generateNginxConfig(serviceConfig);
+    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+    await writeFile(configPath, nginxConfig);
+
+    // Test and reload NGINX
+    const reloadResult = await reloadNginx();
+
+    const sslStatus = service.ssl_enabled && sslCertExists(service.domain);
+
+    logAudit(req.user.id, 'CONFIG_REGENERATED', 'service', req.params.id, { sslStatus }, req.ip);
+
+    res.json({
+      success: true,
+      message: reloadResult.success ? 'Configuration regenerated and NGINX reloaded' : 'Configuration regenerated but NGINX reload failed',
+      sslCertificateExists: sslStatus,
+      nginxReloaded: reloadResult.success,
+      nginxError: reloadResult.error,
+    });
+  } catch (error) {
+    console.error('Error regenerating config:', error);
+    res.status(500).json({ error: 'Failed to regenerate config: ' + error.message });
+  }
+});
 
 // NGINX reload endpoint
 servicesRouter.post('/nginx/reload', async (req, res) => {
@@ -70,11 +146,21 @@ servicesRouter.post('/nginx/reload', async (req, res) => {
       logAudit(req.user.id, 'NGINX_RELOADED', 'system', null, {}, req.ip);
       res.json({ success: true, message: 'NGINX reloaded successfully' });
     } else {
-      res.status(500).json({ error: 'NGINX reload failed', details: result.error });
+      // Parse NGINX error output for more readable message
+      let errorMessage = result.error || 'Unknown error';
+      // Extract key error info if present
+      const errorMatch = errorMessage.match(/nginx:.*error.*|emerg\].*|syntax error.*/i);
+      if (errorMatch) {
+        errorMessage = errorMatch[0];
+      }
+      res.status(500).json({
+        error: `NGINX reload failed: ${errorMessage}`,
+        details: result.error
+      });
     }
   } catch (error) {
     console.error('Error reloading NGINX:', error);
-    res.status(500).json({ error: 'Failed to reload NGINX' });
+    res.status(500).json({ error: 'Failed to reload NGINX: ' + error.message });
   }
 });
 
@@ -93,7 +179,7 @@ servicesRouter.get('/', (req, res) => {
       ORDER BY is_favorite DESC, created_at DESC
     `).all();
 
-    // Convert integer booleans to actual booleans
+    // Convert integer booleans to actual booleans and check SSL cert status
     const formattedServices = services.map(s => ({
       ...s,
       sslEnabled: !!s.sslEnabled,
@@ -101,6 +187,7 @@ servicesRouter.get('/', (req, res) => {
       websocketEnabled: !!s.websocketEnabled,
       isAdmin: !!s.isAdmin,
       isFavorite: !!s.isFavorite,
+      sslCertificateExists: s.sslEnabled ? sslCertExists(s.domain) : null,
     }));
 
     res.json({ services: formattedServices });
@@ -290,9 +377,17 @@ services:
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 
+    // Check SSL certificate status
+    const sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
+    const sslMessage = data.sslEnabled && !sslCertificateExists
+      ? `SSL enabled but certificate not found. Run: certbot certonly --webroot -w /var/www/letsencrypt -d ${data.domain}`
+      : null;
+
     res.status(201).json({
       success: true,
       service: { id, ...data, dataDir },
+      sslCertificateExists,
+      sslMessage,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -565,7 +660,7 @@ servicesRouter.get('/:id/files/*', async (req, res) => {
 // Create or update a file (with version control)
 servicesRouter.put('/:id/files/*', async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, notes } = req.body;
     if (typeof content !== 'string') {
       return res.status(400).json({ error: 'Content is required' });
     }
@@ -604,9 +699,9 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
 
         // Save old content as a version
         db.prepare(`
-          INSERT INTO file_versions (id, service_id, file_path, content, version, created_by)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), req.params.id, filePath, oldContent, nextVersion, req.user.id);
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), req.params.id, filePath, oldContent, nextVersion, notes || null, req.user.id);
 
         // Keep only last 50 versions per file
         db.prepare(`
@@ -699,7 +794,7 @@ servicesRouter.get('/:id/versions/*', (req, res) => {
 
     const filePath = req.params[0];
     const versions = db.prepare(`
-      SELECT id, version, created_at as createdAt, created_by as createdBy
+      SELECT id, version, notes, created_at as createdAt, created_by as createdBy
       FROM file_versions
       WHERE service_id = ? AND file_path = ?
       ORDER BY version DESC
@@ -795,6 +890,36 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
   } catch (error) {
     console.error('Error reverting file:', error);
     res.status(500).json({ error: 'Failed to revert file' });
+  }
+});
+
+// Update version notes
+servicesRouter.put('/:id/version/:versionId/notes', (req, res) => {
+  try {
+    const { notes } = req.body;
+    const db = getDb();
+
+    const version = db.prepare(`
+      SELECT id FROM file_versions WHERE id = ? AND service_id = ?
+    `).get(req.params.versionId, req.params.id);
+
+    if (!version) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    db.prepare(`
+      UPDATE file_versions SET notes = ? WHERE id = ?
+    `).run(notes || null, req.params.versionId);
+
+    logAudit(req.user.id, 'VERSION_NOTES_UPDATED', 'service', req.params.id, {
+      versionId: req.params.versionId,
+      notes,
+    }, req.ip);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating version notes:', error);
+    res.status(500).json({ error: 'Failed to update notes' });
   }
 });
 
@@ -1144,9 +1269,21 @@ servicesRouter.post('/import', async (req, res) => {
   }
 });
 
+// Check if SSL certificate exists for a domain
+function sslCertExists(domain) {
+  const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+  const keyPath = `/etc/letsencrypt/live/${domain}/privkey.pem`;
+  return existsSync(certPath) && existsSync(keyPath);
+}
+
 // Generate NGINX config based on service type
 function generateNginxConfig(service) {
   const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
+
+  // Check if SSL certificates actually exist
+  const certsExist = sslEnabled && sslCertExists(domain);
+  // Only force HTTPS redirect if SSL is enabled AND certificates exist
+  const actualForceHttps = forceHttps && certsExist;
 
   let locationBlock = '';
   let rootBlock = '';
@@ -1184,7 +1321,7 @@ function generateNginxConfig(service) {
       break;
   }
 
-  const httpBlock = forceHttps
+  const httpBlock = actualForceHttps
     ? `
 server {
     listen 80;
@@ -1214,7 +1351,8 @@ server {
 ${locationBlock}
 }`;
 
-  const httpsBlock = sslEnabled ? `
+  // Only include HTTPS block if certificates exist
+  const httpsBlock = certsExist ? `
 
 server {
     listen 443 ssl http2;
@@ -1233,10 +1371,15 @@ server {
 ${locationBlock}
 }` : '';
 
+  // Add comment about SSL status
+  const sslComment = sslEnabled && !certsExist
+    ? `# SSL: Enabled but certificates not found - run: certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}\n`
+    : '';
+
   return `# ProxyPilot Managed Configuration
 # Domain: ${domain}
 # Type: ${type}
 # Generated: ${new Date().toISOString()}
-${httpBlock}${httpsBlock}
+${sslComment}${httpBlock}${httpsBlock}
 `;
 }

@@ -75,12 +75,20 @@ export function initDatabase() {
       file_path TEXT NOT NULL,
       content TEXT NOT NULL,
       version INTEGER NOT NULL,
+      notes TEXT,
       created_by TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
       FOREIGN KEY (created_by) REFERENCES users(id)
     )
   `);
+
+  // Add notes column if it doesn't exist (migration for existing DBs)
+  try {
+    db.exec(`ALTER TABLE file_versions ADD COLUMN notes TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
 
   // Create index for faster file version lookups
   db.exec(`

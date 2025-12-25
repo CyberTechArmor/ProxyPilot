@@ -241,14 +241,56 @@ install_docker() {
     fi
 }
 
-# Check Docker Compose
+# Check and install Docker Compose
 check_docker_compose() {
     log_info "Checking Docker Compose..."
 
+    # Check for docker compose plugin (v2)
     if docker compose version &> /dev/null; then
-        log_success "Docker Compose is available ($(docker compose version --short))"
+        log_success "Docker Compose plugin is available ($(docker compose version --short 2>/dev/null || echo 'v2'))"
+        return 0
+    fi
+
+    # Check for standalone docker-compose (v1)
+    if command -v docker-compose &> /dev/null; then
+        log_warn "Found standalone docker-compose. Consider upgrading to Docker Compose plugin."
+        log_success "Docker Compose is available ($(docker-compose version --short 2>/dev/null || echo 'v1'))"
+        return 0
+    fi
+
+    # Neither found, try to install docker-compose-plugin
+    log_warn "Docker Compose not found, attempting to install..."
+
+    if command -v apt-get &> /dev/null; then
+        apt-get update -y
+        apt-get install -y docker-compose-plugin || {
+            # Fallback: try installing standalone docker-compose
+            log_warn "Plugin install failed, trying standalone docker-compose..."
+            apt-get install -y docker-compose || {
+                log_error "Failed to install Docker Compose. Please install manually:"
+                log_error "  apt-get install docker-compose-plugin"
+                log_error "  OR: apt-get install docker-compose"
+                exit 1
+            }
+        }
+    elif command -v yum &> /dev/null; then
+        yum install -y docker-compose-plugin || yum install -y docker-compose || {
+            log_error "Failed to install Docker Compose. Please install manually."
+            exit 1
+        }
     else
-        log_error "Docker Compose plugin not found"
+        log_error "Could not install Docker Compose automatically."
+        log_error "Please install docker-compose-plugin or docker-compose manually."
+        exit 1
+    fi
+
+    # Verify installation
+    if docker compose version &> /dev/null; then
+        log_success "Docker Compose plugin installed successfully"
+    elif command -v docker-compose &> /dev/null; then
+        log_success "Docker Compose installed successfully"
+    else
+        log_error "Docker Compose installation verification failed"
         exit 1
     fi
 }
@@ -330,6 +372,103 @@ EOF
     log_success "SSL certificate obtained for ${domain}"
 }
 
+# Create secure landing page for when ProxyPilot is secured/stopped
+create_secure_landing_page() {
+    local install_dir=$1
+
+    log_info "Creating secure landing page..."
+
+    mkdir -p "${install_dir}/secured"
+
+    cat > "${install_dir}/secured/index.html" <<'SECUREDHTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProxyPilot - Secured</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            color: #e2e8f0;
+        }
+        .container {
+            text-align: center;
+            padding: 3rem;
+            max-width: 500px;
+        }
+        .shield-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 2rem;
+            fill: #22c55e;
+        }
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #22c55e;
+        }
+        p {
+            font-size: 1.1rem;
+            color: #94a3b8;
+            line-height: 1.6;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 2rem;
+            padding: 0.5rem 1rem;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            color: #22c55e;
+        }
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <svg class="shield-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="currentColor" stroke-width="2" fill="none"/>
+            <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h1>ProxyPilot has been secured.</h1>
+        <p>The admin dashboard has been intentionally taken offline for security purposes. All configured services continue to operate normally.</p>
+        <div class="status-badge">
+            <span class="pulse"></span>
+            Secure Mode Active
+        </div>
+    </div>
+</body>
+</html>
+SECUREDHTML
+
+    log_success "Secure landing page created"
+}
+
 # Create ProxyPilot NGINX config
 create_proxypilot_nginx_config() {
     local domain=$1
@@ -371,6 +510,13 @@ server {
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
+    # Secure landing page location (shown when backend is down)
+    location = /secured.html {
+        internal;
+        root ${INSTALL_DIR}/secured;
+        try_files /index.html =503;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${port};
         proxy_http_version 1.1;
@@ -383,6 +529,10 @@ server {
         proxy_read_timeout 300;
         proxy_connect_timeout 60;
         proxy_send_timeout 300;
+
+        # Show secure landing page when backend is unavailable
+        proxy_intercept_errors on;
+        error_page 502 503 504 = /secured.html;
     }
 }
 EOF
@@ -591,6 +741,9 @@ main() {
 
     # Setup SSL
     setup_ssl "$DOMAIN" "$EMAIL"
+
+    # Create secure landing page
+    create_secure_landing_page "$INSTALL_DIR"
 
     # Create NGINX config
     create_proxypilot_nginx_config "$DOMAIN" "$PORT"

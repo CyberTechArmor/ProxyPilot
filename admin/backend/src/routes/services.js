@@ -728,6 +728,42 @@ services:
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 
+    // Save initial files as version 1 for version control
+    if (data.type === 'static') {
+      const indexPath = join(dataDir, 'index.html');
+      try {
+        const content = await readFile(indexPath, 'utf-8');
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), id, 'index.html', content, 1, 'Initial file created with service', req.user.id);
+      } catch (e) {
+        console.log('Could not save initial version for index.html');
+      }
+    } else if (data.type === 'docker') {
+      // Save docker-compose.yml and index.html as version 1
+      const composePath = join(dataDir, 'docker-compose.yml');
+      const htmlIndexPath = join(dataDir, 'html', 'index.html');
+      try {
+        const composeContent = await readFile(composePath, 'utf-8');
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), id, 'docker-compose.yml', composeContent, 1, 'Initial file created with service', req.user.id);
+      } catch (e) {
+        console.log('Could not save initial version for docker-compose.yml');
+      }
+      try {
+        const htmlContent = await readFile(htmlIndexPath, 'utf-8');
+        db.prepare(`
+          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), id, 'html/index.html', htmlContent, 1, 'Initial file created with service', req.user.id);
+      } catch (e) {
+        console.log('Could not save initial version for html/index.html');
+      }
+    }
+
     // Check if we should obtain SSL certificate
     let sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
     let sslMessage = null;
@@ -1859,6 +1895,57 @@ servicesRouter.post('/docker/compose', async (req, res) => {
       success: false,
       output: error.stdout + '\n' + (error.stderr || error.message),
     });
+  }
+});
+
+// Kill switch - secure the ProxyPilot dashboard (requires TOTP)
+servicesRouter.post('/system/secure', async (req, res) => {
+  try {
+    const { totpCode } = deleteServiceSchema.parse(req.body);
+    const db = getDb();
+
+    // Verify TOTP
+    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    if (user && user.totp_secret) {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'ProxyPilot',
+        label: req.user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    logAudit(req.user.id, 'SYSTEM_SECURED', 'system', null, { action: 'kill_switch' }, req.ip);
+
+    // Send response before stopping (container will stop shortly)
+    res.json({
+      success: true,
+      message: 'ProxyPilot is being secured. The dashboard will become unavailable.',
+    });
+
+    // Give time for response to be sent, then stop the container
+    setTimeout(async () => {
+      try {
+        // Stop the proxypilot-admin container
+        await execOnHost('docker stop proxypilot-admin 2>&1 || true');
+      } catch (e) {
+        console.error('Error stopping container:', e);
+      }
+    }, 500);
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error securing system:', error);
+    res.status(500).json({ error: 'Failed to secure system' });
   }
 });
 

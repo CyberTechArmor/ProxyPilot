@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
@@ -205,6 +205,7 @@ export default function Dashboard() {
   const terminalOutputRef = useCallback(node => {
     if (node) node.scrollTop = node.scrollHeight;
   }, [terminalOutput]);
+  const terminalInputRef = useRef(null);
 
   // Kill switch state
   const [killSwitchDialogOpen, setKillSwitchDialogOpen] = useState(false);
@@ -518,6 +519,7 @@ export default function Dashboard() {
     // Handle special commands locally
     if (cmd === 'clear') {
       setTerminalOutput([]);
+      terminalInputRef.current?.focus();
       return;
     }
 
@@ -563,6 +565,8 @@ export default function Dashboard() {
       ]);
     } finally {
       setTerminalRunning(false);
+      // Re-focus the input after command completes
+      setTimeout(() => terminalInputRef.current?.focus(), 0);
     }
   };
 
@@ -1489,6 +1493,7 @@ export default function Dashboard() {
               <div className="border-t p-2 flex gap-2 bg-gray-900">
                 <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
                 <Input
+                  ref={terminalInputRef}
                   value={terminalCommand}
                   onChange={(e) => setTerminalCommand(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && executeTerminalCommand()}

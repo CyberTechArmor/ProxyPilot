@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -25,6 +26,7 @@ import { Loader2, Key, Shield, QrCode, Users, UserPlus, Trash2, RefreshCw, Copy,
 import QRCode from 'qrcode';
 
 export default function Profile() {
+  const { user: authUser } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [changingPassword, setChangingPassword] = useState(false);
@@ -67,8 +69,8 @@ export default function Profile() {
 
   const { toast } = useToast();
 
-  // Check if current user is admin
-  const isAdmin = profile?.role === 'admin' || JSON.parse(localStorage.getItem('user') || '{}').role === 'admin';
+  // Check if current user is admin (check auth context, profile, and localStorage)
+  const isAdmin = authUser?.role === 'admin' || profile?.role === 'admin' || JSON.parse(localStorage.getItem('user') || '{}').role === 'admin';
 
   useEffect(() => {
     fetchProfile();

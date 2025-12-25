@@ -1900,8 +1900,8 @@ servicesRouter.post('/docker/container/:action', async (req, res) => {
 // Docker Compose operations
 servicesRouter.post('/docker/compose', async (req, res) => {
   try {
-    const { action, path, serviceName } = req.body;
-    const validActions = ['up', 'down', 'restart', 'pull', 'logs', 'ps'];
+    const { action, path, serviceName, options } = req.body;
+    const validActions = ['up', 'down', 'restart', 'pull', 'logs', 'ps', 'stop', 'start', 'destroy'];
 
     if (!validActions.includes(action)) {
       return res.status(400).json({ error: 'Invalid action' });
@@ -1915,10 +1915,14 @@ servicesRouter.post('/docker/compose', async (req, res) => {
 
     switch (action) {
       case 'up':
+      case 'start':
         cmd += ' up -d';
         break;
       case 'down':
         cmd += ' down';
+        break;
+      case 'stop':
+        cmd += ' stop';
         break;
       case 'restart':
         cmd += ' restart';
@@ -1932,9 +1936,16 @@ servicesRouter.post('/docker/compose', async (req, res) => {
       case 'ps':
         cmd += ' ps';
         break;
+      case 'destroy':
+        // Destroy with optional volume/image/orphan removal
+        cmd += ' down';
+        if (options?.removeVolumes) cmd += ' -v';
+        if (options?.removeImages) cmd += ' --rmi all';
+        if (options?.removeOrphans) cmd += ' --remove-orphans';
+        break;
     }
 
-    if (serviceName && ['up', 'restart', 'logs'].includes(action)) {
+    if (serviceName && ['up', 'start', 'stop', 'restart', 'logs'].includes(action)) {
       cmd += ` ${serviceName}`;
     }
 
@@ -1942,11 +1953,76 @@ servicesRouter.post('/docker/compose', async (req, res) => {
 
     const result = await execOnHost(cmd, { timeout: 120000 });
 
-    logAudit(req.user.id, 'DOCKER_COMPOSE', 'compose', path, { action, serviceName }, req.ip);
+    logAudit(req.user.id, 'DOCKER_COMPOSE', 'compose', path, { action, serviceName, options }, req.ip);
 
     res.json({
       success: true,
       output: result.stdout + (result.stderr || ''),
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      output: error.stdout + '\n' + (error.stderr || error.message),
+    });
+  }
+});
+
+// Docker Compose destroy with TOTP verification (for dangerous operations)
+servicesRouter.post('/docker/compose/destroy', async (req, res) => {
+  try {
+    const { path, totpCode, options } = req.body;
+
+    if (!path) {
+      return res.status(400).json({ error: 'Compose file path required' });
+    }
+
+    if (!totpCode || totpCode.length !== 6) {
+      return res.status(400).json({ error: 'TOTP code required for destroy operation' });
+    }
+
+    // Verify TOTP
+    const db = getDb();
+    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    if (user && user.totp_secret) {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'ProxyPilot',
+        label: req.user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    let cmd = `docker compose -f ${JSON.stringify(path)} down`;
+    if (options?.removeVolumes) cmd += ' -v';
+    if (options?.removeImages) cmd += ' --rmi all';
+    if (options?.removeOrphans) cmd += ' --remove-orphans';
+    cmd += ' 2>&1';
+
+    const result = await execOnHost(cmd, { timeout: 120000 });
+
+    // If prune requested, run docker system prune for this project
+    let pruneOutput = '';
+    if (options?.prune) {
+      try {
+        const pruneResult = await execOnHost('docker system prune -f 2>&1', { timeout: 60000 });
+        pruneOutput = '\n--- Prune Output ---\n' + pruneResult.stdout;
+      } catch (e) {
+        pruneOutput = '\n--- Prune Failed ---\n' + e.message;
+      }
+    }
+
+    logAudit(req.user.id, 'DOCKER_COMPOSE_DESTROY', 'compose', path, { options }, req.ip);
+
+    res.json({
+      success: true,
+      output: result.stdout + (result.stderr || '') + pruneOutput,
     });
   } catch (error) {
     res.json({

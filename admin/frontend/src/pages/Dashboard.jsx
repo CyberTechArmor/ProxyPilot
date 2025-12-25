@@ -276,6 +276,44 @@ export default function Dashboard() {
   const [editorLoadingVersions, setEditorLoadingVersions] = useState(false);
   const [editorSaving, setEditorSaving] = useState(false);
 
+  // Docker Compose action state
+  const [composeActionLoading, setComposeActionLoading] = useState({});
+  const [destroyDialogOpen, setDestroyDialogOpen] = useState(false);
+  const [projectToDestroy, setProjectToDestroy] = useState(null);
+  const [destroyTotpCode, setDestroyTotpCode] = useState('');
+  const [destroyOptions, setDestroyOptions] = useState({
+    removeVolumes: false,
+    removeImages: false,
+    removeOrphans: true,
+    prune: false,
+  });
+  const [destroyingProject, setDestroyingProject] = useState(false);
+
+  // Docker Compose create state
+  const [composeCreateOpen, setComposeCreateOpen] = useState(false);
+  const [composeCreateForm, setComposeCreateForm] = useState({
+    serviceName: '',
+    composeContent: `version: '3.8'
+services:
+  app:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+`,
+  });
+  const [composeCreating, setComposeCreating] = useState(false);
+
+  // Service folder state
+  const [serviceFolders, setServiceFolders] = useState(() => {
+    const saved = localStorage.getItem('serviceFolders');
+    return saved ? JSON.parse(saved) : {};
+  });
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [selectedServiceForFolder, setSelectedServiceForFolder] = useState(null);
+  const [expandedFolders, setExpandedFolders] = useState({});
+
   const { toast } = useToast();
 
   // Filtered and sorted services
@@ -677,10 +715,12 @@ export default function Dashboard() {
   };
 
   const openTerminal = async (initialDir = null) => {
-    const startDir = initialDir || terminalCwd || '/';
+    const startDir = initialDir || terminalCwd || '/root';
     setTerminalCwd(startDir);
-    setTerminalOpen(true);
-    setTerminalFullscreen(true); // Always fullscreen
+    // Set fullscreen first, then open to avoid rendering issues
+    setTerminalFullscreen(true);
+    // Small delay to let state settle before opening dialog
+    setTimeout(() => setTerminalOpen(true), 0);
     setTerminalOutput(prev => prev.length === 0 ? [{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }] : prev);
 
     // Fetch system info and containers
@@ -887,6 +927,192 @@ export default function Dashboard() {
         description: 'Failed to refresh containers',
       });
     }
+  };
+
+  // Docker Compose action handlers
+  const handleComposeAction = async (action, project) => {
+    const firstService = project.services[0];
+    const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
+    const composePath = `${composeDir}/docker-compose.yml`;
+
+    const loadingKey = `${project.projectName}-${action}`;
+    setComposeActionLoading(prev => ({ ...prev, [loadingKey]: true }));
+
+    try {
+      const result = await api.dockerCompose(action, composePath);
+      toast({
+        title: result.success ? 'Success' : 'Error',
+        description: result.success
+          ? `${action.charAt(0).toUpperCase() + action.slice(1)} completed for ${project.projectName}`
+          : result.output,
+        variant: result.success ? 'default' : 'destructive',
+      });
+      // Refresh compose services after action
+      fetchComposeServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setComposeActionLoading(prev => ({ ...prev, [loadingKey]: false }));
+    }
+  };
+
+  const openDestroyDialog = (project) => {
+    const firstService = project.services[0];
+    const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
+    setProjectToDestroy({ ...project, composeDir, composePath: `${composeDir}/docker-compose.yml` });
+    setDestroyTotpCode('');
+    setDestroyOptions({
+      removeVolumes: false,
+      removeImages: false,
+      removeOrphans: true,
+      prune: false,
+    });
+    setDestroyDialogOpen(true);
+  };
+
+  const handleDestroyProject = async () => {
+    if (!projectToDestroy || destroyTotpCode.length !== 6) return;
+
+    setDestroyingProject(true);
+    try {
+      const result = await api.dockerComposeDestroy(
+        projectToDestroy.composePath,
+        destroyTotpCode,
+        destroyOptions
+      );
+      toast({
+        title: result.success ? 'Destroyed' : 'Error',
+        description: result.success
+          ? `${projectToDestroy.projectName} has been destroyed`
+          : result.output,
+        variant: result.success ? 'default' : 'destructive',
+      });
+      setDestroyDialogOpen(false);
+      fetchComposeServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setDestroyingProject(false);
+    }
+  };
+
+  // Docker Compose create handler
+  const handleCreateCompose = async () => {
+    if (!composeCreateForm.serviceName.trim()) {
+      toast({ variant: 'destructive', title: 'Error', description: 'Service name is required' });
+      return;
+    }
+
+    setComposeCreating(true);
+    const folderName = composeCreateForm.serviceName.toLowerCase().replace(/\s+/g, '-');
+    const composePath = `/root/docker/${folderName}`;
+
+    try {
+      // Create directory and write docker-compose.yml
+      await api.executeCommand(`mkdir -p "${composePath}"`, '/');
+      await api.writeFile(`${composePath}/docker-compose.yml`, composeCreateForm.composeContent);
+
+      // Start the compose project
+      const result = await api.dockerCompose('up', `${composePath}/docker-compose.yml`);
+
+      if (result.success) {
+        toast({
+          title: 'Success',
+          description: `Docker Compose project "${composeCreateForm.serviceName}" created and started`,
+        });
+
+        // Refresh compose services
+        await fetchComposeServices();
+
+        // Parse ports from compose file or running containers
+        const portsResult = await api.executeCommand(
+          `docker compose -f "${composePath}/docker-compose.yml" ps --format '{{.Ports}}' 2>/dev/null | grep -oE '[0-9]+->|:[0-9]+' | grep -oE '[0-9]+' | sort -u`,
+          '/'
+        );
+
+        const exposedPorts = portsResult.output?.trim().split('\n').filter(Boolean) || [];
+
+        // Pre-fill the proxy container form
+        setFormData({
+          name: composeCreateForm.serviceName,
+          domain: '',
+          type: 'docker',
+          target: '127.0.0.1',
+          port: exposedPorts[0] || '',
+          containerName: folderName,
+          sslEnabled: true,
+          forceHttps: true,
+          websocketEnabled: false,
+          maxUploadSize: '1G',
+          obtainCertificate: true,
+        });
+        setWizardStep(1);
+        setComposeCreateOpen(false);
+        setAddDialogOpen(true);
+      } else {
+        toast({ variant: 'destructive', title: 'Error', description: result.output });
+      }
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message });
+    } finally {
+      setComposeCreating(false);
+    }
+  };
+
+  // Folder management functions
+  const saveServiceFolders = (folders) => {
+    setServiceFolders(folders);
+    localStorage.setItem('serviceFolders', JSON.stringify(folders));
+  };
+
+  const createFolder = (name, parentPath = '') => {
+    const newPath = parentPath ? `${parentPath}/${name}` : name;
+    saveServiceFolders({
+      ...serviceFolders,
+      [newPath]: { name, services: [], subfolders: [] },
+    });
+  };
+
+  const moveServiceToFolder = (serviceId, folderPath) => {
+    // Remove service from all folders first
+    const newFolders = { ...serviceFolders };
+    Object.keys(newFolders).forEach(path => {
+      if (newFolders[path].services) {
+        newFolders[path].services = newFolders[path].services.filter(id => id !== serviceId);
+      }
+    });
+    // Add to new folder
+    if (folderPath && newFolders[folderPath]) {
+      newFolders[folderPath].services = [...(newFolders[folderPath].services || []), serviceId];
+    }
+    saveServiceFolders(newFolders);
+  };
+
+  const deleteFolder = (folderPath) => {
+    const newFolders = { ...serviceFolders };
+    delete newFolders[folderPath];
+    saveServiceFolders(newFolders);
+  };
+
+  // Get services in a specific folder
+  const getServicesInFolder = (folderPath) => {
+    const folder = serviceFolders[folderPath];
+    if (!folder?.services) return [];
+    return filteredServices.filter(s => folder.services.includes(s.id));
+  };
+
+  // Get services not in any folder
+  const getUnfolderedServices = () => {
+    const folderedServiceIds = Object.values(serviceFolders).flatMap(f => f.services || []);
+    return filteredServices.filter(s => !folderedServiceIds.includes(s.id));
   };
 
   // Kill Switch Function
@@ -1726,7 +1952,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg">
+            <DialogContent className={wizardStep === 0 ? "max-w-3xl" : "max-w-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>
@@ -1735,7 +1961,7 @@ volumes:
               </DialogHeader>
 
               {wizardStep === 0 ? (
-                <div className="grid grid-cols-2 gap-4 py-4">
+                <div className="grid grid-cols-3 gap-4 py-4">
                   <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('static')}>
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
@@ -1748,10 +1974,33 @@ volumes:
                   <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('docker')}>
                     <CardHeader className="text-center pb-2">
                       <Container className="h-12 w-12 mx-auto text-primary" />
-                      <CardTitle className="text-lg">Docker Container</CardTitle>
+                      <CardTitle className="text-lg">Proxy Container</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <CardDescription className="text-center">Proxy to a Docker container running on a port</CardDescription>
+                    </CardContent>
+                  </Card>
+                  <Card className="cursor-pointer hover:border-purple-500 border-purple-500/30 transition-colors" onClick={() => {
+                    setAddDialogOpen(false);
+                    setComposeCreateOpen(true);
+                    setComposeCreateForm({
+                      serviceName: '',
+                      composeContent: `version: '3.8'
+services:
+  app:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+`,
+                    });
+                  }}>
+                    <CardHeader className="text-center pb-2">
+                      <Boxes className="h-12 w-12 mx-auto text-purple-500" />
+                      <CardTitle className="text-lg">Docker Compose</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <CardDescription className="text-center">Create a multi-container app with docker-compose.yml</CardDescription>
                     </CardContent>
                   </Card>
                 </div>
@@ -1865,6 +2114,17 @@ volumes:
           <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? 'fill-current' : ''}`} />
           Favorites
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setNewFolderName('');
+            setFolderDialogOpen(true);
+          }}
+        >
+          <FolderTree className="h-4 w-4 mr-1" />
+          Folders
+        </Button>
         <div className="flex items-center gap-1 border rounded-md p-1">
           <Button
             variant={viewMode === 'grid' ? 'default' : 'ghost'}
@@ -1890,9 +2150,103 @@ volumes:
         </span>
       </div>
 
-      {/* Services Display - Grid or List */}
+      {/* Folders Section */}
+      {Object.keys(serviceFolders).length > 0 && (
+        <div className="space-y-3 mb-4">
+          {Object.entries(serviceFolders).map(([folderPath, folder]) => {
+            const folderServices = getServicesInFolder(folderPath);
+            const isExpanded = expandedFolders[folderPath];
+            return (
+              <div key={folderPath} className="border rounded-lg">
+                <div
+                  className="flex items-center justify-between p-3 bg-muted/50 cursor-pointer hover:bg-muted/70"
+                  onClick={() => setExpandedFolders(prev => ({ ...prev, [folderPath]: !prev[folderPath] }))}
+                >
+                  <div className="flex items-center gap-2">
+                    {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    <Folder className="h-4 w-4 text-yellow-500" />
+                    <span className="font-medium">{folder.name}</span>
+                    <span className="text-sm text-muted-foreground">({folderServices.length} services)</span>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0 text-red-500"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteFolder(folderPath);
+                    }}
+                    title="Delete folder"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+                {isExpanded && folderServices.length > 0 && (
+                  <div className={`p-3 ${viewMode === 'grid' ? 'grid gap-3 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}`}>
+                    {folderServices.map((service) => (
+                      <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
+                        <CardHeader className="pb-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              {getServiceIcon(service.type)}
+                              <CardTitle className="text-lg">{service.name}</CardTitle>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => handleToggleFavorite(service, e)}
+                                title={service.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                              >
+                                <Star className={`h-4 w-4 ${service.isFavorite ? 'fill-yellow-500 text-yellow-500' : ''}`} />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedServiceForFolder(service);
+                                  setFolderDialogOpen(true);
+                                }}
+                                title="Move to folder"
+                              >
+                                <Folder className="h-4 w-4" />
+                              </Button>
+                              {!service.isAdmin && (
+                                <>
+                                  <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
+                                    <FileText className="h-4 w-4" />
+                                  </Button>
+                                  <Button variant="ghost" size="icon" onClick={() => openTerminal(getServiceDirectory(service))} title="Open Terminal">
+                                    <Terminal className="h-4 w-4" />
+                                  </Button>
+                                  <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          <CardDescription className="flex items-center gap-1">
+                            <Globe className="h-3 w-3" />
+                            <a href={`https://${service.domain}`} target="_blank" rel="noopener noreferrer" className="hover:underline truncate" onClick={(e) => e.stopPropagation()}>
+                              {service.domain}
+                            </a>
+                          </CardDescription>
+                        </CardHeader>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Services Display - Grid or List (Unfoldered only) */}
       <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
-        {filteredServices.map((service) => (
+        {getUnfolderedServices().map((service) => (
           <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
@@ -1908,6 +2262,17 @@ volumes:
                     title={service.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                   >
                     <Star className={`h-4 w-4 ${service.isFavorite ? 'fill-yellow-500 text-yellow-500' : ''}`} />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setSelectedServiceForFolder(service);
+                      setFolderDialogOpen(true);
+                    }}
+                    title="Move to folder"
+                  >
+                    <Folder className="h-4 w-4" />
                   </Button>
                   {!service.isAdmin && (
                     <>
@@ -2043,13 +2408,71 @@ volumes:
                       <Boxes className="h-4 w-4 text-purple-500" />
                       <CardTitle className="text-lg">{project.projectName}</CardTitle>
                     </div>
+                    {/* Hot command buttons */}
                     <div className="flex gap-1">
+                      {/* Start/Stop button */}
+                      {project.isRunning ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 text-yellow-500 hover:text-yellow-600"
+                          onClick={() => handleComposeAction('stop', project)}
+                          disabled={composeActionLoading[`${project.projectName}-stop`]}
+                          title="Stop"
+                        >
+                          {composeActionLoading[`${project.projectName}-stop`] ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Square className="h-4 w-4" />
+                          )}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 text-green-500 hover:text-green-600"
+                          onClick={() => handleComposeAction('start', project)}
+                          disabled={composeActionLoading[`${project.projectName}-start`]}
+                          title="Start"
+                        >
+                          {composeActionLoading[`${project.projectName}-start`] ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Play className="h-4 w-4" />
+                          )}
+                        </Button>
+                      )}
+                      {/* Restart button */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0 text-blue-500 hover:text-blue-600"
+                        onClick={() => handleComposeAction('restart', project)}
+                        disabled={composeActionLoading[`${project.projectName}-restart`]}
+                        title="Restart"
+                      >
+                        {composeActionLoading[`${project.projectName}-restart`] ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RotateCw className="h-4 w-4" />
+                        )}
+                      </Button>
+                      {/* Destroy button */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                        onClick={() => openDestroyDialog(project)}
+                        title="Destroy"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                      {/* Terminal button */}
                       <Button
                         variant="ghost"
                         size="sm"
                         className="h-7 w-7 p-0"
                         onClick={() => {
-                          // Find the directory for this compose project
                           const firstService = project.services[0];
                           const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
                           openTerminal(composeDir);
@@ -2058,6 +2481,7 @@ volumes:
                       >
                         <Terminal className="h-4 w-4" />
                       </Button>
+                      {/* Expand/Collapse button */}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -2188,6 +2612,146 @@ volumes:
             <Button variant="outline" onClick={() => setRemoveCertDialogOpen(false)}>Cancel</Button>
             <Button variant="destructive" onClick={confirmRemoveCertificate} disabled={totpCode.length !== 6 || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Removing...</> : 'Remove Certificate'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Docker Compose Destroy Dialog */}
+      <Dialog open={destroyDialogOpen} onOpenChange={setDestroyDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-red-500 flex items-center gap-2">
+              <Trash2 className="h-5 w-5" />
+              Destroy Compose Project
+            </DialogTitle>
+            <DialogDescription>
+              This will stop and remove the "{projectToDestroy?.projectName}" project. Choose cleanup options:
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>Remove Volumes</Label>
+                  <p className="text-xs text-muted-foreground">Delete all data stored in volumes</p>
+                </div>
+                <Switch
+                  checked={destroyOptions.removeVolumes}
+                  onCheckedChange={(checked) => setDestroyOptions(prev => ({ ...prev, removeVolumes: checked }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>Remove Images</Label>
+                  <p className="text-xs text-muted-foreground">Delete downloaded container images</p>
+                </div>
+                <Switch
+                  checked={destroyOptions.removeImages}
+                  onCheckedChange={(checked) => setDestroyOptions(prev => ({ ...prev, removeImages: checked }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>Remove Orphans</Label>
+                  <p className="text-xs text-muted-foreground">Remove containers not defined in compose file</p>
+                </div>
+                <Switch
+                  checked={destroyOptions.removeOrphans}
+                  onCheckedChange={(checked) => setDestroyOptions(prev => ({ ...prev, removeOrphans: checked }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>System Prune</Label>
+                  <p className="text-xs text-muted-foreground">Clean up unused Docker resources</p>
+                </div>
+                <Switch
+                  checked={destroyOptions.prune}
+                  onCheckedChange={(checked) => setDestroyOptions(prev => ({ ...prev, prune: checked }))}
+                />
+              </div>
+            </div>
+            <div className="space-y-2 pt-2 border-t">
+              <Label htmlFor="destroyTotp">TOTP Code (required)</Label>
+              <Input
+                id="destroyTotp"
+                value={destroyTotpCode}
+                onChange={(e) => setDestroyTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDestroyDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={handleDestroyProject}
+              disabled={destroyTotpCode.length !== 6 || destroyingProject}
+            >
+              {destroyingProject ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Destroying...</>
+              ) : (
+                'Destroy Project'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Docker Compose Create Dialog */}
+      <Dialog open={composeCreateOpen} onOpenChange={setComposeCreateOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Boxes className="h-5 w-5 text-purple-500" />
+              Create Docker Compose Service
+            </DialogTitle>
+            <DialogDescription>
+              Define your docker-compose.yml and start the containers
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 flex-1 overflow-auto">
+            <div className="space-y-2">
+              <Label htmlFor="composeServiceName">Service Name</Label>
+              <Input
+                id="composeServiceName"
+                value={composeCreateForm.serviceName}
+                onChange={(e) => setComposeCreateForm(prev => ({ ...prev, serviceName: e.target.value }))}
+                placeholder="my-app"
+              />
+              <p className="text-xs text-muted-foreground">
+                Folder will be created at: /root/docker/{composeCreateForm.serviceName?.toLowerCase().replace(/\s+/g, '-') || 'my-app'}
+              </p>
+            </div>
+            <div className="space-y-2 flex-1">
+              <Label>docker-compose.yml</Label>
+              <div className="border rounded-md overflow-hidden h-64">
+                <CodeMirror
+                  value={composeCreateForm.composeContent}
+                  height="100%"
+                  extensions={[yaml()]}
+                  theme={oneDark}
+                  onChange={(value) => setComposeCreateForm(prev => ({ ...prev, composeContent: value }))}
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setComposeCreateOpen(false)}>Cancel</Button>
+            <Button
+              onClick={handleCreateCompose}
+              disabled={composeCreating || !composeCreateForm.serviceName.trim()}
+            >
+              {composeCreating ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>
+              ) : (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  Create & Start
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3225,6 +3789,122 @@ volumes:
                 )}
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Folder Management Dialog */}
+      <Dialog open={folderDialogOpen} onOpenChange={(open) => {
+        setFolderDialogOpen(open);
+        if (!open) {
+          setSelectedServiceForFolder(null);
+          setNewFolderName('');
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FolderTree className="h-5 w-5 text-yellow-500" />
+              {selectedServiceForFolder ? 'Move to Folder' : 'Manage Folders'}
+            </DialogTitle>
+            <DialogDescription>
+              {selectedServiceForFolder
+                ? `Move "${selectedServiceForFolder.name}" to a folder`
+                : 'Create folders to organize your services'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {/* Create new folder */}
+            <div className="space-y-2">
+              <Label>Create New Folder</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="Folder name"
+                />
+                <Button
+                  onClick={() => {
+                    if (newFolderName.trim()) {
+                      createFolder(newFolderName.trim());
+                      setNewFolderName('');
+                      toast({ title: 'Folder created', description: `Created folder "${newFolderName}"` });
+                    }
+                  }}
+                  disabled={!newFolderName.trim()}
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+
+            {/* List existing folders */}
+            {Object.keys(serviceFolders).length > 0 && (
+              <div className="space-y-2">
+                <Label>{selectedServiceForFolder ? 'Select Folder' : 'Existing Folders'}</Label>
+                <div className="space-y-2 max-h-48 overflow-auto">
+                  {selectedServiceForFolder && (
+                    <div
+                      className="flex items-center gap-2 p-2 border rounded cursor-pointer hover:bg-muted"
+                      onClick={() => {
+                        moveServiceToFolder(selectedServiceForFolder.id, null);
+                        setFolderDialogOpen(false);
+                        toast({ title: 'Moved', description: `"${selectedServiceForFolder.name}" removed from folder` });
+                      }}
+                    >
+                      <X className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-muted-foreground">No folder (root level)</span>
+                    </div>
+                  )}
+                  {Object.entries(serviceFolders).map(([path, folder]) => (
+                    <div
+                      key={path}
+                      className={`flex items-center justify-between p-2 border rounded ${selectedServiceForFolder ? 'cursor-pointer hover:bg-muted' : ''}`}
+                      onClick={() => {
+                        if (selectedServiceForFolder) {
+                          moveServiceToFolder(selectedServiceForFolder.id, path);
+                          setFolderDialogOpen(false);
+                          toast({ title: 'Moved', description: `"${selectedServiceForFolder.name}" moved to "${folder.name}"` });
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Folder className="h-4 w-4 text-yellow-500" />
+                        <span>{folder.name}</span>
+                        <span className="text-sm text-muted-foreground">
+                          ({folder.services?.length || 0} services)
+                        </span>
+                      </div>
+                      {!selectedServiceForFolder && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 text-red-500"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteFolder(path);
+                            toast({ title: 'Deleted', description: `Folder "${folder.name}" deleted` });
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {Object.keys(serviceFolders).length === 0 && !selectedServiceForFolder && (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No folders yet. Create your first folder above.
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFolderDialogOpen(false)}>
+              Close
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -173,9 +173,14 @@ export const api = {
     body: JSON.stringify({ containerId, containerName }),
   }),
 
-  dockerCompose: (action, path, serviceName) => request('/services/docker/compose', {
+  dockerCompose: (action, path, serviceName, options = null) => request('/services/docker/compose', {
     method: 'POST',
-    body: JSON.stringify({ action, path, serviceName }),
+    body: JSON.stringify({ action, path, serviceName, options }),
+  }),
+
+  dockerComposeDestroy: (path, totpCode, options = {}) => request('/services/docker/compose/destroy', {
+    method: 'POST',
+    body: JSON.stringify({ path, totpCode, options }),
   }),
 
   // User

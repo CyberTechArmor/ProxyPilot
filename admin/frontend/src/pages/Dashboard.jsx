@@ -74,6 +74,14 @@ import {
   Radar,
   Import,
   Boxes,
+  LayoutGrid,
+  List,
+  Package,
+  Rocket,
+  FolderTree,
+  Eye,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -228,6 +236,35 @@ export default function Dashboard() {
   const [nanoFilePath, setNanoFilePath] = useState('');
   const [nanoFileContent, setNanoFileContent] = useState('');
   const [nanoSaving, setNanoSaving] = useState(false);
+  const [nanoVersions, setNanoVersions] = useState([]);
+  const [nanoShowVersions, setNanoShowVersions] = useState(false);
+
+  // Dashboard view state
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
+
+  // Docker Compose project expansion state
+  const [expandedProjects, setExpandedProjects] = useState({});
+
+  // Terminal improvements
+  const [commandHistory, setCommandHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [tabSuggestions, setTabSuggestions] = useState([]);
+  const [showTabSuggestions, setShowTabSuggestions] = useState(false);
+  const [terminalFiles, setTerminalFiles] = useState([]);
+  const [terminalDirs, setTerminalDirs] = useState([]);
+  const [expandedTerminalDirs, setExpandedTerminalDirs] = useState({});
+  const [loadingTerminalFiles, setLoadingTerminalFiles] = useState(false);
+
+  // One-Click Install state
+  const [oneClickDialogOpen, setOneClickDialogOpen] = useState(false);
+  const [oneClickService, setOneClickService] = useState(null);
+  const [oneClickInstalling, setOneClickInstalling] = useState(false);
+  const [oneClickForm, setOneClickForm] = useState({
+    siteName: '',
+    domain: '',
+    wordpressPort: '7000',
+    dbPort: '7001',
+  });
 
   const { toast } = useToast();
 
@@ -280,6 +317,24 @@ export default function Dashboard() {
 
     return result;
   }, [services, searchQuery, filterType, sortBy, showFavoritesOnly]);
+
+  // Group compose services by project
+  const groupedComposeProjects = useMemo(() => {
+    const groups = {};
+    composeServices.forEach(svc => {
+      const project = svc.projectName || 'standalone';
+      if (!groups[project]) {
+        groups[project] = {
+          projectName: project,
+          services: [],
+          isRunning: false,
+        };
+      }
+      groups[project].services.push(svc);
+      if (svc.isRunning) groups[project].isRunning = true;
+    });
+    return Object.values(groups);
+  }, [composeServices]);
 
   const fetchServices = async () => {
     try {
@@ -559,6 +614,42 @@ export default function Dashboard() {
   };
 
   // Terminal Functions
+  const fetchTerminalDirectory = async (dir) => {
+    setLoadingTerminalFiles(true);
+    try {
+      const result = await api.executeCommand(`ls -la "${dir}" 2>/dev/null | tail -n +2`, '/');
+      if (result.success && result.output) {
+        const items = [];
+        const lines = result.output.trim().split('\n').filter(Boolean);
+        for (const line of lines) {
+          const parts = line.split(/\s+/);
+          if (parts.length >= 9) {
+            const perms = parts[0];
+            const name = parts.slice(8).join(' ');
+            if (name === '.' || name === '..') continue;
+            items.push({
+              name,
+              isDir: perms.startsWith('d'),
+              perms,
+              size: parts[4],
+            });
+          }
+        }
+        // Sort: folders first, then files
+        items.sort((a, b) => {
+          if (a.isDir && !b.isDir) return -1;
+          if (!a.isDir && b.isDir) return 1;
+          return a.name.localeCompare(b.name);
+        });
+        setTerminalFiles(items);
+      }
+    } catch (e) {
+      console.error('Failed to fetch directory:', e);
+    } finally {
+      setLoadingTerminalFiles(false);
+    }
+  };
+
   const openTerminal = async () => {
     setTerminalOpen(true);
     setTerminalOutput([{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }]);
@@ -570,8 +661,49 @@ export default function Dashboard() {
       ]);
       setSystemInfo(sysInfo);
       setContainers(containerList.containers || []);
+      // Fetch initial directory contents
+      fetchTerminalDirectory('/');
     } catch (e) {
       console.error('Failed to fetch terminal info:', e);
+    }
+  };
+
+  // Tab completion for terminal
+  const handleTabComplete = async () => {
+    const input = terminalCommand;
+    const parts = input.split(/\s+/);
+    const lastPart = parts[parts.length - 1] || '';
+
+    // Get directory and partial filename
+    let searchDir = terminalCwd;
+    let searchPrefix = lastPart;
+
+    if (lastPart.includes('/')) {
+      const lastSlash = lastPart.lastIndexOf('/');
+      const dirPart = lastPart.substring(0, lastSlash) || '/';
+      searchPrefix = lastPart.substring(lastSlash + 1);
+      searchDir = dirPart.startsWith('/') ? dirPart : `${terminalCwd}/${dirPart}`.replace(/\/+/g, '/');
+    }
+
+    try {
+      const result = await api.executeCommand(`ls -1 "${searchDir}" 2>/dev/null | grep "^${searchPrefix}"`, '/');
+      if (result.success && result.output) {
+        const matches = result.output.trim().split('\n').filter(Boolean);
+        if (matches.length === 1) {
+          // Single match - complete it
+          const match = matches[0];
+          const prefix = lastPart.includes('/') ? lastPart.substring(0, lastPart.lastIndexOf('/') + 1) : '';
+          parts[parts.length - 1] = prefix + match;
+          setTerminalCommand(parts.join(' '));
+          setShowTabSuggestions(false);
+        } else if (matches.length > 1) {
+          // Multiple matches - show suggestions
+          setTabSuggestions(matches);
+          setShowTabSuggestions(true);
+        }
+      }
+    } catch (e) {
+      // No completions available
     }
   };
 
@@ -579,8 +711,17 @@ export default function Dashboard() {
     if (!terminalCommand.trim() || terminalRunning) return;
 
     const cmd = terminalCommand.trim();
+
+    // Add to command history
+    setCommandHistory(prev => {
+      const newHistory = [...prev.filter(c => c !== cmd), cmd];
+      return newHistory.slice(-100); // Keep last 100 commands
+    });
+    setHistoryIndex(-1);
+
     setTerminalOutput(prev => [...prev, { type: 'input', text: `${terminalCwd}$ ${cmd}` }]);
     setTerminalCommand('');
+    setShowTabSuggestions(false);
 
     // Handle special commands locally
     if (cmd === 'clear') {
@@ -628,6 +769,7 @@ export default function Dashboard() {
         if (result.success && result.output) {
           const newCwd = result.output.trim();
           setTerminalCwd(newCwd);
+          fetchTerminalDirectory(newCwd); // Refresh file browser
           setTerminalOutput(prev => [
             ...prev,
             { type: 'system', text: `Changed directory to: ${newCwd}` },
@@ -751,6 +893,173 @@ export default function Dashboard() {
       });
     } finally {
       setNanoSaving(false);
+    }
+  };
+
+  // Generate strong random password
+  const generatePassword = (length = 24) => {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let password = '';
+    const array = new Uint32Array(length);
+    crypto.getRandomValues(array);
+    for (let i = 0; i < length; i++) {
+      password += chars[array[i] % chars.length];
+    }
+    return password;
+  };
+
+  // Check if port is available
+  const checkPortAvailable = async (port) => {
+    try {
+      const result = await api.executeCommand(`ss -tlnp 2>/dev/null | grep -q ":${port} " && echo "used" || echo "free"`, '/');
+      return result.output?.trim() === 'free';
+    } catch {
+      return true; // Assume available if check fails
+    }
+  };
+
+  // Find next available port
+  const findNextAvailablePort = async (startPort) => {
+    let port = parseInt(startPort);
+    for (let i = 0; i < 100; i++) {
+      if (await checkPortAvailable(port)) return port;
+      port++;
+    }
+    return port;
+  };
+
+  // One-Click Install WordPress
+  const handleOneClickInstall = async () => {
+    if (!oneClickForm.siteName || !oneClickForm.domain) {
+      toast({ variant: 'destructive', title: 'Error', description: 'Site name and domain are required' });
+      return;
+    }
+
+    setOneClickInstalling(true);
+    const safeName = oneClickForm.siteName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const dbPassword = generatePassword();
+    const rootPassword = generatePassword();
+
+    try {
+      // Check and find available ports
+      let wpPort = parseInt(oneClickForm.wordpressPort);
+      let dbPort = parseInt(oneClickForm.dbPort);
+
+      if (!(await checkPortAvailable(wpPort))) {
+        wpPort = await findNextAvailablePort(wpPort + 1);
+        toast({ title: 'Port Changed', description: `WordPress port changed to ${wpPort} (original was in use)` });
+      }
+      if (!(await checkPortAvailable(dbPort))) {
+        dbPort = await findNextAvailablePort(dbPort + 1);
+        toast({ title: 'Port Changed', description: `Database port changed to ${dbPort} (original was in use)` });
+      }
+
+      // Create directory
+      const installDir = `/root/docker/${safeName}`;
+      await api.executeCommand(`mkdir -p "${installDir}"`, '/');
+
+      // Create .env file
+      const envContent = `# ${oneClickForm.siteName} Environment Variables
+WORDPRESS_PORT=${wpPort}
+DB_PORT=${dbPort}
+DB_ROOT_PASSWORD=${rootPassword}
+DB_NAME=wp_${safeName}db
+DB_USER=wp_${safeName}user
+DB_PASSWORD=${dbPassword}
+`;
+      await api.writeFile(`${installDir}/.env`, envContent);
+
+      // Create docker-compose.yml
+      const composeContent = `version: '3.8'
+
+services:
+  wp_${safeName}:
+    image: wordpress:latest
+    container_name: wp_${safeName}_app
+    ports:
+      - "\${WORDPRESS_PORT}:80"
+    environment:
+      WORDPRESS_DB_HOST: wp_${safeName}_db
+      WORDPRESS_DB_USER: \${DB_USER}
+      WORDPRESS_DB_PASSWORD: \${DB_PASSWORD}
+      WORDPRESS_DB_NAME: \${DB_NAME}
+    volumes:
+      - wp_${safeName}_data:/var/www/html
+    depends_on:
+      - wp_${safeName}_db
+    restart: always
+
+  wp_${safeName}_db:
+    image: mysql:5.7
+    container_name: wp_${safeName}_db
+    ports:
+      - "\${DB_PORT}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: \${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: \${DB_NAME}
+      MYSQL_USER: \${DB_USER}
+      MYSQL_PASSWORD: \${DB_PASSWORD}
+    volumes:
+      - wp_${safeName}_db_data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+
+volumes:
+  wp_${safeName}_data:
+  wp_${safeName}_db_data:
+`;
+      await api.writeFile(`${installDir}/docker-compose.yml`, composeContent);
+
+      // Start docker compose
+      setTerminalOutput(prev => [...prev, { type: 'system', text: `Starting WordPress installation for ${oneClickForm.siteName}...` }]);
+      const startResult = await api.executeCommand(`cd "${installDir}" && docker compose up -d`, '/');
+
+      if (!startResult.success) {
+        throw new Error(startResult.output || 'Failed to start containers');
+      }
+
+      // Wait for containers to start
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Create ProxyPilot service
+      try {
+        await api.createService({
+          name: oneClickForm.siteName,
+          domain: oneClickForm.domain,
+          type: 'docker',
+          target: '127.0.0.1',
+          port: wpPort,
+          containerName: `wp_${safeName}_app`,
+          sslEnabled: true,
+          forceHttps: true,
+          websocketEnabled: false,
+          maxUploadSize: '100M',
+          obtainCertificate: true,
+        });
+      } catch (e) {
+        console.error('Service creation warning:', e);
+      }
+
+      toast({
+        title: 'WordPress Installed!',
+        description: `${oneClickForm.siteName} is now running at ${oneClickForm.domain}`,
+      });
+
+      setOneClickDialogOpen(false);
+      setOneClickForm({ siteName: '', domain: '', wordpressPort: '7000', dbPort: '7001' });
+      fetchServices();
+      fetchComposeServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Installation Failed',
+        description: error.message,
+      });
+    } finally {
+      setOneClickInstalling(false);
     }
   };
 
@@ -1190,6 +1499,15 @@ export default function Dashboard() {
           </Button>
           <Button
             variant="outline"
+            className="text-green-600 border-green-600 hover:bg-green-600/10"
+            onClick={() => setOneClickDialogOpen(true)}
+            title="One-Click Install Services"
+          >
+            <Rocket className="h-4 w-4 mr-2" />
+            One-Click
+          </Button>
+          <Button
+            variant="outline"
             className="text-red-500 border-red-500 hover:bg-red-500/10"
             onClick={() => { setTotpCode(''); setKillSwitchDialogOpen(true); }}
             title="Secure/Shutdown ProxyPilot"
@@ -1343,13 +1661,33 @@ export default function Dashboard() {
           <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? 'fill-current' : ''}`} />
           Favorites
         </Button>
+        <div className="flex items-center gap-1 border rounded-md p-1">
+          <Button
+            variant={viewMode === 'grid' ? 'default' : 'ghost'}
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => setViewMode('grid')}
+            title="Grid View"
+          >
+            <LayoutGrid className="h-4 w-4" />
+          </Button>
+          <Button
+            variant={viewMode === 'list' ? 'default' : 'ghost'}
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => setViewMode('list')}
+            title="List View"
+          >
+            <List className="h-4 w-4" />
+          </Button>
+        </div>
         <span className="text-sm text-muted-foreground">
           {filteredServices.length} service{filteredServices.length !== 1 ? 's' : ''}
         </span>
       </div>
 
-      {/* Services Grid */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      {/* Services Display - Grid or List */}
+      <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
         {filteredServices.map((service) => (
           <Card key={service.id} className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''}`}>
             <CardHeader className="pb-3">
@@ -1470,8 +1808,8 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Running Docker Compose Services Section */}
-      {composeServices.length > 0 && (
+      {/* Running Docker Compose Services Section - Grouped by Project */}
+      {groupedComposeProjects.length > 0 && (
         <div className="mt-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold flex items-center gap-2">
@@ -1484,80 +1822,90 @@ export default function Dashboard() {
             </Button>
           </div>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {composeServices.map((svc) => {
-              // Check if there's already a ProxyPilot service for this port
-              const existingService = services.find(s => s.port === svc.exposedPort && s.type === 'docker');
-              return (
-                <Card key={svc.id} className="border-dashed">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className={`w-3 h-3 rounded-full ${svc.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                        <Container className="h-4 w-4 text-purple-500" />
-                        <CardTitle className="text-lg">{svc.serviceName || svc.containerName}</CardTitle>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-purple-500/10 text-purple-500">{svc.projectName}</span>
+            {groupedComposeProjects.map((project) => (
+              <Card key={project.projectName} className="border-dashed border-purple-500/30">
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-3 h-3 rounded-full ${project.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                      <Boxes className="h-4 w-4 text-purple-500" />
+                      <CardTitle className="text-lg">{project.projectName}</CardTitle>
                     </div>
-                    <CardDescription className="truncate" title={svc.containerName}>
-                      {svc.containerName}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Image</span>
-                        <span className="font-mono text-xs truncate max-w-[150px]" title={svc.image}>{svc.image?.split(':')[0]}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Port</span>
-                        <span className={svc.exposedPort ? 'text-green-500' : 'text-muted-foreground'}>
-                          {svc.exposedPort || 'Not exposed'}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Status</span>
-                        <span className={svc.isRunning ? 'text-green-500' : 'text-red-500'}>
-                          {svc.isRunning ? 'Running' : 'Stopped'}
-                        </span>
-                      </div>
-                      {existingService ? (
-                        <div className="pt-2 border-t">
-                          <span className="text-xs text-green-500 flex items-center gap-1">
-                            <Check className="h-3 w-3" />
-                            Proxied via {existingService.domain}
-                          </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      onClick={() => setExpandedProjects(prev => ({ ...prev, [project.projectName]: !prev[project.projectName] }))}
+                    >
+                      {expandedProjects[project.projectName] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  <CardDescription>
+                    {project.services.length} container{project.services.length !== 1 ? 's' : ''} • {project.isRunning ? 'Running' : 'Stopped'}
+                  </CardDescription>
+                </CardHeader>
+                {expandedProjects[project.projectName] && (
+                  <CardContent className="space-y-3">
+                    {project.services.map((svc) => {
+                      const existingService = services.find(s => s.port === svc.exposedPort && s.type === 'docker');
+                      return (
+                        <div key={svc.id} className="border rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <div className={`w-2 h-2 rounded-full ${svc.isRunning ? 'bg-green-500' : 'bg-gray-400'}`} />
+                              <Container className="h-3 w-3 text-purple-400" />
+                              <span className="font-medium text-sm">{svc.serviceName || svc.containerName}</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground space-y-1">
+                            <div className="flex justify-between">
+                              <span>Image:</span>
+                              <span className="font-mono truncate max-w-[120px]" title={svc.image}>{svc.image?.split(':')[0]}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Port:</span>
+                              <span className={svc.exposedPort ? 'text-green-500' : ''}>{svc.exposedPort || 'N/A'}</span>
+                            </div>
+                          </div>
+                          {existingService ? (
+                            <div className="text-xs text-green-500 flex items-center gap-1">
+                              <Check className="h-3 w-3" />
+                              Proxied via {existingService.domain}
+                            </div>
+                          ) : svc.exposedPort ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="w-full h-7 text-xs"
+                              onClick={() => {
+                                setFormData({
+                                  name: svc.serviceName || svc.containerName,
+                                  domain: '',
+                                  type: 'docker',
+                                  target: '127.0.0.1',
+                                  port: svc.exposedPort.toString(),
+                                  containerName: svc.containerName,
+                                  sslEnabled: true,
+                                  forceHttps: true,
+                                  websocketEnabled: false,
+                                  maxUploadSize: '1G',
+                                  obtainCertificate: true,
+                                });
+                                setWizardStep(1);
+                                setAddDialogOpen(true);
+                              }}
+                            >
+                              <Plus className="h-3 w-3 mr-1" />
+                              Create Proxy
+                            </Button>
+                          ) : null}
                         </div>
-                      ) : svc.exposedPort ? (
-                        <Button
-                          size="sm"
-                          className="w-full mt-2"
-                          onClick={() => {
-                            setFormData({
-                              name: svc.serviceName || svc.containerName,
-                              domain: '',
-                              type: 'docker',
-                              target: '127.0.0.1',
-                              port: svc.exposedPort.toString(),
-                              containerName: svc.containerName,
-                              sslEnabled: true,
-                              forceHttps: true,
-                              websocketEnabled: false,
-                              maxUploadSize: '1G',
-                              obtainCertificate: true,
-                            });
-                            setWizardStep(1);
-                            setAddDialogOpen(true);
-                          }}
-                        >
-                          <Plus className="h-4 w-4 mr-1" />
-                          Create Proxy
-                        </Button>
-                      ) : null}
-                    </div>
+                      );
+                    })}
                   </CardContent>
-                </Card>
-              );
-            })}
+                )}
+              </Card>
+            ))}
           </div>
         </div>
       )}
@@ -1645,44 +1993,123 @@ export default function Dashboard() {
           </DialogHeader>
 
           <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0`}>
-            {/* Docker Containers Panel */}
-            <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 border rounded flex flex-col ${terminalFullscreen ? '' : 'max-h-48 md:max-h-none'}`}>
-              <div className="p-2 border-b bg-muted shrink-0">
-                <span className="font-medium text-sm flex items-center gap-2">
-                  <Container className="h-4 w-4" />
-                  Docker Containers
-                </span>
-              </div>
-              <div className="flex-1 overflow-auto p-2 space-y-2">
-                {containers.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-4">No containers found</p>
-                ) : (
-                  containers.map((container) => (
-                    <div key={container.id} className="border rounded p-2 text-xs space-y-1">
-                      <div className="font-medium truncate" title={container.name}>{container.name}</div>
-                      <div className="text-muted-foreground truncate" title={container.image}>{container.image}</div>
-                      <div className={`${container.status?.includes('Up') ? 'text-green-500' : 'text-red-500'}`}>
-                        {container.status}
-                      </div>
-                      <div className="flex gap-1 pt-1">
-                        {container.status?.includes('Up') ? (
-                          <>
-                            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('stop', container)}>
-                              <Square className="h-3 w-3" />
-                            </Button>
-                            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('restart', container)}>
-                              <RotateCw className="h-3 w-3" />
-                            </Button>
-                          </>
-                        ) : (
-                          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('start', container)}>
-                            <Play className="h-3 w-3" />
-                          </Button>
-                        )}
-                      </div>
+            {/* Left Panel: File Browser + Docker Containers */}
+            <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 ${terminalFullscreen ? '' : 'max-h-64 md:max-h-none'}`}>
+              {/* Current View - File Browser */}
+              <div className="border rounded flex flex-col flex-1 min-h-0">
+                <div className="p-2 border-b bg-muted shrink-0 flex items-center justify-between">
+                  <span className="font-medium text-sm flex items-center gap-2">
+                    <FolderTree className="h-4 w-4" />
+                    Current View
+                  </span>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => fetchTerminalDirectory(terminalCwd)}>
+                    <RefreshCw className={`h-3 w-3 ${loadingTerminalFiles ? 'animate-spin' : ''}`} />
+                  </Button>
+                </div>
+                <div className="px-2 py-1 text-xs font-mono text-muted-foreground bg-muted/50 border-b truncate" title={terminalCwd}>
+                  {terminalCwd}
+                </div>
+                <div className="flex-1 overflow-auto p-1">
+                  {loadingTerminalFiles ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="h-4 w-4 animate-spin" />
                     </div>
-                  ))
-                )}
+                  ) : terminalFiles.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-2">Empty directory</p>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {terminalCwd !== '/' && (
+                        <div
+                          className="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-muted cursor-pointer text-xs"
+                          onDoubleClick={async () => {
+                            const parentDir = terminalCwd.split('/').slice(0, -1).join('/') || '/';
+                            setTerminalCwd(parentDir);
+                            fetchTerminalDirectory(parentDir);
+                            setTerminalOutput(prev => [...prev, { type: 'system', text: `Changed directory to: ${parentDir}` }]);
+                          }}
+                        >
+                          <Folder className="h-3 w-3 text-blue-400" />
+                          <span className="text-muted-foreground">..</span>
+                        </div>
+                      )}
+                      {terminalFiles.map((item) => (
+                        <div
+                          key={item.name}
+                          className="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-muted cursor-pointer text-xs"
+                          onDoubleClick={async () => {
+                            if (item.isDir) {
+                              const newPath = `${terminalCwd}/${item.name}`.replace(/\/+/g, '/');
+                              setTerminalCwd(newPath);
+                              fetchTerminalDirectory(newPath);
+                              setTerminalOutput(prev => [...prev, { type: 'system', text: `Changed directory to: ${newPath}` }]);
+                            } else {
+                              // Open file in nano editor
+                              const fullPath = `${terminalCwd}/${item.name}`.replace(/\/+/g, '/');
+                              setNanoFilePath(fullPath);
+                              try {
+                                const result = await api.executeCommand(`cat "${fullPath}" 2>/dev/null || echo ""`, '/');
+                                setNanoFileContent(result.output || '');
+                              } catch (e) {
+                                setNanoFileContent('');
+                              }
+                              setNanoEditorOpen(true);
+                              setTerminalOutput(prev => [...prev, { type: 'system', text: `Opening ${item.name} in editor...` }]);
+                            }
+                          }}
+                          title={`${item.perms} ${item.size}`}
+                        >
+                          {item.isDir ? (
+                            <Folder className="h-3 w-3 text-blue-400" />
+                          ) : (
+                            <File className="h-3 w-3 text-gray-400" />
+                          )}
+                          <span className={item.isDir ? 'text-blue-400' : ''}>{item.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Docker Containers Panel */}
+              <div className="border rounded flex flex-col flex-1 min-h-0">
+                <div className="p-2 border-b bg-muted shrink-0">
+                  <span className="font-medium text-sm flex items-center gap-2">
+                    <Container className="h-4 w-4" />
+                    Docker Containers
+                  </span>
+                </div>
+                <div className="flex-1 overflow-auto p-2 space-y-2">
+                  {containers.length === 0 ? (
+                    <p className="text-sm text-muted-foreground text-center py-4">No containers found</p>
+                  ) : (
+                    containers.map((container) => (
+                      <div key={container.id} className="border rounded p-2 text-xs space-y-1">
+                        <div className="font-medium truncate" title={container.name}>{container.name}</div>
+                        <div className="text-muted-foreground truncate" title={container.image}>{container.image}</div>
+                        <div className={`${container.status?.includes('Up') ? 'text-green-500' : 'text-red-500'}`}>
+                          {container.status}
+                        </div>
+                        <div className="flex gap-1 pt-1">
+                          {container.status?.includes('Up') ? (
+                            <>
+                              <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('stop', container)}>
+                                <Square className="h-3 w-3" />
+                              </Button>
+                              <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('restart', container)}>
+                                <RotateCw className="h-3 w-3" />
+                              </Button>
+                            </>
+                          ) : (
+                            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('start', container)}>
+                              <Play className="h-3 w-3" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1709,14 +2136,62 @@ export default function Dashboard() {
                   </div>
                 )}
               </div>
+              {/* Tab suggestions */}
+              {showTabSuggestions && tabSuggestions.length > 0 && (
+                <div className="border-t bg-gray-800 p-2 flex flex-wrap gap-1">
+                  {tabSuggestions.map((s, i) => (
+                    <span
+                      key={i}
+                      className="text-xs font-mono px-1.5 py-0.5 bg-gray-700 rounded cursor-pointer hover:bg-gray-600 text-cyan-300"
+                      onClick={() => {
+                        const parts = terminalCommand.split(/\s+/);
+                        const lastPart = parts[parts.length - 1] || '';
+                        const prefix = lastPart.includes('/') ? lastPart.substring(0, lastPart.lastIndexOf('/') + 1) : '';
+                        parts[parts.length - 1] = prefix + s;
+                        setTerminalCommand(parts.join(' '));
+                        setShowTabSuggestions(false);
+                        terminalInputRef.current?.focus();
+                      }}
+                    >
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="border-t p-2 flex gap-2 bg-gray-900">
                 <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
                 <Input
                   ref={terminalInputRef}
                   value={terminalCommand}
-                  onChange={(e) => setTerminalCommand(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && executeTerminalCommand()}
-                  placeholder="Enter command... (type 'clear' to clear output)"
+                  onChange={(e) => { setTerminalCommand(e.target.value); setShowTabSuggestions(false); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      executeTerminalCommand();
+                    } else if (e.key === 'Tab') {
+                      e.preventDefault();
+                      handleTabComplete();
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      if (commandHistory.length > 0) {
+                        const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
+                        setHistoryIndex(newIndex);
+                        setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
+                      }
+                    } else if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      if (historyIndex > 0) {
+                        const newIndex = historyIndex - 1;
+                        setHistoryIndex(newIndex);
+                        setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
+                      } else if (historyIndex === 0) {
+                        setHistoryIndex(-1);
+                        setTerminalCommand('');
+                      }
+                    } else if (e.key === 'Escape') {
+                      setShowTabSuggestions(false);
+                    }
+                  }}
+                  placeholder="Enter command... (Tab=complete, ↑↓=history)"
                   className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0 h-8"
                   disabled={terminalRunning}
                   autoFocus
@@ -2221,6 +2696,138 @@ export default function Dashboard() {
                 <><Save className="mr-2 h-4 w-4" />Save</>
               )}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* One-Click Install Dialog */}
+      <Dialog open={oneClickDialogOpen} onOpenChange={setOneClickDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Rocket className="h-5 w-5 text-green-500" />
+              One-Click Install
+            </DialogTitle>
+            <DialogDescription>
+              Install pre-configured services with one click. All passwords are auto-generated.
+            </DialogDescription>
+          </DialogHeader>
+
+          {!oneClickService ? (
+            <div className="grid gap-4 py-4">
+              <Card
+                className="cursor-pointer hover:border-green-500 transition-colors"
+                onClick={() => setOneClickService('wordpress')}
+              >
+                <CardHeader className="text-center pb-2">
+                  <Package className="h-12 w-12 mx-auto text-blue-500" />
+                  <CardTitle className="text-lg">WordPress</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CardDescription className="text-center">
+                    Full WordPress installation with MySQL database, auto-configured with SSL
+                  </CardDescription>
+                </CardContent>
+              </Card>
+              <p className="text-xs text-muted-foreground text-center">
+                More services coming soon...
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4 py-4">
+              <div className="flex items-center gap-2 p-2 bg-muted rounded">
+                <Package className="h-5 w-5 text-blue-500" />
+                <span className="font-medium">WordPress Installation</span>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="siteName">Site Name</Label>
+                  <Input
+                    id="siteName"
+                    value={oneClickForm.siteName}
+                    onChange={(e) => setOneClickForm({ ...oneClickForm, siteName: e.target.value })}
+                    placeholder="My WordPress Site"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Used for container naming (e.g., wp_mysite_app)
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="domain">Domain</Label>
+                  <Input
+                    id="domain"
+                    value={oneClickForm.domain}
+                    onChange={(e) => setOneClickForm({ ...oneClickForm, domain: e.target.value })}
+                    placeholder="blog.example.com"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    SSL certificate will be obtained automatically
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="wpPort">WordPress Port</Label>
+                    <Input
+                      id="wpPort"
+                      type="number"
+                      value={oneClickForm.wordpressPort}
+                      onChange={(e) => setOneClickForm({ ...oneClickForm, wordpressPort: e.target.value })}
+                      placeholder="7000"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="dbPort">Database Port</Label>
+                    <Input
+                      id="dbPort"
+                      type="number"
+                      value={oneClickForm.dbPort}
+                      onChange={(e) => setOneClickForm({ ...oneClickForm, dbPort: e.target.value })}
+                      placeholder="7001"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Ports will be automatically adjusted if already in use
+                </p>
+              </div>
+
+              <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3 space-y-1 text-sm">
+                <p className="font-medium text-green-600">What will be created:</p>
+                <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
+                  <li>Docker Compose stack with WordPress + MySQL</li>
+                  <li>.env file with secure auto-generated passwords</li>
+                  <li>NGINX reverse proxy configuration</li>
+                  <li>SSL certificate via Let's Encrypt</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            {oneClickService && (
+              <Button variant="outline" onClick={() => setOneClickService(null)}>
+                Back
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => { setOneClickDialogOpen(false); setOneClickService(null); }}>
+              Cancel
+            </Button>
+            {oneClickService && (
+              <Button
+                onClick={handleOneClickInstall}
+                disabled={oneClickInstalling || !oneClickForm.siteName || !oneClickForm.domain}
+                className="bg-green-600 hover:bg-green-700"
+              >
+                {oneClickInstalling ? (
+                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Installing...</>
+                ) : (
+                  <><Rocket className="mr-2 h-4 w-4" />Install WordPress</>
+                )}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

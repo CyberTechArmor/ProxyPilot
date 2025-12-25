@@ -67,6 +67,10 @@ import {
   ShieldAlert,
   ShieldCheck,
   RefreshCcw,
+  Terminal,
+  Play,
+  Square,
+  RotateCw,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -188,6 +192,14 @@ export default function Dashboard() {
   const [exportIncludeFiles, setExportIncludeFiles] = useState(true);
   const [importData, setImportData] = useState('');
   const [importOverwrite, setImportOverwrite] = useState(false);
+
+  // Terminal state
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalCommand, setTerminalCommand] = useState('');
+  const [terminalOutput, setTerminalOutput] = useState([]);
+  const [terminalRunning, setTerminalRunning] = useState(false);
+  const [containers, setContainers] = useState([]);
+  const [systemInfo, setSystemInfo] = useState(null);
 
   const { toast } = useToast();
 
@@ -467,6 +479,85 @@ export default function Dashboard() {
       });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Terminal Functions
+  const openTerminal = async () => {
+    setTerminalOpen(true);
+    setTerminalOutput([{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }]);
+    // Fetch system info and containers
+    try {
+      const [sysInfo, containerList] = await Promise.all([
+        api.getSystemInfo().catch(() => null),
+        api.listContainers().catch(() => ({ containers: [] })),
+      ]);
+      setSystemInfo(sysInfo);
+      setContainers(containerList.containers || []);
+    } catch (e) {
+      console.error('Failed to fetch terminal info:', e);
+    }
+  };
+
+  const executeTerminalCommand = async () => {
+    if (!terminalCommand.trim() || terminalRunning) return;
+
+    const cmd = terminalCommand.trim();
+    setTerminalOutput(prev => [...prev, { type: 'input', text: `$ ${cmd}` }]);
+    setTerminalCommand('');
+    setTerminalRunning(true);
+
+    try {
+      const result = await api.executeCommand(cmd);
+      setTerminalOutput(prev => [
+        ...prev,
+        {
+          type: result.success ? 'output' : 'error',
+          text: result.output || '(no output)',
+          exitCode: result.exitCode,
+          duration: result.duration,
+        },
+      ]);
+    } catch (error) {
+      setTerminalOutput(prev => [
+        ...prev,
+        { type: 'error', text: error.message },
+      ]);
+    } finally {
+      setTerminalRunning(false);
+    }
+  };
+
+  const handleContainerAction = async (action, container) => {
+    try {
+      const result = await api.containerAction(action, container.id);
+      toast({
+        title: result.success ? 'Success' : 'Error',
+        description: result.message || result.error,
+        variant: result.success ? 'default' : 'destructive',
+      });
+      // Refresh containers
+      const containerList = await api.listContainers();
+      setContainers(containerList.containers || []);
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    }
+  };
+
+  const refreshContainers = async () => {
+    try {
+      const containerList = await api.listContainers();
+      setContainers(containerList.containers || []);
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to refresh containers',
+      });
     }
   };
 
@@ -896,6 +987,10 @@ export default function Dashboard() {
             <Upload className="h-4 w-4 mr-2" />
             Import
           </Button>
+          <Button variant="outline" onClick={openTerminal}>
+            <Terminal className="h-4 w-4 mr-2" />
+            Terminal
+          </Button>
           <Dialog open={addDialogOpen} onOpenChange={(open) => { setAddDialogOpen(open); if (!open) resetForm(); }}>
             <DialogTrigger asChild>
               <Button>
@@ -1219,6 +1314,120 @@ export default function Dashboard() {
             <Button variant="outline" onClick={() => setRemoveCertDialogOpen(false)}>Cancel</Button>
             <Button variant="destructive" onClick={confirmRemoveCertificate} disabled={totpCode.length !== 6 || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Removing...</> : 'Remove Certificate'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Terminal Dialog */}
+      <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
+        <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <div className="flex items-center justify-between">
+              <div>
+                <DialogTitle className="flex items-center gap-2">
+                  <Terminal className="h-5 w-5" />
+                  Host Terminal
+                </DialogTitle>
+                <DialogDescription>
+                  Execute commands on the host system
+                  {systemInfo && ` - ${systemInfo.hostname}`}
+                </DialogDescription>
+              </div>
+              <Button variant="outline" size="sm" onClick={refreshContainers}>
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+            </div>
+          </DialogHeader>
+
+          <div className="flex gap-4 flex-1 min-h-0">
+            {/* Docker Containers Panel */}
+            <div className="w-64 shrink-0 border rounded flex flex-col">
+              <div className="p-2 border-b bg-muted shrink-0">
+                <span className="font-medium text-sm flex items-center gap-2">
+                  <Container className="h-4 w-4" />
+                  Docker Containers
+                </span>
+              </div>
+              <div className="flex-1 overflow-auto p-2 space-y-2">
+                {containers.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-4">No containers found</p>
+                ) : (
+                  containers.map((container) => (
+                    <div key={container.id} className="border rounded p-2 text-xs space-y-1">
+                      <div className="font-medium truncate" title={container.name}>{container.name}</div>
+                      <div className="text-muted-foreground truncate" title={container.image}>{container.image}</div>
+                      <div className={`${container.status?.includes('Up') ? 'text-green-500' : 'text-red-500'}`}>
+                        {container.status}
+                      </div>
+                      <div className="flex gap-1 pt-1">
+                        {container.status?.includes('Up') ? (
+                          <>
+                            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('stop', container)}>
+                              <Square className="h-3 w-3" />
+                            </Button>
+                            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('restart', container)}>
+                              <RotateCw className="h-3 w-3" />
+                            </Button>
+                          </>
+                        ) : (
+                          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => handleContainerAction('start', container)}>
+                            <Play className="h-3 w-3" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Terminal Output */}
+            <div className="flex-1 flex flex-col border rounded">
+              <div className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
+                {terminalOutput.map((line, i) => (
+                  <div key={i} className={`whitespace-pre-wrap ${
+                    line.type === 'input' ? 'text-white' :
+                    line.type === 'error' ? 'text-red-400' :
+                    line.type === 'system' ? 'text-blue-400' :
+                    'text-green-400'
+                  }`}>
+                    {line.text}
+                    {line.duration !== undefined && (
+                      <span className="text-gray-500 text-xs ml-2">({line.duration}ms)</span>
+                    )}
+                  </div>
+                ))}
+                {terminalRunning && (
+                  <div className="flex items-center gap-2 text-yellow-400">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Running...
+                  </div>
+                )}
+              </div>
+              <div className="border-t p-2 flex gap-2">
+                <span className="text-green-400 font-mono">$</span>
+                <Input
+                  value={terminalCommand}
+                  onChange={(e) => setTerminalCommand(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && executeTerminalCommand()}
+                  placeholder="Enter command..."
+                  className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0"
+                  disabled={terminalRunning}
+                />
+                <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()}>
+                  {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="shrink-0">
+            <Button variant="outline" onClick={() => setTerminalOutput([])}>
+              Clear Output
+            </Button>
+            <Button variant="outline" onClick={() => setTerminalOpen(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

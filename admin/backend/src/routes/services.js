@@ -20,6 +20,24 @@ const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
 // This may differ from SERVICES_DATA_DIR when running in Docker
 const NGINX_STATIC_ROOT = process.env.NGINX_STATIC_ROOT || SERVICES_DATA_DIR;
 
+// Check if running in Docker container
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+
+// Execute command on host (uses nsenter when in Docker, direct exec otherwise)
+async function execOnHost(command, options = {}) {
+  const timeout = options.timeout || 30000;
+
+  if (isInDocker) {
+    // Use nsenter to execute on the host's namespace
+    // This requires the container to have appropriate privileges
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;
+    return execAsync(hostCommand, { timeout });
+  } else {
+    // Not in Docker, execute directly
+    return execAsync(command, { timeout });
+  }
+}
+
 // Helper to create safe directory name from service name
 function toSafeDirectoryName(name) {
   return name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -54,11 +72,11 @@ const fileSchema = z.object({
   content: z.string().max(10 * 1024 * 1024), // 10MB max
 });
 
-// Helper function to reload or start NGINX
+// Helper function to reload or start NGINX (executes on host)
 async function reloadNginx() {
   try {
-    // Test NGINX configuration first
-    const testResult = await execAsync('nginx -t 2>&1');
+    // Test NGINX configuration first (on host)
+    const testResult = await execOnHost('nginx -t 2>&1');
     console.log('NGINX test output:', testResult.stdout, testResult.stderr);
 
     // Check if NGINX master process is running (more reliable than pgrep -x)
@@ -66,17 +84,17 @@ async function reloadNginx() {
     let nginxPid = null;
     try {
       // Check for nginx.pid file first (most reliable)
-      const pidResult = await execAsync('cat /var/run/nginx.pid 2>/dev/null || cat /run/nginx.pid 2>/dev/null');
+      const pidResult = await execOnHost('cat /var/run/nginx.pid 2>/dev/null || cat /run/nginx.pid 2>/dev/null');
       nginxPid = pidResult.stdout.trim();
       if (nginxPid) {
         // Verify the process actually exists
-        await execAsync(`kill -0 ${nginxPid} 2>/dev/null`);
+        await execOnHost(`kill -0 ${nginxPid} 2>/dev/null`);
         nginxRunning = true;
       }
     } catch (e) {
       // PID file doesn't exist or process isn't running, try pgrep
       try {
-        const pgrepResult = await execAsync('pgrep -o nginx 2>/dev/null');
+        const pgrepResult = await execOnHost('pgrep -o nginx 2>/dev/null');
         if (pgrepResult.stdout.trim()) {
           nginxRunning = true;
         }
@@ -89,11 +107,11 @@ async function reloadNginx() {
       // Reload NGINX using the most reliable method
       console.log('NGINX is running, reloading...');
       try {
-        await execAsync('nginx -s reload 2>&1');
+        await execOnHost('nginx -s reload 2>&1');
         console.log('NGINX reloaded via signal');
       } catch (reloadErr) {
         // Try systemctl as fallback
-        await execAsync('systemctl reload nginx 2>&1');
+        await execOnHost('systemctl reload nginx 2>&1');
         console.log('NGINX reloaded via systemctl');
       }
     } else {
@@ -102,7 +120,7 @@ async function reloadNginx() {
 
       // Kill any orphaned nginx processes that might be holding ports
       try {
-        await execAsync('pkill -9 nginx 2>/dev/null || true');
+        await execOnHost('pkill -9 nginx 2>/dev/null || true');
         // Small delay to ensure ports are released
         await new Promise(resolve => setTimeout(resolve, 500));
       } catch (e) {
@@ -111,18 +129,18 @@ async function reloadNginx() {
 
       // Remove stale PID files
       try {
-        await execAsync('rm -f /var/run/nginx.pid /run/nginx.pid 2>/dev/null || true');
+        await execOnHost('rm -f /var/run/nginx.pid /run/nginx.pid 2>/dev/null || true');
       } catch (e) {
         // Ignore
       }
 
       // Start NGINX
       try {
-        await execAsync('systemctl start nginx 2>&1');
+        await execOnHost('systemctl start nginx 2>&1');
         console.log('NGINX started via systemctl');
       } catch (startErr) {
         // Systemctl failed, try direct start
-        await execAsync('nginx 2>&1');
+        await execOnHost('nginx 2>&1');
         console.log('NGINX started directly');
       }
     }
@@ -136,36 +154,36 @@ async function reloadNginx() {
   }
 }
 
-// Check if certbot is installed
+// Check if certbot is installed (on host)
 async function isCertbotInstalled() {
   try {
-    await execAsync('which certbot 2>/dev/null || command -v certbot 2>/dev/null');
+    await execOnHost('which certbot 2>/dev/null || command -v certbot 2>/dev/null');
     return true;
   } catch (e) {
     return false;
   }
 }
 
-// Helper function to obtain SSL certificate using certbot
+// Helper function to obtain SSL certificate using certbot (on host)
 async function obtainSslCertificate(domain) {
   try {
-    // Check if certbot is installed
+    // Check if certbot is installed on host
     const certbotAvailable = await isCertbotInstalled();
     if (!certbotAvailable) {
       return {
         success: false,
-        error: 'Certbot is not installed. Install it with: apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
+        error: 'Certbot is not installed on the host. Install it with: apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
         certbotMissing: true,
       };
     }
 
-    // Create letsencrypt webroot directory if it doesn't exist
-    await mkdir('/var/www/letsencrypt/.well-known/acme-challenge', { recursive: true });
+    // Create letsencrypt webroot directory on host if it doesn't exist
+    await execOnHost('mkdir -p /var/www/letsencrypt/.well-known/acme-challenge');
 
-    // Run certbot in non-interactive mode
+    // Run certbot on host in non-interactive mode
     const certbotCmd = `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain} --non-interactive --agree-tos --register-unsafely-without-email 2>&1`;
-    console.log('Running certbot:', certbotCmd);
-    const result = await execAsync(certbotCmd, { timeout: 120000 }); // 2 minute timeout
+    console.log('Running certbot on host:', certbotCmd);
+    const result = await execOnHost(certbotCmd, { timeout: 120000 }); // 2 minute timeout
     console.log('Certbot output:', result.stdout, result.stderr);
 
     // Check if certificate was obtained
@@ -278,18 +296,18 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       }
     }
 
-    // Remove certificate using certbot
+    // Remove certificate using certbot on host
     try {
-      await execAsync(`certbot delete --cert-name ${service.domain} --non-interactive 2>&1`);
+      await execOnHost(`certbot delete --cert-name ${service.domain} --non-interactive 2>&1`);
     } catch (certbotError) {
-      // If certbot delete fails, try manual removal
+      // If certbot delete fails, try manual removal on host
       const certDir = `/etc/letsencrypt/live/${service.domain}`;
       const renewalConf = `/etc/letsencrypt/renewal/${service.domain}.conf`;
       const archiveDir = `/etc/letsencrypt/archive/${service.domain}`;
 
-      await rm(certDir, { recursive: true, force: true }).catch(() => {});
-      await unlink(renewalConf).catch(() => {});
-      await rm(archiveDir, { recursive: true, force: true }).catch(() => {});
+      await execOnHost(`rm -rf ${certDir} 2>/dev/null || true`).catch(() => {});
+      await execOnHost(`rm -f ${renewalConf} 2>/dev/null || true`).catch(() => {});
+      await execOnHost(`rm -rf ${archiveDir} 2>/dev/null || true`).catch(() => {});
     }
 
     // Regenerate NGINX config without HTTPS
@@ -1621,6 +1639,226 @@ servicesRouter.post('/import', async (req, res) => {
   } catch (error) {
     console.error('Error importing services:', error);
     res.status(500).json({ error: 'Failed to import services' });
+  }
+});
+
+// Terminal/Command execution endpoint
+const terminalSchema = z.object({
+  command: z.string().min(1).max(10000),
+  workingDir: z.string().optional(),
+  timeout: z.number().min(1000).max(300000).optional().default(30000), // 30s default, 5min max
+});
+
+// Blocked commands for security
+const BLOCKED_COMMANDS = [
+  'rm -rf /',
+  'mkfs',
+  ':(){ :|:& };:',  // Fork bomb
+  'dd if=/dev/zero of=/dev/',
+  '> /dev/sda',
+  'chmod -R 777 /',
+];
+
+function isCommandBlocked(command) {
+  const normalizedCmd = command.toLowerCase().trim();
+  return BLOCKED_COMMANDS.some(blocked =>
+    normalizedCmd.includes(blocked.toLowerCase())
+  );
+}
+
+// Execute command on host (requires TOTP for destructive commands)
+servicesRouter.post('/terminal/execute', async (req, res) => {
+  try {
+    const { command, workingDir, timeout } = terminalSchema.parse(req.body);
+
+    // Check for blocked commands
+    if (isCommandBlocked(command)) {
+      return res.status(403).json({
+        error: 'This command is blocked for security reasons',
+        output: '',
+        exitCode: 1,
+      });
+    }
+
+    console.log(`Terminal execute: ${command}`);
+
+    // Build the command with optional working directory
+    let fullCommand = command;
+    if (workingDir) {
+      fullCommand = `cd ${JSON.stringify(workingDir)} && ${command}`;
+    }
+
+    // Execute on host
+    const startTime = Date.now();
+    try {
+      const result = await execOnHost(fullCommand, { timeout });
+      const duration = Date.now() - startTime;
+
+      logAudit(req.user.id, 'TERMINAL_COMMAND', 'system', null, {
+        command,
+        workingDir,
+        exitCode: 0,
+        duration,
+      }, req.ip);
+
+      res.json({
+        success: true,
+        output: result.stdout + (result.stderr ? '\n' + result.stderr : ''),
+        exitCode: 0,
+        duration,
+      });
+    } catch (execError) {
+      const duration = Date.now() - startTime;
+      const output = (execError.stdout || '') + '\n' + (execError.stderr || execError.message || '');
+
+      logAudit(req.user.id, 'TERMINAL_COMMAND', 'system', null, {
+        command,
+        workingDir,
+        exitCode: execError.code || 1,
+        duration,
+        error: true,
+      }, req.ip);
+
+      res.json({
+        success: false,
+        output: output.trim(),
+        exitCode: execError.code || 1,
+        duration,
+      });
+    }
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Terminal error:', error);
+    res.status(500).json({ error: 'Failed to execute command: ' + error.message });
+  }
+});
+
+// Get system info
+servicesRouter.get('/terminal/system-info', async (req, res) => {
+  try {
+    const [hostname, uptime, memory, disk] = await Promise.all([
+      execOnHost('hostname').then(r => r.stdout.trim()).catch(() => 'unknown'),
+      execOnHost('uptime -p 2>/dev/null || uptime').then(r => r.stdout.trim()).catch(() => 'unknown'),
+      execOnHost('free -h 2>/dev/null | head -2').then(r => r.stdout.trim()).catch(() => 'unknown'),
+      execOnHost('df -h / 2>/dev/null | tail -1').then(r => r.stdout.trim()).catch(() => 'unknown'),
+    ]);
+
+    res.json({
+      hostname,
+      uptime,
+      memory,
+      disk,
+      isDocker: isInDocker,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get system info' });
+  }
+});
+
+// Docker management endpoints
+servicesRouter.get('/docker/containers', async (req, res) => {
+  try {
+    const result = await execOnHost('docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"');
+    const containers = result.stdout.trim().split('\n').filter(Boolean).map(line => {
+      const [id, name, image, status, ports] = line.split('\t');
+      return { id, name, image, status, ports: ports || '' };
+    });
+    res.json({ containers });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to list containers', containers: [] });
+  }
+});
+
+servicesRouter.post('/docker/container/:action', async (req, res) => {
+  try {
+    const { action } = req.params;
+    const { containerId, containerName } = req.body;
+    const target = containerId || containerName;
+
+    if (!target) {
+      return res.status(400).json({ error: 'Container ID or name required' });
+    }
+
+    const validActions = ['start', 'stop', 'restart', 'pause', 'unpause'];
+    if (!validActions.includes(action)) {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
+
+    const result = await execOnHost(`docker ${action} ${target} 2>&1`);
+
+    logAudit(req.user.id, 'DOCKER_ACTION', 'container', target, { action }, req.ip);
+
+    res.json({
+      success: true,
+      message: `Container ${action} successful`,
+      output: result.stdout.trim(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.stderr || error.message,
+    });
+  }
+});
+
+// Docker Compose operations
+servicesRouter.post('/docker/compose', async (req, res) => {
+  try {
+    const { action, path, serviceName } = req.body;
+    const validActions = ['up', 'down', 'restart', 'pull', 'logs', 'ps'];
+
+    if (!validActions.includes(action)) {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
+
+    if (!path) {
+      return res.status(400).json({ error: 'Compose file path required' });
+    }
+
+    let cmd = `docker compose -f ${JSON.stringify(path)}`;
+
+    switch (action) {
+      case 'up':
+        cmd += ' up -d';
+        break;
+      case 'down':
+        cmd += ' down';
+        break;
+      case 'restart':
+        cmd += ' restart';
+        break;
+      case 'pull':
+        cmd += ' pull';
+        break;
+      case 'logs':
+        cmd += ' logs --tail=100';
+        break;
+      case 'ps':
+        cmd += ' ps';
+        break;
+    }
+
+    if (serviceName && ['up', 'restart', 'logs'].includes(action)) {
+      cmd += ` ${serviceName}`;
+    }
+
+    cmd += ' 2>&1';
+
+    const result = await execOnHost(cmd, { timeout: 120000 });
+
+    logAudit(req.user.id, 'DOCKER_COMPOSE', 'compose', path, { action, serviceName }, req.ip);
+
+    res.json({
+      success: true,
+      output: result.stdout + (result.stderr || ''),
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      output: error.stdout + '\n' + (error.stderr || error.message),
+    });
   }
 });
 

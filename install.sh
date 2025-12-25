@@ -453,6 +453,8 @@ services:
       dockerfile: Dockerfile
     container_name: proxypilot-admin
     restart: unless-stopped
+    privileged: true
+    pid: host
     ports:
       - "127.0.0.1:${port}:${port}"
     volumes:
@@ -461,11 +463,12 @@ services:
       - /etc/nginx/sites-enabled:/etc/nginx/sites-enabled
       - /etc/letsencrypt:/etc/letsencrypt
       - /var/www/letsencrypt:/var/www/letsencrypt
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NODE_ENV=production
       - SERVICES_DATA_DIR=/data/services
       - NGINX_STATIC_ROOT=${INSTALL_DIR}/data/services
+      - DOCKER_CONTAINER=true
     env_file:
       - .env
     networks:

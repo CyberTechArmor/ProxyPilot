@@ -86,7 +86,6 @@ import {
   GripVertical,
   Cpu,
   HardDrive,
-  Wifi,
   MemoryStick,
   Activity,
   Clock,
@@ -593,8 +592,8 @@ export default function Dashboard() {
       setStatsLoading(true);
       fetchSystemStats().finally(() => setStatsLoading(false));
 
-      // Refresh every 5 seconds (reduced from 2s to prevent rate limiting)
-      statsIntervalRef.current = setInterval(fetchSystemStats, 5000);
+      // Refresh every 30 seconds to prevent resource exhaustion
+      statsIntervalRef.current = setInterval(fetchSystemStats, 30000);
 
       return () => {
         if (statsIntervalRef.current) {
@@ -1372,10 +1371,39 @@ export default function Dashboard() {
 
   const createFolder = (name, parentPath = null) => {
     const newPath = parentPath ? `${parentPath}/${name}` : name;
+    // Calculate order for new folder (highest + 1)
+    const siblingFolders = Object.entries(serviceFolders).filter(([, f]) => f.parentPath === parentPath);
+    const maxOrder = siblingFolders.reduce((max, [, f]) => Math.max(max, f.order || 0), -1);
     saveServiceFolders({
       ...serviceFolders,
-      [newPath]: { name, services: [], parentPath },
+      [newPath]: { name, services: [], parentPath, order: maxOrder + 1 },
     });
+  };
+
+  // Reorder folder (move up or down)
+  const reorderFolder = (folderPath, direction) => {
+    const folder = serviceFolders[folderPath];
+    if (!folder) return;
+
+    // Get sibling folders (same parent)
+    const siblings = Object.entries(serviceFolders)
+      .filter(([, f]) => f.parentPath === folder.parentPath)
+      .sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+
+    const currentIndex = siblings.findIndex(([path]) => path === folderPath);
+    if (currentIndex === -1) return;
+
+    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (swapIndex < 0 || swapIndex >= siblings.length) return;
+
+    // Swap orders
+    const [swapPath] = siblings[swapIndex];
+    const newFolders = { ...serviceFolders };
+    const currentOrder = newFolders[folderPath].order || 0;
+    const swapOrder = newFolders[swapPath].order || 0;
+    newFolders[folderPath] = { ...newFolders[folderPath], order: swapOrder };
+    newFolders[swapPath] = { ...newFolders[swapPath], order: currentOrder };
+    saveServiceFolders(newFolders);
   };
 
   const moveServiceToFolder = (serviceId, folderPath) => {
@@ -1438,14 +1466,18 @@ export default function Dashboard() {
     saveServiceFolders(newFolders);
   };
 
-  // Get root folders (folders without parent)
+  // Get root folders (folders without parent) - sorted by order
   const getRootFolders = () => {
-    return Object.entries(serviceFolders).filter(([path, folder]) => !folder.parentPath);
+    return Object.entries(serviceFolders)
+      .filter(([path, folder]) => !folder.parentPath)
+      .sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
   };
 
-  // Get subfolders of a folder
+  // Get subfolders of a folder - sorted by order
   const getSubfolders = (parentPath) => {
-    return Object.entries(serviceFolders).filter(([path, folder]) => folder.parentPath === parentPath);
+    return Object.entries(serviceFolders)
+      .filter(([path, folder]) => folder.parentPath === parentPath)
+      .sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
   };
 
   // Drag and drop handlers for services
@@ -2656,34 +2688,6 @@ volumes:
                   </CardContent>
                 </Card>
 
-                {/* Network */}
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium flex items-center gap-2">
-                      <Wifi className="h-4 w-4 text-purple-500" />
-                      Network I/O
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">↓ Received</span>
-                        <span className="text-sm font-medium text-purple-500">
-                          {(systemStats.network.bytesReceived / 1024 / 1024 / 1024).toFixed(2)} GB
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">↑ Sent</span>
-                        <span className="text-sm font-medium text-purple-500">
-                          {(systemStats.network.bytesSent / 1024 / 1024 / 1024).toFixed(2)} GB
-                        </span>
-                      </div>
-                    </div>
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      Total: {((systemStats.network.bytesReceived + systemStats.network.bytesSent) / 1024 / 1024 / 1024).toFixed(2)} GB
-                    </div>
-                  </CardContent>
-                </Card>
               </div>
 
               {/* Quick Stats */}
@@ -2915,6 +2919,30 @@ volumes:
                             <Folder className={`h-4 w-4 ${isSelected ? '' : 'text-yellow-500'}`} />
                             <span className="truncate flex-1">{folder.name}</span>
                             <span className="text-xs opacity-70">{folderServiceCount}</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                reorderFolder(folderPath, 'up');
+                              }}
+                              title="Move up"
+                            >
+                              <ArrowUp className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                reorderFolder(folderPath, 'down');
+                              }}
+                              title="Move down"
+                            >
+                              <ArrowDown className="h-3 w-3" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"

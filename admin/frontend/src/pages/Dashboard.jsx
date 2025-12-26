@@ -185,7 +185,7 @@ export default function Dashboard() {
     containerName: '',
     sslEnabled: true,
     forceHttps: true,
-    websocketEnabled: false,
+    websocketEnabled: true,
     maxUploadSize: '1G',
     obtainCertificate: true,
   });
@@ -312,8 +312,79 @@ export default function Dashboard() {
   const [composeCreateForm, setComposeCreateForm] = useState({
     serviceName: '',
     composeContent: DEFAULT_COMPOSE_CONTENT,
+    envVars: [], // Array of { key: '', value: '' }
   });
   const [composeCreating, setComposeCreating] = useState(false);
+
+  // Helper functions for .env management
+  const generateSecureValue = (placeholder) => {
+    if (placeholder === '{password}') {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+      return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    }
+    if (placeholder === '{hex}') {
+      return Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    }
+    if (placeholder === '{jwt}') {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+      return Array.from({ length: 64 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    }
+    return placeholder;
+  };
+
+  const processEnvValue = (value) => {
+    // Replace placeholders with generated values
+    return value
+      .replace(/\{password\}/g, () => generateSecureValue('{password}'))
+      .replace(/\{hex\}/g, () => generateSecureValue('{hex}'))
+      .replace(/\{jwt\}/g, () => generateSecureValue('{jwt}'));
+  };
+
+  const addEnvVar = () => {
+    setComposeCreateForm(prev => ({
+      ...prev,
+      envVars: [...prev.envVars, { key: '', value: '' }]
+    }));
+  };
+
+  const removeEnvVar = (index) => {
+    setComposeCreateForm(prev => ({
+      ...prev,
+      envVars: prev.envVars.filter((_, i) => i !== index)
+    }));
+  };
+
+  const updateEnvVar = (index, field, value) => {
+    setComposeCreateForm(prev => ({
+      ...prev,
+      envVars: prev.envVars.map((env, i) => i === index ? { ...env, [field]: value } : env)
+    }));
+  };
+
+  const importEnvFile = (content) => {
+    const lines = content.split('\n');
+    const envVars = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIndex = trimmed.indexOf('=');
+      if (eqIndex > 0) {
+        const key = trimmed.substring(0, eqIndex).trim();
+        let value = trimmed.substring(eqIndex + 1).trim();
+        // Remove surrounding quotes if present
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        envVars.push({ key, value });
+      }
+    }
+    setComposeCreateForm(prev => ({ ...prev, envVars }));
+  };
+
+  // Compose search/filter state
+  const [composeSearchQuery, setComposeSearchQuery] = useState('');
+  const [composeStatusFilter, setComposeStatusFilter] = useState('all'); // 'all', 'running', 'stopped'
+  const [composeSortBy, setComposeSortBy] = useState('name'); // 'name', 'containers', 'status'
 
   // Service folder state
   const [serviceFolders, setServiceFolders] = useState(() => {
@@ -419,7 +490,7 @@ export default function Dashboard() {
     return result;
   }, [services, searchQuery, filterType, sortBy, showFavoritesOnly]);
 
-  // Group compose services by project
+  // Group compose services by project with search/filter/sort
   const groupedComposeProjects = useMemo(() => {
     const groups = {};
     composeServices.forEach(svc => {
@@ -434,8 +505,41 @@ export default function Dashboard() {
       groups[project].services.push(svc);
       if (svc.isRunning) groups[project].isRunning = true;
     });
-    return Object.values(groups);
-  }, [composeServices]);
+
+    let result = Object.values(groups);
+
+    // Apply search filter
+    if (composeSearchQuery) {
+      const query = composeSearchQuery.toLowerCase();
+      result = result.filter(p =>
+        p.projectName.toLowerCase().includes(query) ||
+        p.services.some(s => s.name?.toLowerCase().includes(query) || s.image?.toLowerCase().includes(query))
+      );
+    }
+
+    // Apply status filter
+    if (composeStatusFilter === 'running') {
+      result = result.filter(p => p.isRunning);
+    } else if (composeStatusFilter === 'stopped') {
+      result = result.filter(p => !p.isRunning);
+    }
+
+    // Apply sorting
+    result.sort((a, b) => {
+      switch (composeSortBy) {
+        case 'name':
+          return a.projectName.localeCompare(b.projectName);
+        case 'containers':
+          return b.services.length - a.services.length;
+        case 'status':
+          return (b.isRunning ? 1 : 0) - (a.isRunning ? 1 : 0);
+        default:
+          return 0;
+      }
+    });
+
+    return result;
+  }, [composeServices, composeSearchQuery, composeStatusFilter, composeSortBy]);
 
   const fetchServices = async () => {
     try {
@@ -1169,6 +1273,20 @@ export default function Dashboard() {
       // Create directory and write docker-compose.yml
       await api.executeCommand(`mkdir -p "${composePath}"`, '/');
       await api.writeFile(`${composePath}/docker-compose.yml`, composeCreateForm.composeContent);
+
+      // Write .env file if there are environment variables
+      if (composeCreateForm.envVars && composeCreateForm.envVars.length > 0) {
+        const envContent = composeCreateForm.envVars
+          .filter(env => env.key.trim())
+          .map(env => {
+            const processedValue = processEnvValue(env.value);
+            return `${env.key}=${processedValue}`;
+          })
+          .join('\n');
+        if (envContent) {
+          await api.writeFile(`${composePath}/.env`, envContent);
+        }
+      }
 
       // Start the compose project
       const result = await api.dockerCompose('up', `${composePath}/docker-compose.yml`);
@@ -2312,6 +2430,18 @@ volumes:
                         <Input id="containerName" value={formData.containerName} onChange={(e) => setFormData({ ...formData, containerName: e.target.value })} placeholder="my-container" required />
                       </div>
                       <div className="space-y-2">
+                        <Label htmlFor="target">IP Address</Label>
+                        <Input
+                          id="target"
+                          value={formData.target}
+                          onChange={(e) => setFormData({ ...formData, target: e.target.value })}
+                          placeholder="127.0.0.1"
+                          pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$|^localhost$"
+                          title="Enter a valid IP address (e.g., 127.0.0.1) or localhost"
+                        />
+                        <p className="text-xs text-muted-foreground">Default: localhost (127.0.0.1)</p>
+                      </div>
+                      <div className="space-y-2">
                         <Label htmlFor="port">Port</Label>
                         <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
                       </div>
@@ -2969,6 +3099,44 @@ volumes:
               Refresh
             </Button>
           </div>
+
+          {/* Search/Filter/Sort Bar for Compose */}
+          <div className="flex flex-wrap gap-3 items-center bg-muted/50 p-3 rounded-lg mb-4">
+            <div className="flex-1 min-w-[200px] relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search compose projects..."
+                value={composeSearchQuery}
+                onChange={(e) => setComposeSearchQuery(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+            <Select value={composeStatusFilter} onValueChange={setComposeStatusFilter}>
+              <SelectTrigger className="w-[130px]">
+                <Filter className="h-4 w-4 mr-2" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Status</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="stopped">Stopped</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={composeSortBy} onValueChange={setComposeSortBy}>
+              <SelectTrigger className="w-[140px]">
+                <SortAsc className="h-4 w-4 mr-2" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="name">Name</SelectItem>
+                <SelectItem value="containers">Containers</SelectItem>
+                <SelectItem value="status">Status</SelectItem>
+              </SelectContent>
+            </Select>
+            <span className="text-sm text-muted-foreground">
+              {groupedComposeProjects.length} project{groupedComposeProjects.length !== 1 ? 's' : ''}
+            </span>
+          </div>
           {groupedComposeProjects.length > 0 && (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {groupedComposeProjects.map((project) => (
@@ -3317,6 +3485,70 @@ volumes:
                   onChange={(value) => setComposeCreateForm(prev => ({ ...prev, composeContent: value }))}
                 />
               </div>
+            </div>
+
+            {/* Environment Variables Section */}
+            <div className="space-y-2 border-t pt-4">
+              <div className="flex items-center justify-between">
+                <Label className="flex items-center gap-2">
+                  <FileText className="h-4 w-4" />
+                  Environment Variables (.env)
+                </Label>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = '.env,text/plain';
+                      input.onchange = (e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (ev) => importEnvFile(ev.target?.result || '');
+                          reader.readAsText(file);
+                        }
+                      };
+                      input.click();
+                    }}
+                  >
+                    <Upload className="h-3 w-3 mr-1" />
+                    Import .env
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={addEnvVar}>
+                    <Plus className="h-3 w-3 mr-1" />
+                    Add Variable
+                  </Button>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Use placeholders: <code className="bg-muted px-1 rounded">{'{password}'}</code> for secure password, <code className="bg-muted px-1 rounded">{'{hex}'}</code> for hex string, <code className="bg-muted px-1 rounded">{'{jwt}'}</code> for JWT secret
+              </p>
+              {composeCreateForm.envVars.length > 0 && (
+                <div className="space-y-2 max-h-32 overflow-y-auto">
+                  {composeCreateForm.envVars.map((env, index) => (
+                    <div key={index} className="flex gap-2 items-center">
+                      <Input
+                        placeholder="KEY"
+                        value={env.key}
+                        onChange={(e) => updateEnvVar(index, 'key', e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'))}
+                        className="w-1/3 font-mono text-sm"
+                      />
+                      <span className="text-muted-foreground">=</span>
+                      <Input
+                        placeholder="value or {password}"
+                        value={env.value}
+                        onChange={(e) => updateEnvVar(index, 'value', e.target.value)}
+                        className="flex-1 font-mono text-sm"
+                      />
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500" onClick={() => removeEnvVar(index)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

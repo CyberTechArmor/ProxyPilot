@@ -38,6 +38,32 @@ async function execOnHost(command, options = {}) {
   }
 }
 
+// Cache for docker compose command detection
+let dockerComposeCmd = null;
+
+// Detect and cache the correct docker compose command
+async function getDockerComposeCmd() {
+  if (dockerComposeCmd) return dockerComposeCmd;
+
+  // Try docker compose (v2 plugin) first
+  try {
+    await execOnHost('docker compose version 2>/dev/null');
+    dockerComposeCmd = 'docker compose';
+    return dockerComposeCmd;
+  } catch (e) {
+    // Fall back to docker-compose (v1 standalone)
+    try {
+      await execOnHost('docker-compose version 2>/dev/null');
+      dockerComposeCmd = 'docker-compose';
+      return dockerComposeCmd;
+    } catch (e2) {
+      // Default to docker compose and let it fail with a clear error
+      dockerComposeCmd = 'docker compose';
+      return dockerComposeCmd;
+    }
+  }
+}
+
 // Helper to create safe directory name from service name
 function toSafeDirectoryName(name) {
   return name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -1911,7 +1937,8 @@ servicesRouter.post('/docker/compose', async (req, res) => {
       return res.status(400).json({ error: 'Compose file path required' });
     }
 
-    let cmd = `docker compose -f ${JSON.stringify(path)}`;
+    const composeCmd = await getDockerComposeCmd();
+    let cmd = `${composeCmd} -f ${JSON.stringify(path)}`;
 
     switch (action) {
       case 'up':
@@ -1999,7 +2026,8 @@ servicesRouter.post('/docker/compose/destroy', async (req, res) => {
       }
     }
 
-    let cmd = `docker compose -f ${JSON.stringify(path)} down`;
+    const composeCmd = await getDockerComposeCmd();
+    let cmd = `${composeCmd} -f ${JSON.stringify(path)} down`;
     if (options?.removeVolumes) cmd += ' -v';
     if (options?.removeImages) cmd += ' --rmi all';
     if (options?.removeOrphans) cmd += ' --remove-orphans';
@@ -2032,23 +2060,149 @@ servicesRouter.post('/docker/compose/destroy', async (req, res) => {
   }
 });
 
+// ==================== VOLUME MANAGEMENT ====================
+
+// List Docker volumes
+servicesRouter.get('/docker/volumes', async (req, res) => {
+  try {
+    const result = await execOnHost('docker volume ls --format "{{.Name}}\\t{{.Driver}}\\t{{.Mountpoint}}" 2>/dev/null');
+    const volumes = result.stdout.trim().split('\n').filter(Boolean).map(line => {
+      const [name, driver, mountpoint] = line.split('\t');
+      return { name, driver, mountpoint };
+    });
+
+    // Get volume sizes
+    for (const vol of volumes) {
+      try {
+        const sizeResult = await execOnHost(`docker run --rm -v ${vol.name}:/data alpine du -sh /data 2>/dev/null | cut -f1`);
+        vol.size = sizeResult.stdout.trim() || 'Unknown';
+      } catch (e) {
+        vol.size = 'Unknown';
+      }
+    }
+
+    res.json({ success: true, volumes });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Export a Docker volume to a tar.gz file
+servicesRouter.post('/docker/volumes/export', async (req, res) => {
+  try {
+    const { volumeName } = req.body;
+
+    if (!volumeName || !/^[a-zA-Z0-9_-]+$/.test(volumeName)) {
+      return res.status(400).json({ error: 'Invalid volume name' });
+    }
+
+    const backupDir = '/data/volume-backups';
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFile = `${volumeName}-${timestamp}.tar.gz`;
+    const backupPath = `${backupDir}/${backupFile}`;
+
+    // Create backup directory
+    await execOnHost(`mkdir -p ${backupDir}`);
+
+    // Export volume using ubuntu container
+    const exportCmd = `docker run --rm -v ${volumeName}:/data -v ${backupDir}:/backup ubuntu tar -czf /backup/${backupFile} -C /data ./ 2>&1`;
+    const result = await execOnHost(exportCmd, { timeout: 300000 }); // 5 min timeout
+
+    logAudit(req.user.id, 'VOLUME_EXPORTED', 'volume', volumeName, { backupPath }, req.ip);
+
+    res.json({
+      success: true,
+      message: `Volume "${volumeName}" exported successfully`,
+      backupPath,
+      backupFile,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Import a Docker volume from a tar.gz file
+servicesRouter.post('/docker/volumes/import', async (req, res) => {
+  try {
+    const { volumeName, backupFile } = req.body;
+
+    if (!volumeName || !/^[a-zA-Z0-9_-]+$/.test(volumeName)) {
+      return res.status(400).json({ error: 'Invalid volume name' });
+    }
+
+    if (!backupFile || !backupFile.endsWith('.tar.gz')) {
+      return res.status(400).json({ error: 'Invalid backup file' });
+    }
+
+    const backupDir = '/data/volume-backups';
+    const backupPath = `${backupDir}/${backupFile}`;
+
+    // Check if backup file exists
+    try {
+      await execOnHost(`test -f ${backupPath}`);
+    } catch (e) {
+      return res.status(404).json({ error: 'Backup file not found' });
+    }
+
+    // Create the volume if it doesn't exist
+    await execOnHost(`docker volume create ${volumeName} 2>/dev/null || true`);
+
+    // Import volume using ubuntu container
+    const importCmd = `docker run --rm -v ${volumeName}:/data -v ${backupDir}:/backup ubuntu tar -xzf /backup/${backupFile} -C /data 2>&1`;
+    const result = await execOnHost(importCmd, { timeout: 300000 }); // 5 min timeout
+
+    logAudit(req.user.id, 'VOLUME_IMPORTED', 'volume', volumeName, { backupPath }, req.ip);
+
+    res.json({
+      success: true,
+      message: `Volume "${volumeName}" imported successfully from ${backupFile}`,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// List available volume backups
+servicesRouter.get('/docker/volumes/backups', async (req, res) => {
+  try {
+    const backupDir = '/data/volume-backups';
+    await execOnHost(`mkdir -p ${backupDir}`);
+
+    const result = await execOnHost(`ls -la ${backupDir}/*.tar.gz 2>/dev/null || echo ""`);
+    const files = result.stdout.trim().split('\n').filter(Boolean).filter(l => !l.includes('total'));
+
+    const backups = files.map(line => {
+      const parts = line.split(/\s+/);
+      const filename = parts[parts.length - 1].split('/').pop();
+      const size = parts[4];
+      const date = `${parts[5]} ${parts[6]} ${parts[7]}`;
+      return { filename, size, date };
+    });
+
+    res.json({ success: true, backups });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get real-time system stats (CPU, RAM, Network, Disk)
 servicesRouter.get('/system/stats', async (req, res) => {
   try {
     // Execute multiple commands to gather system stats
+    // Using more robust parsing that works across different systems
     const commands = {
-      // CPU usage - get overall CPU usage percentage
-      cpu: `top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}' 2>/dev/null || echo "0"`,
-      // Memory usage
-      memory: `free -b | awk '/^Mem:/ {printf "%.0f %.0f %.0f %.0f", $2, $3, $4, $7}'`,
+      // CPU usage - use /proc/stat for more reliable reading
+      cpu: `grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}' 2>/dev/null || echo "0"`,
+      // Memory usage - using /proc/meminfo for more reliable reading
+      memory: `awk '/MemTotal/ {total=$2} /MemAvailable/ {available=$2} /MemFree/ {free=$2} /Buffers/ {buffers=$2} /^Cached/ {cached=$2} END {used=total-available; printf "%.0f %.0f %.0f %.0f", total*1024, used*1024, free*1024, available*1024}' /proc/meminfo`,
       // Disk usage
       disk: `df -B1 / | awk 'NR==2 {printf "%.0f %.0f %.0f", $2, $3, $4}'`,
       // Network stats (bytes in/out) - use first non-lo interface
-      network: `cat /proc/net/dev | awk 'NR>2 && $1 !~ /lo:/ {gsub(":","",$1); rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}'`,
+      network: `awk 'NR>2 && $1 !~ /lo:/ {gsub(":","",$1); rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev`,
       // Load average
-      load: `cat /proc/loadavg | awk '{print $1, $2, $3}'`,
+      load: `awk '{print $1, $2, $3}' /proc/loadavg`,
       // Uptime in seconds
-      uptime: `cat /proc/uptime | awk '{print $1}'`,
+      uptime: `awk '{print $1}' /proc/uptime`,
     };
 
     const results = {};

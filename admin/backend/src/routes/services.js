@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import { writeFile, unlink, readdir, readFile, mkdir, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, basename } from 'path';
+import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit } from '../db.js';
 
@@ -2218,64 +2219,55 @@ servicesRouter.get('/docker/volumes/backups', async (req, res) => {
   }
 });
 
-// Get real-time system stats (CPU, RAM, Disk) using /proc - fast and lightweight
+// Get real-time system stats using Node.js os module - reliable inside containers
 servicesRouter.get('/system/stats', async (req, res) => {
   try {
-    // Get stats using simple, reliable commands
-    const [cpuResult, memResult, diskResult, loadResult, uptimeResult] = await Promise.all([
-      // CPU - get raw values, calculate percentage in JS
-      execOnHost("grep 'cpu ' /proc/stat | awk '{print $2, $3, $4, $5}'"),
-      // Memory
-      execOnHost("awk '/MemTotal/ {total=$2} /MemAvailable/ {avail=$2} /MemFree/ {free=$2} END {print total, total-avail, free, avail}' /proc/meminfo"),
-      // Disk
-      execOnHost("df -B1 / | awk 'NR==2 {print $2, $3, $4}'"),
-      // Load
-      execOnHost("cat /proc/loadavg | awk '{print $1, $2, $3}'"),
-      // Uptime
-      execOnHost("awk '{print $1}' /proc/uptime"),
-    ]);
+    // Use Node.js os module for reliable stats inside container
+    const cpus = os.cpus();
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const loadAvg = os.loadavg();
+    const uptimeSec = os.uptime();
 
-    // Parse CPU (user, nice, system, idle)
-    const cpuParts = cpuResult.stdout.trim().split(/\s+/);
-    const cpuUser = parseInt(cpuParts[0]) || 0;
-    const cpuNice = parseInt(cpuParts[1]) || 0;
-    const cpuSystem = parseInt(cpuParts[2]) || 0;
-    const cpuIdle = parseInt(cpuParts[3]) || 0;
-    const cpuTotal = cpuUser + cpuNice + cpuSystem + cpuIdle;
-    const cpuUsage = cpuTotal > 0 ? ((cpuUser + cpuSystem) / cpuTotal) * 100 : 0;
+    // Calculate CPU usage from all cores
+    let totalIdle = 0;
+    let totalTick = 0;
+    for (const cpu of cpus) {
+      for (const type in cpu.times) {
+        totalTick += cpu.times[type];
+      }
+      totalIdle += cpu.times.idle;
+    }
+    const cpuUsage = totalTick > 0 ? ((totalTick - totalIdle) / totalTick) * 100 : 0;
 
-    // Parse Memory (total, used, free, available) - values in KB
-    const memParts = memResult.stdout.trim().split(/\s+/);
-    const memTotal = (parseInt(memParts[0]) || 0) * 1024;
-    const memUsed = (parseInt(memParts[1]) || 0) * 1024;
-    const memFree = (parseInt(memParts[2]) || 0) * 1024;
-    const memAvailable = (parseInt(memParts[3]) || 0) * 1024;
+    // Memory stats
+    const memUsed = totalMem - freeMem;
 
-    // Parse Disk (total, used, free) - values in bytes
-    const diskParts = diskResult.stdout.trim().split(/\s+/);
-    const diskTotal = parseInt(diskParts[0]) || 0;
-    const diskUsed = parseInt(diskParts[1]) || 0;
-    const diskFree = parseInt(diskParts[2]) || 0;
-
-    // Parse Load
-    const loadParts = loadResult.stdout.trim().split(/\s+/);
-    const load1 = parseFloat(loadParts[0]) || 0;
-    const load5 = parseFloat(loadParts[1]) || 0;
-    const load15 = parseFloat(loadParts[2]) || 0;
-
-    // Parse Uptime
-    const uptime = parseFloat(uptimeResult.stdout.trim()) || 0;
+    // Try to get disk stats (may fail in some container environments)
+    let diskTotal = 0;
+    let diskUsed = 0;
+    let diskFree = 0;
+    try {
+      const diskResult = await execAsync("df -B1 / 2>/dev/null | awk 'NR==2 {print $2, $3, $4}'");
+      const diskParts = diskResult.stdout.trim().split(/\s+/);
+      diskTotal = parseInt(diskParts[0]) || 0;
+      diskUsed = parseInt(diskParts[1]) || 0;
+      diskFree = parseInt(diskParts[2]) || 0;
+    } catch (e) {
+      // Disk stats unavailable
+    }
 
     const stats = {
       cpu: {
         usage: parseFloat(cpuUsage.toFixed(1)),
+        cores: cpus.length,
       },
       memory: {
-        total: memTotal,
+        total: totalMem,
         used: memUsed,
-        free: memFree,
-        available: memAvailable,
-        usagePercent: memTotal > 0 ? ((memUsed / memTotal) * 100).toFixed(1) : '0',
+        free: freeMem,
+        available: freeMem,
+        usagePercent: totalMem > 0 ? ((memUsed / totalMem) * 100).toFixed(1) : '0',
       },
       disk: {
         total: diskTotal,
@@ -2284,11 +2276,11 @@ servicesRouter.get('/system/stats', async (req, res) => {
         usagePercent: diskTotal > 0 ? ((diskUsed / diskTotal) * 100).toFixed(1) : '0',
       },
       load: {
-        avg1: load1,
-        avg5: load5,
-        avg15: load15,
+        avg1: loadAvg[0],
+        avg5: loadAvg[1],
+        avg15: loadAvg[2],
       },
-      uptime,
+      uptime: uptimeSec,
     };
 
     res.json(stats);

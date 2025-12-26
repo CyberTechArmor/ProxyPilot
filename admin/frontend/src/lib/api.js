@@ -1,9 +1,11 @@
 const API_BASE = '/api';
 
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, data = {}) {
     super(message);
     this.status = status;
+    // Pass through any additional fields from the response
+    Object.assign(this, data);
   }
 }
 
@@ -21,17 +23,21 @@ async function request(endpoint, options = {}) {
     headers,
   });
 
+  const data = await response.json();
+
   if (response.status === 401) {
+    // Don't redirect if this is a login attempt requiring TOTP or TOTP setup
+    if (data.totpRequired || data.totpSetupRequired) {
+      throw new ApiError(data.error || 'TOTP required', 401, data);
+    }
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     window.location.href = '/login';
     throw new ApiError('Session expired', 401);
   }
 
-  const data = await response.json();
-
   if (!response.ok) {
-    throw new ApiError(data.error || 'Request failed', response.status);
+    throw new ApiError(data.error || 'Request failed', response.status, data);
   }
 
   return data;

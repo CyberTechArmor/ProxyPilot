@@ -575,11 +575,15 @@ export default function Dashboard() {
   const fetchSystemStats = async () => {
     try {
       const result = await api.getSystemStats();
-      if (result.success) {
-        setSystemStats(result.stats);
+      // Result is the stats object directly (not wrapped in { success, stats })
+      if (result && result.cpu) {
+        setSystemStats(result);
       }
     } catch (error) {
-      console.error('Failed to fetch system stats:', error);
+      // Don't log rate limit errors to console spam
+      if (!error.message?.includes('429') && !error.message?.includes('Too many')) {
+        console.error('Failed to fetch system stats:', error);
+      }
     }
   };
 
@@ -589,8 +593,8 @@ export default function Dashboard() {
       setStatsLoading(true);
       fetchSystemStats().finally(() => setStatsLoading(false));
 
-      // Refresh every 2 seconds
-      statsIntervalRef.current = setInterval(fetchSystemStats, 2000);
+      // Refresh every 5 seconds (reduced from 2s to prevent rate limiting)
+      statsIntervalRef.current = setInterval(fetchSystemStats, 5000);
 
       return () => {
         if (statsIntervalRef.current) {
@@ -933,10 +937,15 @@ export default function Dashboard() {
   };
 
   // Terminal Functions
-  const fetchTerminalDirectory = async (dir) => {
+  const fetchTerminalDirectory = async (dir, forceRefresh = false) => {
     setLoadingTerminalFiles(true);
+    // Clear existing files to force visual refresh when explicitly requested
+    if (forceRefresh) {
+      setTerminalFiles([]);
+    }
     try {
-      const result = await api.executeCommand(`ls -la "${dir}" 2>/dev/null | tail -n +2`, '/');
+      // Add timestamp to prevent any potential caching issues
+      const result = await api.executeCommand(`ls -la "${dir}" 2>/dev/null | tail -n +2 # ${Date.now()}`, '/');
       if (result.success && result.output) {
         const items = [];
         const lines = result.output.trim().split('\n').filter(Boolean);
@@ -1624,8 +1633,8 @@ export default function Dashboard() {
         });
         setEditorOriginalContent(editorContent);
         setTerminalOutput(prev => [...prev, { type: 'system', text: `File saved: ${editorFilePath}` }]);
-        // Refresh file browser to show any new files
-        fetchTerminalDirectory(terminalCwd);
+        // Refresh file browser to show any new files (force refresh to ensure UI updates)
+        fetchTerminalDirectory(terminalCwd, true);
         // Refresh version history if panel is open
         if (editorShowVersions) {
           fetchEditorVersions();
@@ -2184,6 +2193,10 @@ volumes:
       setImportDialogOpen(false);
       setImportData('');
       fetchServices();
+      // Also refresh terminal file browser if terminal is open (force refresh to ensure UI updates)
+      if (terminalOpen) {
+        fetchTerminalDirectory(terminalCwd, true);
+      }
       toast({
         title: 'Import Complete',
         description: `Imported: ${result.results.imported.length}, Skipped: ${result.results.skipped.length}`,
@@ -3628,7 +3641,7 @@ volumes:
                     <FolderTree className="h-4 w-4" />
                     Current View
                   </span>
-                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => fetchTerminalDirectory(terminalCwd)}>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => fetchTerminalDirectory(terminalCwd, true)}>
                     <RefreshCw className={`h-3 w-3 ${loadingTerminalFiles ? 'animate-spin' : ''}`} />
                   </Button>
                 </div>

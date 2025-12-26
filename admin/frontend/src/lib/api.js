@@ -26,8 +26,8 @@ async function request(endpoint, options = {}) {
   const data = await response.json();
 
   if (response.status === 401) {
-    // Don't redirect if this is a login attempt requiring TOTP
-    if (data.totpRequired) {
+    // Don't redirect if this is a login attempt requiring TOTP or TOTP setup
+    if (data.totpRequired || data.totpSetupRequired) {
       throw new ApiError(data.error || 'TOTP required', 401, data);
     }
     localStorage.removeItem('token');

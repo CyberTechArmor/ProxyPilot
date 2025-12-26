@@ -261,6 +261,21 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
+
+  // Docker Volumes
+  getDockerVolumes: () => request('/services/docker/volumes'),
+
+  exportVolume: (volumeName) => request('/services/docker/volumes/export', {
+    method: 'POST',
+    body: JSON.stringify({ volumeName }),
+  }),
+
+  importVolume: (volumeName, backupFile) => request('/services/docker/volumes/import', {
+    method: 'POST',
+    body: JSON.stringify({ volumeName, backupFile }),
+  }),
+
+  getVolumeBackups: () => request('/services/docker/volumes/backups'),
 };
 
 export { ApiError };

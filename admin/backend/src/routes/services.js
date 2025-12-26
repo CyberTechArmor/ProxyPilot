@@ -1731,7 +1731,7 @@ function isCommandBlocked(command) {
 // Execute command on host (requires TOTP for destructive commands)
 servicesRouter.post('/terminal/execute', async (req, res) => {
   try {
-    const { command, workingDir, timeout } = terminalSchema.parse(req.body);
+    let { command, workingDir, timeout } = terminalSchema.parse(req.body);
 
     // Check for blocked commands
     if (isCommandBlocked(command)) {
@@ -1740,6 +1740,12 @@ servicesRouter.post('/terminal/execute', async (req, res) => {
         output: '',
         exitCode: 1,
       });
+    }
+
+    // Auto-replace 'docker compose' with the correct command (v1 or v2)
+    if (command.includes('docker compose')) {
+      const composeCmd = await getDockerComposeCmd();
+      command = command.replace(/docker compose/g, composeCmd);
     }
 
     console.log(`Terminal execute: ${command}`);
@@ -2023,6 +2029,33 @@ servicesRouter.post('/docker/compose/destroy', async (req, res) => {
       const delta = totp.validate({ token: totpCode, window: 1 });
       if (delta === null) {
         return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    // Check if compose file exists first
+    try {
+      await execOnHost(`test -f ${JSON.stringify(path)}`);
+    } catch (e) {
+      // File doesn't exist - try to stop containers by project name instead
+      const projectName = path.split('/').slice(-2, -1)[0] || 'unknown';
+      try {
+        // Try to stop any containers with this project label
+        const stopCmd = `docker ps -q --filter "label=com.docker.compose.project=${projectName}" | xargs -r docker stop 2>/dev/null || true`;
+        await execOnHost(stopCmd);
+        const rmCmd = `docker ps -aq --filter "label=com.docker.compose.project=${projectName}" | xargs -r docker rm -f 2>/dev/null || true`;
+        await execOnHost(rmCmd);
+
+        logAudit(req.user.id, 'DOCKER_COMPOSE_DESTROY', 'compose', path, { options, fallback: true }, req.ip);
+
+        return res.json({
+          success: true,
+          output: `Compose file not found at ${path}. Stopped and removed containers with project "${projectName}" directly.`,
+        });
+      } catch (fallbackErr) {
+        return res.json({
+          success: false,
+          output: `Compose file not found at ${path} and fallback cleanup failed: ${fallbackErr.message}`,
+        });
       }
     }
 

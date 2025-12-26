@@ -220,6 +220,7 @@ export default function Dashboard() {
   const [terminalCommand, setTerminalCommand] = useState('');
   const [terminalOutput, setTerminalOutput] = useState([]);
   const [terminalRunning, setTerminalRunning] = useState(false);
+  const terminalAbortRef = useRef(null);
   const [containers, setContainers] = useState([]);
   const [systemInfo, setSystemInfo] = useState(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
@@ -488,7 +489,7 @@ export default function Dashboard() {
     });
 
     return result;
-  }, [services, searchQuery, filterType, sortBy, showFavoritesOnly]);
+  }, [services, searchQuery, filterType, sortBy, showFavoritesOnly, selectedFolderFilter, serviceFolders]);
 
   // Group compose services by project with search/filter/sort
   const groupedComposeProjects = useMemo(() => {
@@ -1103,13 +1104,17 @@ export default function Dashboard() {
 
     setTerminalRunning(true);
 
+    // Create abort controller for this command
+    const abortController = new AbortController();
+    terminalAbortRef.current = abortController;
+
     try {
       // Handle cd command - need to track directory
       if (cmd.startsWith('cd ') || cmd === 'cd') {
         const targetDir = cmd === 'cd' ? '~' : cmd.substring(3).trim();
         // Execute cd and pwd to get the new directory
         const cdCmd = `cd ${terminalCwd} && cd ${targetDir} && pwd`;
-        const result = await api.executeCommand(cdCmd, '/');
+        const result = await api.executeCommand(cdCmd, '/', undefined, abortController.signal);
         if (result.success && result.output) {
           const newCwd = result.output.trim();
           setTerminalCwd(newCwd);
@@ -1127,7 +1132,7 @@ export default function Dashboard() {
         }
       } else {
         // Execute command in current working directory
-        const result = await api.executeCommand(cmd, terminalCwd);
+        const result = await api.executeCommand(cmd, terminalCwd, undefined, abortController.signal);
         setTerminalOutput(prev => [
           ...prev,
           {
@@ -1139,14 +1144,29 @@ export default function Dashboard() {
         ]);
       }
     } catch (error) {
-      setTerminalOutput(prev => [
-        ...prev,
-        { type: 'error', text: error.message },
-      ]);
+      if (error.name === 'AbortError') {
+        setTerminalOutput(prev => [
+          ...prev,
+          { type: 'system', text: 'Command cancelled by user (note: the command may still be running on the server)' },
+        ]);
+      } else {
+        setTerminalOutput(prev => [
+          ...prev,
+          { type: 'error', text: error.message },
+        ]);
+      }
     } finally {
       setTerminalRunning(false);
+      terminalAbortRef.current = null;
       // Re-focus the input after command completes
       setTimeout(() => terminalInputRef.current?.focus(), 0);
+    }
+  };
+
+  const cancelTerminalCommand = () => {
+    if (terminalAbortRef.current) {
+      terminalAbortRef.current.abort();
+      terminalAbortRef.current = null;
     }
   };
 
@@ -2397,6 +2417,7 @@ volumes:
                     setComposeCreateForm({
                       serviceName: '',
                       composeContent: DEFAULT_COMPOSE_CONTENT,
+                      envVars: [],
                     });
                   }}>
                     <CardHeader className="text-center pb-2">
@@ -3827,9 +3848,16 @@ volumes:
                       disabled={terminalRunning}
                       autoFocus
                     />
-                    <Button onClick={executeTerminalCommand} disabled={terminalRunning || !terminalCommand.trim()} size="sm">
-                      {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
-                    </Button>
+                    {terminalRunning ? (
+                      <Button onClick={cancelTerminalCommand} variant="destructive" size="sm">
+                        <X className="h-4 w-4 mr-1" />
+                        Cancel
+                      </Button>
+                    ) : (
+                      <Button onClick={executeTerminalCommand} disabled={!terminalCommand.trim()} size="sm">
+                        Run
+                      </Button>
+                    )}
                   </div>
                 </>
               )}

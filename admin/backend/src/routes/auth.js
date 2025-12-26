@@ -11,7 +11,7 @@ export const authRouter = Router();
 const loginSchema = z.object({
   username: z.string().min(1, 'Username is required'),
   password: z.string().min(1, 'Password is required'),
-  totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
+  totpCode: z.string().length(6, 'TOTP code must be 6 digits').optional().or(z.literal('')),
 });
 
 // Login endpoint
@@ -34,8 +34,13 @@ authRouter.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Verify TOTP
+    // Verify TOTP if user has it enabled
     if (user.totp_enabled && user.totp_secret) {
+      // Check if TOTP code was provided
+      if (!totpCode) {
+        return res.status(401).json({ error: 'TOTP code required', totpRequired: true });
+      }
+
       const totp = new OTPAuth.TOTP({
         issuer: 'ProxyPilot',
         label: username,
@@ -48,7 +53,7 @@ authRouter.post('/login', async (req, res) => {
       const delta = totp.validate({ token: totpCode, window: 1 });
       if (delta === null) {
         logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid TOTP' }, req.ip);
-        return res.status(401).json({ error: 'Invalid TOTP code' });
+        return res.status(401).json({ error: 'Invalid TOTP code', totpRequired: true });
       }
     }
 

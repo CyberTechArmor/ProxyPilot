@@ -153,9 +153,10 @@ export const api = {
   }),
 
   // Terminal
-  executeCommand: (command, workingDir, timeout) => request('/services/terminal/execute', {
+  executeCommand: (command, workingDir, timeout, signal) => request('/services/terminal/execute', {
     method: 'POST',
     body: JSON.stringify({ command, workingDir, timeout }),
+    signal,
   }),
 
   writeFile: (filePath, content, createDirs = true) => request('/services/terminal/write-file', {

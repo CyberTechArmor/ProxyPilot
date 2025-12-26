@@ -80,8 +80,6 @@ import {
   Rocket,
   FolderTree,
   Eye,
-  ArrowUp,
-  ArrowDown,
   FolderPlus,
   GripVertical,
   Cpu,
@@ -400,6 +398,7 @@ export default function Dashboard() {
   const [draggedFolder, setDraggedFolder] = useState(null);
   const [draggedService, setDraggedService] = useState(null);
   const [dragOverFolder, setDragOverFolder] = useState(null);
+  const [folderDropPosition, setFolderDropPosition] = useState(null); // { folderPath, position: 'before' | 'after' }
 
   // Dashboard view state - tabs for Resources, Services, Compose
   const [dashboardTab, setDashboardTab] = useState(() => {
@@ -1380,29 +1379,37 @@ export default function Dashboard() {
     });
   };
 
-  // Reorder folder (move up or down)
-  const reorderFolder = (folderPath, direction) => {
-    const folder = serviceFolders[folderPath];
-    if (!folder) return;
+  // Reorder folder to a specific position (before or after target folder)
+  const reorderFolderToPosition = (sourcePath, targetPath, position) => {
+    const sourceFolder = serviceFolders[sourcePath];
+    const targetFolder = serviceFolders[targetPath];
+    if (!sourceFolder || !targetFolder) return;
+    if (sourcePath === targetPath) return;
+
+    // Only allow reordering within the same parent level
+    if (sourceFolder.parentPath !== targetFolder.parentPath) return;
 
     // Get sibling folders (same parent)
     const siblings = Object.entries(serviceFolders)
-      .filter(([, f]) => f.parentPath === folder.parentPath)
+      .filter(([, f]) => f.parentPath === sourceFolder.parentPath)
       .sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
 
-    const currentIndex = siblings.findIndex(([path]) => path === folderPath);
-    if (currentIndex === -1) return;
+    // Remove source from current position
+    const filteredSiblings = siblings.filter(([path]) => path !== sourcePath);
 
-    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (swapIndex < 0 || swapIndex >= siblings.length) return;
+    // Find target index in filtered list
+    const targetIndex = filteredSiblings.findIndex(([path]) => path === targetPath);
+    if (targetIndex === -1) return;
 
-    // Swap orders
-    const [swapPath] = siblings[swapIndex];
+    // Insert source at new position
+    const insertIndex = position === 'before' ? targetIndex : targetIndex + 1;
+    filteredSiblings.splice(insertIndex, 0, [sourcePath, sourceFolder]);
+
+    // Reassign order values
     const newFolders = { ...serviceFolders };
-    const currentOrder = newFolders[folderPath].order || 0;
-    const swapOrder = newFolders[swapPath].order || 0;
-    newFolders[folderPath] = { ...newFolders[folderPath], order: swapOrder };
-    newFolders[swapPath] = { ...newFolders[swapPath], order: currentOrder };
+    filteredSiblings.forEach(([path], index) => {
+      newFolders[path] = { ...newFolders[path], order: index };
+    });
     saveServiceFolders(newFolders);
   };
 
@@ -1500,21 +1507,45 @@ export default function Dashboard() {
   const handleFolderDragEnd = () => {
     setDraggedFolder(null);
     setDragOverFolder(null);
+    setFolderDropPosition(null);
   };
 
   const handleFolderDragOver = (e, folderPath) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+
+    // Detect position based on mouse Y relative to element
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mouseY = e.clientY - rect.top;
+    const position = mouseY < rect.height / 2 ? 'before' : 'after';
+
+    // Only show position indicator when dragging a folder (not a service)
+    if (draggedFolder && draggedFolder !== folderPath) {
+      // Check if they have the same parent (only allow reordering within same level)
+      const sourceFolder = serviceFolders[draggedFolder];
+      const targetFolder = serviceFolders[folderPath];
+      if (sourceFolder?.parentPath === targetFolder?.parentPath) {
+        setFolderDropPosition({ folderPath, position });
+        setDragOverFolder(null); // Don't show "move into" indicator
+        return;
+      }
+    }
+
+    // For services or nesting folders, show standard drag over
+    setFolderDropPosition(null);
     setDragOverFolder(folderPath);
   };
 
   const handleFolderDragLeave = () => {
     setDragOverFolder(null);
+    setFolderDropPosition(null);
   };
 
   const handleFolderDrop = (e, targetPath) => {
     e.preventDefault();
+    const dropPosition = folderDropPosition;
     setDragOverFolder(null);
+    setFolderDropPosition(null);
 
     if (draggedService) {
       moveServiceToFolder(draggedService.id, targetPath);
@@ -1524,7 +1555,16 @@ export default function Dashboard() {
       });
       setDraggedService(null);
     } else if (draggedFolder && draggedFolder !== targetPath) {
-      if (moveFolderToFolder(draggedFolder, targetPath)) {
+      // Check if this is a reorder operation (same parent level)
+      const sourceFolder = serviceFolders[draggedFolder];
+      const targetFolder = serviceFolders[targetPath];
+      if (sourceFolder?.parentPath === targetFolder?.parentPath && dropPosition) {
+        reorderFolderToPosition(draggedFolder, targetPath, dropPosition.position);
+        toast({
+          title: 'Folder reordered',
+          description: `Folder order updated`
+        });
+      } else if (moveFolderToFolder(draggedFolder, targetPath)) {
         toast({
           title: 'Folder moved',
           description: `Folder moved to "${serviceFolders[targetPath]?.name || 'root'}"`
@@ -2886,9 +2926,18 @@ volumes:
                       const subfolders = getSubfolders(folderPath);
                       const hasSubfolders = subfolders.length > 0;
                       const isDragOver = dragOverFolder === folderPath;
+                      const showDropBefore = folderDropPosition?.folderPath === folderPath && folderDropPosition?.position === 'before';
+                      const showDropAfter = folderDropPosition?.folderPath === folderPath && folderDropPosition?.position === 'after';
 
                       return (
-                        <div key={folderPath}>
+                        <div key={folderPath} className="relative">
+                          {/* Drop indicator line - before */}
+                          {showDropBefore && (
+                            <div
+                              className="absolute left-0 right-0 h-0.5 bg-primary rounded-full z-10"
+                              style={{ top: 0, marginLeft: `${depth * 12 + 8}px` }}
+                            />
+                          )}
                           <div
                             draggable
                             onDragStart={(e) => handleFolderDragStart(e, folderPath)}
@@ -2896,7 +2945,7 @@ volumes:
                             onDragOver={(e) => handleFolderDragOver(e, folderPath)}
                             onDragLeave={handleFolderDragLeave}
                             onDrop={(e) => handleFolderDrop(e, folderPath)}
-                            className={`group flex items-center gap-1 px-2 py-1.5 rounded cursor-pointer text-sm transition-colors ${
+                            className={`group flex items-center gap-1 px-2 py-1.5 rounded cursor-grab text-sm transition-colors ${
                               isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
                             } ${isDragOver ? 'ring-2 ring-primary ring-offset-1' : ''} ${draggedFolder === folderPath ? 'opacity-50' : ''}`}
                             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -2925,30 +2974,6 @@ volumes:
                               className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                reorderFolder(folderPath, 'up');
-                              }}
-                              title="Move up"
-                            >
-                              <ArrowUp className="h-3 w-3" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                reorderFolder(folderPath, 'down');
-                              }}
-                              title="Move down"
-                            >
-                              <ArrowDown className="h-3 w-3" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className={`h-5 w-5 p-0 opacity-0 group-hover:opacity-100 ${isSelected ? 'text-primary-foreground hover:text-primary/70' : ''}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
                                 setSelectedParentFolder(folderPath);
                                 setNewFolderName('');
                                 setFolderDialogOpen(true);
@@ -2971,6 +2996,13 @@ volumes:
                               <Trash2 className="h-3 w-3" />
                             </Button>
                           </div>
+                          {/* Drop indicator line - after */}
+                          {showDropAfter && (
+                            <div
+                              className="absolute left-0 right-0 h-0.5 bg-primary rounded-full z-10"
+                              style={{ bottom: 0, marginLeft: `${depth * 12 + 8}px` }}
+                            />
+                          )}
                           {isExpanded && subfolders.map(([subPath, subFolder]) =>
                             renderFolder(subPath, subFolder, depth + 1)
                           )}

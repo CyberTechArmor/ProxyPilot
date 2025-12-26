@@ -2221,61 +2221,54 @@ servicesRouter.get('/docker/volumes/backups', async (req, res) => {
 // Get real-time system stats (CPU, RAM, Disk) using /proc - fast and lightweight
 servicesRouter.get('/system/stats', async (req, res) => {
   try {
-    // Get all stats in a single shell command for efficiency
-    const statsResult = await execOnHost(`
-      # CPU usage from /proc/stat
-      cpu_line=$(grep 'cpu ' /proc/stat)
-      cpu_user=$(echo $cpu_line | awk '{print $2}')
-      cpu_nice=$(echo $cpu_line | awk '{print $3}')
-      cpu_system=$(echo $cpu_line | awk '{print $4}')
-      cpu_idle=$(echo $cpu_line | awk '{print $5}')
-      cpu_total=$((cpu_user + cpu_nice + cpu_system + cpu_idle))
-      cpu_used=$((cpu_user + cpu_system))
-      cpu_percent=$(awk "BEGIN {printf \\"%.1f\\", ($cpu_used / $cpu_total) * 100}")
+    // Get stats using simple, reliable commands
+    const [cpuResult, memResult, diskResult, loadResult, uptimeResult] = await Promise.all([
+      // CPU - get raw values, calculate percentage in JS
+      execOnHost("grep 'cpu ' /proc/stat | awk '{print $2, $3, $4, $5}'"),
+      // Memory
+      execOnHost("awk '/MemTotal/ {total=$2} /MemAvailable/ {avail=$2} /MemFree/ {free=$2} END {print total, total-avail, free, avail}' /proc/meminfo"),
+      // Disk
+      execOnHost("df -B1 / | awk 'NR==2 {print $2, $3, $4}'"),
+      // Load
+      execOnHost("cat /proc/loadavg | awk '{print $1, $2, $3}'"),
+      // Uptime
+      execOnHost("awk '{print $1}' /proc/uptime"),
+    ]);
 
-      # Memory from /proc/meminfo
-      mem_total=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-      mem_available=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
-      mem_free=$(awk '/MemFree/ {print $2}' /proc/meminfo)
-      mem_used=$((mem_total - mem_available))
+    // Parse CPU (user, nice, system, idle)
+    const cpuParts = cpuResult.stdout.trim().split(/\s+/);
+    const cpuUser = parseInt(cpuParts[0]) || 0;
+    const cpuNice = parseInt(cpuParts[1]) || 0;
+    const cpuSystem = parseInt(cpuParts[2]) || 0;
+    const cpuIdle = parseInt(cpuParts[3]) || 0;
+    const cpuTotal = cpuUser + cpuNice + cpuSystem + cpuIdle;
+    const cpuUsage = cpuTotal > 0 ? ((cpuUser + cpuSystem) / cpuTotal) * 100 : 0;
 
-      # Disk from df
-      disk_info=$(df -B1 / | awk 'NR==2 {print $2, $3, $4}')
-      disk_total=$(echo $disk_info | awk '{print $1}')
-      disk_used=$(echo $disk_info | awk '{print $2}')
-      disk_free=$(echo $disk_info | awk '{print $3}')
+    // Parse Memory (total, used, free, available) - values in KB
+    const memParts = memResult.stdout.trim().split(/\s+/);
+    const memTotal = (parseInt(memParts[0]) || 0) * 1024;
+    const memUsed = (parseInt(memParts[1]) || 0) * 1024;
+    const memFree = (parseInt(memParts[2]) || 0) * 1024;
+    const memAvailable = (parseInt(memParts[3]) || 0) * 1024;
 
-      # Load average
-      load_info=$(cat /proc/loadavg)
-      load1=$(echo $load_info | awk '{print $1}')
-      load5=$(echo $load_info | awk '{print $2}')
-      load15=$(echo $load_info | awk '{print $3}')
+    // Parse Disk (total, used, free) - values in bytes
+    const diskParts = diskResult.stdout.trim().split(/\s+/);
+    const diskTotal = parseInt(diskParts[0]) || 0;
+    const diskUsed = parseInt(diskParts[1]) || 0;
+    const diskFree = parseInt(diskParts[2]) || 0;
 
-      # Uptime
-      uptime_sec=$(awk '{print $1}' /proc/uptime)
+    // Parse Load
+    const loadParts = loadResult.stdout.trim().split(/\s+/);
+    const load1 = parseFloat(loadParts[0]) || 0;
+    const load5 = parseFloat(loadParts[1]) || 0;
+    const load15 = parseFloat(loadParts[2]) || 0;
 
-      # Output as JSON-like format for easy parsing
-      echo "$cpu_percent|$mem_total|$mem_used|$mem_free|$mem_available|$disk_total|$disk_used|$disk_free|$load1|$load5|$load15|$uptime_sec"
-    `, { timeout: 3000 });
-
-    const parts = statsResult.stdout.trim().split('|');
-
-    const cpuUsage = parseFloat(parts[0]) || 0;
-    const memTotal = (parseFloat(parts[1]) || 0) * 1024; // KB to bytes
-    const memUsed = (parseFloat(parts[2]) || 0) * 1024;
-    const memFree = (parseFloat(parts[3]) || 0) * 1024;
-    const memAvailable = (parseFloat(parts[4]) || 0) * 1024;
-    const diskTotal = parseFloat(parts[5]) || 0;
-    const diskUsed = parseFloat(parts[6]) || 0;
-    const diskFree = parseFloat(parts[7]) || 0;
-    const load1 = parseFloat(parts[8]) || 0;
-    const load5 = parseFloat(parts[9]) || 0;
-    const load15 = parseFloat(parts[10]) || 0;
-    const uptime = parseFloat(parts[11]) || 0;
+    // Parse Uptime
+    const uptime = parseFloat(uptimeResult.stdout.trim()) || 0;
 
     const stats = {
       cpu: {
-        usage: cpuUsage,
+        usage: parseFloat(cpuUsage.toFixed(1)),
       },
       memory: {
         total: memTotal,

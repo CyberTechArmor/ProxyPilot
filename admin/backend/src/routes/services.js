@@ -2218,74 +2218,135 @@ servicesRouter.get('/docker/volumes/backups', async (req, res) => {
   }
 });
 
-// Get real-time system stats (CPU, RAM, Network, Disk)
+// Get real-time system stats (CPU, RAM, Network, Disk) using sar
 servicesRouter.get('/system/stats', async (req, res) => {
   try {
-    // Execute multiple commands to gather system stats
-    // Using more robust parsing that works across different systems
-    const commands = {
-      // CPU usage - use /proc/stat for more reliable reading
-      cpu: `grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}' 2>/dev/null || echo "0"`,
-      // Memory usage - using /proc/meminfo for more reliable reading
-      memory: `awk '/MemTotal/ {total=$2} /MemAvailable/ {available=$2} /MemFree/ {free=$2} /Buffers/ {buffers=$2} /^Cached/ {cached=$2} END {used=total-available; printf "%.0f %.0f %.0f %.0f", total*1024, used*1024, free*1024, available*1024}' /proc/meminfo`,
-      // Disk usage
-      disk: `df -B1 / | awk 'NR==2 {printf "%.0f %.0f %.0f", $2, $3, $4}'`,
-      // Network stats (bytes in/out) - use first non-lo interface
-      network: `awk 'NR>2 && $1 !~ /lo:/ {gsub(":","",$1); rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev`,
-      // Load average
-      load: `awk '{print $1, $2, $3}' /proc/loadavg`,
-      // Uptime in seconds
-      uptime: `awk '{print $1}' /proc/uptime`,
-    };
+    // Use sar for comprehensive system stats
+    let sarOutput = '';
+    try {
+      const sarResult = await execOnHost('sar -u -r -d 1 1 2>/dev/null', { timeout: 5000 });
+      sarOutput = sarResult.stdout;
+    } catch (e) {
+      // sar might not be installed, fall back to basic commands
+      sarOutput = '';
+    }
 
-    const results = {};
+    let cpuUsage = 0;
+    let memTotal = 0, memUsed = 0, memFree = 0, memAvailable = 0, memPercent = 0;
+    let diskTotal = 0, diskUsed = 0, diskFree = 0;
+    let netRx = 0, netTx = 0;
+    let load1 = 0, load5 = 0, load15 = 0;
+    let uptime = 0;
 
-    for (const [key, cmd] of Object.entries(commands)) {
-      try {
-        const result = await execOnHost(cmd);
-        results[key] = result.stdout.trim();
-      } catch (e) {
-        results[key] = '';
+    if (sarOutput) {
+      // Parse sar output
+      const lines = sarOutput.split('\n');
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+
+        // Parse CPU stats from Average line (more accurate than single sample)
+        if (line.startsWith('Average:') && line.includes('%idle')) {
+          // This is the header, next Average line has values
+        } else if (line.startsWith('Average:') && lines[i-1]?.includes('%idle')) {
+          const parts = line.split(/\s+/);
+          // Average:  all  %user  %nice  %system  %iowait  %steal  %idle
+          const idle = parseFloat(parts[parts.length - 1]) || 0;
+          cpuUsage = 100 - idle;
+        }
+
+        // Parse memory stats from Average line
+        if (line.startsWith('Average:') && line.includes('kbmemfree')) {
+          // This is the header, next Average line has values
+        } else if (line.startsWith('Average:') && lines[i-1]?.includes('kbmemfree')) {
+          const parts = line.split(/\s+/);
+          // Average: kbmemfree kbavail kbmemused %memused ...
+          memFree = (parseFloat(parts[1]) || 0) * 1024;
+          memAvailable = (parseFloat(parts[2]) || 0) * 1024;
+          memUsed = (parseFloat(parts[3]) || 0) * 1024;
+          memPercent = parseFloat(parts[4]) || 0;
+          // Calculate total from used + available (approximately)
+          memTotal = memUsed + memAvailable;
+        }
       }
     }
 
-    // Parse the results
-    const [memTotal, memUsed, memFree, memAvailable] = results.memory.split(' ').map(Number);
-    const [diskTotal, diskUsed, diskFree] = results.disk.split(' ').map(Number);
-    const [netRx, netTx] = results.network.split(' ').map(Number);
-    const [load1, load5, load15] = results.load.split(' ').map(Number);
+    // Always get these from /proc for reliability (sar doesn't provide them or we need fallback)
+    try {
+      // Get memory total from /proc/meminfo if sar didn't work
+      if (memTotal === 0) {
+        const memResult = await execOnHost(`awk '/MemTotal/ {total=$2} /MemAvailable/ {available=$2} /MemFree/ {free=$2} END {used=total-available; printf "%.0f %.0f %.0f %.0f %.2f", total*1024, used*1024, free*1024, available*1024, (used/total)*100}' /proc/meminfo`);
+        const memParts = memResult.stdout.trim().split(' ');
+        memTotal = parseFloat(memParts[0]) || 0;
+        memUsed = parseFloat(memParts[1]) || 0;
+        memFree = parseFloat(memParts[2]) || 0;
+        memAvailable = parseFloat(memParts[3]) || 0;
+        memPercent = parseFloat(memParts[4]) || 0;
+      }
+
+      // Get CPU if sar didn't work
+      if (cpuUsage === 0) {
+        const cpuResult = await execOnHost(`grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}'`);
+        cpuUsage = parseFloat(cpuResult.stdout.trim()) || 0;
+      }
+
+      // Disk usage
+      const diskResult = await execOnHost(`df -B1 / | awk 'NR==2 {printf "%.0f %.0f %.0f", $2, $3, $4}'`);
+      const diskParts = diskResult.stdout.trim().split(' ');
+      diskTotal = parseFloat(diskParts[0]) || 0;
+      diskUsed = parseFloat(diskParts[1]) || 0;
+      diskFree = parseFloat(diskParts[2]) || 0;
+
+      // Network stats
+      const netResult = await execOnHost(`awk 'NR>2 && $1 !~ /lo:/ {gsub(":","",$1); rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev`);
+      const netParts = netResult.stdout.trim().split(' ');
+      netRx = parseFloat(netParts[0]) || 0;
+      netTx = parseFloat(netParts[1]) || 0;
+
+      // Load average
+      const loadResult = await execOnHost(`awk '{print $1, $2, $3}' /proc/loadavg`);
+      const loadParts = loadResult.stdout.trim().split(' ');
+      load1 = parseFloat(loadParts[0]) || 0;
+      load5 = parseFloat(loadParts[1]) || 0;
+      load15 = parseFloat(loadParts[2]) || 0;
+
+      // Uptime
+      const uptimeResult = await execOnHost(`awk '{print $1}' /proc/uptime`);
+      uptime = parseFloat(uptimeResult.stdout.trim()) || 0;
+    } catch (e) {
+      console.error('Error getting system stats:', e.message);
+    }
 
     const stats = {
       cpu: {
-        usage: parseFloat(results.cpu) || 0,
+        usage: cpuUsage,
       },
       memory: {
-        total: memTotal || 0,
-        used: memUsed || 0,
-        free: memFree || 0,
-        available: memAvailable || 0,
-        usagePercent: memTotal ? ((memUsed / memTotal) * 100).toFixed(1) : 0,
+        total: memTotal,
+        used: memUsed,
+        free: memFree,
+        available: memAvailable,
+        usagePercent: memTotal > 0 ? ((memUsed / memTotal) * 100).toFixed(1) : '0',
       },
       disk: {
-        total: diskTotal || 0,
-        used: diskUsed || 0,
-        free: diskFree || 0,
-        usagePercent: diskTotal ? ((diskUsed / diskTotal) * 100).toFixed(1) : 0,
+        total: diskTotal,
+        used: diskUsed,
+        free: diskFree,
+        usagePercent: diskTotal > 0 ? ((diskUsed / diskTotal) * 100).toFixed(1) : '0',
       },
       network: {
-        bytesReceived: netRx || 0,
-        bytesSent: netTx || 0,
+        bytesReceived: netRx,
+        bytesSent: netTx,
       },
       load: {
-        avg1: load1 || 0,
-        avg5: load5 || 0,
-        avg15: load15 || 0,
+        avg1: load1,
+        avg5: load5,
+        avg15: load15,
       },
-      uptime: parseFloat(results.uptime) || 0,
-      timestamp: Date.now(),
+      uptime,
     };
 
-    res.json({ success: true, stats });
+    res.json(stats);
   } catch (error) {
     console.error('Error getting system stats:', error);
     res.status(500).json({ error: 'Failed to get system stats' });

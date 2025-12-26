@@ -88,6 +88,28 @@ check_curl() {
     fi
 }
 
+# Check and install sysstat (provides sar command for system monitoring)
+check_sysstat() {
+    if ! command -v sar &> /dev/null; then
+        log_info "sysstat (sar) not found, installing for system monitoring..."
+        if command -v apt-get &> /dev/null; then
+            apt-get update -y
+            apt-get install -y sysstat
+        elif command -v yum &> /dev/null; then
+            yum install -y sysstat
+        elif command -v dnf &> /dev/null; then
+            dnf install -y sysstat
+        fi
+        # Enable sysstat data collection
+        if [ -f /etc/default/sysstat ]; then
+            sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat
+            systemctl enable sysstat 2>/dev/null || true
+            systemctl start sysstat 2>/dev/null || true
+        fi
+        log_success "sysstat installed"
+    fi
+}
+
 # Generate secure random password
 generate_password() {
     local length=${1:-32}
@@ -687,7 +709,7 @@ services:
       context: ./admin
       dockerfile: Dockerfile
     container_name: proxypilot-admin
-    restart: unless-stopped
+    restart: always
     privileged: true
     pid: host
     ports:
@@ -737,6 +759,7 @@ main() {
 
     check_root
     check_curl
+    check_sysstat
 
     # Get installation directory
     INSTALL_DIR="/opt/proxypilot"

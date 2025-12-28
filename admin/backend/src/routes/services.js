@@ -9,6 +9,7 @@ import { join, basename } from 'path';
 import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit } from '../db.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
 
@@ -1729,8 +1730,8 @@ function isCommandBlocked(command) {
   );
 }
 
-// Execute command on host (requires TOTP for destructive commands)
-servicesRouter.post('/terminal/execute', async (req, res) => {
+// Execute command on host (Admin only)
+servicesRouter.post('/terminal/execute', requireAdmin, async (req, res) => {
   try {
     let { command, workingDir, timeout } = terminalSchema.parse(req.body);
 
@@ -1811,7 +1812,7 @@ const fileWriteSchema = z.object({
   createDirs: z.boolean().optional().default(true),
 });
 
-servicesRouter.post('/terminal/write-file', async (req, res) => {
+servicesRouter.post('/terminal/write-file', requireAdmin, async (req, res) => {
   try {
     const { filePath, content, createDirs } = fileWriteSchema.parse(req.body);
 
@@ -1863,7 +1864,7 @@ servicesRouter.post('/terminal/write-file', async (req, res) => {
 });
 
 // Get system info
-servicesRouter.get('/terminal/system-info', async (req, res) => {
+servicesRouter.get('/terminal/system-info', requireAdmin, async (req, res) => {
   try {
     const [hostname, uptime, memory, disk] = await Promise.all([
       execOnHost('hostname').then(r => r.stdout.trim()).catch(() => 'unknown'),

@@ -128,6 +128,8 @@ export default function Layout() {
     }
   };
 
+  const [restarting, setRestarting] = useState(false);
+
   const handleCloseUpdateDialog = async () => {
     if (updateProgress?.status === 'success') {
       // Reset and refresh the page to load new version
@@ -137,6 +139,26 @@ export default function Layout() {
       await api.resetUpdateStatus();
       setUpdateDialogOpen(false);
       setUpdateProgress(null);
+    }
+  };
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    try {
+      await api.restartApplication();
+      // Show message that restart is in progress
+      setUpdateProgress({
+        status: 'success',
+        message: 'Restart initiated. The page will reload in a few seconds...',
+        logs: ['Restart script executed', 'Waiting for application to restart...'],
+      });
+      // Wait a bit for the server to restart, then reload
+      setTimeout(() => {
+        window.location.reload();
+      }, 5000);
+    } catch (e) {
+      console.error('Error restarting:', e);
+      setRestarting(false);
     }
   };
 
@@ -311,10 +333,21 @@ export default function Layout() {
             </div>
           )}
 
-          <DialogFooter>
-            {updateProgress?.status === 'success' && (
-              <Button onClick={handleCloseUpdateDialog}>
-                Reload Application
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            {updateProgress?.status === 'success' && !restarting && (
+              <>
+                <Button variant="outline" onClick={handleCloseUpdateDialog}>
+                  Reload Page Only
+                </Button>
+                <Button onClick={handleRestart}>
+                  Restart Application
+                </Button>
+              </>
+            )}
+            {restarting && (
+              <Button disabled>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Restarting...
               </Button>
             )}
             {updateProgress?.status === 'error' && (

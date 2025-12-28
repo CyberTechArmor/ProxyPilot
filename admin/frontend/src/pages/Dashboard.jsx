@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -148,6 +149,10 @@ const getLanguageExtension = (lang) => {
 };
 
 export default function Dashboard() {
+  const { user } = useAuth();
+  const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -2428,10 +2433,12 @@ volumes:
             <Radar className="h-4 w-4 mr-2" />
             Discover
           </Button>
-          <Button variant="outline" onClick={() => openTerminal()}>
-            <Terminal className="h-4 w-4 mr-2" />
-            Terminal
-          </Button>
+          {isAdmin && (
+            <Button variant="outline" onClick={() => openTerminal()}>
+              <Terminal className="h-4 w-4 mr-2" />
+              Terminal
+            </Button>
+          )}
           <Button
             variant="outline"
             className="text-green-600 border-green-600 hover:bg-green-600/10"
@@ -3060,14 +3067,16 @@ volumes:
                       <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
                         <FileText className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openTerminal(getServiceDirectory(service))}
-                        title="Open Terminal"
-                      >
-                        <Terminal className="h-4 w-4" />
-                      </Button>
+                      {isAdmin && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => openTerminal(getServiceDirectory(service))}
+                          title="Open Terminal"
+                        >
+                          <Terminal className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -3301,20 +3310,22 @@ volumes:
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
-                      {/* Terminal button */}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0"
-                        onClick={() => {
-                          const firstService = project.services[0];
-                          const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
-                          openTerminal(composeDir);
-                        }}
-                        title="Open Terminal"
-                      >
-                        <Terminal className="h-4 w-4" />
-                      </Button>
+                      {/* Terminal button (Admin only) */}
+                      {isAdmin && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          onClick={() => {
+                            const firstService = project.services[0];
+                            const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
+                            openTerminal(composeDir);
+                          }}
+                          title="Open Terminal"
+                        >
+                          <Terminal className="h-4 w-4" />
+                        </Button>
+                      )}
                       {/* Expand/Collapse button */}
                       <Button
                         variant="ghost"

@@ -3,7 +3,58 @@ import bcrypt from 'bcryptjs';
 import * as OTPAuth from 'otpauth';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb, logAudit } from '../db.js';
+import { getDb, logAudit, getSetting, setSetting } from '../db.js';
+import { execSync, spawn } from 'child_process';
+import { readFileSync, existsSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = join(__dirname, '..', '..', '..', '..');
+
+// Default GitHub repo
+const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
+
+// Get current version from package.json
+function getCurrentVersion() {
+  try {
+    const packagePath = join(PROJECT_ROOT, 'admin', 'backend', 'package.json');
+    if (existsSync(packagePath)) {
+      const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+      return pkg.version || '1.0.0';
+    }
+  } catch (e) {
+    console.error('Error reading package.json:', e);
+  }
+  return '1.0.0';
+}
+
+// Get GitHub repo from git remote or settings
+function getGitHubRepo() {
+  // First check settings
+  const savedRepo = getSetting('github_repo');
+  if (savedRepo) return savedRepo;
+
+  // Try to get from git remote
+  try {
+    const remoteUrl = execSync('git remote get-url origin', {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf8',
+      timeout: 5000,
+    }).trim();
+
+    // Parse GitHub URL (supports https and ssh formats)
+    const httpsMatch = remoteUrl.match(/github\.com\/([^\/]+\/[^\/\.]+)/);
+    const sshMatch = remoteUrl.match(/git@github\.com:([^\/]+\/[^\/\.]+)/);
+    const repo = httpsMatch?.[1] || sshMatch?.[1] || null;
+    if (repo) return repo.replace(/\.git$/, '');
+  } catch (e) {
+    // Git not available or not a git repo
+  }
+
+  return DEFAULT_GITHUB_REPO;
+}
 import { requireAdmin } from '../middleware/auth.js';
 
 export const userRouter = Router();
@@ -714,4 +765,258 @@ userRouter.post('/change-initial-password', async (req, res) => {
     console.error('Error changing initial password:', error);
     res.status(500).json({ error: 'Failed to change password' });
   }
+});
+
+// ==========================================
+// Version and Update Endpoints
+// ==========================================
+
+// Get current version and settings
+userRouter.get('/version', (req, res) => {
+  try {
+    const version = getCurrentVersion();
+    const githubRepo = getGitHubRepo();
+    const updateDismissed = getSetting('update_dismissed') === 'true';
+    const dismissedVersion = getSetting('dismissed_version');
+
+    res.json({
+      version,
+      githubRepo,
+      updateDismissed,
+      dismissedVersion,
+    });
+  } catch (error) {
+    console.error('Error getting version:', error);
+    res.status(500).json({ error: 'Failed to get version' });
+  }
+});
+
+// Check for updates
+userRouter.get('/version/check', async (req, res) => {
+  try {
+    const currentVersion = getCurrentVersion();
+    const githubRepo = getGitHubRepo();
+
+    // Fetch latest release from GitHub API
+    const response = await fetch(`https://api.github.com/repos/${githubRepo}/releases/latest`, {
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'ProxyPilot-Update-Checker',
+      },
+    });
+
+    if (!response.ok) {
+      // If no releases, check the package.json in the main branch
+      const pkgResponse = await fetch(`https://raw.githubusercontent.com/${githubRepo}/main/admin/backend/package.json`, {
+        headers: { 'User-Agent': 'ProxyPilot-Update-Checker' },
+      });
+
+      if (pkgResponse.ok) {
+        const pkg = await pkgResponse.json();
+        const latestVersion = pkg.version || currentVersion;
+
+        return res.json({
+          currentVersion,
+          latestVersion,
+          updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
+          releaseUrl: `https://github.com/${githubRepo}`,
+          releaseNotes: null,
+        });
+      }
+
+      return res.json({
+        currentVersion,
+        latestVersion: currentVersion,
+        updateAvailable: false,
+        releaseUrl: null,
+        releaseNotes: null,
+      });
+    }
+
+    const release = await response.json();
+    const latestVersion = release.tag_name.replace(/^v/, '');
+
+    res.json({
+      currentVersion,
+      latestVersion,
+      updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
+      releaseUrl: release.html_url,
+      releaseNotes: release.body,
+    });
+  } catch (error) {
+    console.error('Error checking for updates:', error);
+    res.status(500).json({ error: 'Failed to check for updates' });
+  }
+});
+
+// Compare semantic versions
+function compareVersions(v1, v2) {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+
+  for (let i = 0; i < 3; i++) {
+    const a = parts1[i] || 0;
+    const b = parts2[i] || 0;
+    if (a > b) return 1;
+    if (a < b) return -1;
+  }
+  return 0;
+}
+
+// Update GitHub repo setting (Admin only)
+userRouter.put('/settings/github-repo', requireAdmin, (req, res) => {
+  try {
+    const { githubRepo } = z.object({
+      githubRepo: z.string().regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/, 'Invalid GitHub repo format (owner/repo)'),
+    }).parse(req.body);
+
+    setSetting('github_repo', githubRepo);
+    logAudit(req.user.id, 'GITHUB_REPO_UPDATED', 'settings', 'github_repo', { githubRepo }, req.ip);
+
+    res.json({ success: true, githubRepo });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error updating GitHub repo:', error);
+    res.status(500).json({ error: 'Failed to update GitHub repo' });
+  }
+});
+
+// Dismiss update notification
+userRouter.post('/version/dismiss', (req, res) => {
+  try {
+    const { version } = req.body;
+    setSetting('update_dismissed', 'true');
+    if (version) {
+      setSetting('dismissed_version', version);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error dismissing update:', error);
+    res.status(500).json({ error: 'Failed to dismiss update' });
+  }
+});
+
+// Reset dismissed update (show notification again)
+userRouter.post('/version/reset-dismiss', (req, res) => {
+  try {
+    setSetting('update_dismissed', 'false');
+    setSetting('dismissed_version', '');
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error resetting dismiss:', error);
+    res.status(500).json({ error: 'Failed to reset dismiss' });
+  }
+});
+
+// Store for tracking update progress
+const updateProgress = {
+  status: 'idle', // idle, running, success, error
+  message: '',
+  logs: [],
+};
+
+// Perform update (Admin only)
+userRouter.post('/version/update', requireAdmin, async (req, res) => {
+  try {
+    // Check if update is already running
+    if (updateProgress.status === 'running') {
+      return res.status(409).json({ error: 'Update already in progress' });
+    }
+
+    updateProgress.status = 'running';
+    updateProgress.message = 'Starting update...';
+    updateProgress.logs = [];
+
+    // Send immediate response
+    res.json({ success: true, message: 'Update started' });
+
+    // Run update in background
+    try {
+      updateProgress.logs.push('Fetching latest changes...');
+      updateProgress.message = 'Fetching latest changes...';
+
+      // Git fetch and pull
+      execSync('git fetch origin main', {
+        cwd: PROJECT_ROOT,
+        encoding: 'utf8',
+        timeout: 60000,
+      });
+
+      updateProgress.logs.push('Pulling latest code...');
+      updateProgress.message = 'Pulling latest code...';
+
+      execSync('git pull origin main', {
+        cwd: PROJECT_ROOT,
+        encoding: 'utf8',
+        timeout: 120000,
+      });
+
+      updateProgress.logs.push('Installing backend dependencies...');
+      updateProgress.message = 'Installing backend dependencies...';
+
+      // Install backend dependencies
+      execSync('npm install', {
+        cwd: join(PROJECT_ROOT, 'admin', 'backend'),
+        encoding: 'utf8',
+        timeout: 300000,
+      });
+
+      updateProgress.logs.push('Installing frontend dependencies...');
+      updateProgress.message = 'Installing frontend dependencies...';
+
+      // Install frontend dependencies
+      execSync('npm install', {
+        cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
+        encoding: 'utf8',
+        timeout: 300000,
+      });
+
+      updateProgress.logs.push('Building frontend...');
+      updateProgress.message = 'Building frontend...';
+
+      // Build frontend
+      execSync('npm run build', {
+        cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
+        encoding: 'utf8',
+        timeout: 300000,
+      });
+
+      updateProgress.logs.push('Update completed successfully!');
+      updateProgress.message = 'Update completed successfully! Please restart the application.';
+      updateProgress.status = 'success';
+
+      // Clear dismissed update since we just updated
+      setSetting('update_dismissed', 'false');
+      setSetting('dismissed_version', '');
+
+    } catch (updateError) {
+      console.error('Update error:', updateError);
+      updateProgress.status = 'error';
+      updateProgress.message = `Update failed: ${updateError.message}`;
+      updateProgress.logs.push(`Error: ${updateError.message}`);
+    }
+
+  } catch (error) {
+    console.error('Error starting update:', error);
+    updateProgress.status = 'error';
+    updateProgress.message = error.message;
+    res.status(500).json({ error: 'Failed to start update' });
+  }
+});
+
+// Get update progress
+userRouter.get('/version/update/progress', requireAdmin, (req, res) => {
+  res.json(updateProgress);
+});
+
+// Reset update status (after viewing result)
+userRouter.post('/version/update/reset', requireAdmin, (req, res) => {
+  updateProgress.status = 'idle';
+  updateProgress.message = '';
+  updateProgress.logs = [];
+  res.json({ success: true });
 });

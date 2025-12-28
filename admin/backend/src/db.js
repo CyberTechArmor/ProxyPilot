@@ -173,6 +173,15 @@ export function initDatabase() {
     )
   `);
 
+  // Create app settings table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Check if admin user exists, create if not
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
 
@@ -208,4 +217,19 @@ export function logAudit(userId, action, resourceType, resourceId, details, ipAd
     INSERT INTO audit_log (id, user_id, action, resource_type, resource_id, details, ip_address)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(id, userId, action, resourceType, resourceId, JSON.stringify(details), ipAddress);
+}
+
+export function getSetting(key) {
+  const db = getDb();
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+
+export function setSetting(key, value) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
+  `).run(key, value, value);
 }

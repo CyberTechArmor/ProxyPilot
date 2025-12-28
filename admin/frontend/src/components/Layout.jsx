@@ -1,12 +1,28 @@
+import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
+import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   LayoutDashboard,
   User,
   Users,
   LogOut,
   Rocket,
+  Download,
+  X,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -14,9 +30,115 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
 
+  // Version and update state
+  const [version, setVersion] = useState('');
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [dismissedVersion, setDismissedVersion] = useState('');
+  const [showUpdateBanner, setShowUpdateBanner] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
   // Check admin status from user context and localStorage fallback
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+
+  // Fetch version and check for updates on mount
+  useEffect(() => {
+    fetchVersionInfo();
+  }, []);
+
+  // Poll for update progress when updating
+  useEffect(() => {
+    let interval;
+    if (updating) {
+      interval = setInterval(async () => {
+        try {
+          const progress = await api.getUpdateProgress();
+          setUpdateProgress(progress);
+
+          if (progress.status === 'success' || progress.status === 'error') {
+            setUpdating(false);
+          }
+        } catch (e) {
+          console.error('Error fetching update progress:', e);
+        }
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [updating]);
+
+  const fetchVersionInfo = async () => {
+    try {
+      const versionData = await api.getVersion();
+      setVersion(versionData.version);
+      setUpdateDismissed(versionData.updateDismissed);
+      setDismissedVersion(versionData.dismissedVersion);
+
+      // Check for updates
+      checkForUpdates(versionData.updateDismissed, versionData.dismissedVersion);
+    } catch (e) {
+      console.error('Error fetching version:', e);
+    }
+  };
+
+  const checkForUpdates = async (dismissed = updateDismissed, dismissedVer = dismissedVersion) => {
+    setCheckingUpdate(true);
+    try {
+      const update = await api.checkForUpdates();
+      setUpdateInfo(update);
+
+      // Show banner if update available and not dismissed for this version
+      if (update.updateAvailable && (!dismissed || dismissedVer !== update.latestVersion)) {
+        setShowUpdateBanner(true);
+      } else {
+        setShowUpdateBanner(false);
+      }
+    } catch (e) {
+      console.error('Error checking for updates:', e);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleDismiss = async () => {
+    try {
+      await api.dismissUpdate(updateInfo?.latestVersion);
+      setShowUpdateBanner(false);
+      setUpdateDismissed(true);
+      setDismissedVersion(updateInfo?.latestVersion);
+    } catch (e) {
+      console.error('Error dismissing update:', e);
+    }
+  };
+
+  const handleUpdate = async () => {
+    setUpdateDialogOpen(true);
+    setUpdating(true);
+    setUpdateProgress({ status: 'running', message: 'Starting update...', logs: [] });
+
+    try {
+      await api.performUpdate();
+    } catch (e) {
+      console.error('Error starting update:', e);
+      setUpdateProgress({ status: 'error', message: e.message, logs: [] });
+      setUpdating(false);
+    }
+  };
+
+  const handleCloseUpdateDialog = async () => {
+    if (updateProgress?.status === 'success') {
+      // Reset and refresh the page to load new version
+      await api.resetUpdateStatus();
+      window.location.reload();
+    } else if (updateProgress?.status === 'error') {
+      await api.resetUpdateStatus();
+      setUpdateDialogOpen(false);
+      setUpdateProgress(null);
+    }
+  };
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -30,13 +152,67 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Update Banner */}
+      {showUpdateBanner && updateInfo?.updateAvailable && (
+        <div className="fixed top-0 left-64 right-0 z-50 bg-primary text-primary-foreground px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Download className="h-4 w-4" />
+            <span className="text-sm">
+              Update available: v{updateInfo.latestVersion} (current: v{version})
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleUpdate}
+                disabled={updating}
+              >
+                {updating ? (
+                  <>
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Updating...
+                  </>
+                ) : (
+                  'Update Now'
+                )}
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleDismiss}
+              className="text-primary-foreground hover:bg-primary/80"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r">
         <div className="flex flex-col h-full">
-          {/* Logo */}
-          <div className="flex items-center gap-2 px-6 py-4 border-b">
-            <Rocket className="h-8 w-8 text-primary" />
-            <span className="text-xl font-bold">ProxyPilot</span>
+          {/* Logo and Version */}
+          <div className="flex flex-col px-6 py-4 border-b">
+            <div className="flex items-center gap-2">
+              <Rocket className="h-8 w-8 text-primary" />
+              <span className="text-xl font-bold">ProxyPilot</span>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-muted-foreground">
+                v{version || '...'}
+              </span>
+              {updateInfo?.updateAvailable && !showUpdateBanner && (
+                <span className="text-xs text-primary cursor-pointer hover:underline" onClick={() => setShowUpdateBanner(true)}>
+                  (update available)
+                </span>
+              )}
+              {checkingUpdate && (
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+              )}
+            </div>
           </div>
 
           {/* Navigation */}
@@ -66,7 +242,7 @@ export default function Layout() {
             <div className="flex items-center gap-3 px-3 py-2">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{user?.username}</p>
-                <p className="text-xs text-muted-foreground">Administrator</p>
+                <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
               </div>
               <Button
                 variant="ghost"
@@ -82,11 +258,73 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="pl-64">
+      <main className={cn("pl-64", showUpdateBanner && updateInfo?.updateAvailable && "pt-10")}>
         <div className="p-8">
           <Outlet />
         </div>
       </main>
+
+      {/* Update Progress Dialog */}
+      <Dialog open={updateDialogOpen} onOpenChange={() => {}}>
+        <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {updateProgress?.status === 'running' && (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  Updating ProxyPilot
+                </>
+              )}
+              {updateProgress?.status === 'success' && (
+                <>
+                  <CheckCircle className="h-5 w-5 text-green-500" />
+                  Update Complete
+                </>
+              )}
+              {updateProgress?.status === 'error' && (
+                <>
+                  <AlertCircle className="h-5 w-5 text-red-500" />
+                  Update Failed
+                </>
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {updateProgress?.message}
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Progress logs */}
+          {updateProgress?.logs && updateProgress.logs.length > 0 && (
+            <div className="bg-muted p-3 rounded-md max-h-48 overflow-auto">
+              <pre className="text-xs font-mono whitespace-pre-wrap">
+                {updateProgress.logs.join('\n')}
+              </pre>
+            </div>
+          )}
+
+          {updateProgress?.status === 'running' && (
+            <div className="flex justify-center py-4">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                Please wait, do not close this window...
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            {updateProgress?.status === 'success' && (
+              <Button onClick={handleCloseUpdateDialog}>
+                Reload Application
+              </Button>
+            )}
+            {updateProgress?.status === 'error' && (
+              <Button variant="outline" onClick={handleCloseUpdateDialog}>
+                Close
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

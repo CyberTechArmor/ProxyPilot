@@ -919,6 +919,34 @@ const updateProgress = {
   logs: [],
 };
 
+// Find git executable
+function findGit() {
+  const gitPaths = ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', 'git'];
+  for (const gitPath of gitPaths) {
+    try {
+      execSync(`${gitPath} --version`, { encoding: 'utf8', timeout: 5000 });
+      return gitPath;
+    } catch (e) {
+      // Try next path
+    }
+  }
+  return null;
+}
+
+// Find npm executable
+function findNpm() {
+  const npmPaths = ['/usr/bin/npm', '/usr/local/bin/npm', '/opt/homebrew/bin/npm', 'npm'];
+  for (const npmPath of npmPaths) {
+    try {
+      execSync(`${npmPath} --version`, { encoding: 'utf8', timeout: 5000 });
+      return npmPath;
+    } catch (e) {
+      // Try next path
+    }
+  }
+  return null;
+}
+
 // Perform update (Admin only)
 userRouter.post('/version/update', requireAdmin, async (req, res) => {
   try {
@@ -931,16 +959,37 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
     updateProgress.message = 'Starting update...';
     updateProgress.logs = [];
 
+    // Find git and npm
+    const gitCmd = findGit();
+    const npmCmd = findNpm();
+
+    if (!gitCmd) {
+      updateProgress.status = 'error';
+      updateProgress.message = 'Git is not installed on this server. Please install git first.';
+      updateProgress.logs.push('Error: Git not found in PATH or common locations');
+      updateProgress.logs.push('Install git: apt-get install git (Debian/Ubuntu) or yum install git (CentOS/RHEL)');
+      return res.status(400).json({ error: 'Git is not installed on this server' });
+    }
+
+    if (!npmCmd) {
+      updateProgress.status = 'error';
+      updateProgress.message = 'NPM is not installed on this server.';
+      updateProgress.logs.push('Error: NPM not found');
+      return res.status(400).json({ error: 'NPM is not installed on this server' });
+    }
+
     // Send immediate response
     res.json({ success: true, message: 'Update started' });
 
     // Run update in background
     try {
+      updateProgress.logs.push(`Using git: ${gitCmd}`);
+      updateProgress.logs.push(`Using npm: ${npmCmd}`);
       updateProgress.logs.push('Fetching latest changes...');
       updateProgress.message = 'Fetching latest changes...';
 
       // Git fetch and pull
-      execSync('git fetch origin main', {
+      execSync(`${gitCmd} fetch origin main`, {
         cwd: PROJECT_ROOT,
         encoding: 'utf8',
         timeout: 60000,
@@ -949,7 +998,7 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
       updateProgress.logs.push('Pulling latest code...');
       updateProgress.message = 'Pulling latest code...';
 
-      execSync('git pull origin main', {
+      execSync(`${gitCmd} pull origin main`, {
         cwd: PROJECT_ROOT,
         encoding: 'utf8',
         timeout: 120000,
@@ -959,7 +1008,7 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
       updateProgress.message = 'Installing backend dependencies...';
 
       // Install backend dependencies
-      execSync('npm install', {
+      execSync(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'backend'),
         encoding: 'utf8',
         timeout: 300000,
@@ -969,7 +1018,7 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
       updateProgress.message = 'Installing frontend dependencies...';
 
       // Install frontend dependencies
-      execSync('npm install', {
+      execSync(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
         encoding: 'utf8',
         timeout: 300000,
@@ -979,7 +1028,7 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
       updateProgress.message = 'Building frontend...';
 
       // Build frontend
-      execSync('npm run build', {
+      execSync(`${npmCmd} run build`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
         encoding: 'utf8',
         timeout: 300000,

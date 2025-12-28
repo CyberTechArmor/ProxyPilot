@@ -13,6 +13,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..', '..', '..');
 
+// Check if running in Docker container
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+
+// Execute command on host (uses nsenter when in Docker, direct exec otherwise)
+function execOnHost(command, options = {}) {
+  const timeout = options.timeout || 30000;
+  const cwd = options.cwd || PROJECT_ROOT;
+
+  if (isInDocker) {
+    // Use nsenter to execute on the host's namespace
+    // Wrap command with cd to handle working directory
+    const fullCommand = `cd ${JSON.stringify(cwd)} && ${command}`;
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(fullCommand)}`;
+    return execSync(hostCommand, { encoding: 'utf8', timeout });
+  } else {
+    // Not in Docker, execute directly
+    return execSync(command, { encoding: 'utf8', timeout, cwd });
+  }
+}
+
 // Default GitHub repo
 const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
 
@@ -919,12 +939,12 @@ const updateProgress = {
   logs: [],
 };
 
-// Find git executable
+// Find git executable (on host if in Docker)
 function findGit() {
   const gitPaths = ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', 'git'];
   for (const gitPath of gitPaths) {
     try {
-      execSync(`${gitPath} --version`, { encoding: 'utf8', timeout: 5000 });
+      execOnHost(`${gitPath} --version`, { timeout: 5000 });
       return gitPath;
     } catch (e) {
       // Try next path
@@ -933,12 +953,12 @@ function findGit() {
   return null;
 }
 
-// Find npm executable
+// Find npm executable (on host if in Docker)
 function findNpm() {
   const npmPaths = ['/usr/bin/npm', '/usr/local/bin/npm', '/opt/homebrew/bin/npm', 'npm'];
   for (const npmPath of npmPaths) {
     try {
-      execSync(`${npmPath} --version`, { encoding: 'utf8', timeout: 5000 });
+      execOnHost(`${npmPath} --version`, { timeout: 5000 });
       return npmPath;
     } catch (e) {
       // Try next path
@@ -983,54 +1003,50 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
 
     // Run update in background
     try {
+      updateProgress.logs.push(`Running in Docker: ${isInDocker}`);
       updateProgress.logs.push(`Using git: ${gitCmd}`);
       updateProgress.logs.push(`Using npm: ${npmCmd}`);
       updateProgress.logs.push('Fetching latest changes...');
       updateProgress.message = 'Fetching latest changes...';
 
-      // Git fetch and pull
-      execSync(`${gitCmd} fetch origin main`, {
+      // Git fetch and pull (on host)
+      execOnHost(`${gitCmd} fetch origin main`, {
         cwd: PROJECT_ROOT,
-        encoding: 'utf8',
         timeout: 60000,
       });
 
       updateProgress.logs.push('Pulling latest code...');
       updateProgress.message = 'Pulling latest code...';
 
-      execSync(`${gitCmd} pull origin main`, {
+      execOnHost(`${gitCmd} pull origin main`, {
         cwd: PROJECT_ROOT,
-        encoding: 'utf8',
         timeout: 120000,
       });
 
       updateProgress.logs.push('Installing backend dependencies...');
       updateProgress.message = 'Installing backend dependencies...';
 
-      // Install backend dependencies
-      execSync(`${npmCmd} install`, {
+      // Install backend dependencies (on host)
+      execOnHost(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'backend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 
       updateProgress.logs.push('Installing frontend dependencies...');
       updateProgress.message = 'Installing frontend dependencies...';
 
-      // Install frontend dependencies
-      execSync(`${npmCmd} install`, {
+      // Install frontend dependencies (on host)
+      execOnHost(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 
       updateProgress.logs.push('Building frontend...');
       updateProgress.message = 'Building frontend...';
 
-      // Build frontend
-      execSync(`${npmCmd} run build`, {
+      // Build frontend (on host)
+      execOnHost(`${npmCmd} run build`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 

@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Key, Shield, QrCode, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3 } from 'lucide-react';
+import { Loader2, Key, Shield, QrCode, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff } from 'lucide-react';
 import QRCode from 'qrcode';
 
 export default function Profile() {
@@ -67,6 +67,17 @@ export default function Profile() {
   const [savingAccess, setSavingAccess] = useState(false);
   const [copiedPassword, setCopiedPassword] = useState(false);
 
+  // App settings state
+  const [appVersion, setAppVersion] = useState('');
+  const [githubRepo, setGithubRepo] = useState('');
+  const [editingRepo, setEditingRepo] = useState(false);
+  const [newGithubRepo, setNewGithubRepo] = useState('');
+  const [savingRepo, setSavingRepo] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [resettingDismiss, setResettingDismiss] = useState(false);
+
   const { toast } = useToast();
 
   // Check if current user is admin (check auth context, profile, and localStorage)
@@ -74,7 +85,82 @@ export default function Profile() {
 
   useEffect(() => {
     fetchProfile();
+    fetchAppSettings();
   }, []);
+
+  const fetchAppSettings = async () => {
+    try {
+      const data = await api.getVersion();
+      setAppVersion(data.version);
+      setGithubRepo(data.githubRepo);
+      setUpdateDismissed(data.updateDismissed);
+
+      // Also check for updates
+      checkForUpdates();
+    } catch (error) {
+      console.error('Error fetching app settings:', error);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    setCheckingUpdate(true);
+    try {
+      const data = await api.checkForUpdates();
+      setUpdateInfo(data);
+    } catch (error) {
+      console.error('Error checking for updates:', error);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleSaveGithubRepo = async () => {
+    if (!newGithubRepo || newGithubRepo === githubRepo) {
+      setEditingRepo(false);
+      return;
+    }
+
+    setSavingRepo(true);
+    try {
+      await api.updateGithubRepo(newGithubRepo);
+      setGithubRepo(newGithubRepo);
+      setEditingRepo(false);
+      toast({
+        title: 'Success',
+        description: 'GitHub repository updated successfully',
+      });
+      // Re-check for updates with new repo
+      checkForUpdates();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setSavingRepo(false);
+    }
+  };
+
+  const handleResetDismiss = async () => {
+    setResettingDismiss(true);
+    try {
+      await api.resetDismissUpdate();
+      setUpdateDismissed(false);
+      toast({
+        title: 'Success',
+        description: 'Update notification will be shown again',
+      });
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setResettingDismiss(false);
+    }
+  };
 
   const fetchProfile = async () => {
     try {
@@ -603,6 +689,153 @@ export default function Profile() {
           )}
         </CardContent>
       </Card>
+
+      {/* App Settings (Admin Only) */}
+      {isAdmin && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Settings className="h-5 w-5" />
+              Application Settings
+            </CardTitle>
+            <CardDescription>
+              Manage ProxyPilot version and update settings
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {/* Current Version */}
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">Current Version</Label>
+              <div className="flex items-center gap-2">
+                <span className="font-medium">v{appVersion || '...'}</span>
+                {updateInfo?.updateAvailable && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-primary text-primary-foreground">
+                    Update available: v{updateInfo.latestVersion}
+                  </span>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={checkForUpdates}
+                  disabled={checkingUpdate}
+                >
+                  <RefreshCw className={`h-4 w-4 ${checkingUpdate ? 'animate-spin' : ''}`} />
+                </Button>
+              </div>
+            </div>
+
+            {/* GitHub Repository */}
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">GitHub Repository</Label>
+              {editingRepo ? (
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={newGithubRepo}
+                    onChange={(e) => setNewGithubRepo(e.target.value)}
+                    placeholder="owner/repository"
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEditingRepo(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleSaveGithubRepo}
+                    disabled={savingRepo}
+                  >
+                    {savingRepo ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-1">
+                    <Github className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium">{githubRepo || '...'}</span>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setNewGithubRepo(githubRepo);
+                      setEditingRepo(true);
+                    }}
+                  >
+                    <Edit3 className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                The GitHub repository used to check for updates and pull new versions
+              </p>
+            </div>
+
+            {/* Update Notification */}
+            {updateDismissed && updateInfo?.updateAvailable && (
+              <div className="space-y-2">
+                <Label className="text-muted-foreground">Update Notification</Label>
+                <div className="flex items-center gap-2">
+                  <BellOff className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">
+                    Update notification dismissed for v{updateInfo.latestVersion}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleResetDismiss}
+                    disabled={resettingDismiss}
+                  >
+                    {resettingDismiss ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <>
+                        <Bell className="h-4 w-4 mr-1" />
+                        Show Again
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Update Info */}
+            {updateInfo && (
+              <div className="p-4 bg-muted rounded-lg space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-sm text-muted-foreground">Current Version</span>
+                  <span className="font-medium">v{updateInfo.currentVersion}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-muted-foreground">Latest Version</span>
+                  <span className="font-medium">v{updateInfo.latestVersion}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-muted-foreground">Status</span>
+                  <span className={`text-sm font-medium ${updateInfo.updateAvailable ? 'text-primary' : 'text-green-500'}`}>
+                    {updateInfo.updateAvailable ? 'Update Available' : 'Up to Date'}
+                  </span>
+                </div>
+                {updateInfo.releaseUrl && (
+                  <div className="pt-2 border-t">
+                    <a
+                      href={updateInfo.releaseUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-primary hover:underline flex items-center gap-1"
+                    >
+                      <Download className="h-4 w-4" />
+                      View Release Notes
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* User Management (Admin Only) */}
       {isAdmin && (

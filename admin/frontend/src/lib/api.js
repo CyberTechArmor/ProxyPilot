@@ -283,6 +283,35 @@ export const api = {
   }),
 
   getVolumeBackups: () => request('/services/docker/volumes/backups'),
+
+  // Version and Update
+  getVersion: () => request('/user/version'),
+
+  checkForUpdates: () => request('/user/version/check'),
+
+  updateGithubRepo: (githubRepo) => request('/user/settings/github-repo', {
+    method: 'PUT',
+    body: JSON.stringify({ githubRepo }),
+  }),
+
+  dismissUpdate: (version) => request('/user/version/dismiss', {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  }),
+
+  resetDismissUpdate: () => request('/user/version/reset-dismiss', {
+    method: 'POST',
+  }),
+
+  performUpdate: () => request('/user/version/update', {
+    method: 'POST',
+  }),
+
+  getUpdateProgress: () => request('/user/version/update/progress'),
+
+  resetUpdateStatus: () => request('/user/version/update/reset', {
+    method: 'POST',
+  }),
 };
 
 export { ApiError };

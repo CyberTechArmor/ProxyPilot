@@ -312,6 +312,10 @@ export const api = {
   resetUpdateStatus: () => request('/user/version/update/reset', {
     method: 'POST',
   }),
+
+  restartApplication: () => request('/user/version/restart', {
+    method: 'POST',
+  }),
 };
 
 export { ApiError };

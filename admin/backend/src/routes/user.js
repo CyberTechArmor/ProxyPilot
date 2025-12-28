@@ -1020,3 +1020,36 @@ userRouter.post('/version/update/reset', requireAdmin, (req, res) => {
   updateProgress.logs = [];
   res.json({ success: true });
 });
+
+// Restart the application (Admin only)
+userRouter.post('/version/restart', requireAdmin, (req, res) => {
+  try {
+    const restartScript = join(PROJECT_ROOT, 'restart.sh');
+
+    if (!existsSync(restartScript)) {
+      return res.status(404).json({ error: 'Restart script not found' });
+    }
+
+    // Send response before restarting
+    res.json({ success: true, message: 'Restart initiated' });
+
+    // Delay restart to allow response to be sent
+    setTimeout(() => {
+      try {
+        // Execute restart script in detached mode
+        const child = spawn('bash', [restartScript], {
+          cwd: PROJECT_ROOT,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+      } catch (e) {
+        console.error('Restart error:', e);
+      }
+    }, 1000);
+
+  } catch (error) {
+    console.error('Error initiating restart:', error);
+    res.status(500).json({ error: 'Failed to initiate restart' });
+  }
+});

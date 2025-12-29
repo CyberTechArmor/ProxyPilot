@@ -13,6 +13,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..', '..', '..');
 
+// Check if running in Docker container
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+
+// Execute command on host (uses nsenter when in Docker, direct exec otherwise)
+function execOnHost(command, options = {}) {
+  const timeout = options.timeout || 30000;
+  const cwd = options.cwd || PROJECT_ROOT;
+
+  if (isInDocker) {
+    // Use nsenter to execute on the host's namespace
+    // Wrap command with cd to handle working directory
+    const fullCommand = `cd ${JSON.stringify(cwd)} && ${command}`;
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(fullCommand)}`;
+    return execSync(hostCommand, { encoding: 'utf8', timeout });
+  } else {
+    // Not in Docker, execute directly
+    return execSync(command, { encoding: 'utf8', timeout, cwd });
+  }
+}
+
 // Default GitHub repo
 const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
 
@@ -919,6 +939,34 @@ const updateProgress = {
   logs: [],
 };
 
+// Find git executable (on host if in Docker)
+function findGit() {
+  const gitPaths = ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', 'git'];
+  for (const gitPath of gitPaths) {
+    try {
+      execOnHost(`${gitPath} --version`, { timeout: 5000 });
+      return gitPath;
+    } catch (e) {
+      // Try next path
+    }
+  }
+  return null;
+}
+
+// Find npm executable (on host if in Docker)
+function findNpm() {
+  const npmPaths = ['/usr/bin/npm', '/usr/local/bin/npm', '/opt/homebrew/bin/npm', 'npm'];
+  for (const npmPath of npmPaths) {
+    try {
+      execOnHost(`${npmPath} --version`, { timeout: 5000 });
+      return npmPath;
+    } catch (e) {
+      // Try next path
+    }
+  }
+  return null;
+}
+
 // Perform update (Admin only)
 userRouter.post('/version/update', requireAdmin, async (req, res) => {
   try {
@@ -931,57 +979,74 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
     updateProgress.message = 'Starting update...';
     updateProgress.logs = [];
 
+    // Find git and npm
+    const gitCmd = findGit();
+    const npmCmd = findNpm();
+
+    if (!gitCmd) {
+      updateProgress.status = 'error';
+      updateProgress.message = 'Git is not installed on this server. Please install git first.';
+      updateProgress.logs.push('Error: Git not found in PATH or common locations');
+      updateProgress.logs.push('Install git: apt-get install git (Debian/Ubuntu) or yum install git (CentOS/RHEL)');
+      return res.status(400).json({ error: 'Git is not installed on this server' });
+    }
+
+    if (!npmCmd) {
+      updateProgress.status = 'error';
+      updateProgress.message = 'NPM is not installed on this server.';
+      updateProgress.logs.push('Error: NPM not found');
+      return res.status(400).json({ error: 'NPM is not installed on this server' });
+    }
+
     // Send immediate response
     res.json({ success: true, message: 'Update started' });
 
     // Run update in background
     try {
+      updateProgress.logs.push(`Running in Docker: ${isInDocker}`);
+      updateProgress.logs.push(`Using git: ${gitCmd}`);
+      updateProgress.logs.push(`Using npm: ${npmCmd}`);
       updateProgress.logs.push('Fetching latest changes...');
       updateProgress.message = 'Fetching latest changes...';
 
-      // Git fetch and pull
-      execSync('git fetch origin main', {
+      // Git fetch and pull (on host)
+      execOnHost(`${gitCmd} fetch origin main`, {
         cwd: PROJECT_ROOT,
-        encoding: 'utf8',
         timeout: 60000,
       });
 
       updateProgress.logs.push('Pulling latest code...');
       updateProgress.message = 'Pulling latest code...';
 
-      execSync('git pull origin main', {
+      execOnHost(`${gitCmd} pull origin main`, {
         cwd: PROJECT_ROOT,
-        encoding: 'utf8',
         timeout: 120000,
       });
 
       updateProgress.logs.push('Installing backend dependencies...');
       updateProgress.message = 'Installing backend dependencies...';
 
-      // Install backend dependencies
-      execSync('npm install', {
+      // Install backend dependencies (on host)
+      execOnHost(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'backend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 
       updateProgress.logs.push('Installing frontend dependencies...');
       updateProgress.message = 'Installing frontend dependencies...';
 
-      // Install frontend dependencies
-      execSync('npm install', {
+      // Install frontend dependencies (on host)
+      execOnHost(`${npmCmd} install`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 
       updateProgress.logs.push('Building frontend...');
       updateProgress.message = 'Building frontend...';
 
-      // Build frontend
-      execSync('npm run build', {
+      // Build frontend (on host)
+      execOnHost(`${npmCmd} run build`, {
         cwd: join(PROJECT_ROOT, 'admin', 'frontend'),
-        encoding: 'utf8',
         timeout: 300000,
       });
 

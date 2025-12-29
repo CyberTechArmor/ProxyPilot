@@ -8,134 +8,298 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/admin/backend"
 FRONTEND_DIR="$SCRIPT_DIR/admin/frontend"
+LOG_FILE="/tmp/proxypilot-update.log"
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Parse arguments
 FORCE_REBUILD=false
+SKIP_RESTART=false
+VERBOSE=false
 for arg in "$@"; do
     case $arg in
         --rebuild|--force|-f)
             FORCE_REBUILD=true
-            shift
+            ;;
+        --no-restart)
+            SKIP_RESTART=true
+            ;;
+        --verbose|-v)
+            VERBOSE=true
+            ;;
+        --help|-h)
+            echo "ProxyPilot Update Script"
+            echo ""
+            echo "Usage: ./update.sh [options]"
+            echo ""
+            echo "Options:"
+            echo "  --rebuild, --force, -f   Force rebuild even if code is up to date"
+            echo "  --no-restart             Don't restart after update"
+            echo "  --verbose, -v            Show verbose output"
+            echo "  --help, -h               Show this help message"
+            exit 0
             ;;
     esac
 done
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}       ProxyPilot Update Script        ${NC}"
-echo -e "${BLUE}========================================${NC}"
+log() {
+    echo -e "$1"
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_verbose() {
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${CYAN}[DEBUG]${NC} $1"
+    fi
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] $1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# Find command in common paths
+find_command() {
+    local cmd=$1
+    local paths="/usr/local/bin/$cmd /usr/bin/$cmd /bin/$cmd /opt/homebrew/bin/$cmd"
+
+    # First try which
+    if command -v $cmd &> /dev/null; then
+        command -v $cmd
+        return 0
+    fi
+
+    # Then try common paths
+    for path in $paths; do
+        if [ -x "$path" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 echo ""
+log "${BLUE}========================================${NC}"
+log "${BLUE}       ProxyPilot Update Script        ${NC}"
+log "${BLUE}========================================${NC}"
+log ""
+log "Log file: $LOG_FILE"
+log ""
 
-# Check if git is installed
-if ! command -v git &> /dev/null; then
-    echo -e "${RED}Error: git is not installed${NC}"
-    echo "Please install git first:"
-    echo "  Ubuntu/Debian: sudo apt-get install git"
-    echo "  CentOS/RHEL: sudo yum install git"
-    exit 1
+# Check if running as root or with sudo for restart
+if [ "$EUID" -ne 0 ] && [ "$SKIP_RESTART" = false ]; then
+    log "${YELLOW}Note: Running without sudo. You may need sudo for restart.${NC}"
 fi
 
-# Check if npm is installed
-if ! command -v npm &> /dev/null; then
-    echo -e "${RED}Error: npm is not installed${NC}"
-    echo "Please install Node.js and npm first"
+# Find git
+log_verbose "Looking for git..."
+GIT_CMD=$(find_command git) || true
+if [ -z "$GIT_CMD" ]; then
+    log "${RED}Error: git is not installed${NC}"
+    log "Please install git first:"
+    log "  Ubuntu/Debian: sudo apt-get install git"
+    log "  CentOS/RHEL: sudo yum install git"
     exit 1
 fi
+log_verbose "Found git: $GIT_CMD"
+
+# Find npm
+log_verbose "Looking for npm..."
+NPM_CMD=$(find_command npm) || true
+if [ -z "$NPM_CMD" ]; then
+    log "${RED}Error: npm is not installed${NC}"
+    log "Please install Node.js and npm first"
+    exit 1
+fi
+log_verbose "Found npm: $NPM_CMD"
+
+# Find node
+log_verbose "Looking for node..."
+NODE_CMD=$(find_command node) || true
+if [ -z "$NODE_CMD" ]; then
+    log "${RED}Error: node is not installed${NC}"
+    log "Please install Node.js first"
+    exit 1
+fi
+log_verbose "Found node: $NODE_CMD"
 
 # Change to project directory
 cd "$SCRIPT_DIR"
+log_verbose "Working directory: $SCRIPT_DIR"
 
 # Get current version
-CURRENT_VERSION=$(node -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
-echo -e "Current version: ${YELLOW}v${CURRENT_VERSION}${NC}"
-echo ""
+CURRENT_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
+log "Current version: ${YELLOW}v${CURRENT_VERSION}${NC}"
+log ""
 
 # Check for uncommitted changes
-if [[ -n $(git status --porcelain) ]]; then
-    echo -e "${YELLOW}Warning: You have uncommitted changes${NC}"
-    echo "These files have local modifications:"
-    git status --short
-    echo ""
+if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
+    log "${YELLOW}Warning: You have uncommitted changes${NC}"
+    log "These files have local modifications:"
+    $GIT_CMD status --short
+    log ""
     read -p "Do you want to continue? This may cause merge conflicts. (y/N) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${RED}Update cancelled${NC}"
+        log "${RED}Update cancelled${NC}"
         exit 1
     fi
 fi
 
-# Fetch and pull latest changes
-echo -e "${BLUE}[1/5] Fetching latest changes...${NC}"
-git fetch origin main
+# Fetch latest changes
+log "${BLUE}[1/6] Fetching latest changes...${NC}"
+log_verbose "Running: $GIT_CMD fetch origin main"
+if ! $GIT_CMD fetch origin main 2>&1 | tee -a "$LOG_FILE"; then
+    log "${RED}Error: Failed to fetch from remote${NC}"
+    exit 1
+fi
 
 # Check if there are updates
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
+LOCAL=$($GIT_CMD rev-parse HEAD 2>/dev/null)
+REMOTE=$($GIT_CMD rev-parse origin/main 2>/dev/null)
+log_verbose "Local commit: $LOCAL"
+log_verbose "Remote commit: $REMOTE"
 
 if [ "$LOCAL" = "$REMOTE" ]; then
     if [ "$FORCE_REBUILD" = true ]; then
-        echo -e "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"
+        log "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"
     else
-        echo -e "${GREEN}Code is already up to date!${NC}"
-        echo ""
+        log "${GREEN}Code is already up to date!${NC}"
+        log ""
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "${BLUE}No changes made. Use --rebuild to force rebuild.${NC}"
+            log "${BLUE}No changes made. Use --rebuild to force rebuild.${NC}"
             exit 0
         fi
     fi
 else
-    echo -e "${BLUE}[2/5] Pulling latest code...${NC}"
-    git pull origin main
+    log "${BLUE}[2/6] Pulling latest code...${NC}"
+    log_verbose "Running: $GIT_CMD pull origin main"
+    if ! $GIT_CMD pull origin main 2>&1 | tee -a "$LOG_FILE"; then
+        log "${RED}Error: Failed to pull from remote${NC}"
+        exit 1
+    fi
 fi
 
 # Get new version
-NEW_VERSION=$(node -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
+NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
 if [ "$LOCAL" != "$REMOTE" ]; then
-    echo -e "New version: ${GREEN}v${NEW_VERSION}${NC}"
+    log "New version: ${GREEN}v${NEW_VERSION}${NC}"
 fi
-echo ""
+log ""
 
 # Install backend dependencies
-echo -e "${BLUE}[3/5] Installing backend dependencies...${NC}"
+log "${BLUE}[3/6] Installing backend dependencies...${NC}"
 cd "$BACKEND_DIR"
-npm install
+log_verbose "Running: $NPM_CMD install in $BACKEND_DIR"
+if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
+    log "${RED}Error: Failed to install backend dependencies${NC}"
+    exit 1
+fi
 
 # Install frontend dependencies
-echo -e "${BLUE}[4/5] Installing frontend dependencies...${NC}"
+log "${BLUE}[4/6] Installing frontend dependencies...${NC}"
 cd "$FRONTEND_DIR"
-npm install
+log_verbose "Running: $NPM_CMD install in $FRONTEND_DIR"
+if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
+    log "${RED}Error: Failed to install frontend dependencies${NC}"
+    exit 1
+fi
 
 # Build frontend
-echo -e "${BLUE}[5/5] Building frontend...${NC}"
-npm run build
+log "${BLUE}[5/6] Building frontend...${NC}"
+log_verbose "Running: $NPM_CMD run build in $FRONTEND_DIR"
+if ! $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"; then
+    log "${RED}Error: Failed to build frontend${NC}"
+    exit 1
+fi
 
-echo ""
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}       Update completed successfully!   ${NC}"
-echo -e "${GREEN}========================================${NC}"
-echo ""
+# Return to project root
+cd "$SCRIPT_DIR"
+
+log ""
+log "${GREEN}========================================${NC}"
+log "${GREEN}       Update completed successfully!   ${NC}"
+log "${GREEN}========================================${NC}"
+log ""
 if [ "$LOCAL" != "$REMOTE" ]; then
-    echo -e "Updated from ${YELLOW}v${CURRENT_VERSION}${NC} to ${GREEN}v${NEW_VERSION}${NC}"
+    log "Updated from ${YELLOW}v${CURRENT_VERSION}${NC} to ${GREEN}v${NEW_VERSION}${NC}"
 else
-    echo -e "Rebuilt version ${GREEN}v${NEW_VERSION}${NC}"
+    log "Rebuilt version ${GREEN}v${NEW_VERSION}${NC}"
 fi
-echo ""
-echo -e "${YELLOW}Please restart ProxyPilot to apply changes:${NC}"
-echo "  sudo $SCRIPT_DIR/restart.sh"
-echo ""
+log ""
 
-# Ask if user wants to restart now
-read -p "Do you want to restart ProxyPilot now? (y/N) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "${BLUE}Restarting ProxyPilot...${NC}"
-    sudo "$SCRIPT_DIR/restart.sh"
+# Restart
+if [ "$SKIP_RESTART" = true ]; then
+    log "${YELLOW}Skipping restart (--no-restart specified)${NC}"
+    log "Run manually: sudo $SCRIPT_DIR/restart.sh"
+else
+    log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
+    log ""
+
+    # Stop existing processes
+    log "Stopping existing ProxyPilot processes..."
+
+    # Find and kill ProxyPilot processes
+    PIDS=$(pgrep -f "node.*src/index.js" 2>/dev/null || true)
+    if [ -n "$PIDS" ]; then
+        log_verbose "Found processes: $PIDS"
+        for PID in $PIDS; do
+            log "Stopping process $PID..."
+            kill $PID 2>/dev/null || sudo kill $PID 2>/dev/null || true
+        done
+        sleep 2
+
+        # Force kill if still running
+        PIDS=$(pgrep -f "node.*src/index.js" 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            log_verbose "Force killing remaining processes..."
+            for PID in $PIDS; do
+                kill -9 $PID 2>/dev/null || sudo kill -9 $PID 2>/dev/null || true
+            done
+            sleep 1
+        fi
+    else
+        log "No existing ProxyPilot processes found"
+    fi
+
+    # Start the backend
+    log "Starting ProxyPilot backend..."
+    cd "$BACKEND_DIR"
+
+    # Check if PM2 is available
+    if command -v pm2 &> /dev/null; then
+        log "Using PM2..."
+        pm2 delete proxypilot 2>/dev/null || true
+        pm2 start src/index.js --name proxypilot
+        pm2 save
+        log "${GREEN}Started with PM2${NC}"
+    else
+        # Use nohup
+        log "Using nohup..."
+        nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
+        NEW_PID=$!
+        sleep 2
+
+        # Verify it started
+        if kill -0 $NEW_PID 2>/dev/null; then
+            log "${GREEN}Started in background (PID: $NEW_PID)${NC}"
+            log "Logs: /tmp/proxypilot.log"
+        else
+            log "${RED}Failed to start backend${NC}"
+            log "Check logs: /tmp/proxypilot.log"
+            exit 1
+        fi
+    fi
+
+    log ""
+    log "${GREEN}ProxyPilot restart complete!${NC}"
 fi
+
+log ""
+log "Update log saved to: $LOG_FILE"

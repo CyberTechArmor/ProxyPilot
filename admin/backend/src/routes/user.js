@@ -76,21 +76,27 @@ function updateInstalledVersion() {
 
 // Sync version on server startup (updates DB if package.json version changed)
 function syncVersionOnStartup() {
-  const packageVersion = getPackageVersion();
-  const savedVersion = getSetting('installed_version');
+  try {
+    const packageVersion = getPackageVersion();
+    const savedVersion = getSetting('installed_version');
 
-  if (savedVersion !== packageVersion) {
-    setSetting('installed_version', packageVersion);
-    if (savedVersion) {
-      console.log(`Version synced: v${savedVersion} -> v${packageVersion}`);
-    } else {
-      console.log(`Version initialized: v${packageVersion}`);
+    if (savedVersion !== packageVersion) {
+      setSetting('installed_version', packageVersion);
+      if (savedVersion) {
+        console.log(`Version synced: v${savedVersion} -> v${packageVersion}`);
+      } else {
+        console.log(`Version initialized: v${packageVersion}`);
+      }
     }
+    return packageVersion;
+  } catch (e) {
+    // Database might not be initialized yet, will sync on first version request
+    console.log('Version sync deferred (database not ready)');
+    return null;
   }
-  return packageVersion;
 }
 
-// Initialize version on module load
+// Try to initialize version on module load (may fail if DB not ready)
 syncVersionOnStartup();
 
 // Get GitHub repo from git remote or settings

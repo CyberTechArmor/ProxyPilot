@@ -16,6 +16,17 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Parse arguments
+FORCE_REBUILD=false
+for arg in "$@"; do
+    case $arg in
+        --rebuild|--force|-f)
+            FORCE_REBUILD=true
+            shift
+            ;;
+    esac
+done
+
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}       ProxyPilot Update Script        ${NC}"
 echo -e "${BLUE}========================================${NC}"
@@ -68,41 +79,57 @@ LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-    echo -e "${GREEN}Already up to date!${NC}"
-    exit 0
+    if [ "$FORCE_REBUILD" = true ]; then
+        echo -e "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"
+    else
+        echo -e "${GREEN}Code is already up to date!${NC}"
+        echo ""
+        read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}No changes made. Use --rebuild to force rebuild.${NC}"
+            exit 0
+        fi
+    fi
+else
+    echo -e "${BLUE}[2/5] Pulling latest code...${NC}"
+    git pull origin main
 fi
-
-echo -e "${BLUE}[2/5] Pulling latest code...${NC}"
-git pull origin main
 
 # Get new version
 NEW_VERSION=$(node -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
-echo -e "New version: ${GREEN}v${NEW_VERSION}${NC}"
+if [ "$LOCAL" != "$REMOTE" ]; then
+    echo -e "New version: ${GREEN}v${NEW_VERSION}${NC}"
+fi
 echo ""
 
 # Install backend dependencies
 echo -e "${BLUE}[3/5] Installing backend dependencies...${NC}"
 cd "$BACKEND_DIR"
-npm install --silent
+npm install
 
 # Install frontend dependencies
 echo -e "${BLUE}[4/5] Installing frontend dependencies...${NC}"
 cd "$FRONTEND_DIR"
-npm install --silent
+npm install
 
 # Build frontend
 echo -e "${BLUE}[5/5] Building frontend...${NC}"
-npm run build --silent
+npm run build
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}       Update completed successfully!   ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "Updated from ${YELLOW}v${CURRENT_VERSION}${NC} to ${GREEN}v${NEW_VERSION}${NC}"
+if [ "$LOCAL" != "$REMOTE" ]; then
+    echo -e "Updated from ${YELLOW}v${CURRENT_VERSION}${NC} to ${GREEN}v${NEW_VERSION}${NC}"
+else
+    echo -e "Rebuilt version ${GREEN}v${NEW_VERSION}${NC}"
+fi
 echo ""
 echo -e "${YELLOW}Please restart ProxyPilot to apply changes:${NC}"
-echo "  $SCRIPT_DIR/restart.sh"
+echo "  sudo $SCRIPT_DIR/restart.sh"
 echo ""
 
 # Ask if user wants to restart now
@@ -110,5 +137,5 @@ read -p "Do you want to restart ProxyPilot now? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo -e "${BLUE}Restarting ProxyPilot...${NC}"
-    "$SCRIPT_DIR/restart.sh"
+    sudo "$SCRIPT_DIR/restart.sh"
 fi

@@ -1,12 +1,19 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import { mkdirSync, existsSync } from 'fs';
+import { dirname } from 'path';
 
 const dbPath = process.env.DATABASE_PATH || './data/proxypilot.db';
 let db;
 
 export function getDb() {
   if (!db) {
+    // Ensure the directory exists
+    const dbDir = dirname(dbPath);
+    if (!existsSync(dbDir)) {
+      mkdirSync(dbDir, { recursive: true });
+    }
     db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
   }

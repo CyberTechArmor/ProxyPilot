@@ -23,8 +23,9 @@ function execOnHost(command, options = {}) {
 
   if (isInDocker) {
     // Use nsenter to execute on the host's namespace
-    // Wrap command with cd to handle working directory
-    const fullCommand = `cd ${JSON.stringify(cwd)} && ${command}`;
+    // Include standard PATH and source profile for proper environment
+    const pathSetup = 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"';
+    const fullCommand = `${pathSetup} && cd ${JSON.stringify(cwd)} && ${command}`;
     const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(fullCommand)}`;
     return execSync(hostCommand, { encoding: 'utf8', timeout });
   } else {

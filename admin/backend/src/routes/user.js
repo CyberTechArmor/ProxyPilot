@@ -36,8 +36,8 @@ function execOnHost(command, options = {}) {
 // Default GitHub repo
 const DEFAULT_GITHUB_REPO = 'CyberTechArmor/ProxyPilot';
 
-// Get current version from package.json
-function getCurrentVersion() {
+// Get version from package.json
+function getPackageVersion() {
   try {
     const packagePath = join(PROJECT_ROOT, 'admin', 'backend', 'package.json');
     if (existsSync(packagePath)) {
@@ -49,6 +49,48 @@ function getCurrentVersion() {
   }
   return '1.0.0';
 }
+
+// Get current installed version from database (or initialize from package.json)
+function getCurrentVersion() {
+  // Try to get from database first
+  const savedVersion = getSetting('installed_version');
+  if (savedVersion) {
+    return savedVersion;
+  }
+
+  // Not in database yet, read from package.json and save it
+  const packageVersion = getPackageVersion();
+  setSetting('installed_version', packageVersion);
+  console.log(`Initialized installed version in database: v${packageVersion}`);
+  return packageVersion;
+}
+
+// Update the installed version in database (called after successful update)
+function updateInstalledVersion() {
+  const packageVersion = getPackageVersion();
+  setSetting('installed_version', packageVersion);
+  console.log(`Updated installed version in database: v${packageVersion}`);
+  return packageVersion;
+}
+
+// Sync version on server startup (updates DB if package.json version changed)
+function syncVersionOnStartup() {
+  const packageVersion = getPackageVersion();
+  const savedVersion = getSetting('installed_version');
+
+  if (savedVersion !== packageVersion) {
+    setSetting('installed_version', packageVersion);
+    if (savedVersion) {
+      console.log(`Version synced: v${savedVersion} -> v${packageVersion}`);
+    } else {
+      console.log(`Version initialized: v${packageVersion}`);
+    }
+  }
+  return packageVersion;
+}
+
+// Initialize version on module load
+syncVersionOnStartup();
 
 // Get GitHub repo from git remote or settings
 function getGitHubRepo() {
@@ -1053,6 +1095,10 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
       updateProgress.logs.push('Update completed successfully!');
       updateProgress.message = 'Update completed successfully! Please restart the application.';
       updateProgress.status = 'success';
+
+      // Update the installed version in the database
+      const newVersion = updateInstalledVersion();
+      updateProgress.logs.push(`Version updated to v${newVersion}`);
 
       // Clear dismissed update since we just updated
       setSetting('update_dismissed', 'false');

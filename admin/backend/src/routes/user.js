@@ -16,6 +16,11 @@ const PROJECT_ROOT = join(__dirname, '..', '..', '..', '..');
 // Check if running in Docker container
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
+// Host project root path (for when running in Docker and executing on host)
+// Can be set via environment variable HOST_PROJECT_ROOT
+// Default assumes ~/ProxyPilot on the host
+const HOST_PROJECT_ROOT = process.env.HOST_PROJECT_ROOT || '/root/ProxyPilot';
+
 // Execute command on host (uses nsenter when in Docker, direct exec otherwise)
 function execOnHost(command, options = {}) {
   const timeout = options.timeout || 30000;
@@ -24,8 +29,17 @@ function execOnHost(command, options = {}) {
   if (isInDocker) {
     // Use nsenter to execute on the host's namespace
     // Include standard PATH and source profile for proper environment
+    // When running in Docker, replace container paths with host paths
+    let hostCwd = cwd;
+    if (cwd.startsWith('/app')) {
+      // Map /app (container) to host project root
+      hostCwd = cwd.replace('/app', HOST_PROJECT_ROOT);
+    } else if (cwd === PROJECT_ROOT) {
+      // Use host project root for PROJECT_ROOT
+      hostCwd = HOST_PROJECT_ROOT;
+    }
     const pathSetup = 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"';
-    const fullCommand = `${pathSetup} && cd ${JSON.stringify(cwd)} && ${command}`;
+    const fullCommand = `${pathSetup} && cd ${JSON.stringify(hostCwd)} && ${command}`;
     const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(fullCommand)}`;
     return execSync(hostCommand, { encoding: 'utf8', timeout });
   } else {
@@ -334,6 +348,129 @@ userRouter.post('/totp/verify', async (req, res) => {
     }
     console.error('Error verifying TOTP:', error);
     res.status(500).json({ error: 'Failed to verify TOTP' });
+  }
+});
+
+// ==========================================
+// Device Management Endpoints
+// ==========================================
+
+// List authenticated devices for current user
+userRouter.get('/devices', (req, res) => {
+  try {
+    const db = getDb();
+    const devices = db.prepare(`
+      SELECT id, device_name, user_agent, ip_address, last_used_at, created_at
+      FROM authenticated_devices
+      WHERE user_id = ?
+      ORDER BY last_used_at DESC
+    `).all(req.user.id);
+
+    res.json({ devices });
+  } catch (error) {
+    console.error('Error fetching devices:', error);
+    res.status(500).json({ error: 'Failed to fetch devices' });
+  }
+});
+
+// Revoke an authenticated device
+userRouter.delete('/devices/:deviceId', async (req, res) => {
+  try {
+    const { totpCode } = z.object({
+      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
+    }).parse(req.body);
+
+    const db = getDb();
+
+    // Verify device belongs to user
+    const device = db.prepare(`
+      SELECT * FROM authenticated_devices WHERE id = ? AND user_id = ?
+    `).get(req.params.deviceId, req.user.id);
+
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    // Verify TOTP
+    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    if (user?.totp_secret) {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'ProxyPilot',
+        label: req.user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    // Delete device
+    db.prepare('DELETE FROM authenticated_devices WHERE id = ?').run(req.params.deviceId);
+
+    logAudit(req.user.id, 'DEVICE_REVOKED', 'device', req.params.deviceId, { deviceName: device.device_name }, req.ip);
+
+    res.json({ success: true, message: 'Device revoked successfully' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error revoking device:', error);
+    res.status(500).json({ error: 'Failed to revoke device' });
+  }
+});
+
+// Revoke all devices except current one (logout everywhere else)
+userRouter.post('/devices/revoke-all', async (req, res) => {
+  try {
+    const { totpCode, keepCurrent } = z.object({
+      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
+      keepCurrent: z.string().optional(), // Device fingerprint to keep
+    }).parse(req.body);
+
+    const db = getDb();
+
+    // Verify TOTP
+    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    if (user?.totp_secret) {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'ProxyPilot',
+        label: req.user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        return res.status(401).json({ error: 'Invalid TOTP code' });
+      }
+    }
+
+    // Delete all devices except current
+    if (keepCurrent) {
+      db.prepare(`
+        DELETE FROM authenticated_devices
+        WHERE user_id = ? AND device_fingerprint != ?
+      `).run(req.user.id, keepCurrent);
+    } else {
+      db.prepare('DELETE FROM authenticated_devices WHERE user_id = ?').run(req.user.id);
+    }
+
+    logAudit(req.user.id, 'ALL_DEVICES_REVOKED', 'user', req.user.id, { keptCurrent: !!keepCurrent }, req.ip);
+
+    res.json({ success: true, message: 'All other devices have been logged out' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error revoking devices:', error);
+    res.status(500).json({ error: 'Failed to revoke devices' });
   }
 });
 

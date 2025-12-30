@@ -189,6 +189,71 @@ export function initDatabase() {
     )
   `);
 
+  // Create authenticated devices table for TOTP-free login on trusted devices
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS authenticated_devices (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      device_fingerprint TEXT NOT NULL,
+      user_agent TEXT,
+      ip_address TEXT,
+      last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(user_id, device_fingerprint)
+    )
+  `);
+
+  // Create index for device lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_devices_user_fingerprint
+    ON authenticated_devices(user_id, device_fingerprint)
+  `);
+
+  // Create service config versions table for version control on settings
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS service_config_versions (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      notes TEXT,
+      created_by TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+
+  // Create index for config version lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_config_versions_lookup
+    ON service_config_versions(service_id, version DESC)
+  `);
+
+  // Create access log table for detailed access tracking
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS access_log (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      action TEXT NOT NULL,
+      endpoint TEXT,
+      method TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      response_status INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    )
+  `);
+
+  // Create index for access log lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_access_log_user
+    ON access_log(user_id, created_at DESC)
+  `);
+
   // Check if admin user exists, create if not
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
 

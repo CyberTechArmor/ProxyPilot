@@ -4,9 +4,10 @@ import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check } from 'lucide-react';
+import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, Smartphone } from 'lucide-react';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -17,6 +18,8 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [qrCodeUrl, setQrCodeUrl] = useState('');
   const [copied, setCopied] = useState(false);
+  const [rememberDevice, setRememberDevice] = useState(false);
+  const [deviceFingerprint, setDeviceFingerprint] = useState('');
 
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -49,6 +52,8 @@ export default function Login() {
         username,
         password,
         totpCode: (totpRequired || totpSetup) ? totpCode : '',
+        deviceFingerprint: deviceFingerprint || undefined,
+        registerDevice: rememberDevice,
       };
 
       // Include setup secret if this is a new TOTP setup
@@ -59,6 +64,11 @@ export default function Login() {
       await login(loginData);
       navigate('/');
     } catch (error) {
+      // Capture device fingerprint from response
+      if (error.deviceFingerprint) {
+        setDeviceFingerprint(error.deviceFingerprint);
+      }
+
       // Check if TOTP setup is required (new user without TOTP)
       if (error.totpSetupRequired) {
         setTotpSetup({
@@ -209,26 +219,41 @@ export default function Login() {
 
             {/* TOTP Entry for existing users */}
             {totpRequired && !totpSetup && (
-              <div className="space-y-2">
-                <Label htmlFor="totp" className="flex items-center gap-2">
-                  <ShieldCheck className="h-4 w-4 text-primary" />
-                  TOTP Code
-                </Label>
-                <Input
-                  id="totp"
-                  type="text"
-                  value={totpCode}
-                  onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="Enter 6-digit code"
-                  required
-                  maxLength={6}
-                  pattern="[0-9]{6}"
-                  autoComplete="one-time-code"
-                  autoFocus
-                />
-                <p className="text-xs text-muted-foreground">
-                  Enter the code from your authenticator app
-                </p>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="totp" className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-primary" />
+                    TOTP Code
+                  </Label>
+                  <Input
+                    id="totp"
+                    type="text"
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="Enter 6-digit code"
+                    required
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    autoComplete="one-time-code"
+                    autoFocus
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Enter the code from your authenticator app
+                  </p>
+                </div>
+                <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <Smartphone className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <span className="text-sm font-medium">Remember this device</span>
+                      <p className="text-xs text-muted-foreground">Skip TOTP on future logins</p>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={rememberDevice}
+                    onCheckedChange={setRememberDevice}
+                  />
+                </div>
               </div>
             )}
 

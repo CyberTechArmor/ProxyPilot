@@ -213,6 +213,26 @@ export const api = {
   getAuditLog: (limit = 50, offset = 0) =>
     request(`/user/audit-log?limit=${limit}&offset=${offset}`),
 
+  // Device Management
+  getDevices: () => request('/user/devices'),
+
+  revokeDevice: (deviceId, totpCode) => request(`/user/devices/${deviceId}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totpCode }),
+  }),
+
+  revokeAllDevices: (totpCode, keepCurrent) => request('/user/devices/revoke-all', {
+    method: 'POST',
+    body: JSON.stringify({ totpCode, keepCurrent }),
+  }),
+
+  // Service Config Versions
+  getConfigVersions: (serviceId) => request(`/services/${serviceId}/config-versions`),
+
+  revertConfig: (serviceId, versionId) => request(`/services/${serviceId}/revert-config/${versionId}`, {
+    method: 'POST',
+  }),
+
   // System Security
   secureSystem: (totpCode) => request('/services/system/secure', {
     method: 'POST',

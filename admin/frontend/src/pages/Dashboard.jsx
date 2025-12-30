@@ -4478,6 +4478,7 @@ volumes:
           </div>
 
           {settingsTab === 'settings' ? (
+          <>
           <div className="space-y-4 py-4">
             {/* Service Info */}
             <div className="p-3 bg-muted rounded-lg space-y-1">
@@ -4577,6 +4578,7 @@ volumes:
               {savingSettings ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : <><Save className="mr-2 h-4 w-4" />Save Settings</>}
             </Button>
           </DialogFooter>
+          </>
           ) : (
           /* History Tab */
           <div className="space-y-4 py-4">

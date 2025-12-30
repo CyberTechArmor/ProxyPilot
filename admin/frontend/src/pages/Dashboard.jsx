@@ -88,6 +88,7 @@ import {
   MemoryStick,
   Activity,
   Clock,
+  Settings,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -165,6 +166,23 @@ export default function Dashboard() {
   const [selectedService, setSelectedService] = useState(null);
   const [totpCode, setTotpCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Service settings dialog state
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [settingsService, setSettingsService] = useState(null);
+  const [settingsForm, setSettingsForm] = useState({
+    target: '127.0.0.1',
+    port: '',
+    websocketEnabled: false,
+    forceHttps: true,
+    maxUploadSize: '1G',
+    sslEnabled: true,
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('settings'); // 'settings' or 'history'
+  const [configVersions, setConfigVersions] = useState([]);
+  const [loadingConfigVersions, setLoadingConfigVersions] = useState(false);
+  const [revertingVersion, setRevertingVersion] = useState(null);
 
   // Search/Filter/Sort state
   const [searchQuery, setSearchQuery] = useState('');
@@ -2006,6 +2024,87 @@ volumes:
     }
   };
 
+  // Service Settings Functions
+  const openSettings = (service) => {
+    setSettingsService(service);
+    setSettingsForm({
+      target: service.target || '127.0.0.1',
+      port: service.port || '',
+      websocketEnabled: service.websocketEnabled || false,
+      forceHttps: service.forceHttps !== false,
+      maxUploadSize: service.maxUploadSize || '1G',
+      sslEnabled: service.sslEnabled !== false,
+    });
+    setSettingsTab('settings');
+    setConfigVersions([]);
+    setSettingsDialogOpen(true);
+  };
+
+  const fetchConfigVersions = async () => {
+    if (!settingsService) return;
+    setLoadingConfigVersions(true);
+    try {
+      const { versions } = await api.getConfigVersions(settingsService.id);
+      setConfigVersions(versions);
+    } catch (error) {
+      console.error('Error fetching config versions:', error);
+    } finally {
+      setLoadingConfigVersions(false);
+    }
+  };
+
+  const handleRevertConfig = async (versionId, versionNum) => {
+    if (!settingsService) return;
+    setRevertingVersion(versionId);
+    try {
+      await api.revertConfig(settingsService.id, versionId);
+      toast({
+        title: 'Success',
+        description: `Reverted to version ${versionNum}`,
+      });
+      fetchServices();
+      fetchConfigVersions();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setRevertingVersion(null);
+    }
+  };
+
+  const saveSettings = async () => {
+    if (!settingsService) return;
+    setSavingSettings(true);
+
+    try {
+      await api.updateService(settingsService.id, {
+        target: settingsForm.target,
+        port: settingsForm.port ? parseInt(settingsForm.port, 10) : null,
+        websocketEnabled: settingsForm.websocketEnabled,
+        forceHttps: settingsForm.forceHttps,
+        maxUploadSize: settingsForm.maxUploadSize,
+        sslEnabled: settingsForm.sslEnabled,
+      });
+      toast({
+        title: 'Success',
+        description: 'Service settings saved and NGINX config regenerated',
+      });
+      setSettingsDialogOpen(false);
+      fetchServices();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   const toggleDir = (path) => {
     setExpandedDirs(prev => ({
       ...prev,
@@ -3064,9 +3163,16 @@ volumes:
                   </Button>
                   {!service.isAdmin && (
                     <>
-                      <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
-                        <FileText className="h-4 w-4" />
+                      {/* Settings button for all service types */}
+                      <Button variant="ghost" size="icon" onClick={() => openSettings(service)} title="Service Settings">
+                        <Server className="h-4 w-4" />
                       </Button>
+                      {/* File editor for static sites only */}
+                      {service.type === 'static' && (
+                        <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
+                          <FileText className="h-4 w-4" />
+                        </Button>
+                      )}
                       {isAdmin && (
                         <Button
                           variant="ghost"
@@ -4335,6 +4441,202 @@ volumes:
         </DialogContent>
       </Dialog>
 
+      {/* Service Settings Dialog */}
+      <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Server className="h-5 w-5" />
+              Service Settings - {settingsService?.name}
+            </DialogTitle>
+            <DialogDescription>
+              Configure NGINX proxy settings for this service
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Tabs */}
+          <div className="flex gap-2 border-b pb-2">
+            <Button
+              variant={settingsTab === 'settings' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setSettingsTab('settings')}
+            >
+              <Settings className="h-4 w-4 mr-2" />
+              Settings
+            </Button>
+            <Button
+              variant={settingsTab === 'history' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => {
+                setSettingsTab('history');
+                fetchConfigVersions();
+              }}
+            >
+              <History className="h-4 w-4 mr-2" />
+              History
+            </Button>
+          </div>
+
+          {settingsTab === 'settings' ? (
+          <div className="space-y-4 py-4">
+            {/* Service Info */}
+            <div className="p-3 bg-muted rounded-lg space-y-1">
+              <p className="text-sm"><span className="text-muted-foreground">Domain:</span> {settingsService?.domain}</p>
+              <p className="text-sm"><span className="text-muted-foreground">Type:</span> <span className="capitalize">{settingsService?.type}</span></p>
+              {settingsService?.dataDir && (
+                <p className="text-sm"><span className="text-muted-foreground">Path:</span> <code className="text-xs bg-background px-1 rounded">{settingsService?.dataDir}</code></p>
+              )}
+            </div>
+
+            {/* Proxy Settings (for docker/proxy types) */}
+            {(settingsService?.type === 'docker' || settingsService?.type === 'proxy') && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="target">Target IP/Host</Label>
+                    <Input
+                      id="target"
+                      value={settingsForm.target}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, target: e.target.value })}
+                      placeholder="127.0.0.1"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="port">Port</Label>
+                    <Input
+                      id="port"
+                      type="number"
+                      value={settingsForm.port}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, port: e.target.value })}
+                      placeholder="8080"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* NGINX Settings */}
+            <div className="space-y-3">
+              <h4 className="font-medium text-sm">NGINX Configuration</h4>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label htmlFor="websocket">WebSocket Support</Label>
+                  <p className="text-xs text-muted-foreground">Enable WebSocket proxy headers</p>
+                </div>
+                <Switch
+                  id="websocket"
+                  checked={settingsForm.websocketEnabled}
+                  onCheckedChange={(checked) => setSettingsForm({ ...settingsForm, websocketEnabled: checked })}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label htmlFor="forceHttps">Force HTTPS</Label>
+                  <p className="text-xs text-muted-foreground">Redirect HTTP to HTTPS</p>
+                </div>
+                <Switch
+                  id="forceHttps"
+                  checked={settingsForm.forceHttps}
+                  onCheckedChange={(checked) => setSettingsForm({ ...settingsForm, forceHttps: checked })}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label htmlFor="sslEnabled">SSL Enabled</Label>
+                  <p className="text-xs text-muted-foreground">Use HTTPS with SSL certificate</p>
+                </div>
+                <Switch
+                  id="sslEnabled"
+                  checked={settingsForm.sslEnabled}
+                  onCheckedChange={(checked) => setSettingsForm({ ...settingsForm, sslEnabled: checked })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="maxUpload">Max Upload Size</Label>
+                <Select value={settingsForm.maxUploadSize} onValueChange={(v) => setSettingsForm({ ...settingsForm, maxUploadSize: v })}>
+                  <SelectTrigger id="maxUpload">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1M">1 MB</SelectItem>
+                    <SelectItem value="10M">10 MB</SelectItem>
+                    <SelectItem value="50M">50 MB</SelectItem>
+                    <SelectItem value="100M">100 MB</SelectItem>
+                    <SelectItem value="500M">500 MB</SelectItem>
+                    <SelectItem value="1G">1 GB</SelectItem>
+                    <SelectItem value="5G">5 GB</SelectItem>
+                    <SelectItem value="10G">10 GB</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Cancel</Button>
+            <Button onClick={saveSettings} disabled={savingSettings}>
+              {savingSettings ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : <><Save className="mr-2 h-4 w-4" />Save Settings</>}
+            </Button>
+          </DialogFooter>
+          ) : (
+          /* History Tab */
+          <div className="space-y-4 py-4">
+            <h4 className="font-medium text-sm">Configuration History</h4>
+            {loadingConfigVersions ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+              </div>
+            ) : configVersions.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <History className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                <p>No configuration history</p>
+                <p className="text-sm mt-1">Changes will be recorded when you save settings</p>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {configVersions.map((version) => (
+                  <div key={version.id} className="p-3 border rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-medium">Version {version.version}</span>
+                        <p className="text-xs text-muted-foreground">
+                          {version.notes} • by {version.createdBy}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(version.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleRevertConfig(version.id, version.version)}
+                        disabled={revertingVersion === version.id}
+                      >
+                        {revertingVersion === version.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <>
+                            <RotateCcw className="h-4 w-4 mr-1" />
+                            Revert
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    <div className="mt-2 text-xs bg-muted p-2 rounded">
+                      <p>Target: {version.config.target || 'N/A'}:{version.config.port || 'N/A'}</p>
+                      <p>WebSocket: {version.config.websocketEnabled ? 'Yes' : 'No'} | SSL: {version.config.sslEnabled ? 'Yes' : 'No'}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Close</Button>
+            </DialogFooter>
+          </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Export Dialog */}
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
         <DialogContent>
@@ -4492,11 +4794,13 @@ volumes:
                           )}
                           <span className="font-medium">{site.name}</span>
                           <span className="text-xs px-2 py-0.5 rounded bg-muted">{site.type}</span>
-                          {site.sslEnabled && <ShieldCheck className="h-4 w-4 text-green-500" />}
+                          {site.sslEnabled && <ShieldCheck className="h-4 w-4 text-green-500" title="SSL Enabled" />}
+                          {site.websocketEnabled && <Activity className="h-4 w-4 text-blue-500" title="WebSocket Enabled" />}
                         </div>
                         <p className="text-sm text-muted-foreground mt-1">{site.domain}</p>
                         {site.rootDir && <p className="text-xs text-muted-foreground">Root: {site.rootDir}</p>}
-                        {site.port && <p className="text-xs text-muted-foreground">Port: {site.port}</p>}
+                        {site.target && site.port && <p className="text-xs text-muted-foreground">Target: {site.target}:{site.port}</p>}
+                        {!site.target && site.port && <p className="text-xs text-muted-foreground">Port: {site.port}</p>}
                       </div>
                       <div className="flex gap-2">
                         <Button

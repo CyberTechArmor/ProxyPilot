@@ -908,6 +908,32 @@ servicesRouter.put('/:id', async (req, res) => {
       updatedData.maxUploadSize, req.params.id
     );
 
+    // Save config version for history
+    try {
+      const lastVersion = db.prepare(`
+        SELECT MAX(version) as maxVersion
+        FROM service_config_versions
+        WHERE service_id = ?
+      `).get(req.params.id);
+
+      const newVersion = (lastVersion?.maxVersion || 0) + 1;
+
+      db.prepare(`
+        INSERT INTO service_config_versions (id, service_id, config_json, version, notes, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        uuidv4(),
+        req.params.id,
+        JSON.stringify(updatedData),
+        newVersion,
+        'Configuration updated',
+        req.user.id
+      );
+    } catch (e) {
+      console.error('Error saving config version:', e);
+      // Non-critical, don't fail the update
+    }
+
     logAudit(req.user.id, 'SERVICE_UPDATED', 'service', req.params.id, updatedData, req.ip);
 
     res.json({ success: true, service: { id: req.params.id, ...updatedData } });
@@ -917,6 +943,118 @@ servicesRouter.put('/:id', async (req, res) => {
     }
     console.error('Error updating service:', error);
     res.status(500).json({ error: 'Failed to update service' });
+  }
+});
+
+// Get service config versions (for version control)
+servicesRouter.get('/:id/config-versions', async (req, res) => {
+  try {
+    const db = getDb();
+
+    const versions = db.prepare(`
+      SELECT scv.*, u.username as created_by_name
+      FROM service_config_versions scv
+      LEFT JOIN users u ON scv.created_by = u.id
+      WHERE scv.service_id = ?
+      ORDER BY scv.version DESC
+      LIMIT 50
+    `).all(req.params.id);
+
+    res.json({
+      versions: versions.map(v => ({
+        id: v.id,
+        version: v.version,
+        config: JSON.parse(v.config_json),
+        notes: v.notes,
+        createdBy: v.created_by_name || 'Unknown',
+        createdAt: v.created_at,
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching config versions:', error);
+    res.status(500).json({ error: 'Failed to fetch config versions' });
+  }
+});
+
+// Revert service config to a previous version
+servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
+  try {
+    const db = getDb();
+
+    const version = db.prepare(`
+      SELECT * FROM service_config_versions
+      WHERE id = ? AND service_id = ?
+    `).get(req.params.versionId, req.params.id);
+
+    if (!version) {
+      return res.status(404).json({ error: 'Config version not found' });
+    }
+
+    const config = JSON.parse(version.config_json);
+
+    // Apply the old config
+    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    if (service.is_admin) {
+      return res.status(403).json({ error: 'Cannot modify admin service' });
+    }
+
+    // Regenerate NGINX config with reverted settings
+    const nginxConfig = generateNginxConfig(config);
+    const configPath = `${NGINX_SITES_AVAILABLE}/${config.domain}`;
+    await writeFile(configPath, nginxConfig);
+
+    const enabledPath = `${NGINX_SITES_ENABLED}/${config.domain}`;
+    await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
+
+    // Test and reload NGINX
+    await execAsync('nginx -t');
+    await execAsync('systemctl reload nginx || nginx -s reload').catch(() => {});
+
+    // Update database
+    db.prepare(`
+      UPDATE services SET
+        name = ?, domain = ?, type = ?, target = ?, port = ?,
+        root_dir = ?, container_name = ?, ssl_enabled = ?,
+        force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      config.name, config.domain, config.type,
+      config.target, config.port, config.rootDir,
+      config.containerName, config.sslEnabled ? 1 : 0,
+      config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
+      config.maxUploadSize, req.params.id
+    );
+
+    // Save as new version
+    const lastVersion = db.prepare(`
+      SELECT MAX(version) as maxVersion FROM service_config_versions WHERE service_id = ?
+    `).get(req.params.id);
+
+    db.prepare(`
+      INSERT INTO service_config_versions (id, service_id, config_json, version, notes, created_by)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      uuidv4(),
+      req.params.id,
+      JSON.stringify(config),
+      (lastVersion?.maxVersion || 0) + 1,
+      `Reverted to version ${version.version}`,
+      req.user.id
+    );
+
+    logAudit(req.user.id, 'SERVICE_CONFIG_REVERTED', 'service', req.params.id, {
+      revertedToVersion: version.version,
+    }, req.ip);
+
+    res.json({ success: true, message: `Reverted to version ${version.version}` });
+  } catch (error) {
+    console.error('Error reverting config:', error);
+    res.status(500).json({ error: 'Failed to revert config: ' + error.message });
   }
 });
 
@@ -1644,29 +1782,43 @@ servicesRouter.post('/import', async (req, res) => {
 
         // Create the service
         const id = uuidv4();
-        const safeDir = toSafeDirectoryName(serviceData.name);
-        const dataDir = join(SERVICES_DATA_DIR, safeDir);
+        let dataDir;
+        let rootDir = serviceData.rootDir;
 
-        // Create directory
-        await mkdir(dataDir, { recursive: true });
+        // Determine dataDir based on service type and whether rootDir is provided
+        if (serviceData.type === 'static' && serviceData.rootDir && !serviceData.files?.length) {
+          // Static site with existing rootDir and no files to import - use original location
+          dataDir = serviceData.rootDir;
+          rootDir = serviceData.rootDir;
+          // Ensure the directory exists
+          if (!existsSync(dataDir)) {
+            await mkdir(dataDir, { recursive: true });
+          }
+        } else {
+          // Create a new data directory for this service
+          const safeDir = toSafeDirectoryName(serviceData.name);
+          dataDir = join(SERVICES_DATA_DIR, safeDir);
+          await mkdir(dataDir, { recursive: true });
 
-        // Import files if provided
-        if (serviceData.files && serviceData.files.length > 0) {
-          for (const file of serviceData.files) {
-            const filePath = join(dataDir, file.path);
-            const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
-            await mkdir(fileDir, { recursive: true });
-            await writeFile(filePath, file.content);
+          // Import files if provided
+          if (serviceData.files && serviceData.files.length > 0) {
+            for (const file of serviceData.files) {
+              const filePath = join(dataDir, file.path);
+              const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
+              await mkdir(fileDir, { recursive: true });
+              await writeFile(filePath, file.content);
+            }
+          }
+
+          // Set rootDir for static sites (when files are imported to dataDir)
+          if (serviceData.type === 'static') {
+            rootDir = dataDir;
           }
         }
 
-        // Set rootDir for static sites
-        if (serviceData.type === 'static') {
-          serviceData.rootDir = dataDir;
-        }
-
         // Generate NGINX config
-        const nginxConfig = generateNginxConfig(serviceData);
+        const configData = { ...serviceData, rootDir };
+        const nginxConfig = generateNginxConfig(configData);
         const configPath = `${NGINX_SITES_AVAILABLE}/${serviceData.domain}`;
         await writeFile(configPath, nginxConfig);
 
@@ -1682,7 +1834,7 @@ servicesRouter.post('/import', async (req, res) => {
         `).run(
           id, serviceData.name, serviceData.domain, serviceData.type,
           serviceData.target || null, serviceData.port || null,
-          serviceData.rootDir || null, serviceData.containerName || null,
+          rootDir || null, serviceData.containerName || null,
           serviceData.sslEnabled ? 1 : 0, serviceData.forceHttps ? 1 : 0,
           serviceData.websocketEnabled ? 1 : 0, serviceData.maxUploadSize || '1G',
           dataDir
@@ -2418,6 +2570,11 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
         // Check for SSL
         const sslEnabled = content.includes('ssl_certificate') || content.includes('listen 443');
 
+        // Check for websocket support
+        const websocketEnabled = content.includes('proxy_set_header Upgrade') ||
+                                  content.includes('Connection "upgrade"') ||
+                                  content.includes('Upgrade $http_upgrade');
+
         // Try to find index.html for static sites
         let hasIndexHtml = false;
         if (rootDir) {
@@ -2441,6 +2598,7 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
           target,
           port,
           sslEnabled,
+          websocketEnabled,
           hasIndexHtml,
           configFile: file,
         });
@@ -2460,7 +2618,7 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 // Import a discovered NGINX site
 servicesRouter.post('/discover/import', async (req, res) => {
   try {
-    const { domain, name, type, rootDir, target, port, sslEnabled } = req.body;
+    const { domain, name, type, rootDir, target, port, sslEnabled, websocketEnabled } = req.body;
 
     if (!domain || !name) {
       return res.status(400).json({ error: 'Domain and name are required' });
@@ -2475,52 +2633,38 @@ servicesRouter.post('/discover/import', async (req, res) => {
     }
 
     const id = uuidv4();
-    const safeDir = toSafeDirectoryName(name);
-    let dataDir = join(SERVICES_DATA_DIR, safeDir);
+    let dataDir;
     let actualRootDir = rootDir;
 
-    // For static sites, copy files to our data directory if they exist elsewhere
-    if (type === 'static' && rootDir && rootDir !== dataDir) {
-      await mkdir(dataDir, { recursive: true });
+    // For static sites with existing rootDir, use the original path directly
+    // This allows file editing and terminal to work with the original location
+    if (type === 'static' && rootDir) {
+      // Use the original rootDir as both root_dir and data_dir
+      dataDir = rootDir;
+      actualRootDir = rootDir;
 
-      // Copy index.html if it exists
-      const sourceIndex = join(rootDir, 'index.html');
-      if (existsSync(sourceIndex)) {
-        const content = await readFile(sourceIndex, 'utf-8');
-        await writeFile(join(dataDir, 'index.html'), content);
-
-        // Save as version 1
-        db.prepare(`
-          INSERT INTO file_versions (id, service_id, file_path, content, version, notes, created_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), id, 'index.html', content, 1, 'Imported from existing site', req.user.id);
+      // Ensure the directory exists
+      if (!existsSync(rootDir)) {
+        await mkdir(rootDir, { recursive: true });
       }
-
-      // Update root dir to our managed location
-      actualRootDir = dataDir;
-
-      // Regenerate NGINX config with new root
-      const nginxConfig = generateNginxConfig({
-        domain,
-        type,
-        rootDir: dataDir,
-        target,
-        port,
-        sslEnabled,
-        forceHttps: sslEnabled,
-        websocketEnabled: false,
-        maxUploadSize: '1G',
-      });
-
-      await writeFile(join(NGINX_SITES_AVAILABLE, domain), nginxConfig);
-      await reloadNginx();
     } else if (type === 'static') {
-      // Create data dir and link to existing root
+      // New static site without existing rootDir - create in default location
+      const safeDir = toSafeDirectoryName(name);
+      dataDir = join(SERVICES_DATA_DIR, safeDir);
+      actualRootDir = dataDir;
       await mkdir(dataDir, { recursive: true });
-      actualRootDir = rootDir || dataDir;
+    } else if (type === 'docker') {
+      // For docker services, create a data directory for compose files etc.
+      const safeDir = toSafeDirectoryName(name);
+      dataDir = join(SERVICES_DATA_DIR, safeDir);
+      await mkdir(dataDir, { recursive: true });
+    } else {
+      // Proxy or other types
+      const safeDir = toSafeDirectoryName(name);
+      dataDir = join(SERVICES_DATA_DIR, safeDir);
     }
 
-    // Insert into database
+    // Insert into database - for imported static sites, data_dir = root_dir (the original path)
     db.prepare(`
       INSERT INTO services (
         id, name, domain, type, target, port, root_dir, container_name,
@@ -2529,10 +2673,10 @@ servicesRouter.post('/discover/import', async (req, res) => {
     `).run(
       id, name, domain, type, target || null, port || null,
       actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
-      0, '1G', dataDir
+      websocketEnabled ? 1 : 0, '1G', dataDir
     );
 
-    logAudit(req.user.id, 'SERVICE_IMPORTED', 'service', id, { domain, type }, req.ip);
+    logAudit(req.user.id, 'SERVICE_IMPORTED', 'service', id, { domain, type, rootDir: actualRootDir }, req.ip);
 
     res.json({
       success: true,

@@ -469,9 +469,40 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
   try {
     const db = getDb();
     const services = db.prepare('SELECT * FROM services').all();
+    const serviceDomains = new Set(services.map(s => s.domain));
 
-    const results = { success: [], failed: [] };
+    const results = { success: [], failed: [], cleaned: [] };
     const backups = {}; // Store backups of original configs
+
+    // Clean up orphaned config files (configs not in database)
+    try {
+      let configFiles = [];
+      if (isInDocker) {
+        const result = await execOnHost(`ls -1 ${JSON.stringify(NGINX_SITES_AVAILABLE)} 2>/dev/null || echo ""`);
+        configFiles = result.stdout.trim().split('\n').filter(Boolean);
+      } else if (existsSync(NGINX_SITES_AVAILABLE)) {
+        configFiles = await readdir(NGINX_SITES_AVAILABLE);
+      }
+
+      for (const file of configFiles) {
+        // Skip special files like 'default'
+        if (file === 'default' || file === '.' || file === '..' || file.startsWith('.')) continue;
+
+        // If this config file doesn't correspond to a service in the database, remove it
+        if (!serviceDomains.has(file)) {
+          console.log(`Cleaning up orphaned config: ${file}`);
+          try {
+            await execOnHost(`rm -f "${NGINX_SITES_ENABLED}/${file}" 2>/dev/null || true`);
+            await execOnHost(`rm -f "${NGINX_SITES_AVAILABLE}/${file}" 2>/dev/null || true`);
+            results.cleaned.push(file);
+          } catch (e) {
+            console.error(`Failed to clean up orphaned config ${file}:`, e);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error cleaning up orphaned configs:', e);
+    }
 
     // First, backup all existing configs
     for (const service of services) {
@@ -504,9 +535,9 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
         const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
         await writeFile(configPath, nginxConfig);
 
-        // Ensure symlink exists
+        // Ensure symlink exists (use execOnHost for Docker compatibility)
         const enabledPath = `${NGINX_SITES_ENABLED}/${service.domain}`;
-        await execAsync(`ln -sf "${configPath}" "${enabledPath}"`).catch(() => {});
+        await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`).catch(() => {});
 
         results.success.push(service.domain);
       } catch (err) {
@@ -796,18 +827,18 @@ services:
     const configPath = `${NGINX_SITES_AVAILABLE}/${data.domain}`;
     await writeFile(configPath, nginxConfig);
 
-    // Enable the site
+    // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${data.domain}`;
-    await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
+    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
 
     // Test NGINX config
     try {
-      await execAsync('nginx -t 2>&1');
+      await execOnHost('nginx -t 2>&1');
     } catch (testErr) {
       // Rollback
-      await unlink(enabledPath).catch(() => {});
-      await unlink(configPath).catch(() => {});
-      return res.status(400).json({ error: 'Invalid NGINX configuration generated: ' + testErr.message });
+      await execOnHost(`rm -f "${enabledPath}" 2>/dev/null || true`).catch(() => {});
+      await execOnHost(`rm -f "${configPath}" 2>/dev/null || true`).catch(() => {});
+      return res.status(400).json({ error: 'Invalid NGINX configuration generated: ' + (testErr.stderr || testErr.message) });
     }
 
     // Reload/start NGINX
@@ -968,8 +999,9 @@ servicesRouter.put('/:id', async (req, res) => {
     const nginxConfig = generateNginxConfig(updatedData);
     await writeFile(configPath, nginxConfig);
 
+    // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${updatedData.domain}`;
-    await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
+    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
 
     // Test nginx config before reload
     try {
@@ -1115,12 +1147,13 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
     const configPath = `${NGINX_SITES_AVAILABLE}/${config.domain}`;
     await writeFile(configPath, nginxConfig);
 
+    // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${config.domain}`;
-    await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
+    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
 
-    // Test and reload NGINX
-    await execAsync('nginx -t');
-    await execAsync('systemctl reload nginx || nginx -s reload').catch(() => {});
+    // Test and reload NGINX using execOnHost for Docker compatibility
+    await execOnHost('nginx -t 2>&1');
+    await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
 
     // Update database
     db.prepare(`
@@ -1304,12 +1337,18 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
-    // Remove NGINX config
-    await unlink(`${NGINX_SITES_ENABLED}/${service.domain}`).catch(() => {});
-    await unlink(`${NGINX_SITES_AVAILABLE}/${service.domain}`).catch(() => {});
+    // Remove NGINX config (use execOnHost for Docker compatibility)
+    try {
+      await execOnHost(`rm -f "${NGINX_SITES_ENABLED}/${service.domain}" 2>/dev/null || true`);
+      await execOnHost(`rm -f "${NGINX_SITES_AVAILABLE}/${service.domain}" 2>/dev/null || true`);
+    } catch (e) {
+      console.error('Error removing nginx config files:', e);
+    }
 
-    // Reload NGINX
-    await execAsync('systemctl reload nginx || nginx -s reload').catch(() => {});
+    // Reload NGINX using execOnHost for Docker compatibility
+    await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch((e) => {
+      console.error('Error reloading nginx after delete:', e);
+    });
 
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
@@ -2035,8 +2074,9 @@ servicesRouter.post('/import', async (req, res) => {
         const configPath = `${NGINX_SITES_AVAILABLE}/${serviceData.domain}`;
         await writeFile(configPath, nginxConfig);
 
+        // Enable the site (use execOnHost for Docker compatibility)
         const enabledPath = `${NGINX_SITES_ENABLED}/${serviceData.domain}`;
-        await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
+        await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
 
         // Insert into database
         db.prepare(`
@@ -2059,8 +2099,8 @@ servicesRouter.post('/import', async (req, res) => {
       }
     }
 
-    // Reload NGINX
-    await execAsync('nginx -t && (systemctl reload nginx || nginx -s reload)').catch(() => {});
+    // Reload NGINX using execOnHost for Docker compatibility
+    await execOnHost('nginx -t 2>&1 && (systemctl reload nginx 2>&1 || nginx -s reload 2>&1)').catch(() => {});
 
     logAudit(req.user.id, 'SERVICES_IMPORTED', 'system', null, results, req.ip);
 
@@ -2888,6 +2928,36 @@ servicesRouter.post('/discover/import', async (req, res) => {
       actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
+
+    // Regenerate nginx config in ProxyPilot format to ensure consistency
+    try {
+      const serviceConfig = {
+        domain,
+        type,
+        target: target || '127.0.0.1',
+        port: port || null,
+        rootDir: actualRootDir,
+        websocketEnabled: !!websocketEnabled,
+        forceHttps: !!sslEnabled,
+        maxUploadSize: '1G',
+        sslEnabled: !!sslEnabled,
+      };
+
+      const nginxConfig = generateNginxConfig(serviceConfig);
+      const configPath = `${NGINX_SITES_AVAILABLE}/${domain}`;
+      await writeFile(configPath, nginxConfig);
+
+      // Ensure symlink exists
+      const enabledPath = `${NGINX_SITES_ENABLED}/${domain}`;
+      await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`).catch(() => {});
+
+      // Test and reload nginx
+      await execOnHost('nginx -t 2>&1');
+      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+    } catch (nginxError) {
+      console.error('Error regenerating nginx config for imported site:', nginxError);
+      // Don't fail the import, but log the error
+    }
 
     logAudit(req.user.id, 'SERVICE_IMPORTED', 'service', id, { domain, type, rootDir: actualRootDir }, req.ip);
 

@@ -40,6 +40,27 @@ async function execOnHost(command, options = {}) {
   }
 }
 
+// Write nginx config file (handles Docker compatibility)
+async function writeNginxConfig(configPath, content) {
+  if (isInDocker) {
+    // Use heredoc to write file content via execOnHost
+    // This handles multiline content and special characters properly
+    await execOnHost(`cat > ${JSON.stringify(configPath)} << 'NGINXCONFIGEOF'\n${content}\nNGINXCONFIGEOF`);
+  } else {
+    await writeFile(configPath, content);
+  }
+}
+
+// Read nginx config file (handles Docker compatibility)
+async function readNginxConfig(configPath) {
+  if (isInDocker) {
+    const result = await execOnHost(`cat ${JSON.stringify(configPath)} 2>/dev/null`);
+    return result.stdout;
+  } else {
+    return readFile(configPath, 'utf-8');
+  }
+}
+
 // Cache for docker compose command detection
 let dockerComposeCmd = null;
 
@@ -265,7 +286,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 
       const nginxConfig = generateNginxConfig(serviceConfig);
       const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-      await writeFile(configPath, nginxConfig);
+      await writeNginxConfig(configPath, nginxConfig);
 
       // Reload NGINX
       const reloadResult = await reloadNginx();
@@ -353,7 +374,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
 
     const nginxConfig = generateNginxConfig(serviceConfig);
     const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-    await writeFile(configPath, nginxConfig);
+    await writeNginxConfig(configPath, nginxConfig);
 
     // Reload NGINX
     const reloadResult = await reloadNginx();
@@ -442,7 +463,7 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
     // Generate and write new NGINX config
     const nginxConfig = generateNginxConfig(serviceConfig);
     const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-    await writeFile(configPath, nginxConfig);
+    await writeNginxConfig(configPath, nginxConfig);
 
     // Test and reload NGINX
     const reloadResult = await reloadNginx();
@@ -469,12 +490,12 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
   try {
     const db = getDb();
     const services = db.prepare('SELECT * FROM services').all();
-    const serviceDomains = new Set(services.map(s => s.domain));
 
-    const results = { success: [], failed: [], cleaned: [] };
+    const results = { success: [], failed: [] };
     const backups = {}; // Store backups of original configs
 
-    // Clean up orphaned config files (configs not in database)
+    // First, backup ALL existing configs (not just DB services)
+    // This ensures we can revert if anything fails
     try {
       let configFiles = [];
       if (isInDocker) {
@@ -485,38 +506,29 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
       }
 
       for (const file of configFiles) {
-        // Skip special files like 'default'
-        if (file === 'default' || file === '.' || file === '..' || file.startsWith('.')) continue;
-
-        // If this config file doesn't correspond to a service in the database, remove it
-        if (!serviceDomains.has(file)) {
-          console.log(`Cleaning up orphaned config: ${file}`);
-          try {
-            await execOnHost(`rm -f "${NGINX_SITES_ENABLED}/${file}" 2>/dev/null || true`);
-            await execOnHost(`rm -f "${NGINX_SITES_AVAILABLE}/${file}" 2>/dev/null || true`);
-            results.cleaned.push(file);
-          } catch (e) {
-            console.error(`Failed to clean up orphaned config ${file}:`, e);
+        if (file === '.' || file === '..') continue;
+        try {
+          if (isInDocker) {
+            const result = await execOnHost(`cat ${JSON.stringify(NGINX_SITES_AVAILABLE + '/' + file)} 2>/dev/null || echo ""`);
+            if (result.stdout.trim()) {
+              backups[file] = result.stdout;
+            }
+          } else {
+            const configPath = `${NGINX_SITES_AVAILABLE}/${file}`;
+            if (existsSync(configPath)) {
+              backups[file] = await readFile(configPath, 'utf-8');
+            }
           }
+        } catch (e) {
+          console.log(`Could not backup config ${file}:`, e.message);
         }
       }
+      console.log(`Backed up ${Object.keys(backups).length} nginx configs`);
     } catch (e) {
-      console.error('Error cleaning up orphaned configs:', e);
+      console.error('Error backing up configs:', e);
     }
 
-    // First, backup all existing configs
-    for (const service of services) {
-      const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-      try {
-        if (existsSync(configPath)) {
-          backups[service.domain] = await readFile(configPath, 'utf-8');
-        }
-      } catch (e) {
-        // No backup available
-      }
-    }
-
-    // Generate and write new configs
+    // Generate and write new configs for services in database
     for (const service of services) {
       try {
         const serviceConfig = {
@@ -533,14 +545,17 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
 
         const nginxConfig = generateNginxConfig(serviceConfig);
         const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-        await writeFile(configPath, nginxConfig);
 
-        // Ensure symlink exists (use execOnHost for Docker compatibility)
+        // Write config using helper for Docker compatibility
+        await writeNginxConfig(configPath, nginxConfig);
+
+        // Ensure symlink exists
         const enabledPath = `${NGINX_SITES_ENABLED}/${service.domain}`;
         await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`).catch(() => {});
 
         results.success.push(service.domain);
       } catch (err) {
+        console.error(`Failed to regenerate config for ${service.domain}:`, err);
         results.failed.push({ domain: service.domain, error: err.message });
       }
     }
@@ -554,19 +569,23 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
       console.error('NGINX config test failed:', testError.stderr || testError.message);
     }
 
-    if (!testPassed) {
-      // Config test failed - revert all configs from backup
-      console.log('NGINX config test failed, reverting all configs...');
-      for (const service of services) {
-        if (backups[service.domain]) {
-          const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-          try {
-            await writeFile(configPath, backups[service.domain]);
-          } catch (e) {
-            console.error(`Failed to revert config for ${service.domain}:`, e);
-          }
+    // Helper function to revert all configs from backup
+    const revertAllConfigs = async () => {
+      console.log('Reverting all configs from backup...');
+      for (const [filename, content] of Object.entries(backups)) {
+        const configPath = `${NGINX_SITES_AVAILABLE}/${filename}`;
+        try {
+          await writeNginxConfig(configPath, content);
+          console.log(`Reverted config: ${filename}`);
+        } catch (e) {
+          console.error(`Failed to revert config for ${filename}:`, e);
         }
       }
+    };
+
+    if (!testPassed) {
+      // Config test failed - revert all configs from backup
+      await revertAllConfigs();
 
       logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Config test failed, reverted' }, req.ip);
 
@@ -582,17 +601,7 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
 
     if (!reloadResult.success) {
       // Reload failed - revert all configs from backup
-      console.log('NGINX reload failed, reverting all configs...');
-      for (const service of services) {
-        if (backups[service.domain]) {
-          const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-          try {
-            await writeFile(configPath, backups[service.domain]);
-          } catch (e) {
-            console.error(`Failed to revert config for ${service.domain}:`, e);
-          }
-        }
-      }
+      await revertAllConfigs();
       // Try to reload again with reverted configs
       await reloadNginx().catch(() => {});
 
@@ -825,7 +834,7 @@ services:
 
     // Write NGINX config file
     const configPath = `${NGINX_SITES_AVAILABLE}/${data.domain}`;
-    await writeFile(configPath, nginxConfig);
+    await writeNginxConfig(configPath, nginxConfig);
 
     // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${data.domain}`;
@@ -909,7 +918,7 @@ services:
 
         // Regenerate NGINX config with SSL now that we have certificates
         const updatedNginxConfig = generateNginxConfig(data);
-        await writeFile(configPath, updatedNginxConfig);
+        await writeNginxConfig(configPath, updatedNginxConfig);
         await reloadNginx();
 
         sslMessage = 'SSL certificate obtained and configured successfully';
@@ -997,7 +1006,7 @@ servicesRouter.put('/:id', async (req, res) => {
 
     // Generate and write new NGINX config
     const nginxConfig = generateNginxConfig(updatedData);
-    await writeFile(configPath, nginxConfig);
+    await writeNginxConfig(configPath, nginxConfig);
 
     // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${updatedData.domain}`;
@@ -1009,7 +1018,7 @@ servicesRouter.put('/:id', async (req, res) => {
     } catch (testError) {
       // Config test failed - revert to backup
       if (backupConfig) {
-        await writeFile(configPath, backupConfig);
+        await writeNginxConfig(configPath, backupConfig);
       }
       return res.status(400).json({
         error: 'NGINX config test failed - reverted to previous config',
@@ -1023,7 +1032,7 @@ servicesRouter.put('/:id', async (req, res) => {
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
-        await writeFile(configPath, backupConfig);
+        await writeNginxConfig(configPath, backupConfig);
         await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
       }
       return res.status(400).json({
@@ -1145,7 +1154,7 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
     // Regenerate NGINX config with reverted settings
     const nginxConfig = generateNginxConfig(config);
     const configPath = `${NGINX_SITES_AVAILABLE}/${config.domain}`;
-    await writeFile(configPath, nginxConfig);
+    await writeNginxConfig(configPath, nginxConfig);
 
     // Enable the site (use execOnHost for Docker compatibility)
     const enabledPath = `${NGINX_SITES_ENABLED}/${config.domain}`;
@@ -1243,7 +1252,7 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
     }
 
     // Write new config
-    await writeFile(configPath, config);
+    await writeNginxConfig(configPath, config);
 
     // Test nginx config
     try {
@@ -1251,7 +1260,7 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
     } catch (testError) {
       // Config test failed - revert to backup
       if (backupConfig) {
-        await writeFile(configPath, backupConfig);
+        await writeNginxConfig(configPath, backupConfig);
       }
       return res.status(400).json({
         error: 'Nginx config test failed - reverted to previous config',
@@ -1265,7 +1274,7 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
-        await writeFile(configPath, backupConfig);
+        await writeNginxConfig(configPath, backupConfig);
         // Try to reload with old config
         await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
       }
@@ -2072,7 +2081,7 @@ servicesRouter.post('/import', async (req, res) => {
         const configData = { ...serviceData, rootDir };
         const nginxConfig = generateNginxConfig(configData);
         const configPath = `${NGINX_SITES_AVAILABLE}/${serviceData.domain}`;
-        await writeFile(configPath, nginxConfig);
+        await writeNginxConfig(configPath, nginxConfig);
 
         // Enable the site (use execOnHost for Docker compatibility)
         const enabledPath = `${NGINX_SITES_ENABLED}/${serviceData.domain}`;
@@ -2945,7 +2954,7 @@ servicesRouter.post('/discover/import', async (req, res) => {
 
       const nginxConfig = generateNginxConfig(serviceConfig);
       const configPath = `${NGINX_SITES_AVAILABLE}/${domain}`;
-      await writeFile(configPath, nginxConfig);
+      await writeNginxConfig(configPath, nginxConfig);
 
       // Ensure symlink exists
       const enabledPath = `${NGINX_SITES_ENABLED}/${domain}`;

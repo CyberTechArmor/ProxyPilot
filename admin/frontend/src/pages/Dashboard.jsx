@@ -2008,7 +2008,6 @@ volumes:
 
   // File Management Functions
   const openEditor = async (service) => {
-    setSelectedService(service);
     setFiles([]);
     setSelectedFile(null);
     setFileContent('');
@@ -2019,9 +2018,15 @@ volumes:
     setExpandedDirs({});
 
     try {
+      // Fetch fresh service data to ensure we have the latest path
+      const { service: freshService } = await api.getService(service.id);
+      setSelectedService(freshService);
+
       const { files } = await api.getFiles(service.id);
       setFiles(files);
     } catch (error) {
+      // Fallback to passed service if fetch fails
+      setSelectedService(service);
       toast({
         variant: 'destructive',
         title: 'Error',
@@ -2031,23 +2036,41 @@ volumes:
   };
 
   // Service Settings Functions
-  const openSettings = (service) => {
-    setSettingsService(service);
-    setSettingsForm({
-      target: service.target || '127.0.0.1',
-      port: service.port || '',
-      websocketEnabled: service.websocketEnabled || false,
-      forceHttps: service.forceHttps !== false,
-      maxUploadSize: service.maxUploadSize || '1G',
-      sslEnabled: service.sslEnabled !== false,
-      rootDir: service.rootDir || '',
-      dataDir: service.dataDir || '',
-    });
+  const openSettings = async (service) => {
+    setSettingsDialogOpen(true);
     setSettingsTab('settings');
     setConfigVersions([]);
     setNginxConfig('');
     setNginxConfigOriginal('');
-    setSettingsDialogOpen(true);
+
+    try {
+      // Fetch fresh service data to ensure we have the latest settings
+      const { service: freshService } = await api.getService(service.id);
+      setSettingsService(freshService);
+      setSettingsForm({
+        target: freshService.target || '127.0.0.1',
+        port: freshService.port || '',
+        websocketEnabled: freshService.websocketEnabled || false,
+        forceHttps: freshService.forceHttps !== false,
+        maxUploadSize: freshService.maxUploadSize || '1G',
+        sslEnabled: freshService.sslEnabled !== false,
+        rootDir: freshService.rootDir || '',
+        dataDir: freshService.dataDir || '',
+      });
+    } catch (error) {
+      // Fallback to passed service if fetch fails
+      setSettingsService(service);
+      setSettingsForm({
+        target: service.target || '127.0.0.1',
+        port: service.port || '',
+        websocketEnabled: service.websocketEnabled || false,
+        forceHttps: service.forceHttps !== false,
+        maxUploadSize: service.maxUploadSize || '1G',
+        sslEnabled: service.sslEnabled !== false,
+        rootDir: service.rootDir || '',
+        dataDir: service.dataDir || '',
+      });
+    }
   };
 
   // Fetch nginx config for advanced editing
@@ -3716,8 +3739,8 @@ volumes:
 
       {/* Docker Compose Create Dialog */}
       <Dialog open={composeCreateOpen} onOpenChange={setComposeCreateOpen}>
-        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
-          <DialogHeader>
+        <DialogContent className="max-w-4xl h-[90vh] flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Boxes className="h-5 w-5 text-purple-500" />
               Create Docker Compose Service
@@ -3726,8 +3749,8 @@ volumes:
               Define your docker-compose.yml and start the containers
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 flex-1 overflow-auto">
-            <div className="space-y-2">
+          <div className="flex flex-col flex-1 min-h-0 gap-4 overflow-hidden">
+            <div className="space-y-2 shrink-0">
               <Label htmlFor="composeServiceName">Service Name</Label>
               <Input
                 id="composeServiceName"
@@ -3739,21 +3762,22 @@ volumes:
                 Folder will be created at: /root/docker/{composeCreateForm.serviceName?.toLowerCase().replace(/\s+/g, '-') || 'my-app'}
               </p>
             </div>
-            <div className="space-y-2 flex-1">
+            <div className="flex flex-col flex-1 min-h-0 space-y-2">
               <Label>docker-compose.yml</Label>
-              <div className="border rounded-md overflow-hidden h-64">
+              <div className="border rounded-md overflow-hidden flex-1 min-h-0">
                 <CodeMirror
                   value={composeCreateForm.composeContent}
                   height="100%"
                   extensions={[yaml()]}
                   theme={oneDark}
                   onChange={(value) => setComposeCreateForm(prev => ({ ...prev, composeContent: value }))}
+                  className="h-full"
                 />
               </div>
             </div>
 
             {/* Environment Variables Section */}
-            <div className="space-y-2 border-t pt-4">
+            <div className="space-y-2 border-t pt-4 shrink-0">
               <div className="flex items-center justify-between">
                 <Label className="flex items-center gap-2">
                   <FileText className="h-4 w-4" />
@@ -3816,7 +3840,7 @@ volumes:
               )}
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button variant="outline" onClick={() => setComposeCreateOpen(false)}>Cancel</Button>
             <Button
               onClick={handleCreateCompose}
@@ -4547,7 +4571,7 @@ volumes:
 
       {/* Service Settings Dialog */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className={settingsTab === 'nginx' ? 'max-w-5xl h-[90vh] flex flex-col' : 'max-w-lg max-h-[90vh] overflow-y-auto'}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Server className="h-5 w-5" />
@@ -4715,8 +4739,8 @@ volumes:
           </>
           ) : settingsTab === 'nginx' ? (
           /* Advanced Nginx Tab */
-          <div className="space-y-4 py-4">
-            <div className="flex items-center justify-between">
+          <div className="flex flex-col flex-1 min-h-0 py-4 gap-4">
+            <div className="flex items-center justify-between shrink-0">
               <div>
                 <h4 className="font-medium text-sm">NGINX Configuration</h4>
                 <p className="text-xs text-muted-foreground">Edit the raw nginx config file for this service</p>
@@ -4726,14 +4750,14 @@ volumes:
               )}
             </div>
             {loadingNginxConfig ? (
-              <div className="flex items-center justify-center py-8">
+              <div className="flex items-center justify-center flex-1">
                 <Loader2 className="h-6 w-6 animate-spin" />
               </div>
             ) : (
-              <div className="border rounded-lg overflow-hidden">
+              <div className="border rounded-lg overflow-hidden flex-1 min-h-0">
                 <CodeMirror
                   value={nginxConfig}
-                  height="300px"
+                  height="100%"
                   theme={oneDark}
                   onChange={(value) => setNginxConfig(value)}
                   basicSetup={{
@@ -4741,15 +4765,16 @@ volumes:
                     highlightActiveLineGutter: true,
                     foldGutter: true,
                   }}
+                  className="h-full"
                 />
               </div>
             )}
-            <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+            <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg shrink-0">
               <p className="text-xs text-yellow-500">
                 <strong>Warning:</strong> Invalid configurations will be automatically reverted. The config will be tested before reload.
               </p>
             </div>
-            <DialogFooter>
+            <DialogFooter className="shrink-0">
               <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Cancel</Button>
               <Button
                 onClick={saveNginxConfig}

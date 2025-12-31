@@ -233,6 +233,14 @@ export const api = {
     method: 'POST',
   }),
 
+  // Nginx Config (Advanced)
+  getNginxConfig: (serviceId) => request(`/services/${serviceId}/nginx-config`),
+
+  saveNginxConfig: (serviceId, config) => request(`/services/${serviceId}/nginx-config`, {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  }),
+
   // System Security
   secureSystem: (totpCode) => request('/services/system/secure', {
     method: 'POST',

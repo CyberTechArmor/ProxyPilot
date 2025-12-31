@@ -177,10 +177,16 @@ export default function Dashboard() {
     forceHttps: true,
     maxUploadSize: '1G',
     sslEnabled: true,
+    rootDir: '',
+    dataDir: '',
   });
+  const [settingsTab, setSettingsTab] = useState('settings'); // 'settings', 'history', or 'nginx'
   const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState('settings'); // 'settings' or 'history'
   const [configVersions, setConfigVersions] = useState([]);
+  const [nginxConfig, setNginxConfig] = useState('');
+  const [nginxConfigOriginal, setNginxConfigOriginal] = useState('');
+  const [loadingNginxConfig, setLoadingNginxConfig] = useState(false);
+  const [savingNginxConfig, setSavingNginxConfig] = useState(false);
   const [loadingConfigVersions, setLoadingConfigVersions] = useState(false);
   const [revertingVersion, setRevertingVersion] = useState(null);
 
@@ -2034,10 +2040,56 @@ volumes:
       forceHttps: service.forceHttps !== false,
       maxUploadSize: service.maxUploadSize || '1G',
       sslEnabled: service.sslEnabled !== false,
+      rootDir: service.rootDir || '',
+      dataDir: service.dataDir || '',
     });
     setSettingsTab('settings');
     setConfigVersions([]);
+    setNginxConfig('');
+    setNginxConfigOriginal('');
     setSettingsDialogOpen(true);
+  };
+
+  // Fetch nginx config for advanced editing
+  const fetchNginxConfig = async () => {
+    if (!settingsService) return;
+    setLoadingNginxConfig(true);
+    try {
+      const { config } = await api.getNginxConfig(settingsService.id);
+      setNginxConfig(config);
+      setNginxConfigOriginal(config);
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to load nginx config',
+      });
+    } finally {
+      setLoadingNginxConfig(false);
+    }
+  };
+
+  // Save nginx config with failsafe revert
+  const saveNginxConfig = async () => {
+    if (!settingsService) return;
+    setSavingNginxConfig(true);
+    try {
+      await api.saveNginxConfig(settingsService.id, nginxConfig);
+      setNginxConfigOriginal(nginxConfig);
+      toast({
+        title: 'Success',
+        description: 'Nginx configuration saved and reloaded',
+      });
+      fetchConfigVersions();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message || 'Failed to save nginx config',
+      });
+    } finally {
+      setSavingNginxConfig(false);
+    }
   };
 
   const fetchConfigVersions = async () => {
@@ -2087,6 +2139,8 @@ volumes:
         forceHttps: settingsForm.forceHttps,
         maxUploadSize: settingsForm.maxUploadSize,
         sslEnabled: settingsForm.sslEnabled,
+        rootDir: settingsForm.rootDir || undefined,
+        dataDir: settingsForm.dataDir || undefined,
       });
       toast({
         title: 'Success',
@@ -2404,13 +2458,13 @@ volumes:
   const getServiceIcon = (type) => {
     switch (type) {
       case 'proxy':
-        return <Server className="h-5 w-5" />;
+        return <Server className="h-5 w-5 text-orange-500" />;
       case 'static':
-        return <FolderOpen className="h-5 w-5" />;
+        return <FolderOpen className="h-5 w-5 text-blue-500" />;
       case 'docker':
-        return <Container className="h-5 w-5" />;
+        return <Container className="h-5 w-5 text-purple-500" />;
       default:
-        return <Globe className="h-5 w-5" />;
+        return <Globe className="h-5 w-5 text-green-500" />;
     }
   };
 
@@ -4465,6 +4519,17 @@ volumes:
               Settings
             </Button>
             <Button
+              variant={settingsTab === 'nginx' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => {
+                setSettingsTab('nginx');
+                fetchNginxConfig();
+              }}
+            >
+              <Code className="h-4 w-4 mr-2" />
+              Advanced
+            </Button>
+            <Button
               variant={settingsTab === 'history' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => {
@@ -4484,10 +4549,29 @@ volumes:
             <div className="p-3 bg-muted rounded-lg space-y-1">
               <p className="text-sm"><span className="text-muted-foreground">Domain:</span> {settingsService?.domain}</p>
               <p className="text-sm"><span className="text-muted-foreground">Type:</span> <span className="capitalize">{settingsService?.type}</span></p>
-              {settingsService?.dataDir && (
-                <p className="text-sm"><span className="text-muted-foreground">Path:</span> <code className="text-xs bg-background px-1 rounded">{settingsService?.dataDir}</code></p>
-              )}
             </div>
+
+            {/* File Path Settings (for static sites) */}
+            {settingsService?.type === 'static' && (
+              <div className="space-y-3">
+                <h4 className="font-medium text-sm">Static Site Path</h4>
+                <div className="space-y-2">
+                  <Label htmlFor="rootDir">Website Root Directory</Label>
+                  <Input
+                    id="rootDir"
+                    value={settingsForm.rootDir}
+                    onChange={(e) => {
+                      const newPath = e.target.value;
+                      setSettingsForm({ ...settingsForm, rootDir: newPath, dataDir: newPath });
+                    }}
+                    placeholder="/var/www/mysite"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The directory containing your website files (used by NGINX, file editor, and terminal)
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Proxy Settings (for docker/proxy types) */}
             {(settingsService?.type === 'docker' || settingsService?.type === 'proxy') && (
@@ -4579,6 +4663,56 @@ volumes:
             </Button>
           </DialogFooter>
           </>
+          ) : settingsTab === 'nginx' ? (
+          /* Advanced Nginx Tab */
+          <div className="space-y-4 py-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="font-medium text-sm">NGINX Configuration</h4>
+                <p className="text-xs text-muted-foreground">Edit the raw nginx config file for this service</p>
+              </div>
+              {nginxConfig !== nginxConfigOriginal && (
+                <span className="text-xs text-yellow-500">Unsaved changes</span>
+              )}
+            </div>
+            {loadingNginxConfig ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+              </div>
+            ) : (
+              <div className="border rounded-lg overflow-hidden">
+                <CodeMirror
+                  value={nginxConfig}
+                  height="300px"
+                  theme={oneDark}
+                  onChange={(value) => setNginxConfig(value)}
+                  basicSetup={{
+                    lineNumbers: true,
+                    highlightActiveLineGutter: true,
+                    foldGutter: true,
+                  }}
+                />
+              </div>
+            )}
+            <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+              <p className="text-xs text-yellow-500">
+                <strong>Warning:</strong> Invalid configurations will be automatically reverted. The config will be tested before reload.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Cancel</Button>
+              <Button
+                onClick={saveNginxConfig}
+                disabled={savingNginxConfig || nginxConfig === nginxConfigOriginal}
+              >
+                {savingNginxConfig ? (
+                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>
+                ) : (
+                  <><Save className="mr-2 h-4 w-4" />Save & Reload</>
+                )}
+              </Button>
+            </DialogFooter>
+          </div>
           ) : (
           /* History Tab */
           <div className="space-y-4 py-4">

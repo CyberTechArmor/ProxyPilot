@@ -40,25 +40,16 @@ async function execOnHost(command, options = {}) {
   }
 }
 
-// Write nginx config file (handles Docker compatibility)
+// Write nginx config file
+// Note: Since /etc/nginx/sites-available is a mounted volume in Docker,
+// regular writeFile works. Only shell commands (nginx -t, ln, etc.) need execOnHost.
 async function writeNginxConfig(configPath, content) {
-  if (isInDocker) {
-    // Use heredoc to write file content via execOnHost
-    // This handles multiline content and special characters properly
-    await execOnHost(`cat > ${JSON.stringify(configPath)} << 'NGINXCONFIGEOF'\n${content}\nNGINXCONFIGEOF`);
-  } else {
-    await writeFile(configPath, content);
-  }
+  await writeFile(configPath, content);
 }
 
-// Read nginx config file (handles Docker compatibility)
+// Read nginx config file
 async function readNginxConfig(configPath) {
-  if (isInDocker) {
-    const result = await execOnHost(`cat ${JSON.stringify(configPath)} 2>/dev/null`);
-    return result.stdout;
-  } else {
-    return readFile(configPath, 'utf-8');
-  }
+  return readFile(configPath, 'utf-8');
 }
 
 // Cache for docker compose command detection
@@ -496,28 +487,19 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
 
     // First, backup ALL existing configs (not just DB services)
     // This ensures we can revert if anything fails
+    // Note: /etc/nginx/sites-available is a mounted volume, so we can use fs directly
     try {
       let configFiles = [];
-      if (isInDocker) {
-        const result = await execOnHost(`ls -1 ${JSON.stringify(NGINX_SITES_AVAILABLE)} 2>/dev/null || echo ""`);
-        configFiles = result.stdout.trim().split('\n').filter(Boolean);
-      } else if (existsSync(NGINX_SITES_AVAILABLE)) {
+      if (existsSync(NGINX_SITES_AVAILABLE)) {
         configFiles = await readdir(NGINX_SITES_AVAILABLE);
       }
 
       for (const file of configFiles) {
         if (file === '.' || file === '..') continue;
         try {
-          if (isInDocker) {
-            const result = await execOnHost(`cat ${JSON.stringify(NGINX_SITES_AVAILABLE + '/' + file)} 2>/dev/null || echo ""`);
-            if (result.stdout.trim()) {
-              backups[file] = result.stdout;
-            }
-          } else {
-            const configPath = `${NGINX_SITES_AVAILABLE}/${file}`;
-            if (existsSync(configPath)) {
-              backups[file] = await readFile(configPath, 'utf-8');
-            }
+          const configPath = `${NGINX_SITES_AVAILABLE}/${file}`;
+          if (existsSync(configPath)) {
+            backups[file] = await readFile(configPath, 'utf-8');
           }
         } catch (e) {
           console.log(`Could not backup config ${file}:`, e.message);
@@ -529,7 +511,15 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
     }
 
     // Generate and write new configs for services in database
+    // Skip admin service - its config is managed by the installer with special settings
     for (const service of services) {
+      // Skip admin service - it has special nginx config created by installer
+      if (service.is_admin) {
+        console.log(`Skipping admin service: ${service.domain}`);
+        results.success.push(`${service.domain} (skipped - admin)`);
+        continue;
+      }
+
       try {
         const serviceConfig = {
           domain: service.domain,
@@ -546,7 +536,7 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
         const nginxConfig = generateNginxConfig(serviceConfig);
         const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
 
-        // Write config using helper for Docker compatibility
+        // Write config
         await writeNginxConfig(configPath, nginxConfig);
 
         // Ensure symlink exists

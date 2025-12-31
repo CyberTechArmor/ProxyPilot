@@ -4309,6 +4309,56 @@ volumes:
             </div>
           </DialogHeader>
 
+          {/* Path Picker for Static Sites */}
+          {selectedService?.type === 'static' && (
+            <div className="p-3 bg-muted/50 rounded-lg border mb-2 shrink-0">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="editorPath" className="text-sm font-medium whitespace-nowrap">Site Path:</Label>
+                <Input
+                  id="editorPath"
+                  defaultValue={selectedService?.dataDir || selectedService?.rootDir || ''}
+                  key={selectedService?.id}
+                  placeholder="/var/www/mysite"
+                  className="flex-1 h-8 text-sm font-mono"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.target.blur();
+                    }
+                  }}
+                  onBlur={async (e) => {
+                    const newPath = e.target.value.trim();
+                    const currentPath = selectedService?.dataDir || selectedService?.rootDir || '';
+                    if (newPath && newPath !== currentPath) {
+                      try {
+                        await api.updateService(selectedService.id, { rootDir: newPath, dataDir: newPath });
+                        setSelectedService({ ...selectedService, rootDir: newPath, dataDir: newPath });
+                        // Refresh file list
+                        const { files: newFiles } = await api.getFiles(selectedService.id);
+                        setFiles(newFiles);
+                        fetchServices(); // Refresh services list too
+                        toast({ title: 'Success', description: 'Path updated successfully' });
+                      } catch (error) {
+                        toast({ variant: 'destructive', title: 'Error', description: error.message });
+                        e.target.value = currentPath; // Revert on error
+                      }
+                    }
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openTerminal(selectedService?.dataDir || selectedService?.rootDir)}
+                  title="Open Terminal in this directory"
+                >
+                  <Terminal className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Press Enter or click outside to save. This path is used by the file editor, terminal, and NGINX.
+              </p>
+            </div>
+          )}
+
           <div className="flex gap-4 flex-1 min-h-0">
             {/* File Tree */}
             <div className="w-64 shrink-0 border rounded flex flex-col">

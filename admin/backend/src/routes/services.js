@@ -2756,16 +2756,13 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 
     const discoveredSites = [];
 
-    // Use execOnHost to read from host filesystem when running in Docker
+    // Note: /etc/nginx/sites-available is a mounted volume in Docker, so we can use fs directly
     const sitesDir = NGINX_SITES_AVAILABLE;
 
     // Get list of files in sites-available
     let files = [];
     try {
-      if (isInDocker) {
-        const result = await execOnHost(`ls -1 ${JSON.stringify(sitesDir)} 2>/dev/null || echo ""`);
-        files = result.stdout.trim().split('\n').filter(Boolean);
-      } else if (existsSync(sitesDir)) {
+      if (existsSync(sitesDir)) {
         files = await readdir(sitesDir);
       }
     } catch (e) {
@@ -2779,16 +2776,10 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 
       try {
         // Read config content
-        let content = '';
-        if (isInDocker) {
-          const result = await execOnHost(`cat ${JSON.stringify(join(sitesDir, file))} 2>/dev/null || echo ""`);
-          content = result.stdout;
-        } else {
-          const configPath = join(sitesDir, file);
-          const stats = await stat(configPath);
-          if (!stats.isFile()) continue;
-          content = await readFile(configPath, 'utf-8');
-        }
+        const configPath = join(sitesDir, file);
+        const stats = await stat(configPath);
+        if (!stats.isFile()) continue;
+        const content = await readFile(configPath, 'utf-8');
 
         if (!content.trim()) continue;
 

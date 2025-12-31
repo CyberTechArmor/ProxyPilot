@@ -464,14 +464,28 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
   }
 });
 
-// Regenerate all NGINX configs
+// Regenerate all NGINX configs with backup/revert capability
 servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
   try {
     const db = getDb();
     const services = db.prepare('SELECT * FROM services').all();
 
     const results = { success: [], failed: [] };
+    const backups = {}; // Store backups of original configs
 
+    // First, backup all existing configs
+    for (const service of services) {
+      const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+      try {
+        if (existsSync(configPath)) {
+          backups[service.domain] = await readFile(configPath, 'utf-8');
+        }
+      } catch (e) {
+        // No backup available
+      }
+    }
+
+    // Generate and write new configs
     for (const service of services) {
       try {
         const serviceConfig = {
@@ -500,8 +514,66 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
       }
     }
 
-    // Reload NGINX
+    // Test nginx config before reload
+    let testPassed = false;
+    try {
+      await execOnHost('nginx -t 2>&1');
+      testPassed = true;
+    } catch (testError) {
+      console.error('NGINX config test failed:', testError.stderr || testError.message);
+    }
+
+    if (!testPassed) {
+      // Config test failed - revert all configs from backup
+      console.log('NGINX config test failed, reverting all configs...');
+      for (const service of services) {
+        if (backups[service.domain]) {
+          const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+          try {
+            await writeFile(configPath, backups[service.domain]);
+          } catch (e) {
+            console.error(`Failed to revert config for ${service.domain}:`, e);
+          }
+        }
+      }
+
+      logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Config test failed, reverted' }, req.ip);
+
+      return res.status(400).json({
+        success: false,
+        error: 'NGINX config test failed - all configs reverted to previous versions',
+        results,
+      });
+    }
+
+    // Test passed, reload NGINX
     const reloadResult = await reloadNginx();
+
+    if (!reloadResult.success) {
+      // Reload failed - revert all configs from backup
+      console.log('NGINX reload failed, reverting all configs...');
+      for (const service of services) {
+        if (backups[service.domain]) {
+          const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+          try {
+            await writeFile(configPath, backups[service.domain]);
+          } catch (e) {
+            console.error(`Failed to revert config for ${service.domain}:`, e);
+          }
+        }
+      }
+      // Try to reload again with reverted configs
+      await reloadNginx().catch(() => {});
+
+      logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Reload failed, reverted' }, req.ip);
+
+      return res.status(400).json({
+        success: false,
+        error: 'NGINX reload failed - all configs reverted to previous versions',
+        details: reloadResult.error,
+        results,
+      });
+    }
 
     logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATED', 'system', null, results, req.ip);
 
@@ -3035,7 +3107,14 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
+
+    # SSL settings (inline to avoid dependency on external files)
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
 
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;

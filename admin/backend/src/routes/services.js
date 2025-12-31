@@ -953,17 +953,52 @@ servicesRouter.put('/:id', async (req, res) => {
       await unlink(`${NGINX_SITES_AVAILABLE}/${service.domain}`).catch(() => {});
     }
 
+    // Backup existing nginx config before changes
+    const configPath = `${NGINX_SITES_AVAILABLE}/${updatedData.domain}`;
+    let backupConfig = null;
+    try {
+      if (existsSync(configPath)) {
+        backupConfig = await readFile(configPath, 'utf-8');
+      }
+    } catch (e) {
+      // No backup available
+    }
+
     // Generate and write new NGINX config
     const nginxConfig = generateNginxConfig(updatedData);
-    const configPath = `${NGINX_SITES_AVAILABLE}/${updatedData.domain}`;
     await writeFile(configPath, nginxConfig);
 
     const enabledPath = `${NGINX_SITES_ENABLED}/${updatedData.domain}`;
     await execAsync(`ln -sf "${configPath}" "${enabledPath}"`);
 
-    // Test and reload NGINX
-    await execAsync('nginx -t');
-    await execAsync('systemctl reload nginx || nginx -s reload').catch(() => {});
+    // Test nginx config before reload
+    try {
+      await execOnHost('nginx -t 2>&1');
+    } catch (testError) {
+      // Config test failed - revert to backup
+      if (backupConfig) {
+        await writeFile(configPath, backupConfig);
+      }
+      return res.status(400).json({
+        error: 'NGINX config test failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // Reload NGINX with failsafe
+    try {
+      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+    } catch (reloadError) {
+      // Reload failed - revert to backup
+      if (backupConfig) {
+        await writeFile(configPath, backupConfig);
+        await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
+      }
+      return res.status(400).json({
+        error: 'NGINX reload failed - reverted to previous config',
+        details: reloadError.stderr || reloadError.message,
+      });
+    }
 
     // Update database
     db.prepare(`

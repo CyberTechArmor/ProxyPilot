@@ -867,6 +867,7 @@ servicesRouter.put('/:id', async (req, res) => {
       target: data.target !== undefined ? data.target : service.target,
       port: data.port !== undefined ? data.port : service.port,
       rootDir: data.rootDir !== undefined ? data.rootDir : service.root_dir,
+      dataDir: data.dataDir !== undefined ? data.dataDir : service.data_dir,
       containerName: data.containerName !== undefined ? data.containerName : service.container_name,
       sslEnabled: data.sslEnabled !== undefined ? data.sslEnabled : !!service.ssl_enabled,
       forceHttps: data.forceHttps !== undefined ? data.forceHttps : !!service.force_https,
@@ -896,14 +897,14 @@ servicesRouter.put('/:id', async (req, res) => {
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, type = ?, target = ?, port = ?,
-        root_dir = ?, container_name = ?, ssl_enabled = ?,
+        root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
         force_https = ?, websocket_enabled = ?, max_upload_size = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
       updatedData.name, updatedData.domain, updatedData.type,
       updatedData.target, updatedData.port, updatedData.rootDir,
-      updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
+      updatedData.dataDir, updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
       updatedData.maxUploadSize, req.params.id
     );
@@ -1055,6 +1056,111 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
   } catch (error) {
     console.error('Error reverting config:', error);
     res.status(500).json({ error: 'Failed to revert config: ' + error.message });
+  }
+});
+
+// Get nginx config for advanced editing
+servicesRouter.get('/:id/nginx-config', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db.prepare('SELECT domain FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+
+    if (!existsSync(configPath)) {
+      return res.status(404).json({ error: 'Nginx config not found' });
+    }
+
+    const config = await readFile(configPath, 'utf-8');
+    res.json({ config });
+  } catch (error) {
+    console.error('Error reading nginx config:', error);
+    res.status(500).json({ error: 'Failed to read nginx config' });
+  }
+});
+
+// Save nginx config with failsafe revert on reload failure
+servicesRouter.put('/:id/nginx-config', async (req, res) => {
+  try {
+    const { config } = req.body;
+    const db = getDb();
+    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+
+    // Read and backup current config
+    let backupConfig = null;
+    if (existsSync(configPath)) {
+      backupConfig = await readFile(configPath, 'utf-8');
+    }
+
+    // Write new config
+    await writeFile(configPath, config);
+
+    // Test nginx config
+    try {
+      await execOnHost('nginx -t 2>&1');
+    } catch (testError) {
+      // Config test failed - revert to backup
+      if (backupConfig) {
+        await writeFile(configPath, backupConfig);
+      }
+      return res.status(400).json({
+        error: 'Nginx config test failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // Try to reload nginx
+    try {
+      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+    } catch (reloadError) {
+      // Reload failed - revert to backup
+      if (backupConfig) {
+        await writeFile(configPath, backupConfig);
+        // Try to reload with old config
+        await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
+      }
+      return res.status(400).json({
+        error: 'Nginx reload failed - reverted to previous config',
+        details: reloadError.stderr || reloadError.message,
+      });
+    }
+
+    // Save version to history
+    const versionId = uuidv4();
+    const lastVersion = db.prepare(`
+      SELECT MAX(version) as maxVersion FROM service_config_versions WHERE service_id = ?
+    `).get(req.params.id);
+    const newVersion = (lastVersion?.maxVersion || 0) + 1;
+
+    db.prepare(`
+      INSERT INTO service_config_versions (
+        id, service_id, version, config, notes, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      versionId,
+      req.params.id,
+      newVersion,
+      JSON.stringify({ rawNginxConfig: config }),
+      'Manual nginx config edit',
+      req.user.username
+    );
+
+    logAudit(req.user.id, 'NGINX_CONFIG_EDITED', 'service', req.params.id, { domain: service.domain }, req.ip);
+
+    res.json({ success: true, message: 'Nginx config saved and reloaded' });
+  } catch (error) {
+    console.error('Error saving nginx config:', error);
+    res.status(500).json({ error: 'Failed to save nginx config: ' + error.message });
   }
 });
 

@@ -1127,7 +1127,37 @@ const updateProgress = {
 
 // Find git executable (on host if in Docker)
 function findGit() {
-  const gitPaths = ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', 'git'];
+  // Allow override via environment variable
+  if (process.env.GIT_PATH) {
+    try {
+      execOnHost(`${process.env.GIT_PATH} --version`, { timeout: 5000 });
+      return process.env.GIT_PATH;
+    } catch (e) {
+      console.error(`GIT_PATH env var set to ${process.env.GIT_PATH} but git not found there`);
+    }
+  }
+
+  // Try using 'which' first to find git in PATH
+  try {
+    const result = execOnHost('which git', { timeout: 5000 });
+    const foundPath = result.trim();
+    if (foundPath) {
+      execOnHost(`${foundPath} --version`, { timeout: 5000 });
+      return foundPath;
+    }
+  } catch (e) {
+    // which failed, try common paths
+  }
+
+  // Common git installation paths (including nvm, homebrew, snap, etc.)
+  const gitPaths = [
+    '/usr/bin/git',
+    '/usr/local/bin/git',
+    '/opt/homebrew/bin/git',
+    '/snap/bin/git',
+    '/home/linuxbrew/.linuxbrew/bin/git',
+  ];
+
   for (const gitPath of gitPaths) {
     try {
       execOnHost(`${gitPath} --version`, { timeout: 5000 });
@@ -1141,7 +1171,37 @@ function findGit() {
 
 // Find npm executable (on host if in Docker)
 function findNpm() {
-  const npmPaths = ['/usr/bin/npm', '/usr/local/bin/npm', '/opt/homebrew/bin/npm', 'npm'];
+  // Allow override via environment variable
+  if (process.env.NPM_PATH) {
+    try {
+      execOnHost(`${process.env.NPM_PATH} --version`, { timeout: 5000 });
+      return process.env.NPM_PATH;
+    } catch (e) {
+      console.error(`NPM_PATH env var set to ${process.env.NPM_PATH} but npm not found there`);
+    }
+  }
+
+  // Try using 'which' first to find npm in PATH
+  try {
+    const result = execOnHost('which npm', { timeout: 5000 });
+    const foundPath = result.trim();
+    if (foundPath) {
+      execOnHost(`${foundPath} --version`, { timeout: 5000 });
+      return foundPath;
+    }
+  } catch (e) {
+    // which failed, try common paths
+  }
+
+  // Common npm installation paths (including nvm, homebrew, snap, etc.)
+  const npmPaths = [
+    '/usr/bin/npm',
+    '/usr/local/bin/npm',
+    '/opt/homebrew/bin/npm',
+    '/snap/bin/npm',
+    '/home/linuxbrew/.linuxbrew/bin/npm',
+  ];
+
   for (const npmPath of npmPaths) {
     try {
       execOnHost(`${npmPath} --version`, { timeout: 5000 });
@@ -1171,17 +1231,37 @@ userRouter.post('/version/update', requireAdmin, async (req, res) => {
 
     if (!gitCmd) {
       updateProgress.status = 'error';
-      updateProgress.message = 'Git is not installed on this server. Please install git first.';
-      updateProgress.logs.push('Error: Git not found in PATH or common locations');
-      updateProgress.logs.push('Install git: apt-get install git (Debian/Ubuntu) or yum install git (CentOS/RHEL)');
-      return res.status(400).json({ error: 'Git is not installed on this server' });
+      updateProgress.message = 'Git not found on host. See logs for setup instructions.';
+      updateProgress.logs.push('Error: Git not found in PATH or common locations on the host system');
+      updateProgress.logs.push('');
+      updateProgress.logs.push('To fix this issue:');
+      updateProgress.logs.push('1. Install git on the HOST system (not inside Docker):');
+      updateProgress.logs.push('   Ubuntu/Debian: sudo apt-get install git');
+      updateProgress.logs.push('   CentOS/RHEL: sudo yum install git');
+      updateProgress.logs.push('');
+      updateProgress.logs.push('2. Or specify the git path in docker-compose.yml:');
+      updateProgress.logs.push('   environment:');
+      updateProgress.logs.push('     - GIT_PATH=/path/to/git');
+      updateProgress.logs.push('');
+      updateProgress.logs.push(`Running in Docker: ${isInDocker}`);
+      updateProgress.logs.push(`Host project root: ${HOST_PROJECT_ROOT}`);
+      return res.status(400).json({ error: 'Git not found on host system' });
     }
 
     if (!npmCmd) {
       updateProgress.status = 'error';
-      updateProgress.message = 'NPM is not installed on this server.';
-      updateProgress.logs.push('Error: NPM not found');
-      return res.status(400).json({ error: 'NPM is not installed on this server' });
+      updateProgress.message = 'NPM not found on host. See logs for setup instructions.';
+      updateProgress.logs.push('Error: NPM not found in PATH or common locations on the host system');
+      updateProgress.logs.push('');
+      updateProgress.logs.push('To fix this issue:');
+      updateProgress.logs.push('1. Install Node.js/NPM on the HOST system (not inside Docker):');
+      updateProgress.logs.push('   Ubuntu/Debian: sudo apt-get install nodejs npm');
+      updateProgress.logs.push('   Or use nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash');
+      updateProgress.logs.push('');
+      updateProgress.logs.push('2. Or specify the npm path in docker-compose.yml:');
+      updateProgress.logs.push('   environment:');
+      updateProgress.logs.push('     - NPM_PATH=/path/to/npm');
+      return res.status(400).json({ error: 'NPM not found on host system' });
     }
 
     // Send immediate response

@@ -181,35 +181,18 @@ export default function Layout() {
             <Download className="h-4 w-4" />
             <span className="text-sm">
               Update available: v{updateInfo.latestVersion} (current: v{version})
+              {' '}<span className="opacity-75">- Update via command line: git pull && npm run build</span>
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            {isAdmin && (
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={handleUpdate}
-                disabled={updating}
-              >
-                {updating ? (
-                  <>
-                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    Updating...
-                  </>
-                ) : (
-                  'Update Now'
-                )}
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleDismiss}
-              className="text-primary-foreground hover:bg-primary/80"
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleDismiss}
+            className="text-primary-foreground hover:bg-primary/80"
+            title="Dismiss"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
       )}
 

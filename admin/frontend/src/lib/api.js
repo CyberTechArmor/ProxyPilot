@@ -170,6 +170,11 @@ export const api = {
     body: JSON.stringify({ filePath, content, createDirs }),
   }),
 
+  uploadFileToDirectory: (directory, filename, content, encoding = 'base64') => request('/services/terminal/upload-file', {
+    method: 'POST',
+    body: JSON.stringify({ directory, filename, content, encoding }),
+  }),
+
   getSystemInfo: () => request('/services/terminal/system-info'),
 
   getSystemStats: () => request('/services/system/stats'),

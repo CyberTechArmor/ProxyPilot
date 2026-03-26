@@ -5,7 +5,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink, readdir, readFile, mkdir, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, basename } from 'path';
+import { join, basename, resolve } from 'path';
 import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit } from '../db.js';
@@ -81,6 +81,20 @@ async function getDockerComposeCmd() {
 // Helper to create safe directory name from service name
 function toSafeDirectoryName(name) {
   return name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+}
+
+// Safely resolve a file path within a base directory (prevents path traversal)
+function safePath(baseDir, userPath) {
+  const resolved = resolve(baseDir, userPath);
+  if (!resolved.startsWith(resolve(baseDir) + '/') && resolved !== resolve(baseDir)) {
+    return null;
+  }
+  return resolved;
+}
+
+// Escape HTML special characters to prevent XSS
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
 // Validation schemas
@@ -206,6 +220,11 @@ async function isCertbotInstalled() {
 
 // Helper function to obtain SSL certificate using certbot (on host)
 async function obtainSslCertificate(domain) {
+  // Validate domain to prevent command injection
+  if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(domain)) {
+    return { success: false, error: 'Invalid domain name' };
+  }
+
   try {
     // Check if certbot is installed on host
     const certbotAvailable = await isCertbotInstalled();
@@ -338,7 +357,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
 
     // Remove certificate using certbot on host
     try {
-      await execOnHost(`certbot delete --cert-name ${service.domain} --non-interactive 2>&1`);
+      await execOnHost(`certbot delete --cert-name ${JSON.stringify(service.domain)} --non-interactive 2>&1`);
     } catch (certbotError) {
       // If certbot delete fails, try manual removal on host
       const certDir = `/etc/letsencrypt/live/${service.domain}`;
@@ -773,7 +792,7 @@ servicesRouter.post('/', async (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${data.name}</title>
+    <title>${escapeHtml(data.name)}</title>
     <style>
         body { font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
         .container { text-align: center; padding: 2rem; }
@@ -783,7 +802,7 @@ servicesRouter.post('/', async (req, res) => {
 </head>
 <body>
     <div class="container">
-        <h1>Welcome to ${data.name}</h1>
+        <h1>Welcome to ${escapeHtml(data.name)}</h1>
         <p>Your static site is ready. Edit the files using ProxyPilot dashboard.</p>
     </div>
 </body>
@@ -813,7 +832,7 @@ services:
         await writeFile(composePath, defaultCompose);
         // Create html subdirectory
         await mkdir(join(dataDir, 'html'), { recursive: true });
-        await writeFile(join(dataDir, 'html', 'index.html'), `<h1>${data.name}</h1>`);
+        await writeFile(join(dataDir, 'html', 'index.html'), `<h1>${escapeHtml(data.name)}</h1>`);
       }
       // Set target to localhost
       data.target = data.target || '127.0.0.1';
@@ -1283,15 +1302,15 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
 
     db.prepare(`
       INSERT INTO service_config_versions (
-        id, service_id, version, config, notes, created_by
+        id, service_id, config_json, version, notes, created_by
       ) VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       versionId,
       req.params.id,
-      newVersion,
       JSON.stringify({ rawNginxConfig: config }),
+      newVersion,
       'Manual nginx config edit',
-      req.user.username
+      req.user.id
     );
 
     logAudit(req.user.id, 'NGINX_CONFIG_EDITED', 'service', req.params.id, { domain: service.domain }, req.ip);
@@ -1367,21 +1386,6 @@ servicesRouter.delete('/:id', async (req, res) => {
   }
 });
 
-// Get Docker containers
-servicesRouter.get('/docker/containers', async (req, res) => {
-  try {
-    const { stdout } = await execAsync('docker ps -a --format "{{.ID}}|{{.Names}}|{{.Ports}}|{{.Status}}"');
-    const containers = stdout.trim().split('\n').filter(Boolean).map(line => {
-      const [id, name, ports, status] = line.split('|');
-      return { id, name, ports, status };
-    });
-    res.json({ containers });
-  } catch (error) {
-    console.error('Error fetching containers:', error);
-    res.json({ containers: [], error: 'Failed to fetch Docker containers' });
-  }
-});
-
 // ==================== FILE MANAGEMENT ====================
 
 // List files for a service
@@ -1454,10 +1458,10 @@ servicesRouter.get('/:id/files/*', async (req, res) => {
     }
 
     const filePath = req.params[0];
-    const fullPath = join(service.data_dir, filePath);
+    const fullPath = safePath(service.data_dir, filePath);
 
     // Security: ensure path is within data_dir
-    if (!fullPath.startsWith(service.data_dir)) {
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1499,10 +1503,10 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
     }
 
     const filePath = req.params[0];
-    const fullPath = join(service.data_dir, filePath);
+    const fullPath = safePath(service.data_dir, filePath);
 
     // Security: ensure path is within data_dir
-    if (!fullPath.startsWith(service.data_dir)) {
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1574,15 +1578,15 @@ servicesRouter.delete('/:id/files/*', async (req, res) => {
     }
 
     const filePath = req.params[0];
-    const fullPath = join(service.data_dir, filePath);
+    const fullPath = safePath(service.data_dir, filePath);
 
     // Security: ensure path is within data_dir
-    if (!fullPath.startsWith(service.data_dir)) {
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
     // Prevent deleting root directory
-    if (fullPath === service.data_dir) {
+    if (fullPath === resolve(service.data_dir)) {
       return res.status(403).json({ error: 'Cannot delete root directory' });
     }
 
@@ -1764,10 +1768,10 @@ servicesRouter.post('/:id/upload/*', async (req, res) => {
     }
 
     const filePath = req.params[0];
-    const fullPath = join(service.data_dir, filePath);
+    const fullPath = safePath(service.data_dir, filePath);
 
     // Security check
-    if (!fullPath.startsWith(service.data_dir)) {
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1802,10 +1806,10 @@ servicesRouter.get('/:id/download/*', async (req, res) => {
     }
 
     const filePath = req.params[0];
-    const fullPath = join(service.data_dir, filePath);
+    const fullPath = safePath(service.data_dir, filePath);
 
     // Security check
-    if (!fullPath.startsWith(service.data_dir)) {
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1883,10 +1887,10 @@ servicesRouter.post('/:id/import-files', async (req, res) => {
 
     for (const file of files) {
       try {
-        const fullPath = join(service.data_dir, file.path);
+        const fullPath = safePath(service.data_dir, file.path);
 
         // Security check
-        if (!fullPath.startsWith(service.data_dir)) {
+        if (!fullPath) {
           results.errors.push({ path: file.path, error: 'Access denied' });
           continue;
         }
@@ -2220,9 +2224,16 @@ servicesRouter.post('/terminal/write-file', requireAdmin, async (req, res) => {
   try {
     const { filePath, content, createDirs } = fileWriteSchema.parse(req.body);
 
-    // Security: prevent writing to dangerous paths
-    const dangerousPaths = ['/etc/passwd', '/etc/shadow', '/etc/sudoers', '/root/.ssh/authorized_keys'];
-    if (dangerousPaths.some(p => filePath.includes(p))) {
+    // Security: resolve path and prevent writing to dangerous locations
+    const resolvedPath = resolve(filePath);
+    const dangerousPaths = ['/etc/passwd', '/etc/shadow', '/etc/sudoers', '/etc/sudoers.d'];
+    const dangerousDirs = ['/proc', '/sys', '/dev'];
+    const dangerousPatterns = ['.ssh/authorized_keys', '.ssh/id_'];
+    if (
+      dangerousPaths.some(p => resolvedPath === p) ||
+      dangerousDirs.some(d => resolvedPath.startsWith(d + '/') || resolvedPath === d) ||
+      dangerousPatterns.some(p => resolvedPath.includes(p))
+    ) {
       return res.status(403).json({ error: 'Writing to this path is not allowed' });
     }
 
@@ -2264,6 +2275,73 @@ servicesRouter.post('/terminal/write-file', requireAdmin, async (req, res) => {
     }
     console.error('File write error:', error);
     res.status(500).json({ error: 'Failed to write file: ' + error.message });
+  }
+});
+
+// Upload file to a directory (binary-safe via base64) - for terminal file browser
+const terminalUploadSchema = z.object({
+  directory: z.string().min(1).max(4096),
+  filename: z.string().min(1).max(255),
+  content: z.string().max(50 * 1024 * 1024), // 50MB max base64 content
+  encoding: z.enum(['base64', 'text']).default('base64'),
+});
+
+servicesRouter.post('/terminal/upload-file', requireAdmin, async (req, res) => {
+  try {
+    const { directory, filename, content, encoding } = terminalUploadSchema.parse(req.body);
+
+    // Validate filename - no path separators allowed
+    if (filename.includes('/') || filename.includes('\\') || filename === '..' || filename === '.') {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+
+    const filePath = resolve(directory, filename);
+
+    // Security: ensure resolved path stays within the target directory
+    if (!filePath.startsWith(resolve(directory) + '/') && filePath !== resolve(directory)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Security: prevent writing to dangerous locations
+    const dangerousDirs = ['/proc', '/sys', '/dev'];
+    if (dangerousDirs.some(d => filePath.startsWith(d + '/') || filePath === d)) {
+      return res.status(403).json({ error: 'Writing to this path is not allowed' });
+    }
+
+    // Ensure directory exists
+    if (isInDocker) {
+      await execOnHost(`mkdir -p ${JSON.stringify(directory)}`);
+    } else {
+      await mkdir(directory, { recursive: true });
+    }
+
+    // Write file
+    const fileContent = encoding === 'base64' ? Buffer.from(content, 'base64') : content;
+
+    if (isInDocker) {
+      const base64Content = encoding === 'base64' ? content : Buffer.from(content).toString('base64');
+      await execOnHost(`echo ${JSON.stringify(base64Content)} | base64 -d > ${JSON.stringify(filePath)}`, { timeout: 60000 });
+    } else {
+      await writeFile(filePath, fileContent);
+    }
+
+    logAudit(req.user.id, 'FILE_UPLOAD', 'system', null, {
+      filePath,
+      size: fileContent.length,
+    }, req.ip);
+
+    res.json({
+      success: true,
+      message: `File uploaded successfully: ${filename}`,
+      filePath,
+      size: fileContent.length,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('File upload error:', error);
+    res.status(500).json({ error: 'Failed to upload file: ' + error.message });
   }
 });
 
@@ -2313,12 +2391,17 @@ servicesRouter.post('/docker/container/:action', async (req, res) => {
       return res.status(400).json({ error: 'Container ID or name required' });
     }
 
+    // Validate container target (only alphanumeric, hyphens, underscores, dots, slashes)
+    if (!/^[a-zA-Z0-9_.\-\/]+$/.test(target)) {
+      return res.status(400).json({ error: 'Invalid container identifier' });
+    }
+
     const validActions = ['start', 'stop', 'restart', 'pause', 'unpause'];
     if (!validActions.includes(action)) {
       return res.status(400).json({ error: 'Invalid action' });
     }
 
-    const result = await execOnHost(`docker ${action} ${target} 2>&1`);
+    const result = await execOnHost(`docker ${action} ${JSON.stringify(target)} 2>&1`);
 
     logAudit(req.user.id, 'DOCKER_ACTION', 'container', target, { action }, req.ip);
 

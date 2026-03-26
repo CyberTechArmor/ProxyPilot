@@ -257,14 +257,25 @@ export function initDatabase() {
   // Check if admin user exists, create if not
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
 
-  if (!adminUser && process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
-    const passwordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 12);
+  if (!adminUser && process.env.ADMIN_USERNAME) {
     const userId = uuidv4();
 
-    db.prepare(`
-      INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled, role)
-      VALUES (?, ?, ?, ?, 1, 'admin')
-    `).run(userId, process.env.ADMIN_USERNAME, passwordHash, process.env.ADMIN_TOTP_SECRET || '');
+    if (process.env.ADMIN_PASSWORD) {
+      // Legacy mode: password provided via env (from older installs)
+      const passwordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 12);
+      db.prepare(`
+        INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled, role, password_change_required)
+        VALUES (?, ?, ?, ?, 1, 'admin', 0)
+      `).run(userId, process.env.ADMIN_USERNAME, passwordHash, process.env.ADMIN_TOTP_SECRET || '');
+      console.log('Admin user created with provided password');
+    } else {
+      // New mode: no password - user sets it from the web UI on first login
+      db.prepare(`
+        INSERT INTO users (id, username, password_hash, totp_secret, totp_enabled, role, password_change_required)
+        VALUES (?, ?, '', '', 0, 'admin', 1)
+      `).run(userId, process.env.ADMIN_USERNAME);
+      console.log('Admin user created - initial setup required via web UI');
+    }
 
     console.log('Admin user created');
 

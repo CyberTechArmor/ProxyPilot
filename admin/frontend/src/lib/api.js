@@ -26,9 +26,13 @@ async function request(endpoint, options = {}) {
   const data = await response.json();
 
   if (response.status === 401) {
-    // Don't redirect if this is a login attempt requiring TOTP or TOTP setup
-    if (data.totpRequired || data.totpSetupRequired) {
-      throw new ApiError(data.error || 'TOTP required', 401, data);
+    // Don't redirect if this is a login/setup attempt with special flow flags
+    if (data.totpRequired || data.totpSetupRequired || data.setupRequired) {
+      throw new ApiError(data.error || 'Authentication step required', 401, data);
+    }
+    // Don't redirect if already on login page (prevents "Session expired" on bad credentials)
+    if (window.location.pathname === '/login') {
+      throw new ApiError(data.error || 'Invalid credentials', 401, data);
     }
     localStorage.removeItem('token');
     localStorage.removeItem('user');
@@ -48,6 +52,18 @@ export const api = {
   login: (credentials) => request('/auth/login', {
     method: 'POST',
     body: JSON.stringify(credentials),
+  }),
+
+  getSetupStatus: () => request('/auth/setup-status'),
+
+  initialSetup: (data) => request('/auth/initial-setup', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  completeTotpSetup: (data) => request('/auth/complete-totp-setup', {
+    method: 'POST',
+    body: JSON.stringify(data),
   }),
 
   verify: () => request('/auth/verify'),

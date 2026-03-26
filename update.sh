@@ -281,6 +281,12 @@ else
         log "${GREEN}Started with PM2${NC}"
     else
         # Use nohup
+        # Source .env from install root if it exists (provides env vars to the process)
+        ENV_FILE="$SCRIPT_DIR/.env"
+        if [ -f "$ENV_FILE" ]; then
+            log "Loading environment from $ENV_FILE"
+            set -a; source "$ENV_FILE"; set +a
+        fi
         log "Using nohup..."
         nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
         NEW_PID=$!

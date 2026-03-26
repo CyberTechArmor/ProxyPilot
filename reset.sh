@@ -94,17 +94,16 @@ get_username() {
     grep "^ADMIN_USERNAME=" "$ENV_FILE" | cut -d'=' -f2
 }
 
-# Reset password
+# Reset password - clears password so user can set it from the web UI
 reset_password() {
     log_info "Resetting admin password..."
 
     local username=$(get_username)
-    local new_password=$(generate_password 24)
 
-    # Update the .env file with new password
-    sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${new_password}/" "$ENV_FILE"
+    # Clear password and TOTP in .env so the web setup flow triggers
+    sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=/" "$ENV_FILE"
 
-    # Delete the database to force re-initialization with new password
+    # Delete the database to force re-initialization without a password
     rm -f "${INSTALL_DIR}/data/proxypilot.db"
 
     # Restart the container
@@ -114,34 +113,33 @@ reset_password() {
 
     # Wait for container to be ready
     sleep 5
+
+    local domain=$(grep "^DOMAIN=" "$ENV_FILE" | cut -d'=' -f2)
 
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}                   ${GREEN}PASSWORD RESET COMPLETE${NC}                      ${GREEN}║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  Username: ${CYAN}${username}${NC}                                           ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Username: ${CYAN}${username}${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  New Password:                                                 ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}${new_password}${NC}         ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Open the dashboard to create a new password:                  ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}https://${domain}${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${YELLOW}IMPORTANT: Save this password securely! It will not be shown again.${NC}"
-    echo ""
 }
 
-# Reset TOTP
+# Reset TOTP - clears TOTP so user can set it up again from the web UI
 reset_totp() {
     log_info "Resetting TOTP secret..."
 
     local username=$(get_username)
-    local new_totp=$(generate_totp_secret)
 
-    # Update the .env file with new TOTP secret
-    sed -i "s/^ADMIN_TOTP_SECRET=.*/ADMIN_TOTP_SECRET=${new_totp}/" "$ENV_FILE"
+    # Clear TOTP in .env
+    sed -i "s/^ADMIN_TOTP_SECRET=.*/ADMIN_TOTP_SECRET=/" "$ENV_FILE"
 
-    # Delete the database to force re-initialization with new TOTP
+    # Delete the database to force re-initialization without TOTP
     rm -f "${INSTALL_DIR}/data/proxypilot.db"
 
     # Restart the container
@@ -152,29 +150,29 @@ reset_totp() {
     # Wait for container to be ready
     sleep 5
 
+    local domain=$(grep "^DOMAIN=" "$ENV_FILE" | cut -d'=' -f2)
+
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}                    ${GREEN}TOTP RESET COMPLETE${NC}                         ${GREEN}║${NC}"
+    echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Log in to the dashboard to set up new TOTP:                   ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}https://${domain}${NC}"
+    echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    generate_totp_qr "$new_totp" "$username"
-
-    echo -e "${YELLOW}IMPORTANT: Save this TOTP secret securely!${NC}"
     echo ""
 }
 
-# Full reset (password + TOTP)
+# Full reset (password + TOTP) - clears both for web-based setup
 full_reset() {
     log_info "Performing full credential reset..."
 
     local username=$(get_username)
-    local new_password=$(generate_password 24)
-    local new_totp=$(generate_totp_secret)
 
-    # Update the .env file
-    sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${new_password}/" "$ENV_FILE"
-    sed -i "s/^ADMIN_TOTP_SECRET=.*/ADMIN_TOTP_SECRET=${new_totp}/" "$ENV_FILE"
+    # Clear password and TOTP in .env
+    sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=/" "$ENV_FILE"
+    sed -i "s/^ADMIN_TOTP_SECRET=.*/ADMIN_TOTP_SECRET=/" "$ENV_FILE"
 
     # Delete the database to force re-initialization
     rm -f "${INSTALL_DIR}/data/proxypilot.db"
@@ -187,53 +185,54 @@ full_reset() {
     # Wait for container to be ready
     sleep 5
 
+    local domain=$(grep "^DOMAIN=" "$ENV_FILE" | cut -d'=' -f2)
+
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}                  ${GREEN}FULL RESET COMPLETE${NC}                           ${GREEN}║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  Username: ${CYAN}${username}${NC}                                           ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Username: ${CYAN}${username}${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  New Password:                                                 ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${YELLOW}${new_password}${NC}         ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Open the dashboard to set up your credentials:                ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}https://${domain}${NC}"
+    echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  You will be asked to:                                         ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}    1. Create a new password                                    ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}    2. Set up two-factor authentication (TOTP)                  ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}                                                                ${GREEN}║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-
-    generate_totp_qr "$new_totp" "$username"
-
-    echo -e "${YELLOW}IMPORTANT: Save these credentials securely! They will not be shown again.${NC}"
-    echo ""
 }
 
-# Show current credentials (from .env file)
+# Show current configuration
 show_credentials() {
-    log_info "Current credentials from configuration:"
+    log_info "Current configuration:"
     echo ""
 
     local username=$(get_username)
     local password=$(grep "^ADMIN_PASSWORD=" "$ENV_FILE" | cut -d'=' -f2)
-    local totp=$(grep "^ADMIN_TOTP_SECRET=" "$ENV_FILE" | cut -d'=' -f2)
     local domain=$(grep "^DOMAIN=" "$ENV_FILE" | cut -d'=' -f2)
 
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${NC}                   ${CYAN}CURRENT CREDENTIALS${NC}                           ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                   ${CYAN}CURRENT CONFIGURATION${NC}                         ${CYAN}║${NC}"
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}                                                                ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  Dashboard URL: ${GREEN}https://${domain}${NC}"
     echo -e "${CYAN}║${NC}                                                                ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  Username: ${GREEN}${username}${NC}"
     echo -e "${CYAN}║${NC}                                                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  Password:                                                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  ${YELLOW}${password}${NC}"
+    if [[ -z "$password" ]]; then
+        echo -e "${CYAN}║${NC}  Password: ${YELLOW}(set via web UI)${NC}"
+    else
+        echo -e "${CYAN}║${NC}  Password: ${YELLOW}(set via .env - legacy)${NC}"
+    fi
+    echo -e "${CYAN}║${NC}  TOTP:     ${YELLOW}(set via web UI)${NC}"
     echo -e "${CYAN}║${NC}                                                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  TOTP Secret:                                                  ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  ${YELLOW}${totp}${NC}"
+    echo -e "${CYAN}║${NC}  ${BLUE}To reset access, run: sudo $0 full${NC}"
     echo -e "${CYAN}║${NC}                                                                ${CYAN}║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-
-    generate_totp_qr "$totp" "$username"
 }
 
 # Show status

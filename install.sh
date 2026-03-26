@@ -815,13 +815,13 @@ main() {
         read -rp "Enter admin username: " ADMIN_USER
     done
 
-    # Generate password
-    ADMIN_PASS=$(generate_password 24)
+    # Password will be set via the web UI on first login
+    ADMIN_PASS=""
     echo ""
-    log_info "Generated secure password for admin user"
+    log_info "You will create your password from the web dashboard on first login"
 
-    # Generate TOTP secret
-    TOTP_SECRET=$(generate_totp_secret)
+    # TOTP will also be set up via the web UI
+    TOTP_SECRET=""
 
     # Domain
     read -rp "Enter domain for admin dashboard (e.g., admin.example.com): " DOMAIN
@@ -933,23 +933,18 @@ main() {
     echo ""
     echo ""
     echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║${NC}              ${RED}⚠️  SAVE THESE CREDENTIALS NOW ⚠️${NC}                ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}              ${CYAN}🚀  NEXT STEPS${NC}                                     ${YELLOW}║${NC}"
     echo -e "${YELLOW}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}  Dashboard URL: ${CYAN}https://${DOMAIN}${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}  Username: ${GREEN}${ADMIN_USER}${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║${NC}  Password:                                                     ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║${NC}  ${GREEN}${ADMIN_PASS}${NC}"
+    echo -e "${YELLOW}║${NC}  ${CYAN}Open the dashboard URL above to:${NC}                              ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}    1. Create your admin password                               ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}    2. Set up two-factor authentication (TOTP)                  ${YELLOW}║${NC}"
     echo -e "${YELLOW}║${NC}                                                                ${YELLOW}║${NC}"
     echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${NC}                      ${CYAN}TOTP SETUP${NC}                                 ${CYAN}║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
-    generate_totp_qr "$TOTP_SECRET" "$ADMIN_USER"
     echo ""
     echo ""
     # Determine correct docker compose command for display

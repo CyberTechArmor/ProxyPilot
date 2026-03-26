@@ -3094,26 +3094,30 @@ servicesRouter.get('/discover/docker-compose', async (req, res) => {
         }
       }
 
-      if (projectName) {
-        if (!composeProjects[projectName]) {
-          composeProjects[projectName] = {
-            projectName,
-            composeFile,
-            services: [],
-          };
-        }
+      // Skip proxypilot containers
+      if (name && (name.includes('proxypilot') || name === 'proxypilot-admin')) continue;
 
-        composeProjects[projectName].services.push({
-          containerId: id,
-          containerName: name,
-          serviceName: serviceName || name,
-          image,
-          status,
-          ports,
-          exposedPort,
-          isRunning: status.includes('Up'),
-        });
+      // Group by compose project, or use 'standalone' for non-compose containers
+      const groupName = projectName || 'standalone';
+
+      if (!composeProjects[groupName]) {
+        composeProjects[groupName] = {
+          projectName: groupName,
+          composeFile,
+          services: [],
+        };
       }
+
+      composeProjects[groupName].services.push({
+        containerId: id,
+        containerName: name,
+        serviceName: serviceName || name,
+        image,
+        status,
+        ports,
+        exposedPort,
+        isRunning: status.includes('Up'),
+      });
     }
 
     res.json({ projects: Object.values(composeProjects) });
@@ -3168,22 +3172,20 @@ servicesRouter.get('/docker-compose/services', async (req, res) => {
         }
       }
 
-      // Include container if it has compose labels OR has exposed ports
-      if (projectName || exposedPort) {
-        services.push({
-          id,
-          containerName,
-          serviceName: serviceName || containerName,
-          projectName: projectName || 'standalone',
-          image,
-          status,
-          ports,
-          exposedPort,
-          hostBinding,
-          isRunning: status && status.includes('Up'),
-          type: projectName ? 'docker-compose' : 'docker',
-        });
-      }
+      // Include all containers except proxypilot's own
+      services.push({
+        id,
+        containerName,
+        serviceName: serviceName || containerName,
+        projectName: projectName || 'standalone',
+        image,
+        status,
+        ports,
+        exposedPort,
+        hostBinding,
+        isRunning: status && status.includes('Up'),
+        type: projectName ? 'docker-compose' : 'docker',
+      });
     }
 
     console.log(`Returning ${services.length} docker compose services`);

@@ -1005,6 +1005,37 @@ export default function Dashboard() {
     }
   };
 
+  // Upload files to the current terminal directory
+  const handleTerminalFileUpload = async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    for (const file of files) {
+      try {
+        const reader = new FileReader();
+        const base64Content = await new Promise((resolve, reject) => {
+          reader.onload = () => {
+            const base64 = reader.result.split(',')[1];
+            resolve(base64);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        const result = await api.uploadFileToDirectory(terminalCwd, file.name, base64Content, 'base64');
+        if (result.success) {
+          setTerminalOutput(prev => [...prev, { type: 'system', text: `Uploaded: ${file.name} (${file.size} bytes)` }]);
+        }
+      } catch (err) {
+        setTerminalOutput(prev => [...prev, { type: 'error', text: `Failed to upload ${file.name}: ${err.message}` }]);
+      }
+    }
+    // Refresh file list
+    fetchTerminalDirectory(terminalCwd, true);
+    // Reset input
+    e.target.value = '';
+  };
+
   const openTerminal = async (initialDir = null) => {
     // Always start with /root if no directory specified
     const startDir = initialDir || '/root';
@@ -2410,6 +2441,43 @@ volumes:
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message });
     }
+
+    e.target.value = '';
+  };
+
+  // Upload files directly to service data directory
+  const uploadFilesToService = async (e) => {
+    const uploadedFiles = e.target.files;
+    if (!uploadedFiles || uploadedFiles.length === 0 || !selectedService) return;
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const file of uploadedFiles) {
+      try {
+        const reader = new FileReader();
+        const base64Content = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        await api.uploadFile(selectedService.id, file.name, base64Content, 'base64');
+        successCount++;
+      } catch (err) {
+        errorCount++;
+      }
+    }
+
+    toast({
+      title: 'Upload Complete',
+      description: `Uploaded: ${successCount}${errorCount ? `, Failed: ${errorCount}` : ''}`,
+    });
+
+    // Refresh file list
+    try {
+      const { files: updatedFiles } = await api.getFiles(selectedService.id);
+      setFiles(updatedFiles);
+    } catch (e) { /* ignore */ }
 
     e.target.value = '';
   };
@@ -3896,9 +3964,17 @@ volumes:
                     <FolderTree className="h-4 w-4" />
                     Current View
                   </span>
-                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => fetchTerminalDirectory(terminalCwd, true)}>
-                    <RefreshCw className={`h-3 w-3 ${loadingTerminalFiles ? 'animate-spin' : ''}`} />
-                  </Button>
+                  <div className="flex gap-1">
+                    <label>
+                      <input type="file" multiple className="hidden" onChange={handleTerminalFileUpload} />
+                      <Button variant="ghost" size="sm" className="h-6 w-6 p-0" asChild title="Upload files to current folder">
+                        <span><Upload className="h-3 w-3" /></span>
+                      </Button>
+                    </label>
+                    <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => fetchTerminalDirectory(terminalCwd, true)}>
+                      <RefreshCw className={`h-3 w-3 ${loadingTerminalFiles ? 'animate-spin' : ''}`} />
+                    </Button>
+                  </div>
                 </div>
                 <div className="px-2 py-1 text-xs font-mono text-muted-foreground bg-muted/50 border-b truncate" title={terminalCwd}>
                   {terminalCwd}
@@ -4317,12 +4393,18 @@ volumes:
                 <DialogDescription>View, create, and edit files for your service</DialogDescription>
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={exportFiles} title="Export Files">
+                <label>
+                  <input type="file" multiple className="hidden" onChange={uploadFilesToService} />
+                  <Button variant="outline" size="sm" asChild title="Upload Files to Service">
+                    <span><FilePlus className="h-4 w-4" /></span>
+                  </Button>
+                </label>
+                <Button variant="outline" size="sm" onClick={exportFiles} title="Export Files as JSON">
                   <Download className="h-4 w-4" />
                 </Button>
                 <label>
                   <input type="file" accept=".json" onChange={importFiles} className="hidden" />
-                  <Button variant="outline" size="sm" asChild title="Import Files">
+                  <Button variant="outline" size="sm" asChild title="Import Files from JSON">
                     <span><Upload className="h-4 w-4" /></span>
                   </Button>
                 </label>

@@ -4,10 +4,12 @@ import * as OTPAuth from 'otpauth';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
+import { requireAdmin } from '../middleware/auth.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -138,7 +140,6 @@ function getGitHubRepo() {
 
   return DEFAULT_GITHUB_REPO;
 }
-import { requireAdmin } from '../middleware/auth.js';
 
 export const userRouter = Router();
 
@@ -146,10 +147,10 @@ export const userRouter = Router();
 function generatePassword(length = 24) {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
   let password = '';
-  const array = new Uint32Array(length);
-  crypto.getRandomValues(array);
+  const bytes = crypto.randomBytes(length * 4);
   for (let i = 0; i < length; i++) {
-    password += chars[array[i] % chars.length];
+    const randomValue = bytes.readUInt32BE(i * 4);
+    password += chars[randomValue % chars.length];
   }
   return password;
 }

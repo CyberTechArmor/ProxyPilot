@@ -589,6 +589,12 @@ export default function Login() {
                 Back to login
               </Button>
             )}
+
+            {!totpRequired && !totpSetup && (
+              <p className="text-center text-xs text-muted-foreground mt-4">
+                Can't log in? Run <code className="bg-muted px-1.5 py-0.5 rounded font-mono">sudo /opt/proxypilot/reset.sh</code> on your server to reset credentials.
+              </p>
+            )}
           </form>
         </CardContent>
       </Card>

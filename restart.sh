@@ -59,7 +59,14 @@ fi
 # Find and kill existing Node process running the backend
 echo "Looking for existing ProxyPilot process..."
 
-# Multiple patterns to catch the process
+# Source .env early to get PORT
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a; source "$ENV_FILE" 2>/dev/null; set +a
+fi
+PORT_TO_FREE=${PORT:-3001}
+
+# Find processes by pattern AND by port
 PIDS=""
 for pattern in "node.*src/index.js" "node src/index.js" "proxypilot.*index.js"; do
     FOUND=$(pgrep -f "$pattern" 2>/dev/null || true)
@@ -67,49 +74,45 @@ for pattern in "node.*src/index.js" "node src/index.js" "proxypilot.*index.js"; 
         PIDS="$PIDS $FOUND"
     fi
 done
+PORT_PIDS=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+ALL_PIDS=$(echo "$PIDS $PORT_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
 
-# Remove duplicates
-PIDS=$(echo $PIDS | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
-if [ -n "$PIDS" ] && [ "$PIDS" != " " ]; then
-    echo "Found existing process(es):$PIDS"
-    echo "Stopping existing process..."
-    for PID in $PIDS; do
-        kill $PID 2>/dev/null || sudo kill $PID 2>/dev/null || true
+if [ -n "$ALL_PIDS" ]; then
+    echo "Found existing process(es): $ALL_PIDS"
+    echo "Stopping..."
+    for PID in $ALL_PIDS; do
+        kill $PID 2>/dev/null || true
     done
     sleep 2
 
-    # Force kill if still running
-    STILL_RUNNING=""
-    for pattern in "node.*src/index.js" "node src/index.js"; do
-        FOUND=$(pgrep -f "$pattern" 2>/dev/null || true)
-        if [ -n "$FOUND" ]; then
-            STILL_RUNNING="$STILL_RUNNING $FOUND"
-        fi
-    done
-
-    if [ -n "$STILL_RUNNING" ] && [ "$STILL_RUNNING" != " " ]; then
-        echo "Force stopping..."
-        for PID in $STILL_RUNNING; do
-            kill -9 $PID 2>/dev/null || sudo kill -9 $PID 2>/dev/null || true
+    # Force kill anything still on the port
+    REMAINING=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || true)
+    REMAINING="$REMAINING $(pgrep -f 'node.*src/index.js' 2>/dev/null || true)"
+    REMAINING=$(echo "$REMAINING" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+    if [ -n "$REMAINING" ]; then
+        echo "Force killing: $REMAINING"
+        for PID in $REMAINING; do
+            kill -9 $PID 2>/dev/null || true
         done
-        sleep 1
+        sleep 2
     fi
 else
     echo "No existing ProxyPilot process found"
 fi
 
+# Wait until port is actually free (up to 10 seconds)
+for i in $(seq 1 10); do
+    if ! lsof -ti:$PORT_TO_FREE >/dev/null 2>&1 && ! ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -q ":$PORT_TO_FREE"; then
+        break
+    fi
+    echo "Port $PORT_TO_FREE still in use, waiting... ($i/10)"
+    sleep 1
+done
+
 # Start the backend
 echo ""
 echo "Starting ProxyPilot backend..."
 cd "$BACKEND_DIR"
-
-# Source .env from install root if it exists
-ENV_FILE="$SCRIPT_DIR/.env"
-if [ -f "$ENV_FILE" ]; then
-    echo "Loading environment from $ENV_FILE"
-    set -a; source "$ENV_FILE" 2>/dev/null; set +a
-fi
 
 # Ensure DATABASE_PATH is absolute (relative paths break when CWD differs)
 if [ -n "$DATABASE_PATH" ] && [[ "$DATABASE_PATH" != /* ]]; then

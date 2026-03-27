@@ -104,6 +104,13 @@ echo ""
 echo "Starting ProxyPilot backend..."
 cd "$BACKEND_DIR"
 
+# Source .env from install root if it exists
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    echo "Loading environment from $ENV_FILE"
+    set -a; source "$ENV_FILE"; set +a
+fi
+
 # Check if we should use PM2
 if command -v pm2 &> /dev/null; then
     echo "Starting with PM2..."

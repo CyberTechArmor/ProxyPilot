@@ -12,11 +12,31 @@ import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { authenticateToken } from './middleware/auth.js';
 
-// Load environment variables
-config();
-
+// Load environment variables - check multiple paths for .env
+// The .env file may be in the install root (/opt/proxypilot/.env) or
+// in the backend dir (admin/backend/.env) depending on deployment method
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+const envPaths = [
+  join(__dirname, '../../../.env'),  // Install root: /opt/proxypilot/.env (from src/)
+  join(__dirname, '../../.env'),     // Project root when running from repo
+  join(__dirname, '../.env'),        // Backend dir: admin/backend/.env
+];
+
+let envLoaded = false;
+for (const envPath of envPaths) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    console.log('Loaded .env from:', envPath);
+    envLoaded = true;
+    break;
+  }
+}
+if (!envLoaded) {
+  // Fallback: let dotenv try default paths
+  config();
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;

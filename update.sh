@@ -245,28 +245,45 @@ else
     # Stop existing processes
     log "Stopping existing ProxyPilot processes..."
 
+    # Also kill anything holding the port
+    PORT_TO_FREE=${PORT:-3001}
+
     # Find and kill ProxyPilot processes
     PIDS=$(pgrep -f "node.*src/index.js" 2>/dev/null || true)
-    if [ -n "$PIDS" ]; then
-        log_verbose "Found processes: $PIDS"
-        for PID in $PIDS; do
+    # Also check for processes holding the port
+    PORT_PIDS=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+    ALL_PIDS=$(echo "$PIDS $PORT_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+
+    if [ -n "$ALL_PIDS" ]; then
+        for PID in $ALL_PIDS; do
             log "Stopping process $PID..."
-            kill $PID 2>/dev/null || sudo kill $PID 2>/dev/null || true
+            kill $PID 2>/dev/null || true
         done
         sleep 2
 
-        # Force kill if still running
-        PIDS=$(pgrep -f "node.*src/index.js" 2>/dev/null || true)
-        if [ -n "$PIDS" ]; then
-            log_verbose "Force killing remaining processes..."
-            for PID in $PIDS; do
-                kill -9 $PID 2>/dev/null || sudo kill -9 $PID 2>/dev/null || true
+        # Force kill anything still on the port
+        REMAINING=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || true)
+        REMAINING="$REMAINING $(pgrep -f 'node.*src/index.js' 2>/dev/null || true)"
+        REMAINING=$(echo "$REMAINING" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+        if [ -n "$REMAINING" ]; then
+            log "Force killing remaining processes: $REMAINING"
+            for PID in $REMAINING; do
+                kill -9 $PID 2>/dev/null || true
             done
-            sleep 1
+            sleep 2
         fi
     else
         log "No existing ProxyPilot processes found"
     fi
+
+    # Wait until port is actually free (up to 10 seconds)
+    for i in $(seq 1 10); do
+        if ! lsof -ti:$PORT_TO_FREE >/dev/null 2>&1 && ! ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -q ":$PORT_TO_FREE"; then
+            break
+        fi
+        log_verbose "Port $PORT_TO_FREE still in use, waiting... ($i/10)"
+        sleep 1
+    done
 
     # Start the backend
     log "Starting ProxyPilot backend..."

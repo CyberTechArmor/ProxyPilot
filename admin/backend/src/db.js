@@ -2,9 +2,17 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, existsSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, resolve, join } from 'path';
+import { fileURLToPath } from 'url';
 
-const dbPath = process.env.DATABASE_PATH || './data/proxypilot.db';
+const __dbFilename = fileURLToPath(import.meta.url);
+const __dbDirname = dirname(__dbFilename);
+// Project root is 3 levels up from src/db.js (src -> backend -> admin -> root)
+const PROJECT_ROOT = resolve(__dbDirname, '..', '..', '..');
+
+// Resolve DATABASE_PATH: if relative, resolve against project root (not CWD)
+const rawDbPath = process.env.DATABASE_PATH || './data/proxypilot.db';
+const dbPath = rawDbPath.startsWith('/') ? rawDbPath : resolve(PROJECT_ROOT, rawDbPath);
 let db;
 
 export function getDb() {

@@ -108,8 +108,19 @@ cd "$BACKEND_DIR"
 ENV_FILE="$SCRIPT_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
     echo "Loading environment from $ENV_FILE"
-    set -a; source "$ENV_FILE"; set +a
+    set -a; source "$ENV_FILE" 2>/dev/null; set +a
 fi
+
+# Ensure DATABASE_PATH is absolute (relative paths break when CWD differs)
+if [ -n "$DATABASE_PATH" ] && [[ "$DATABASE_PATH" != /* ]]; then
+    export DATABASE_PATH="$SCRIPT_DIR/$DATABASE_PATH"
+fi
+# Default DATABASE_PATH if not set
+if [ -z "$DATABASE_PATH" ]; then
+    export DATABASE_PATH="$SCRIPT_DIR/data/proxypilot.db"
+fi
+# Ensure data directory exists
+mkdir -p "$(dirname "$DATABASE_PATH")"
 
 # Check if we should use PM2
 if command -v pm2 &> /dev/null; then
@@ -123,15 +134,19 @@ else
     echo "Starting in background with nohup..."
     nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
     NEW_PID=$!
-    sleep 2
+    sleep 3
 
     # Verify it started
     if kill -0 $NEW_PID 2>/dev/null; then
         echo -e "${GREEN}Started in background (PID: $NEW_PID)${NC}"
         echo "Logs: /tmp/proxypilot.log"
     else
-        echo -e "${RED}Failed to start - check /tmp/proxypilot.log${NC}"
-        tail -20 /tmp/proxypilot.log 2>/dev/null || true
+        echo -e "${RED}Failed to start - see error below:${NC}"
+        echo ""
+        tail -20 /tmp/proxypilot.log 2>/dev/null || echo "  (no log output)"
+        echo ""
+        echo -e "${YELLOW}Try starting manually:${NC}"
+        echo "  cd $BACKEND_DIR && source $ENV_FILE && node src/index.js"
         exit 1
     fi
 fi

@@ -272,6 +272,29 @@ else
     log "Starting ProxyPilot backend..."
     cd "$BACKEND_DIR"
 
+    # Source .env from install root if it exists (provides env vars to the process)
+    ENV_FILE="$SCRIPT_DIR/.env"
+    if [ -f "$ENV_FILE" ]; then
+        log "Loading environment from $ENV_FILE"
+        set +e  # Don't exit on .env source errors
+        set -a; source "$ENV_FILE" 2>/dev/null; set +a
+        set -e
+    fi
+
+    # Ensure DATABASE_PATH is absolute (relative paths break when CWD differs)
+    if [ -n "$DATABASE_PATH" ] && [[ "$DATABASE_PATH" != /* ]]; then
+        export DATABASE_PATH="$SCRIPT_DIR/$DATABASE_PATH"
+        log_verbose "Resolved DATABASE_PATH to: $DATABASE_PATH"
+    fi
+    # Default DATABASE_PATH if not set
+    if [ -z "$DATABASE_PATH" ]; then
+        export DATABASE_PATH="$SCRIPT_DIR/data/proxypilot.db"
+        log_verbose "Using default DATABASE_PATH: $DATABASE_PATH"
+    fi
+
+    # Ensure data directory exists
+    mkdir -p "$(dirname "$DATABASE_PATH")"
+
     # Check if PM2 is available
     if command -v pm2 &> /dev/null; then
         log "Using PM2..."
@@ -280,17 +303,10 @@ else
         pm2 save
         log "${GREEN}Started with PM2${NC}"
     else
-        # Use nohup
-        # Source .env from install root if it exists (provides env vars to the process)
-        ENV_FILE="$SCRIPT_DIR/.env"
-        if [ -f "$ENV_FILE" ]; then
-            log "Loading environment from $ENV_FILE"
-            set -a; source "$ENV_FILE"; set +a
-        fi
         log "Using nohup..."
         nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
         NEW_PID=$!
-        sleep 2
+        sleep 3
 
         # Verify it started
         if kill -0 $NEW_PID 2>/dev/null; then
@@ -298,7 +314,12 @@ else
             log "Logs: /tmp/proxypilot.log"
         else
             log "${RED}Failed to start backend${NC}"
-            log "Check logs: /tmp/proxypilot.log"
+            log ""
+            log "${YELLOW}Last 20 lines from /tmp/proxypilot.log:${NC}"
+            tail -20 /tmp/proxypilot.log 2>/dev/null || log "  (no log output)"
+            log ""
+            log "${YELLOW}Try starting manually:${NC}"
+            log "  cd $BACKEND_DIR && source $ENV_FILE && node src/index.js"
             exit 1
         fi
     fi

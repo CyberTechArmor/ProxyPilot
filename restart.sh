@@ -56,9 +56,6 @@ if systemctl list-units --type=service 2>/dev/null | grep -q proxypilot; then
     exit 0
 fi
 
-# Find and kill existing Node process running the backend
-echo "Looking for existing ProxyPilot process..."
-
 # Source .env early to get PORT
 ENV_FILE="$SCRIPT_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
@@ -66,46 +63,31 @@ if [ -f "$ENV_FILE" ]; then
 fi
 PORT_TO_FREE=${PORT:-3001}
 
-# Find processes by pattern AND by port
-PIDS=""
-for pattern in "node.*src/index.js" "node src/index.js" "proxypilot.*index.js"; do
-    FOUND=$(pgrep -f "$pattern" 2>/dev/null || true)
-    if [ -n "$FOUND" ]; then
-        PIDS="$PIDS $FOUND"
-    fi
-done
-PORT_PIDS=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
-ALL_PIDS=$(echo "$PIDS $PORT_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+# Stop existing processes and free the port
+echo "Stopping existing ProxyPilot processes..."
 
-if [ -n "$ALL_PIDS" ]; then
-    echo "Found existing process(es): $ALL_PIDS"
-    echo "Stopping..."
-    for PID in $ALL_PIDS; do
-        kill $PID 2>/dev/null || true
-    done
-    sleep 2
+# Step 1: Graceful kill by process name
+pgrep -f "node.*index.js" 2>/dev/null | xargs -r kill 2>/dev/null || true
+sleep 2
 
-    # Force kill anything still on the port
-    REMAINING=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || true)
-    REMAINING="$REMAINING $(pgrep -f 'node.*src/index.js' 2>/dev/null || true)"
-    REMAINING=$(echo "$REMAINING" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
-    if [ -n "$REMAINING" ]; then
-        echo "Force killing: $REMAINING"
-        for PID in $REMAINING; do
-            kill -9 $PID 2>/dev/null || true
-        done
-        sleep 2
-    fi
-else
-    echo "No existing ProxyPilot process found"
-fi
+# Step 2: Force kill by process name
+pgrep -f "node.*index.js" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
-# Wait until port is actually free (up to 10 seconds)
-for i in $(seq 1 10); do
-    if ! lsof -ti:$PORT_TO_FREE >/dev/null 2>&1 && ! ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -q ":$PORT_TO_FREE"; then
+# Step 3: Kill anything holding the port using fuser (most reliable)
+fuser -k ${PORT_TO_FREE}/tcp 2>/dev/null || true
+sleep 1
+fuser -k -9 ${PORT_TO_FREE}/tcp 2>/dev/null || true
+
+# Step 4: Wait for port to be free (up to 15 seconds)
+echo "Waiting for port ${PORT_TO_FREE} to be free..."
+for i in $(seq 1 15); do
+    if $NODE_CMD -e "const s=require('net').createServer();s.listen(${PORT_TO_FREE},'0.0.0.0',()=>{s.close();process.exit(0)});s.on('error',()=>process.exit(1))" 2>/dev/null; then
+        echo "Port ${PORT_TO_FREE} is free"
         break
     fi
-    echo "Port $PORT_TO_FREE still in use, waiting... ($i/10)"
+    if [ "$i" -eq 15 ]; then
+        echo -e "${YELLOW}Warning: Port ${PORT_TO_FREE} may still be in use${NC}"
+    fi
     sleep 1
 done
 

@@ -242,46 +242,33 @@ else
     log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
     log ""
 
-    # Stop existing processes
+    # Stop existing processes and free the port
     log "Stopping existing ProxyPilot processes..."
-
-    # Also kill anything holding the port
     PORT_TO_FREE=${PORT:-3001}
 
-    # Find and kill ProxyPilot processes
-    PIDS=$(pgrep -f "node.*src/index.js" 2>/dev/null || true)
-    # Also check for processes holding the port
-    PORT_PIDS=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
-    ALL_PIDS=$(echo "$PIDS $PORT_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+    # Step 1: Graceful kill by process name
+    pgrep -f "node.*index.js" 2>/dev/null | xargs -r kill 2>/dev/null || true
+    sleep 2
 
-    if [ -n "$ALL_PIDS" ]; then
-        for PID in $ALL_PIDS; do
-            log "Stopping process $PID..."
-            kill $PID 2>/dev/null || true
-        done
-        sleep 2
+    # Step 2: Force kill by process name
+    pgrep -f "node.*index.js" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
-        # Force kill anything still on the port
-        REMAINING=$(lsof -ti:$PORT_TO_FREE 2>/dev/null || true)
-        REMAINING="$REMAINING $(pgrep -f 'node.*src/index.js' 2>/dev/null || true)"
-        REMAINING=$(echo "$REMAINING" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
-        if [ -n "$REMAINING" ]; then
-            log "Force killing remaining processes: $REMAINING"
-            for PID in $REMAINING; do
-                kill -9 $PID 2>/dev/null || true
-            done
-            sleep 2
-        fi
-    else
-        log "No existing ProxyPilot processes found"
-    fi
+    # Step 3: Kill anything holding the port using fuser (most reliable)
+    fuser -k ${PORT_TO_FREE}/tcp 2>/dev/null || true
+    sleep 1
+    fuser -k -9 ${PORT_TO_FREE}/tcp 2>/dev/null || true
 
-    # Wait until port is actually free (up to 10 seconds)
-    for i in $(seq 1 10); do
-        if ! lsof -ti:$PORT_TO_FREE >/dev/null 2>&1 && ! ss -tlnp "sport = :$PORT_TO_FREE" 2>/dev/null | grep -q ":$PORT_TO_FREE"; then
+    # Step 4: Wait for port to be free (up to 15 seconds)
+    log "Waiting for port ${PORT_TO_FREE} to be free..."
+    for i in $(seq 1 15); do
+        # Test if port is free by trying to bind to it briefly
+        if $NODE_CMD -e "const s=require('net').createServer();s.listen(${PORT_TO_FREE},'0.0.0.0',()=>{s.close();process.exit(0)});s.on('error',()=>process.exit(1))" 2>/dev/null; then
+            log "Port ${PORT_TO_FREE} is free"
             break
         fi
-        log_verbose "Port $PORT_TO_FREE still in use, waiting... ($i/10)"
+        if [ "$i" -eq 15 ]; then
+            log "${YELLOW}Warning: Port ${PORT_TO_FREE} may still be in use${NC}"
+        fi
         sleep 1
     done
 

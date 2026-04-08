@@ -174,9 +174,10 @@ install_caddy() {
         log_success "Caddy installed successfully"
     fi
 
-    # Create sites directory
+    # Create directories with correct ownership for caddy user
     mkdir -p /etc/caddy/sites
     mkdir -p /var/log/caddy
+    chown caddy:caddy /var/log/caddy 2>/dev/null || true
 
     # Create main Caddyfile
     log_info "Configuring Caddyfile..."
@@ -456,9 +457,9 @@ ${domain} {
 }
 EOF
 
-    # Ensure Caddy data directory has correct ownership
-    mkdir -p /var/lib/caddy
-    chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
+    # Ensure Caddy directories have correct ownership (caddy runs as 'caddy' user)
+    mkdir -p /var/lib/caddy /var/log/caddy
+    chown -R caddy:caddy /var/lib/caddy /var/log/caddy 2>/dev/null || true
 
     # Remove any stray placeholder files
     rm -f /etc/caddy/sites/.keep 2>/dev/null || true

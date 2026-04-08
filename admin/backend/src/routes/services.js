@@ -63,7 +63,6 @@ async function ensureCaddyStructure() {
     const emailLine = acmeEmail ? `\n    email ${acmeEmail}` : '';
     const mainConfig = `{
     admin localhost:2019${emailLine}
-    storage file_system /var/lib/caddy/certificates
 }
 
 import ${CADDY_SITES_DIR}/*

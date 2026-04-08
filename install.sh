@@ -178,11 +178,6 @@ install_caddy() {
     mkdir -p /etc/caddy/sites
     mkdir -p /var/log/caddy
 
-    # Create a placeholder file so the import glob doesn't fail on empty directory
-    if [ -z "$(ls -A /etc/caddy/sites/ 2>/dev/null)" ]; then
-        touch /etc/caddy/sites/.keep
-    fi
-
     # Create main Caddyfile
     log_info "Configuring Caddyfile..."
     cat > /etc/caddy/Caddyfile <<'CADDYEOF'
@@ -194,22 +189,11 @@ install_caddy() {
 import /etc/caddy/sites/*
 CADDYEOF
 
-    # Enable and restart Caddy with the new config
+    # Enable Caddy but don't start yet - will start after site config is written
     systemctl enable caddy 2>/dev/null || true
-    systemctl restart caddy 2>/dev/null || true
-
-    # Wait briefly for Caddy to start
-    sleep 2
-
-    # Verify Caddy is running
-    if ! systemctl is-active --quiet caddy; then
-        log_warn "Caddy service not running, attempting to start..."
-        systemctl start caddy || {
-            log_error "Failed to start Caddy. Check: journalctl -xeu caddy"
-            exit 1
-        }
-    fi
-    log_success "Caddy is running"
+    # Stop any running instance so ports are free for later
+    systemctl stop caddy 2>/dev/null || true
+    log_success "Caddy is installed and enabled (will start after configuration)"
 }
 
 # Check and install Docker
@@ -476,31 +460,48 @@ EOF
     mkdir -p /var/lib/caddy
     chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 
-    # Check if ports 80/443 are free for ACME challenge
-    log_info "Checking port availability for TLS..."
-    for check_port in 80 443; do
-        local pid=$(fuser ${check_port}/tcp 2>/dev/null | awk '{print $1}')
-        if [[ -n "$pid" ]]; then
-            local proc=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
-            if [[ "$proc" != "caddy" ]]; then
-                log_warn "Port ${check_port} is in use by ${proc} (PID ${pid}) - Caddy needs this for TLS"
-            fi
-        fi
-    done
+    # Remove any stray .keep placeholder files
+    rm -f /etc/caddy/sites/.keep 2>/dev/null || true
+
+    # Stop Caddy before validation so ports are free
+    # caddy validate can briefly bind ports, conflicting with the running service
+    log_info "Stopping Caddy for config update..."
+    systemctl stop caddy 2>/dev/null || true
+    sleep 1
 
     # Validate config (show errors if any)
     log_info "Validating Caddy configuration..."
-    if ! caddy validate --config /etc/caddy/Caddyfile; then
+    if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
         log_error "Caddy config validation failed! Config contents:"
         cat /etc/caddy/Caddyfile
         echo "--- Site config ---"
         cat "/etc/caddy/sites/${domain}"
     fi
 
-    # Restart Caddy
-    log_info "Restarting Caddy..."
-    systemctl restart caddy
+    # Wait for validate to fully release resources
+    sleep 1
+
+    # Start Caddy fresh
+    log_info "Starting Caddy..."
+    systemctl start caddy
     sleep 3
+
+    # If start failed, check for port conflicts and retry
+    if ! systemctl is-active --quiet caddy; then
+        log_warn "Caddy failed to start, checking for port conflicts..."
+        for check_port in 80 443; do
+            local pid=$(fuser ${check_port}/tcp 2>/dev/null | awk '{print $1}')
+            if [[ -n "$pid" ]]; then
+                local proc=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
+                log_warn "Port ${check_port} held by ${proc} (PID ${pid}), killing..."
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 2
+        log_info "Retrying Caddy start..."
+        systemctl start caddy
+        sleep 3
+    fi
 
     # Verify Caddy is actually running
     if ! systemctl is-active --quiet caddy; then

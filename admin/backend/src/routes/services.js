@@ -63,6 +63,7 @@ async function ensureCaddyStructure() {
     const emailLine = acmeEmail ? `\n    email ${acmeEmail}` : '';
     const mainConfig = `{
     admin localhost:2019${emailLine}
+    storage file_system /var/lib/caddy/certificates
 }
 
 import ${CADDY_SITES_DIR}/*
@@ -3109,10 +3110,8 @@ function generateCaddyConfig(service) {
   switch (type) {
     case 'docker':
     case 'proxy':
-      lines.push(`    reverse_proxy ${target || '127.0.0.1'}:${port} {`);
-      lines.push(`        # Caddy automatically sets Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto`);
-      lines.push(`        # WebSocket upgrade is handled automatically`);
-      lines.push(`    }`);
+      // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, and WebSocket
+      lines.push(`    reverse_proxy ${target || '127.0.0.1'}:${port}`);
       break;
 
     case 'static':

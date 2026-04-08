@@ -86,8 +86,8 @@ else
     log_warn "Installation directory not found"
 fi
 
-# Note: Caddy auto-manages TLS certificates; they will be cleaned up automatically
-log_info "Caddy-managed TLS certificates will be cleaned up automatically by Caddy"
+# TLS certificates are kept in /var/lib/caddy/certificates so they persist across reinstalls
+log_info "TLS certificates preserved in /var/lib/caddy/certificates (reused on reinstall)"
 
 echo ""
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"

@@ -16,8 +16,8 @@ RUN npm install --omit=dev
 FROM node:20-alpine
 WORKDIR /app
 
-# Install runtime dependencies including certbot for SSL certificate management
-RUN apk add --no-cache nginx curl certbot certbot-nginx
+# Install runtime dependencies
+RUN apk add --no-cache curl
 
 # Create non-root user
 RUN addgroup -S proxypilot && adduser -S proxypilot -G proxypilot

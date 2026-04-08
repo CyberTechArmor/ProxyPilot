@@ -180,13 +180,13 @@ export default function Dashboard() {
     rootDir: '',
     dataDir: '',
   });
-  const [settingsTab, setSettingsTab] = useState('settings'); // 'settings', 'history', or 'nginx'
+  const [settingsTab, setSettingsTab] = useState('settings'); // 'settings', 'history', or 'caddy'
   const [savingSettings, setSavingSettings] = useState(false);
   const [configVersions, setConfigVersions] = useState([]);
-  const [nginxConfig, setNginxConfig] = useState('');
-  const [nginxConfigOriginal, setNginxConfigOriginal] = useState('');
-  const [loadingNginxConfig, setLoadingNginxConfig] = useState(false);
-  const [savingNginxConfig, setSavingNginxConfig] = useState(false);
+  const [caddyConfig, setCaddyConfig] = useState('');
+  const [caddyConfigOriginal, setCaddyConfigOriginal] = useState('');
+  const [loadingCaddyConfig, setLoadingCaddyConfig] = useState(false);
+  const [savingCaddyConfig, setSavingCaddyConfig] = useState(false);
   const [loadingConfigVersions, setLoadingConfigVersions] = useState(false);
   const [revertingVersion, setRevertingVersion] = useState(null);
 
@@ -263,7 +263,7 @@ export default function Dashboard() {
   // Discovery state
   const [discoverDialogOpen, setDiscoverDialogOpen] = useState(false);
   const [discoveredSites, setDiscoveredSites] = useState([]);
-  const [discoveringNginx, setDiscoveringNginx] = useState(false);
+  const [discoveringCaddy, setDiscoveringCaddy] = useState(false);
   const [importingSite, setImportingSite] = useState(null);
 
   // Remove site dialog state
@@ -649,9 +649,9 @@ export default function Dashboard() {
 
   // Discovery functions
   const discoverSites = async () => {
-    setDiscoveringNginx(true);
+    setDiscoveringCaddy(true);
     try {
-      const { sites } = await api.discoverNginxSites();
+      const { sites } = await api.discoverCaddySites();
       setDiscoveredSites(sites || []);
     } catch (error) {
       toast({
@@ -660,7 +660,7 @@ export default function Dashboard() {
         description: 'Failed to discover sites: ' + error.message,
       });
     } finally {
-      setDiscoveringNginx(false);
+      setDiscoveringCaddy(false);
     }
   };
 
@@ -703,10 +703,9 @@ export default function Dashboard() {
     try {
       const commands = [];
 
-      // Remove NGINX config files
+      // Remove Caddy config files
       if (removeOptions.files) {
-        commands.push(`rm -f /etc/nginx/sites-available/${siteToRemove.domain}`);
-        commands.push(`rm -f /etc/nginx/sites-enabled/${siteToRemove.domain}`);
+        commands.push(`rm -f /etc/caddy/sites/${siteToRemove.domain}`);
         if (siteToRemove.rootDir && siteToRemove.type === 'static') {
           commands.push(`rm -rf "${siteToRemove.rootDir}"`);
         }
@@ -718,21 +717,13 @@ export default function Dashboard() {
         commands.push(`rm -rf "${siteToRemove.composePath}"`);
       }
 
-      // Remove SSL certificate
-      if (removeOptions.cert && siteToRemove.sslEnabled) {
-        commands.push(`certbot delete --cert-name ${siteToRemove.domain} --non-interactive 2>/dev/null || true`);
-        commands.push(`rm -rf /etc/letsencrypt/live/${siteToRemove.domain}`);
-        commands.push(`rm -rf /etc/letsencrypt/archive/${siteToRemove.domain}`);
-        commands.push(`rm -f /etc/letsencrypt/renewal/${siteToRemove.domain}.conf`);
-      }
-
       // Execute removal commands
       for (const cmd of commands) {
         await api.executeCommand(cmd, '/');
       }
 
-      // Reload NGINX
-      await api.executeCommand('nginx -t && nginx -s reload 2>/dev/null || true', '/');
+      // Reload Caddy
+      await api.executeCommand('caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true', '/');
 
       toast({
         title: 'Success',
@@ -827,12 +818,12 @@ export default function Dashboard() {
     }
   };
 
-  const handleReloadNginx = async () => {
+  const handleReloadCaddy = async () => {
     try {
-      await api.reloadNginx();
+      await api.reloadCaddy();
       toast({
         title: 'Success',
-        description: 'NGINX reloaded successfully',
+        description: 'Caddy reloaded successfully',
       });
     } catch (error) {
       toast({
@@ -850,8 +841,8 @@ export default function Dashboard() {
     try {
       const result = await api.regenerateAllConfigs();
       toast({
-        title: result.nginxReloaded ? 'Success' : 'Partial Success',
-        description: `Regenerated ${result.results.success.length} configs${result.results.failed.length > 0 ? `, ${result.results.failed.length} failed` : ''}. NGINX ${result.nginxReloaded ? 'reloaded' : 'reload failed'}`,
+        title: result.caddyReloaded ? 'Success' : 'Partial Success',
+        description: `Regenerated ${result.results.success.length} configs${result.results.failed.length > 0 ? `, ${result.results.failed.length} failed` : ''}. Caddy ${result.caddyReloaded ? 'reloaded' : 'reload failed'}`,
       });
       fetchServices();
     } catch (error) {
@@ -873,7 +864,7 @@ export default function Dashboard() {
         title: result.sslCertificateExists ? 'Success' : 'Config Updated',
         description: result.sslCertificateExists
           ? 'Configuration regenerated with SSL enabled'
-          : 'Configuration regenerated. SSL certificate still missing - run certbot to obtain certificate.',
+          : 'Configuration regenerated. Enable SSL in settings and Caddy will automatically obtain a certificate.',
       });
       fetchServices();
     } catch (error) {
@@ -2071,8 +2062,8 @@ volumes:
     setSettingsDialogOpen(true);
     setSettingsTab('settings');
     setConfigVersions([]);
-    setNginxConfig('');
-    setNginxConfigOriginal('');
+    setCaddyConfig('');
+    setCaddyConfigOriginal('');
 
     try {
       // Fetch fresh service data to ensure we have the latest settings
@@ -2104,45 +2095,45 @@ volumes:
     }
   };
 
-  // Fetch nginx config for advanced editing
-  const fetchNginxConfig = async () => {
+  // Fetch Caddy config for advanced editing
+  const fetchCaddyConfig = async () => {
     if (!settingsService) return;
-    setLoadingNginxConfig(true);
+    setLoadingCaddyConfig(true);
     try {
-      const { config } = await api.getNginxConfig(settingsService.id);
-      setNginxConfig(config);
-      setNginxConfigOriginal(config);
+      const { config } = await api.getCaddyConfig(settingsService.id);
+      setCaddyConfig(config);
+      setCaddyConfigOriginal(config);
     } catch (error) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Failed to load nginx config',
+        description: 'Failed to load Caddy config',
       });
     } finally {
-      setLoadingNginxConfig(false);
+      setLoadingCaddyConfig(false);
     }
   };
 
-  // Save nginx config with failsafe revert
-  const saveNginxConfig = async () => {
+  // Save Caddy config with failsafe revert
+  const saveCaddyConfig = async () => {
     if (!settingsService) return;
-    setSavingNginxConfig(true);
+    setSavingCaddyConfig(true);
     try {
-      await api.saveNginxConfig(settingsService.id, nginxConfig);
-      setNginxConfigOriginal(nginxConfig);
+      await api.saveCaddyConfig(settingsService.id, caddyConfig);
+      setCaddyConfigOriginal(caddyConfig);
       toast({
         title: 'Success',
-        description: 'Nginx configuration saved and reloaded',
+        description: 'Caddy configuration saved and reloaded',
       });
       fetchConfigVersions();
     } catch (error) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: error.message || 'Failed to save nginx config',
+        description: error.message || 'Failed to save Caddy config',
       });
     } finally {
-      setSavingNginxConfig(false);
+      setSavingCaddyConfig(false);
     }
   };
 
@@ -2198,7 +2189,7 @@ volumes:
       });
       toast({
         title: 'Success',
-        description: 'Service settings saved and NGINX config regenerated',
+        description: 'Service settings saved and Caddy config regenerated',
       });
       setSettingsDialogOpen(false);
       fetchServices();
@@ -2255,8 +2246,8 @@ volumes:
       setSaveNotes('');
       toast({
         title: 'Success',
-        description: result.nginxReloaded
-          ? 'File saved and NGINX reloaded'
+        description: result.caddyReloaded
+          ? 'File saved and Caddy reloaded'
           : 'File saved successfully',
       });
     } catch (error) {
@@ -2654,14 +2645,14 @@ volumes:
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={handleReloadNginx} title="Reload NGINX">
+          <Button variant="outline" onClick={handleReloadCaddy} title="Reload Caddy">
             <RefreshCw className="h-4 w-4" />
           </Button>
           <Button
             variant="outline"
             onClick={handleRegenerateAllConfigs}
             disabled={regeneratingAll}
-            title="Regenerate All NGINX Configs"
+            title="Regenerate All Caddy Configs"
           >
             {regeneratingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
           </Button>
@@ -2820,7 +2811,7 @@ volumes:
                     <div className="flex items-center justify-between pl-4 border-l-2 border-primary/20">
                       <div>
                         <Label htmlFor="obtainCertificate">Auto-obtain Certificate</Label>
-                        <p className="text-xs text-muted-foreground">Get Let's Encrypt certificate automatically</p>
+                        <p className="text-xs text-muted-foreground">Caddy will auto-obtain a certificate via ACME</p>
                       </div>
                       <Switch id="obtainCertificate" checked={formData.obtainCertificate} onCheckedChange={(checked) => setFormData({ ...formData, obtainCertificate: checked })} />
                     </div>
@@ -4460,7 +4451,7 @@ volumes:
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Press Enter or click outside to save. This path is used by the file editor, terminal, and NGINX.
+                Press Enter or click outside to save. This path is used by the file editor, terminal, and Caddy.
               </p>
             </div>
           )}
@@ -4513,7 +4504,7 @@ volumes:
                         <SelectItem value="python">Python</SelectItem>
                         <SelectItem value="bash">Bash</SelectItem>
                         <SelectItem value="dockerfile">Dockerfile</SelectItem>
-                        <SelectItem value="nginx">NGINX</SelectItem>
+                        <SelectItem value="nginx">Caddyfile</SelectItem>
                       </SelectContent>
                     </Select>
                     <Button variant="outline" size="sm" onClick={loadVersions} disabled={loadingVersions}>
@@ -4653,14 +4644,14 @@ volumes:
 
       {/* Service Settings Dialog */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
-        <DialogContent className={settingsTab === 'nginx' ? 'max-w-5xl h-[90vh] flex flex-col' : 'max-w-lg max-h-[90vh] overflow-y-auto'}>
+        <DialogContent className={settingsTab === 'caddy' ? 'max-w-5xl h-[90vh] flex flex-col' : 'max-w-lg max-h-[90vh] overflow-y-auto'}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Server className="h-5 w-5" />
               Service Settings - {settingsService?.name}
             </DialogTitle>
             <DialogDescription>
-              Configure NGINX proxy settings for this service
+              Configure Caddy reverse proxy settings for this service
             </DialogDescription>
           </DialogHeader>
 
@@ -4675,11 +4666,11 @@ volumes:
               Settings
             </Button>
             <Button
-              variant={settingsTab === 'nginx' ? 'default' : 'ghost'}
+              variant={settingsTab === 'caddy' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => {
-                setSettingsTab('nginx');
-                fetchNginxConfig();
+                setSettingsTab('caddy');
+                fetchCaddyConfig();
               }}
             >
               <Code className="h-4 w-4 mr-2" />
@@ -4723,7 +4714,7 @@ volumes:
                     placeholder="/var/www/mysite"
                   />
                   <p className="text-xs text-muted-foreground">
-                    The directory containing your website files (used by NGINX, file editor, and terminal)
+                    The directory containing your website files (used by Caddy, file editor, and terminal)
                   </p>
                 </div>
               </div>
@@ -4756,9 +4747,9 @@ volumes:
               </div>
             )}
 
-            {/* NGINX Settings */}
+            {/* Caddy Settings */}
             <div className="space-y-3">
-              <h4 className="font-medium text-sm">NGINX Configuration</h4>
+              <h4 className="font-medium text-sm">Caddy Configuration</h4>
               <div className="flex items-center justify-between">
                 <div>
                   <Label htmlFor="websocket">WebSocket Support</Label>
@@ -4819,29 +4810,29 @@ volumes:
             </Button>
           </DialogFooter>
           </>
-          ) : settingsTab === 'nginx' ? (
-          /* Advanced Nginx Tab */
+          ) : settingsTab === 'caddy' ? (
+          /* Advanced Caddy Tab */
           <div className="flex flex-col flex-1 min-h-0 py-4 gap-4">
             <div className="flex items-center justify-between shrink-0">
               <div>
-                <h4 className="font-medium text-sm">NGINX Configuration</h4>
-                <p className="text-xs text-muted-foreground">Edit the raw nginx config file for this service</p>
+                <h4 className="font-medium text-sm">Caddy Configuration</h4>
+                <p className="text-xs text-muted-foreground">Edit the raw Caddyfile for this service</p>
               </div>
-              {nginxConfig !== nginxConfigOriginal && (
+              {caddyConfig !== caddyConfigOriginal && (
                 <span className="text-xs text-yellow-500">Unsaved changes</span>
               )}
             </div>
-            {loadingNginxConfig ? (
+            {loadingCaddyConfig ? (
               <div className="flex items-center justify-center flex-1">
                 <Loader2 className="h-6 w-6 animate-spin" />
               </div>
             ) : (
               <div className="border rounded-lg overflow-hidden flex-1 min-h-0">
                 <CodeMirror
-                  value={nginxConfig}
+                  value={caddyConfig}
                   height="100%"
                   theme={oneDark}
-                  onChange={(value) => setNginxConfig(value)}
+                  onChange={(value) => setCaddyConfig(value)}
                   basicSetup={{
                     lineNumbers: true,
                     highlightActiveLineGutter: true,
@@ -4859,10 +4850,10 @@ volumes:
             <DialogFooter className="shrink-0">
               <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Cancel</Button>
               <Button
-                onClick={saveNginxConfig}
-                disabled={savingNginxConfig || nginxConfig === nginxConfigOriginal}
+                onClick={saveCaddyConfig}
+                disabled={savingCaddyConfig || caddyConfig === caddyConfigOriginal}
               >
-                {savingNginxConfig ? (
+                {savingCaddyConfig ? (
                   <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>
                 ) : (
                   <><Save className="mr-2 h-4 w-4" />Save & Reload</>
@@ -5006,7 +4997,7 @@ volumes:
               Secure System - Kill Switch
             </DialogTitle>
             <DialogDescription>
-              This will stop the ProxyPilot admin container. All your services, NGINX configurations,
+              This will stop the ProxyPilot admin container. All your services, Caddy configurations,
               and Docker containers will continue running. The admin dashboard will become unavailable
               until the container is manually restarted.
             </DialogDescription>
@@ -5057,11 +5048,11 @@ volumes:
               Discover Existing Sites
             </DialogTitle>
             <DialogDescription>
-              Discover and import existing NGINX sites and Docker Compose services from this server.
+              Discover and import existing Caddy sites and Docker Compose services from this server.
             </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto space-y-4 py-4">
-            {discoveringNginx ? (
+            {discoveringCaddy ? (
               <div className="flex items-center justify-center p-8">
                 <Loader2 className="h-8 w-8 animate-spin" />
                 <span className="ml-2">Scanning for sites...</span>
@@ -5070,7 +5061,7 @@ volumes:
               <div className="text-center p-8 text-muted-foreground">
                 <Radar className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p>No new sites discovered</p>
-                <p className="text-sm">All existing NGINX sites are already imported.</p>
+                <p className="text-sm">All existing Caddy sites are already imported.</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -5181,7 +5172,7 @@ volumes:
                 <div className="flex items-center gap-2">
                   <FolderOpen className="h-4 w-4 text-blue-500" />
                   <div>
-                    <p className="font-medium text-sm">NGINX Config & Files</p>
+                    <p className="font-medium text-sm">Caddy Config & Files</p>
                     <p className="text-xs text-muted-foreground">Site config and root directory</p>
                   </div>
                 </div>
@@ -5213,7 +5204,7 @@ volumes:
                     <ShieldCheck className="h-4 w-4 text-green-500" />
                     <div>
                       <p className="font-medium text-sm">SSL Certificate</p>
-                      <p className="text-xs text-muted-foreground">Let's Encrypt certificate</p>
+                      <p className="text-xs text-muted-foreground">Caddy auto-managed certificate</p>
                     </div>
                   </div>
                   <Switch
@@ -5402,8 +5393,8 @@ volumes:
                 <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
                   <li>Docker Compose stack with WordPress + MySQL</li>
                   <li>.env file with secure auto-generated passwords</li>
-                  <li>NGINX reverse proxy configuration</li>
-                  <li>SSL certificate via Let's Encrypt</li>
+                  <li>Caddy reverse proxy configuration</li>
+                  <li>SSL certificate via Caddy (automatic ACME)</li>
                 </ul>
               </div>
             </div>

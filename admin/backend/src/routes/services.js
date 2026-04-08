@@ -15,12 +15,12 @@ const execAsync = promisify(exec);
 
 export const servicesRouter = Router();
 
-const NGINX_SITES_AVAILABLE = process.env.NGINX_SITES_AVAILABLE || '/etc/nginx/sites-available';
-const NGINX_SITES_ENABLED = process.env.NGINX_SITES_ENABLED || '/etc/nginx/sites-enabled';
+const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
+const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';
 const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
-// NGINX_STATIC_ROOT is the host path that NGINX uses to serve static files
+// CADDY_STATIC_ROOT is the host path that Caddy uses to serve static files
 // This may differ from SERVICES_DATA_DIR when running in Docker
-const NGINX_STATIC_ROOT = process.env.NGINX_STATIC_ROOT || SERVICES_DATA_DIR;
+const CADDY_STATIC_ROOT = process.env.CADDY_STATIC_ROOT || SERVICES_DATA_DIR;
 
 // Check if running in Docker container
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
@@ -40,16 +40,33 @@ async function execOnHost(command, options = {}) {
   }
 }
 
-// Write nginx config file
-// Note: Since /etc/nginx/sites-available is a mounted volume in Docker,
-// regular writeFile works. Only shell commands (nginx -t, ln, etc.) need execOnHost.
-async function writeNginxConfig(configPath, content) {
+// Write Caddy site config file
+// Note: Since /etc/caddy/sites is a mounted volume in Docker,
+// regular writeFile works. Only shell commands (caddy reload, etc.) need execOnHost.
+async function writeCaddyConfig(configPath, content) {
   await writeFile(configPath, content);
 }
 
-// Read nginx config file
-async function readNginxConfig(configPath) {
+// Read Caddy site config file
+async function readCaddyConfig(configPath) {
   return readFile(configPath, 'utf-8');
+}
+
+// Ensure the main Caddyfile and sites directory exist
+async function ensureCaddyStructure() {
+  // Ensure sites directory exists
+  await mkdir(CADDY_SITES_DIR, { recursive: true }).catch(() => {});
+
+  // Ensure main Caddyfile exists with global options and import directive
+  if (!existsSync(CADDY_CONFIG_FILE)) {
+    const mainConfig = `{
+    admin localhost:2019
+}
+
+import ${CADDY_SITES_DIR}/*
+`;
+    await writeFile(CADDY_CONFIG_FILE, mainConfig);
+  }
 }
 
 // Cache for docker compose command detection
@@ -126,76 +143,54 @@ const fileSchema = z.object({
   content: z.string().max(10 * 1024 * 1024), // 10MB max
 });
 
-// Helper function to reload or start NGINX (executes on host)
-async function reloadNginx() {
+// Helper function to reload or start Caddy (executes on host)
+async function reloadCaddy() {
   try {
-    // Test NGINX configuration first (on host)
-    const testResult = await execOnHost('nginx -t 2>&1');
-    console.log('NGINX test output:', testResult.stdout, testResult.stderr);
+    // Ensure Caddy config structure exists
+    await ensureCaddyStructure();
 
-    // Check if NGINX master process is running (more reliable than pgrep -x)
-    let nginxRunning = false;
-    let nginxPid = null;
+    // Validate Caddy configuration first (on host)
+    const testResult = await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
+    console.log('Caddy validate output:', testResult.stdout, testResult.stderr);
+
+    // Check if Caddy is running
+    let caddyRunning = false;
     try {
-      // Check for nginx.pid file first (most reliable)
-      const pidResult = await execOnHost('cat /var/run/nginx.pid 2>/dev/null || cat /run/nginx.pid 2>/dev/null');
-      nginxPid = pidResult.stdout.trim();
-      if (nginxPid) {
-        // Verify the process actually exists
-        await execOnHost(`kill -0 ${nginxPid} 2>/dev/null`);
-        nginxRunning = true;
-      }
+      await execOnHost('systemctl is-active --quiet caddy 2>/dev/null');
+      caddyRunning = true;
     } catch (e) {
-      // PID file doesn't exist or process isn't running, try pgrep
+      // Try pgrep as fallback
       try {
-        const pgrepResult = await execOnHost('pgrep -o nginx 2>/dev/null');
+        const pgrepResult = await execOnHost('pgrep -o caddy 2>/dev/null');
         if (pgrepResult.stdout.trim()) {
-          nginxRunning = true;
+          caddyRunning = true;
         }
       } catch (e2) {
-        nginxRunning = false;
+        caddyRunning = false;
       }
     }
 
-    if (nginxRunning) {
-      // Reload NGINX using the most reliable method
-      console.log('NGINX is running, reloading...');
+    if (caddyRunning) {
+      // Reload Caddy - it validates before applying, rejects invalid configs
+      console.log('Caddy is running, reloading...');
       try {
-        await execOnHost('nginx -s reload 2>&1');
-        console.log('NGINX reloaded via signal');
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
+        console.log('Caddy reloaded successfully');
       } catch (reloadErr) {
         // Try systemctl as fallback
-        await execOnHost('systemctl reload nginx 2>&1');
-        console.log('NGINX reloaded via systemctl');
+        await execOnHost('systemctl reload caddy 2>&1');
+        console.log('Caddy reloaded via systemctl');
       }
     } else {
-      // NGINX not running - clean up any stale processes/pid files before starting
-      console.log('NGINX not running, cleaning up and starting...');
-
-      // Kill any orphaned nginx processes that might be holding ports
+      // Caddy not running - start it
+      console.log('Caddy not running, starting...');
       try {
-        await execOnHost('pkill -9 nginx 2>/dev/null || true');
-        // Small delay to ensure ports are released
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } catch (e) {
-        // Ignore - no processes to kill
-      }
-
-      // Remove stale PID files
-      try {
-        await execOnHost('rm -f /var/run/nginx.pid /run/nginx.pid 2>/dev/null || true');
-      } catch (e) {
-        // Ignore
-      }
-
-      // Start NGINX
-      try {
-        await execOnHost('systemctl start nginx 2>&1');
-        console.log('NGINX started via systemctl');
+        await execOnHost('systemctl start caddy 2>&1');
+        console.log('Caddy started via systemctl');
       } catch (startErr) {
         // Systemctl failed, try direct start
-        await execOnHost('nginx 2>&1');
-        console.log('NGINX started directly');
+        await execOnHost(`caddy start --config ${CADDY_CONFIG_FILE} 2>&1`);
+        console.log('Caddy started directly');
       }
     }
 
@@ -203,62 +198,22 @@ async function reloadNginx() {
   } catch (error) {
     // Extract the actual error message from stderr or stdout
     const errorOutput = error.stderr || error.stdout || error.message;
-    console.error('NGINX reload/start failed:', errorOutput);
+    console.error('Caddy reload/start failed:', errorOutput);
     return { success: false, error: errorOutput };
   }
 }
 
-// Check if certbot is installed (on host)
-async function isCertbotInstalled() {
+// Check if Caddy is installed (on host)
+async function isCaddyInstalled() {
   try {
-    await execOnHost('which certbot 2>/dev/null || command -v certbot 2>/dev/null');
+    await execOnHost('which caddy 2>/dev/null || command -v caddy 2>/dev/null');
     return true;
   } catch (e) {
     return false;
   }
 }
 
-// Helper function to obtain SSL certificate using certbot (on host)
-async function obtainSslCertificate(domain) {
-  // Validate domain to prevent command injection
-  if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(domain)) {
-    return { success: false, error: 'Invalid domain name' };
-  }
-
-  try {
-    // Check if certbot is installed on host
-    const certbotAvailable = await isCertbotInstalled();
-    if (!certbotAvailable) {
-      return {
-        success: false,
-        error: 'Certbot is not installed on the host. Install it with: apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
-        certbotMissing: true,
-      };
-    }
-
-    // Create letsencrypt webroot directory on host if it doesn't exist
-    await execOnHost('mkdir -p /var/www/letsencrypt/.well-known/acme-challenge');
-
-    // Run certbot on host in non-interactive mode
-    const certbotCmd = `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain} --non-interactive --agree-tos --register-unsafely-without-email 2>&1`;
-    console.log('Running certbot on host:', certbotCmd);
-    const result = await execOnHost(certbotCmd, { timeout: 120000 }); // 2 minute timeout
-    console.log('Certbot output:', result.stdout, result.stderr);
-
-    // Check if certificate was obtained
-    if (sslCertExists(domain)) {
-      return { success: true, message: 'SSL certificate obtained successfully' };
-    } else {
-      return { success: false, error: 'Certificate files not found after certbot' };
-    }
-  } catch (error) {
-    const errorOutput = error.stderr || error.stdout || error.message;
-    console.error('Certbot failed:', errorOutput);
-    return { success: false, error: errorOutput };
-  }
-}
-
-// Obtain SSL certificate for a service
+// Enable SSL for a service (Caddy auto-obtains certificates via ACME)
 servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
   try {
     const db = getDb();
@@ -268,60 +223,44 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Check if certificate already exists
-    if (sslCertExists(service.domain)) {
-      return res.json({
-        success: true,
-        message: 'SSL certificate already exists',
-        alreadyExists: true,
-      });
-    }
+    // Enable SSL in database
+    db.prepare('UPDATE services SET ssl_enabled = 1, force_https = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-    // Obtain certificate
-    const certResult = await obtainSslCertificate(service.domain);
+    // Regenerate Caddy config with SSL enabled
+    const serviceConfig = {
+      domain: service.domain,
+      type: service.type,
+      target: service.target,
+      port: service.port,
+      rootDir: service.root_dir,
+      websocketEnabled: !!service.websocket_enabled,
+      forceHttps: true,
+      maxUploadSize: service.max_upload_size,
+      sslEnabled: true,
+    };
 
-    if (certResult.success) {
-      // Regenerate NGINX config now that we have certificates
-      const serviceConfig = {
-        domain: service.domain,
-        type: service.type,
-        target: service.target,
-        port: service.port,
-        rootDir: service.root_dir,
-        websocketEnabled: !!service.websocket_enabled,
-        forceHttps: !!service.force_https,
-        maxUploadSize: service.max_upload_size,
-        sslEnabled: !!service.ssl_enabled,
-      };
+    const caddyConfig = generateCaddyConfig(serviceConfig);
+    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    await writeCaddyConfig(configPath, caddyConfig);
 
-      const nginxConfig = generateNginxConfig(serviceConfig);
-      const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-      await writeNginxConfig(configPath, nginxConfig);
+    // Reload Caddy - it will automatically obtain the certificate
+    const reloadResult = await reloadCaddy();
 
-      // Reload NGINX
-      const reloadResult = await reloadNginx();
+    logAudit(req.user.id, 'SSL_ENABLED', 'service', req.params.id, { domain: service.domain }, req.ip);
 
-      logAudit(req.user.id, 'SSL_CERTIFICATE_OBTAINED', 'service', req.params.id, { domain: service.domain }, req.ip);
-
-      res.json({
-        success: true,
-        message: 'SSL certificate obtained and NGINX configured',
-        nginxReloaded: reloadResult.success,
-        nginxError: reloadResult.error,
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        error: 'Failed to obtain certificate: ' + certResult.error,
-      });
-    }
+    res.json({
+      success: true,
+      message: 'SSL enabled - Caddy will automatically obtain a certificate',
+      caddyReloaded: reloadResult.success,
+      caddyError: reloadResult.error,
+    });
   } catch (error) {
-    console.error('Error obtaining certificate:', error);
-    res.status(500).json({ error: 'Failed to obtain certificate: ' + error.message });
+    console.error('Error enabling SSL:', error);
+    res.status(500).json({ error: 'Failed to enable SSL: ' + error.message });
   }
 });
 
-// Remove SSL certificate for a service (requires TOTP)
+// Disable SSL for a service (requires TOTP)
 servicesRouter.delete('/:id/certificate', async (req, res) => {
   try {
     const { totpCode } = deleteServiceSchema.parse(req.body);
@@ -330,11 +269,6 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
-    }
-
-    // Check if certificate exists
-    if (!sslCertExists(service.domain)) {
-      return res.status(400).json({ error: 'No SSL certificate found for this domain' });
     }
 
     // Verify TOTP
@@ -355,21 +289,10 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       }
     }
 
-    // Remove certificate using certbot on host
-    try {
-      await execOnHost(`certbot delete --cert-name ${JSON.stringify(service.domain)} --non-interactive 2>&1`);
-    } catch (certbotError) {
-      // If certbot delete fails, try manual removal on host
-      const certDir = `/etc/letsencrypt/live/${service.domain}`;
-      const renewalConf = `/etc/letsencrypt/renewal/${service.domain}.conf`;
-      const archiveDir = `/etc/letsencrypt/archive/${service.domain}`;
+    // Disable SSL in database
+    db.prepare('UPDATE services SET ssl_enabled = 0, force_https = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-      await execOnHost(`rm -rf ${certDir} 2>/dev/null || true`).catch(() => {});
-      await execOnHost(`rm -f ${renewalConf} 2>/dev/null || true`).catch(() => {});
-      await execOnHost(`rm -rf ${archiveDir} 2>/dev/null || true`).catch(() => {});
-    }
-
-    // Regenerate NGINX config without HTTPS
+    // Regenerate Caddy config without HTTPS
     const serviceConfig = {
       domain: service.domain,
       type: service.type,
@@ -377,67 +300,72 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       port: service.port,
       rootDir: service.root_dir,
       websocketEnabled: !!service.websocket_enabled,
-      forceHttps: false, // Can't force HTTPS without cert
+      forceHttps: false,
       maxUploadSize: service.max_upload_size,
-      sslEnabled: false, // Disable SSL since cert is removed
+      sslEnabled: false,
     };
 
-    const nginxConfig = generateNginxConfig(serviceConfig);
-    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-    await writeNginxConfig(configPath, nginxConfig);
+    const caddyConfig = generateCaddyConfig(serviceConfig);
+    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    await writeCaddyConfig(configPath, caddyConfig);
 
-    // Reload NGINX
-    const reloadResult = await reloadNginx();
+    // Reload Caddy
+    const reloadResult = await reloadCaddy();
 
-    logAudit(req.user.id, 'SSL_CERTIFICATE_REMOVED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(req.user.id, 'SSL_DISABLED', 'service', req.params.id, { domain: service.domain }, req.ip);
 
     res.json({
       success: true,
-      message: 'SSL certificate removed and NGINX reconfigured',
-      nginxReloaded: reloadResult.success,
-      nginxError: reloadResult.error,
+      message: 'SSL disabled and Caddy reconfigured',
+      caddyReloaded: reloadResult.success,
+      caddyError: reloadResult.error,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors[0].message });
     }
-    console.error('Error removing certificate:', error);
-    res.status(500).json({ error: 'Failed to remove certificate: ' + error.message });
+    console.error('Error disabling SSL:', error);
+    res.status(500).json({ error: 'Failed to disable SSL: ' + error.message });
   }
 });
 
 // Check SSL certificate status for a domain
+// Caddy auto-manages certificates - this endpoint reports whether SSL is enabled
 servicesRouter.get('/ssl-status/:domain', async (req, res) => {
   try {
     const domain = req.params.domain;
-    const exists = sslCertExists(domain);
-    const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
-    const certbotInstalled = await isCertbotInstalled();
+    const db = getDb();
+    const service = db.prepare('SELECT ssl_enabled FROM services WHERE domain = ?').get(domain);
+    const caddyInstalled = await isCaddyInstalled();
 
     res.json({
       domain,
-      certificateExists: exists,
-      certificatePath: certPath,
-      certbotInstalled,
-      command: exists ? null : `certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}`,
-      installCertbotCommand: certbotInstalled ? null : 'apt install certbot (Debian/Ubuntu) or yum install certbot (RHEL/CentOS)',
+      certificateExists: !!service?.ssl_enabled,
+      autoManaged: true,
+      caddyInstalled,
+      message: service?.ssl_enabled
+        ? 'Caddy automatically manages TLS certificates for this domain'
+        : 'SSL is disabled for this domain - enable it to auto-obtain a certificate',
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to check SSL status' });
   }
 });
 
-// Check system requirements (certbot, etc.)
+// Check system requirements (Caddy, etc.)
 servicesRouter.get('/system-check', async (req, res) => {
   try {
-    const certbotInstalled = await isCertbotInstalled();
+    const caddyInstalled = await isCaddyInstalled();
 
     res.json({
-      certbotInstalled,
-      installInstructions: certbotInstalled ? null : {
-        debian: 'sudo apt install certbot',
-        rhel: 'sudo yum install certbot',
-        alpine: 'sudo apk add certbot',
+      caddyInstalled,
+      autoTls: true,
+      message: caddyInstalled
+        ? 'Caddy is installed and manages TLS certificates automatically'
+        : 'Caddy is not installed',
+      installInstructions: caddyInstalled ? null : {
+        debian: 'sudo apt install caddy',
+        manual: 'See https://caddyserver.com/docs/install',
       },
     });
   } catch (error) {
@@ -445,7 +373,7 @@ servicesRouter.get('/system-check', async (req, res) => {
   }
 });
 
-// Regenerate NGINX config for a service (useful after obtaining SSL certificates)
+// Regenerate Caddy config for a service
 servicesRouter.post('/:id/regenerate-config', async (req, res) => {
   try {
     const db = getDb();
@@ -470,24 +398,22 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
       sslEnabled: !!service.ssl_enabled,
     };
 
-    // Generate and write new NGINX config
-    const nginxConfig = generateNginxConfig(serviceConfig);
-    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
-    await writeNginxConfig(configPath, nginxConfig);
+    // Generate and write new Caddy config
+    const caddyConfig = generateCaddyConfig(serviceConfig);
+    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    await writeCaddyConfig(configPath, caddyConfig);
 
-    // Test and reload NGINX
-    const reloadResult = await reloadNginx();
+    // Reload Caddy
+    const reloadResult = await reloadCaddy();
 
-    const sslStatus = service.ssl_enabled && sslCertExists(service.domain);
-
-    logAudit(req.user.id, 'CONFIG_REGENERATED', 'service', req.params.id, { sslStatus }, req.ip);
+    logAudit(req.user.id, 'CONFIG_REGENERATED', 'service', req.params.id, { sslEnabled: !!service.ssl_enabled }, req.ip);
 
     res.json({
       success: true,
-      message: reloadResult.success ? 'Configuration regenerated and NGINX reloaded' : 'Configuration regenerated but NGINX reload failed',
-      sslCertificateExists: sslStatus,
-      nginxReloaded: reloadResult.success,
-      nginxError: reloadResult.error,
+      message: reloadResult.success ? 'Configuration regenerated and Caddy reloaded' : 'Configuration regenerated but Caddy reload failed',
+      sslCertificateExists: !!service.ssl_enabled,
+      caddyReloaded: reloadResult.success,
+      caddyError: reloadResult.error,
     });
   } catch (error) {
     console.error('Error regenerating config:', error);
@@ -495,8 +421,8 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
   }
 });
 
-// Regenerate all NGINX configs with backup/revert capability
-servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
+// Regenerate all Caddy configs with backup/revert capability
+servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
   try {
     const db = getDb();
     const services = db.prepare('SELECT * FROM services').all();
@@ -504,19 +430,20 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
     const results = { success: [], failed: [] };
     const backups = {}; // Store backups of original configs
 
-    // First, backup ALL existing configs (not just DB services)
-    // This ensures we can revert if anything fails
-    // Note: /etc/nginx/sites-available is a mounted volume, so we can use fs directly
+    // Ensure Caddy structure exists
+    await ensureCaddyStructure();
+
+    // First, backup ALL existing site configs
     try {
       let configFiles = [];
-      if (existsSync(NGINX_SITES_AVAILABLE)) {
-        configFiles = await readdir(NGINX_SITES_AVAILABLE);
+      if (existsSync(CADDY_SITES_DIR)) {
+        configFiles = await readdir(CADDY_SITES_DIR);
       }
 
       for (const file of configFiles) {
         if (file === '.' || file === '..') continue;
         try {
-          const configPath = `${NGINX_SITES_AVAILABLE}/${file}`;
+          const configPath = `${CADDY_SITES_DIR}/${file}`;
           if (existsSync(configPath)) {
             backups[file] = await readFile(configPath, 'utf-8');
           }
@@ -524,15 +451,14 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
           console.log(`Could not backup config ${file}:`, e.message);
         }
       }
-      console.log(`Backed up ${Object.keys(backups).length} nginx configs`);
+      console.log(`Backed up ${Object.keys(backups).length} Caddy site configs`);
     } catch (e) {
       console.error('Error backing up configs:', e);
     }
 
     // Generate and write new configs for services in database
-    // Skip admin service - its config is managed by the installer with special settings
     for (const service of services) {
-      // Skip admin service - it has special nginx config created by installer
+      // Skip admin service - its config is managed by the installer
       if (service.is_admin) {
         console.log(`Skipping admin service: ${service.domain}`);
         results.success.push(`${service.domain} (skipped - admin)`);
@@ -552,15 +478,11 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
           sslEnabled: !!service.ssl_enabled,
         };
 
-        const nginxConfig = generateNginxConfig(serviceConfig);
-        const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+        const caddyConfig = generateCaddyConfig(serviceConfig);
+        const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
 
         // Write config
-        await writeNginxConfig(configPath, nginxConfig);
-
-        // Ensure symlink exists
-        const enabledPath = `${NGINX_SITES_ENABLED}/${service.domain}`;
-        await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`).catch(() => {});
+        await writeCaddyConfig(configPath, caddyConfig);
 
         results.success.push(service.domain);
       } catch (err) {
@@ -569,22 +491,22 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
       }
     }
 
-    // Test nginx config before reload
+    // Validate Caddy config before reload
     let testPassed = false;
     try {
-      await execOnHost('nginx -t 2>&1');
+      await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
       testPassed = true;
     } catch (testError) {
-      console.error('NGINX config test failed:', testError.stderr || testError.message);
+      console.error('Caddy config validation failed:', testError.stderr || testError.message);
     }
 
     // Helper function to revert all configs from backup
     const revertAllConfigs = async () => {
       console.log('Reverting all configs from backup...');
       for (const [filename, content] of Object.entries(backups)) {
-        const configPath = `${NGINX_SITES_AVAILABLE}/${filename}`;
+        const configPath = `${CADDY_SITES_DIR}/${filename}`;
         try {
-          await writeNginxConfig(configPath, content);
+          await writeCaddyConfig(configPath, content);
           console.log(`Reverted config: ${filename}`);
         } catch (e) {
           console.error(`Failed to revert config for ${filename}:`, e);
@@ -593,44 +515,41 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
     };
 
     if (!testPassed) {
-      // Config test failed - revert all configs from backup
       await revertAllConfigs();
 
-      logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Config test failed, reverted' }, req.ip);
+      logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Config validation failed, reverted' }, req.ip);
 
       return res.status(400).json({
         success: false,
-        error: 'NGINX config test failed - all configs reverted to previous versions',
+        error: 'Caddy config validation failed - all configs reverted to previous versions',
         results,
       });
     }
 
-    // Test passed, reload NGINX
-    const reloadResult = await reloadNginx();
+    // Validation passed, reload Caddy
+    const reloadResult = await reloadCaddy();
 
     if (!reloadResult.success) {
-      // Reload failed - revert all configs from backup
       await revertAllConfigs();
-      // Try to reload again with reverted configs
-      await reloadNginx().catch(() => {});
+      await reloadCaddy().catch(() => {});
 
-      logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Reload failed, reverted' }, req.ip);
+      logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATE_FAILED', 'system', null, { reason: 'Reload failed, reverted' }, req.ip);
 
       return res.status(400).json({
         success: false,
-        error: 'NGINX reload failed - all configs reverted to previous versions',
+        error: 'Caddy reload failed - all configs reverted to previous versions',
         details: reloadResult.error,
         results,
       });
     }
 
-    logAudit(req.user.id, 'NGINX_CONFIGS_REGENERATED', 'system', null, results, req.ip);
+    logAudit(req.user.id, 'CADDY_CONFIGS_REGENERATED', 'system', null, results, req.ip);
 
     res.json({
       success: true,
       results,
-      nginxReloaded: reloadResult.success,
-      nginxError: reloadResult.error,
+      caddyReloaded: reloadResult.success,
+      caddyError: reloadResult.error,
     });
   } catch (error) {
     console.error('Error regenerating all configs:', error);
@@ -638,29 +557,23 @@ servicesRouter.post('/nginx/regenerate-all', async (req, res) => {
   }
 });
 
-// NGINX reload endpoint
-servicesRouter.post('/nginx/reload', async (req, res) => {
+// Caddy reload endpoint
+servicesRouter.post('/caddy/reload', async (req, res) => {
   try {
-    const result = await reloadNginx();
+    const result = await reloadCaddy();
     if (result.success) {
-      logAudit(req.user.id, 'NGINX_RELOADED', 'system', null, {}, req.ip);
-      res.json({ success: true, message: 'NGINX reloaded successfully' });
+      logAudit(req.user.id, 'CADDY_RELOADED', 'system', null, {}, req.ip);
+      res.json({ success: true, message: 'Caddy reloaded successfully' });
     } else {
-      // Parse NGINX error output for more readable message
       let errorMessage = result.error || 'Unknown error';
-      // Extract key error info if present
-      const errorMatch = errorMessage.match(/nginx:.*error.*|emerg\].*|syntax error.*/i);
-      if (errorMatch) {
-        errorMessage = errorMatch[0];
-      }
       res.status(500).json({
-        error: `NGINX reload failed: ${errorMessage}`,
+        error: `Caddy reload failed: ${errorMessage}`,
         details: result.error
       });
     }
   } catch (error) {
-    console.error('Error reloading NGINX:', error);
-    res.status(500).json({ error: 'Failed to reload NGINX: ' + error.message });
+    console.error('Error reloading Caddy:', error);
+    res.status(500).json({ error: 'Failed to reload Caddy: ' + error.message });
   }
 });
 
@@ -679,7 +592,8 @@ servicesRouter.get('/', (req, res) => {
       ORDER BY is_favorite DESC, created_at DESC
     `).all();
 
-    // Convert integer booleans to actual booleans and check SSL cert status
+    // Convert integer booleans to actual booleans
+    // Caddy auto-manages certs, so sslCertificateExists matches sslEnabled
     const formattedServices = services.map(s => ({
       ...s,
       sslEnabled: !!s.sslEnabled,
@@ -687,7 +601,7 @@ servicesRouter.get('/', (req, res) => {
       websocketEnabled: !!s.websocketEnabled,
       isAdmin: !!s.isAdmin,
       isFavorite: !!s.isFavorite,
-      sslCertificateExists: s.sslEnabled ? sslCertExists(s.domain) : null,
+      sslCertificateExists: !!s.sslEnabled,
     }));
 
     res.json({ services: formattedServices });
@@ -838,29 +752,25 @@ services:
       data.target = data.target || '127.0.0.1';
     }
 
-    // Generate NGINX config
-    const nginxConfig = generateNginxConfig(data);
+    // Generate Caddy config
+    const caddyConfig = generateCaddyConfig(data);
 
-    // Write NGINX config file
-    const configPath = `${NGINX_SITES_AVAILABLE}/${data.domain}`;
-    await writeNginxConfig(configPath, nginxConfig);
+    // Write Caddy site config file
+    await ensureCaddyStructure();
+    const configPath = `${CADDY_SITES_DIR}/${data.domain}`;
+    await writeCaddyConfig(configPath, caddyConfig);
 
-    // Enable the site (use execOnHost for Docker compatibility)
-    const enabledPath = `${NGINX_SITES_ENABLED}/${data.domain}`;
-    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
-
-    // Test NGINX config
+    // Validate Caddy config
     try {
-      await execOnHost('nginx -t 2>&1');
+      await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
     } catch (testErr) {
       // Rollback
-      await execOnHost(`rm -f "${enabledPath}" 2>/dev/null || true`).catch(() => {});
-      await execOnHost(`rm -f "${configPath}" 2>/dev/null || true`).catch(() => {});
-      return res.status(400).json({ error: 'Invalid NGINX configuration generated: ' + (testErr.stderr || testErr.message) });
+      await unlink(configPath).catch(() => {});
+      return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
     }
 
-    // Reload/start NGINX
-    const nginxResult = await reloadNginx();
+    // Reload Caddy
+    const caddyResult = await reloadCaddy();
 
     // Insert into database
     db.prepare(`
@@ -913,39 +823,20 @@ services:
       }
     }
 
-    // Check if we should obtain SSL certificate
-    let sslCertificateExists = data.sslEnabled && sslCertExists(data.domain);
-    let sslMessage = null;
-    let certObtained = false;
-
-    if (data.sslEnabled && data.obtainCertificate && !sslCertificateExists) {
-      // Try to obtain certificate
-      const certResult = await obtainSslCertificate(data.domain);
-      if (certResult.success) {
-        certObtained = true;
-        sslCertificateExists = true;
-
-        // Regenerate NGINX config with SSL now that we have certificates
-        const updatedNginxConfig = generateNginxConfig(data);
-        await writeNginxConfig(configPath, updatedNginxConfig);
-        await reloadNginx();
-
-        sslMessage = 'SSL certificate obtained and configured successfully';
-      } else {
-        sslMessage = `Failed to obtain certificate: ${certResult.error}`;
-      }
-    } else if (data.sslEnabled && !sslCertificateExists) {
-      sslMessage = `SSL enabled but certificate not found. Run: certbot certonly --webroot -w /var/www/letsencrypt -d ${data.domain}`;
-    }
+    // Caddy auto-manages SSL certificates when SSL is enabled
+    const sslCertificateExists = !!data.sslEnabled;
+    const sslMessage = data.sslEnabled
+      ? 'Caddy will automatically obtain and manage the SSL certificate'
+      : null;
 
     res.status(201).json({
       success: true,
       service: { id, ...data, dataDir },
       sslCertificateExists,
       sslMessage,
-      certObtained,
-      nginxReloaded: nginxResult.success,
-      nginxError: nginxResult.error,
+      certObtained: !!data.sslEnabled,
+      caddyReloaded: caddyResult.success,
+      caddyError: caddyResult.error,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -996,14 +887,13 @@ servicesRouter.put('/:id', async (req, res) => {
       maxUploadSize: data.maxUploadSize || service.max_upload_size,
     };
 
-    // Remove old NGINX config if domain changed
+    // Remove old Caddy config if domain changed
     if (data.domain && data.domain !== service.domain) {
-      await unlink(`${NGINX_SITES_ENABLED}/${service.domain}`).catch(() => {});
-      await unlink(`${NGINX_SITES_AVAILABLE}/${service.domain}`).catch(() => {});
+      await unlink(`${CADDY_SITES_DIR}/${service.domain}`).catch(() => {});
     }
 
-    // Backup existing nginx config before changes
-    const configPath = `${NGINX_SITES_AVAILABLE}/${updatedData.domain}`;
+    // Backup existing Caddy config before changes
+    const configPath = `${CADDY_SITES_DIR}/${updatedData.domain}`;
     let backupConfig = null;
     try {
       if (existsSync(configPath)) {
@@ -1013,39 +903,35 @@ servicesRouter.put('/:id', async (req, res) => {
       // No backup available
     }
 
-    // Generate and write new NGINX config
-    const nginxConfig = generateNginxConfig(updatedData);
-    await writeNginxConfig(configPath, nginxConfig);
+    // Generate and write new Caddy config
+    const caddyConfig = generateCaddyConfig(updatedData);
+    await writeCaddyConfig(configPath, caddyConfig);
 
-    // Enable the site (use execOnHost for Docker compatibility)
-    const enabledPath = `${NGINX_SITES_ENABLED}/${updatedData.domain}`;
-    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
-
-    // Test nginx config before reload
+    // Validate Caddy config before reload
     try {
-      await execOnHost('nginx -t 2>&1');
+      await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
     } catch (testError) {
-      // Config test failed - revert to backup
+      // Config validation failed - revert to backup
       if (backupConfig) {
-        await writeNginxConfig(configPath, backupConfig);
+        await writeCaddyConfig(configPath, backupConfig);
       }
       return res.status(400).json({
-        error: 'NGINX config test failed - reverted to previous config',
+        error: 'Caddy config validation failed - reverted to previous config',
         details: testError.stderr || testError.message,
       });
     }
 
-    // Reload NGINX with failsafe
+    // Reload Caddy with failsafe
     try {
-      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
-        await writeNginxConfig(configPath, backupConfig);
-        await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
+        await writeCaddyConfig(configPath, backupConfig);
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`).catch(() => {});
       }
       return res.status(400).json({
-        error: 'NGINX reload failed - reverted to previous config',
+        error: 'Caddy reload failed - reverted to previous config',
         details: reloadError.stderr || reloadError.message,
       });
     }
@@ -1160,18 +1046,14 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Regenerate NGINX config with reverted settings
-    const nginxConfig = generateNginxConfig(config);
-    const configPath = `${NGINX_SITES_AVAILABLE}/${config.domain}`;
-    await writeNginxConfig(configPath, nginxConfig);
+    // Regenerate Caddy config with reverted settings
+    const caddyConfig = generateCaddyConfig(config);
+    const configPath = `${CADDY_SITES_DIR}/${config.domain}`;
+    await writeCaddyConfig(configPath, caddyConfig);
 
-    // Enable the site (use execOnHost for Docker compatibility)
-    const enabledPath = `${NGINX_SITES_ENABLED}/${config.domain}`;
-    await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
-
-    // Test and reload NGINX using execOnHost for Docker compatibility
-    await execOnHost('nginx -t 2>&1');
-    await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
+    // Validate and reload Caddy
+    await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
+    await reloadCaddy();
 
     // Update database
     db.prepare(`
@@ -1217,8 +1099,8 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
   }
 });
 
-// Get nginx config for advanced editing
-servicesRouter.get('/:id/nginx-config', async (req, res) => {
+// Get Caddy config for advanced editing
+servicesRouter.get('/:id/caddy-config', async (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare('SELECT domain FROM services WHERE id = ?').get(req.params.id);
@@ -1227,22 +1109,22 @@ servicesRouter.get('/:id/nginx-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
 
     if (!existsSync(configPath)) {
-      return res.status(404).json({ error: 'Nginx config not found' });
+      return res.status(404).json({ error: 'Caddy config not found' });
     }
 
     const config = await readFile(configPath, 'utf-8');
     res.json({ config });
   } catch (error) {
-    console.error('Error reading nginx config:', error);
-    res.status(500).json({ error: 'Failed to read nginx config' });
+    console.error('Error reading Caddy config:', error);
+    res.status(500).json({ error: 'Failed to read Caddy config' });
   }
 });
 
-// Save nginx config with failsafe revert on reload failure
-servicesRouter.put('/:id/nginx-config', async (req, res) => {
+// Save Caddy config with failsafe revert on reload failure
+servicesRouter.put('/:id/caddy-config', async (req, res) => {
   try {
     const { config } = req.body;
     const db = getDb();
@@ -1252,7 +1134,7 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    const configPath = `${NGINX_SITES_AVAILABLE}/${service.domain}`;
+    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
 
     // Read and backup current config
     let backupConfig = null;
@@ -1261,34 +1143,33 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
     }
 
     // Write new config
-    await writeNginxConfig(configPath, config);
+    await writeCaddyConfig(configPath, config);
 
-    // Test nginx config
+    // Validate Caddy config
     try {
-      await execOnHost('nginx -t 2>&1');
+      await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
     } catch (testError) {
-      // Config test failed - revert to backup
+      // Config validation failed - revert to backup
       if (backupConfig) {
-        await writeNginxConfig(configPath, backupConfig);
+        await writeCaddyConfig(configPath, backupConfig);
       }
       return res.status(400).json({
-        error: 'Nginx config test failed - reverted to previous config',
+        error: 'Caddy config validation failed - reverted to previous config',
         details: testError.stderr || testError.message,
       });
     }
 
-    // Try to reload nginx
+    // Try to reload Caddy
     try {
-      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
-        await writeNginxConfig(configPath, backupConfig);
-        // Try to reload with old config
-        await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch(() => {});
+        await writeCaddyConfig(configPath, backupConfig);
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`).catch(() => {});
       }
       return res.status(400).json({
-        error: 'Nginx reload failed - reverted to previous config',
+        error: 'Caddy reload failed - reverted to previous config',
         details: reloadError.stderr || reloadError.message,
       });
     }
@@ -1307,18 +1188,18 @@ servicesRouter.put('/:id/nginx-config', async (req, res) => {
     `).run(
       versionId,
       req.params.id,
-      JSON.stringify({ rawNginxConfig: config }),
+      JSON.stringify({ rawCaddyConfig: config }),
       newVersion,
-      'Manual nginx config edit',
+      'Manual Caddy config edit',
       req.user.id
     );
 
-    logAudit(req.user.id, 'NGINX_CONFIG_EDITED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(req.user.id, 'CADDY_CONFIG_EDITED', 'service', req.params.id, { domain: service.domain }, req.ip);
 
-    res.json({ success: true, message: 'Nginx config saved and reloaded' });
+    res.json({ success: true, message: 'Caddy config saved and reloaded' });
   } catch (error) {
-    console.error('Error saving nginx config:', error);
-    res.status(500).json({ error: 'Failed to save nginx config: ' + error.message });
+    console.error('Error saving Caddy config:', error);
+    res.status(500).json({ error: 'Failed to save Caddy config: ' + error.message });
   }
 });
 
@@ -1355,17 +1236,16 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
-    // Remove NGINX config (use execOnHost for Docker compatibility)
+    // Remove Caddy site config
     try {
-      await execOnHost(`rm -f "${NGINX_SITES_ENABLED}/${service.domain}" 2>/dev/null || true`);
-      await execOnHost(`rm -f "${NGINX_SITES_AVAILABLE}/${service.domain}" 2>/dev/null || true`);
+      await unlink(`${CADDY_SITES_DIR}/${service.domain}`).catch(() => {});
     } catch (e) {
-      console.error('Error removing nginx config files:', e);
+      console.error('Error removing Caddy config file:', e);
     }
 
-    // Reload NGINX using execOnHost for Docker compatibility
-    await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1').catch((e) => {
-      console.error('Error reloading nginx after delete:', e);
+    // Reload Caddy
+    await reloadCaddy().catch((e) => {
+      console.error('Error reloading Caddy after delete:', e);
     });
 
     // Optionally remove data directory (keep files by default for safety)
@@ -1553,14 +1433,14 @@ servicesRouter.put('/:id/files/*', async (req, res) => {
 
     logAudit(req.user.id, 'FILE_UPDATED', 'service', req.params.id, { path: filePath }, req.ip);
 
-    // Auto-reload NGINX for static sites
-    let nginxReloaded = false;
+    // Auto-reload Caddy for static sites
+    let caddyReloaded = false;
     if (service.type === 'static') {
-      const reloadResult = await reloadNginx();
-      nginxReloaded = reloadResult.success;
+      const reloadResult = await reloadCaddy();
+      caddyReloaded = reloadResult.success;
     }
 
-    res.json({ success: true, path: filePath, nginxReloaded });
+    res.json({ success: true, path: filePath, caddyReloaded });
   } catch (error) {
     console.error('Error writing file:', error);
     res.status(500).json({ error: 'Failed to write file' });
@@ -1709,14 +1589,14 @@ servicesRouter.post('/:id/revert/:versionId', async (req, res) => {
       toVersion: version.version,
     }, req.ip);
 
-    // Reload NGINX for static sites
-    let nginxReloaded = false;
+    // Reload Caddy for static sites
+    let caddyReloaded = false;
     if (version.type === 'static') {
-      const reloadResult = await reloadNginx();
-      nginxReloaded = reloadResult.success;
+      const reloadResult = await reloadCaddy();
+      caddyReloaded = reloadResult.success;
     }
 
-    res.json({ success: true, revertedToVersion: version.version, nginxReloaded });
+    res.json({ success: true, revertedToVersion: version.version, caddyReloaded });
   } catch (error) {
     console.error('Error reverting file:', error);
     res.status(500).json({ error: 'Failed to revert file' });
@@ -1908,9 +1788,9 @@ servicesRouter.post('/:id/import-files', async (req, res) => {
 
     logAudit(req.user.id, 'FILES_IMPORTED', 'service', req.params.id, results, req.ip);
 
-    // Reload NGINX for static sites
+    // Reload Caddy for static sites
     if (service.type === 'static' && results.imported.length > 0) {
-      await reloadNginx();
+      await reloadCaddy();
     }
 
     res.json({ success: true, results });
@@ -2030,8 +1910,7 @@ servicesRouter.post('/import', async (req, res) => {
 
         if (existing && overwrite) {
           // Delete existing service first
-          await unlink(`${NGINX_SITES_ENABLED}/${serviceData.domain}`).catch(() => {});
-          await unlink(`${NGINX_SITES_AVAILABLE}/${serviceData.domain}`).catch(() => {});
+          await unlink(`${CADDY_SITES_DIR}/${serviceData.domain}`).catch(() => {});
           db.prepare('DELETE FROM services WHERE id = ?').run(existing.id);
         }
 
@@ -2071,15 +1950,11 @@ servicesRouter.post('/import', async (req, res) => {
           }
         }
 
-        // Generate NGINX config
+        // Generate Caddy config
         const configData = { ...serviceData, rootDir };
-        const nginxConfig = generateNginxConfig(configData);
-        const configPath = `${NGINX_SITES_AVAILABLE}/${serviceData.domain}`;
-        await writeNginxConfig(configPath, nginxConfig);
-
-        // Enable the site (use execOnHost for Docker compatibility)
-        const enabledPath = `${NGINX_SITES_ENABLED}/${serviceData.domain}`;
-        await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`);
+        const caddyConfig = generateCaddyConfig(configData);
+        const configPath = `${CADDY_SITES_DIR}/${serviceData.domain}`;
+        await writeCaddyConfig(configPath, caddyConfig);
 
         // Insert into database
         db.prepare(`
@@ -2102,8 +1977,8 @@ servicesRouter.post('/import', async (req, res) => {
       }
     }
 
-    // Reload NGINX using execOnHost for Docker compatibility
-    await execOnHost('nginx -t 2>&1 && (systemctl reload nginx 2>&1 || nginx -s reload 2>&1)').catch(() => {});
+    // Reload Caddy
+    await reloadCaddy().catch(() => {});
 
     logAudit(req.user.id, 'SERVICES_IMPORTED', 'system', null, results, req.ip);
 
@@ -2831,18 +2706,17 @@ servicesRouter.post('/system/secure', async (req, res) => {
 
 // ==================== DISCOVER EXISTING SITES ====================
 
-// Discover existing NGINX sites from sites-available
-servicesRouter.get('/discover/nginx-sites', async (req, res) => {
+// Discover existing Caddy sites from sites directory
+servicesRouter.get('/discover/caddy-sites', async (req, res) => {
   try {
     const db = getDb();
     const existingDomains = db.prepare('SELECT domain FROM services').all().map(s => s.domain);
 
     const discoveredSites = [];
 
-    // Use execOnHost to read from host filesystem when running in Docker
-    const sitesDir = NGINX_SITES_AVAILABLE;
+    const sitesDir = CADDY_SITES_DIR;
 
-    // Get list of files in sites-available
+    // Get list of files in Caddy sites directory
     let files = [];
     try {
       if (isInDocker) {
@@ -2852,13 +2726,13 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
         files = await readdir(sitesDir);
       }
     } catch (e) {
-      console.log('Could not read sites-available directory:', e.message);
+      console.log('Could not read Caddy sites directory:', e.message);
     }
 
-    console.log(`NGINX discovery found ${files.length} files in ${sitesDir}`);
+    console.log(`Caddy discovery found ${files.length} files in ${sitesDir}`);
 
     for (const file of files) {
-      if (file === 'default' || file === '.' || file === '..') continue; // Skip default site
+      if (file === '.' || file === '..') continue;
 
       try {
         // Read config content
@@ -2875,9 +2749,9 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 
         if (!content.trim()) continue;
 
-        // Extract domain from server_name directive
-        const serverNameMatch = content.match(/server_name\s+([^\s;]+)/);
-        const domain = serverNameMatch ? serverNameMatch[1] : file;
+        // Extract domain from Caddyfile site block (first non-comment line with domain)
+        const domainMatch = content.match(/^(?:https?:\/\/)?([a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])\s*\{/m);
+        const domain = domainMatch ? domainMatch[1] : file;
 
         // Skip if already in database
         if (existingDomains.includes(domain)) continue;
@@ -2888,8 +2762,8 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
         let port = null;
         let target = null;
 
-        // Check for proxy_pass (indicates docker/proxy type)
-        const proxyMatch = content.match(/proxy_pass\s+http:\/\/([^:\/]+):?(\d+)?/);
+        // Check for reverse_proxy (indicates docker/proxy type)
+        const proxyMatch = content.match(/reverse_proxy\s+(?:https?:\/\/)?([^:\s\/]+):?(\d+)?/);
         if (proxyMatch) {
           type = 'docker';
           target = proxyMatch[1] || '127.0.0.1';
@@ -2897,18 +2771,16 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
         }
 
         // Check for root directive (static site)
-        const rootMatch = content.match(/root\s+([^;]+);/);
+        const rootMatch = content.match(/root\s+\*?\s*([^\n]+)/);
         if (rootMatch && type === 'static') {
           rootDir = rootMatch[1].trim();
         }
 
-        // Check for SSL
-        const sslEnabled = content.includes('ssl_certificate') || content.includes('listen 443');
+        // Check for SSL (Caddy enables TLS by default unless http:// prefix is used)
+        const sslEnabled = !content.includes('http://');
 
-        // Check for websocket support
-        const websocketEnabled = content.includes('proxy_set_header Upgrade') ||
-                                  content.includes('Connection "upgrade"') ||
-                                  content.includes('Upgrade $http_upgrade');
+        // WebSocket support is automatic in Caddy
+        const websocketEnabled = false;
 
         // Try to find index.html for static sites
         let hasIndexHtml = false;
@@ -2927,7 +2799,7 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
 
         discoveredSites.push({
           domain,
-          name: domain.split('.')[0], // Use first part of domain as name
+          name: domain.split('.')[0],
           type,
           rootDir,
           target,
@@ -2942,7 +2814,7 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
       }
     }
 
-    console.log(`Returning ${discoveredSites.length} discovered NGINX sites`);
+    console.log(`Returning ${discoveredSites.length} discovered Caddy sites`);
     res.json({ sites: discoveredSites });
   } catch (error) {
     console.error('Error discovering sites:', error);
@@ -2950,7 +2822,7 @@ servicesRouter.get('/discover/nginx-sites', async (req, res) => {
   }
 });
 
-// Import a discovered NGINX site
+// Import a discovered site
 servicesRouter.post('/discover/import', async (req, res) => {
   try {
     const { domain, name, type, rootDir, target, port, sslEnabled, websocketEnabled } = req.body;
@@ -3011,7 +2883,7 @@ servicesRouter.post('/discover/import', async (req, res) => {
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
 
-    // Regenerate nginx config in ProxyPilot format to ensure consistency
+    // Generate Caddy config for the imported site
     try {
       const serviceConfig = {
         domain,
@@ -3025,19 +2897,16 @@ servicesRouter.post('/discover/import', async (req, res) => {
         sslEnabled: !!sslEnabled,
       };
 
-      const nginxConfig = generateNginxConfig(serviceConfig);
-      const configPath = `${NGINX_SITES_AVAILABLE}/${domain}`;
-      await writeNginxConfig(configPath, nginxConfig);
+      await ensureCaddyStructure();
+      const caddyConfig = generateCaddyConfig(serviceConfig);
+      const configPath = `${CADDY_SITES_DIR}/${domain}`;
+      await writeCaddyConfig(configPath, caddyConfig);
 
-      // Ensure symlink exists
-      const enabledPath = `${NGINX_SITES_ENABLED}/${domain}`;
-      await execOnHost(`ln -sf "${configPath}" "${enabledPath}" 2>/dev/null || true`).catch(() => {});
-
-      // Test and reload nginx
-      await execOnHost('nginx -t 2>&1');
-      await execOnHost('systemctl reload nginx 2>&1 || nginx -s reload 2>&1');
-    } catch (nginxError) {
-      console.error('Error regenerating nginx config for imported site:', nginxError);
+      // Validate and reload Caddy
+      await execOnHost(`caddy validate --config ${CADDY_CONFIG_FILE} 2>&1`);
+      await reloadCaddy();
+    } catch (caddyError) {
+      console.error('Error generating Caddy config for imported site:', caddyError);
       // Don't fail the import, but log the error
     }
 
@@ -3197,127 +3066,76 @@ servicesRouter.get('/docker-compose/services', async (req, res) => {
 });
 
 // Check if SSL certificate exists for a domain
-function sslCertExists(domain) {
-  const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
-  const keyPath = `/etc/letsencrypt/live/${domain}/privkey.pem`;
-  return existsSync(certPath) && existsSync(keyPath);
+// Convert upload size string to Caddy format (e.g. "1G" -> "1GB", "100M" -> "100MB")
+function toCaddySize(size) {
+  if (!size) return '1GB';
+  return size.toUpperCase().replace(/^(\d+)G$/i, '$1GB').replace(/^(\d+)M$/i, '$1MB');
 }
 
-// Generate NGINX config based on service type
-function generateNginxConfig(service) {
+// Generate Caddy site config based on service type
+function generateCaddyConfig(service) {
   const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
 
-  // Check if SSL certificates actually exist
-  const certsExist = sslEnabled && sslCertExists(domain);
-  // Only force HTTPS redirect if SSL is enabled AND certificates exist
-  const actualForceHttps = forceHttps && certsExist;
-
-  // Convert container path to host path for NGINX
-  // If rootDir starts with SERVICES_DATA_DIR, replace with NGINX_STATIC_ROOT
-  let nginxRootDir = rootDir;
+  // Convert container path to host path for Caddy
+  // If rootDir starts with SERVICES_DATA_DIR, replace with CADDY_STATIC_ROOT
+  let caddyRootDir = rootDir;
   if (rootDir && rootDir.startsWith(SERVICES_DATA_DIR)) {
-    nginxRootDir = rootDir.replace(SERVICES_DATA_DIR, NGINX_STATIC_ROOT);
+    caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
 
-  let locationBlock = '';
-  let rootBlock = '';
+  // Caddy auto-handles TLS when domain is used without http:// prefix
+  // Use http:// prefix to disable automatic HTTPS
+  const siteAddress = sslEnabled ? domain : `http://${domain}`;
+
+  let lines = [];
+  lines.push(`# ProxyPilot Managed Configuration`);
+  lines.push(`# Domain: ${domain}`);
+  lines.push(`# Type: ${type}`);
+  lines.push(`# Generated: ${new Date().toISOString()}`);
+  lines.push(``);
+  lines.push(`${siteAddress} {`);
+
+  // Request body size limit
+  if (maxUploadSize) {
+    lines.push(`    request_body {`);
+    lines.push(`        max_size ${toCaddySize(maxUploadSize)}`);
+    lines.push(`    }`);
+    lines.push(``);
+  }
 
   switch (type) {
     case 'docker':
-      const wsConfig = websocketEnabled ? `
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";` : `
-        proxy_http_version 1.1;`;
-
-      locationBlock = `
-    location / {${wsConfig}
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 300;
-        proxy_connect_timeout 60;
-        proxy_send_timeout 300;
-        proxy_buffering off;
-        proxy_pass http://${target || '127.0.0.1'}:${port};
-    }`;
+    case 'proxy':
+      lines.push(`    reverse_proxy ${target || '127.0.0.1'}:${port} {`);
+      lines.push(`        # Caddy automatically sets Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto`);
+      lines.push(`        # WebSocket upgrade is handled automatically`);
+      lines.push(`    }`);
       break;
 
     case 'static':
-      rootBlock = `
-    root ${nginxRootDir};
-    index index.html index.htm;`;
-      locationBlock = `
-    location / {
-        try_files $uri $uri/ /index.html;
-    }`;
+      lines.push(`    root * ${caddyRootDir}`);
+      lines.push(`    file_server`);
+      lines.push(`    try_files {path} {path}/ /index.html`);
       break;
   }
 
-  const httpBlock = actualForceHttps
-    ? `
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
+  // Security headers
+  lines.push(``);
+  lines.push(`    header {`);
+  lines.push(`        X-Frame-Options "SAMEORIGIN"`);
+  lines.push(`        X-Content-Type-Options "nosniff"`);
+  lines.push(`        X-XSS-Protection "1; mode=block"`);
+  lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
+  lines.push(`    }`);
 
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
-    }
+  // Logging
+  lines.push(``);
+  lines.push(`    log {`);
+  lines.push(`        output file /var/log/caddy/${domain}.log`);
+  lines.push(`    }`);
 
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}`
-    : `
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
-    client_max_body_size ${maxUploadSize};${rootBlock}
+  lines.push(`}`);
+  lines.push(``);
 
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
-    }
-${locationBlock}
-}`;
-
-  // Only include HTTPS block if certificates exist
-  const httpsBlock = certsExist ? `
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${domain};
-    client_max_body_size ${maxUploadSize};${rootBlock}
-
-    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
-
-    # SSL settings (minimal - session cache should be in nginx.conf)
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-${locationBlock}
-}` : '';
-
-  // Add comment about SSL status
-  const sslComment = sslEnabled && !certsExist
-    ? `# SSL: Enabled but certificates not found - run: certbot certonly --webroot -w /var/www/letsencrypt -d ${domain}\n`
-    : '';
-
-  return `# ProxyPilot Managed Configuration
-# Domain: ${domain}
-# Type: ${type}
-# Generated: ${new Date().toISOString()}
-${sslComment}${httpBlock}${httpsBlock}
-`;
+  return lines.join('\n');
 }

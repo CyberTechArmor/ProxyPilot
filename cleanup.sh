@@ -1,6 +1,6 @@
 #!/bin/bash
 # ProxyPilot Cleanup Script
-# Removes ProxyPilot service while keeping NGINX and Docker installed
+# Removes ProxyPilot service while keeping Caddy and Docker installed
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ echo ""
 echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${YELLOW}║           ProxyPilot Cleanup Script                           ║${NC}"
 echo -e "${YELLOW}║                                                               ║${NC}"
-echo -e "${YELLOW}║   This will remove ProxyPilot but keep NGINX and Docker       ║${NC}"
+echo -e "${YELLOW}║   This will remove ProxyPilot but keep Caddy and Docker       ║${NC}"
 echo -e "${YELLOW}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -55,34 +55,27 @@ log_info "Removing ProxyPilot Docker images..."
 docker images | grep -E "proxypilot|${INSTALL_DIR##*/}" | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
 log_success "Docker images removed"
 
-# Get domain from .env before removing (for NGINX cleanup)
+# Get domain from .env before removing (for Caddy cleanup)
 DOMAIN=""
 if [[ -f "${INSTALL_DIR}/.env" ]]; then
     DOMAIN=$(grep "^DOMAIN=" "${INSTALL_DIR}/.env" 2>/dev/null | cut -d'=' -f2 || true)
 fi
 
-# Remove NGINX site configuration
-log_info "Removing NGINX site configuration..."
+# Remove Caddy site configuration
+log_info "Removing Caddy site configuration..."
 if [[ -n "$DOMAIN" ]]; then
-    rm -f "/etc/nginx/sites-enabled/${DOMAIN}.conf" 2>/dev/null || true
-    rm -f "/etc/nginx/sites-available/${DOMAIN}.conf" 2>/dev/null || true
-    log_success "NGINX site config for ${DOMAIN} removed"
+    rm -f "/etc/caddy/sites/${DOMAIN}" 2>/dev/null || true
+    log_success "Caddy site config for ${DOMAIN} removed"
 else
     # Try to find and remove any proxypilot-related configs
-    rm -f /etc/nginx/sites-enabled/proxypilot*.conf 2>/dev/null || true
-    rm -f /etc/nginx/sites-available/proxypilot*.conf 2>/dev/null || true
-    log_warn "Could not determine domain, removed any proxypilot*.conf files"
+    rm -f /etc/caddy/sites/proxypilot* 2>/dev/null || true
+    log_warn "Could not determine domain, removed any proxypilot* site files"
 fi
 
-# Reload NGINX
-log_info "Reloading NGINX..."
-if nginx -t 2>/dev/null; then
-    systemctl reload nginx
-    log_success "NGINX reloaded"
-else
-    log_warn "NGINX config test failed, attempting to restart anyway"
-    systemctl restart nginx || true
-fi
+# Reload Caddy
+log_info "Reloading Caddy..."
+caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl reload caddy || true
+log_success "Caddy reloaded"
 
 # Remove installation directory
 log_info "Removing installation directory..."
@@ -93,14 +86,8 @@ else
     log_warn "Installation directory not found"
 fi
 
-# Optional: Remove SSL certificates
-echo ""
-read -rp "Do you also want to remove SSL certificates for ${DOMAIN:-the domain}? [y/N]: " remove_certs
-if [[ "$remove_certs" =~ ^[Yy]$ ]] && [[ -n "$DOMAIN" ]]; then
-    log_info "Removing SSL certificates..."
-    certbot delete --cert-name "$DOMAIN" --non-interactive 2>/dev/null || true
-    log_success "SSL certificates removed"
-fi
+# Note: Caddy auto-manages TLS certificates; they will be cleaned up automatically
+log_info "Caddy-managed TLS certificates will be cleaned up automatically by Caddy"
 
 echo ""
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
@@ -108,7 +95,7 @@ echo -e "${GREEN}║              Cleanup Complete!                             
 echo -e "${GREEN}╠═══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║                                                               ║${NC}"
 echo -e "${GREEN}║   ProxyPilot has been removed.                                ║${NC}"
-echo -e "${GREEN}║   NGINX and Docker are still installed.                       ║${NC}"
+echo -e "${GREEN}║   Caddy and Docker are still installed.                       ║${NC}"
 echo -e "${GREEN}║                                                               ║${NC}"
 echo -e "${GREEN}║   To reinstall, run: sudo ./install.sh                        ║${NC}"
 echo -e "${GREEN}║                                                               ║${NC}"

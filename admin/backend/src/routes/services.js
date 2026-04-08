@@ -174,12 +174,13 @@ async function reloadCaddy() {
       // Reload Caddy - it validates before applying, rejects invalid configs
       console.log('Caddy is running, reloading...');
       try {
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
+        // Use --force to avoid hanging if admin API is unresponsive
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
         console.log('Caddy reloaded successfully');
       } catch (reloadErr) {
         // Try systemctl as fallback
-        await execOnHost('systemctl reload caddy 2>&1');
-        console.log('Caddy reloaded via systemctl');
+        await execOnHost('systemctl restart caddy 2>&1');
+        console.log('Caddy restarted via systemctl');
       }
     } else {
       // Caddy not running - start it
@@ -923,12 +924,12 @@ servicesRouter.put('/:id', async (req, res) => {
 
     // Reload Caddy with failsafe
     try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
         await writeCaddyConfig(configPath, backupConfig);
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`).catch(() => {});
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
       }
       return res.status(400).json({
         error: 'Caddy reload failed - reverted to previous config',
@@ -1161,12 +1162,12 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 
     // Try to reload Caddy
     try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`);
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
         await writeCaddyConfig(configPath, backupConfig);
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} 2>&1`).catch(() => {});
+        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
       }
       return res.status(400).json({
         error: 'Caddy reload failed - reverted to previous config',

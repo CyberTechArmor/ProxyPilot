@@ -178,20 +178,28 @@ install_caddy() {
     mkdir -p /etc/caddy/sites
     mkdir -p /var/log/caddy
 
-    # Create main Caddyfile if it doesn't exist or update it
+    # Create a placeholder file so the import glob doesn't fail on empty directory
+    if [ -z "$(ls -A /etc/caddy/sites/ 2>/dev/null)" ]; then
+        touch /etc/caddy/sites/.keep
+    fi
+
+    # Create main Caddyfile
     log_info "Configuring Caddyfile..."
     cat > /etc/caddy/Caddyfile <<'CADDYEOF'
 # ProxyPilot Caddy Configuration
 {
-    # Global options
+    admin localhost:2019
 }
 
 import /etc/caddy/sites/*
 CADDYEOF
 
-    # Enable and start Caddy
+    # Enable and restart Caddy with the new config
     systemctl enable caddy 2>/dev/null || true
-    systemctl start caddy 2>/dev/null || true
+    systemctl restart caddy 2>/dev/null || true
+
+    # Wait briefly for Caddy to start
+    sleep 2
 
     # Verify Caddy is running
     if ! systemctl is-active --quiet caddy; then
@@ -453,11 +461,12 @@ EOF
 
     # Validate and reload Caddy
     if caddy validate --config /etc/caddy/Caddyfile 2>/dev/null; then
-        caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl reload caddy
+        # Restart caddy via systemctl (more reliable than caddy reload during install)
+        systemctl restart caddy 2>/dev/null || caddy reload --config /etc/caddy/Caddyfile --force 2>/dev/null || true
         log_success "Caddy site configuration created for ${domain}"
     else
-        log_warn "Caddy config validation failed, attempting reload anyway..."
-        systemctl reload caddy || true
+        log_warn "Caddy config validation failed, attempting restart anyway..."
+        systemctl restart caddy 2>/dev/null || true
     fi
 }
 

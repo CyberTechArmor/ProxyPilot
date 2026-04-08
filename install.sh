@@ -189,15 +189,10 @@ install_caddy() {
 # ProxyPilot Caddy Configuration
 {
     admin localhost:2019
-    storage file_system /var/lib/caddy/certificates
 }
 
 import /etc/caddy/sites/*
 CADDYEOF
-
-    # Ensure cert storage directory exists with correct ownership
-    mkdir -p /var/lib/caddy/certificates
-    chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 
     # Enable and restart Caddy with the new config
     systemctl enable caddy 2>/dev/null || true
@@ -445,13 +440,13 @@ create_proxypilot_caddy_config() {
     mkdir -p /var/log/caddy
 
     # Update the global Caddyfile with ACME email for automatic TLS
-    # Use a persistent storage path so certs survive reinstalls
+    # Caddy stores certs in its default data dir: /var/lib/caddy/.local/share/caddy/
+    # This persists across ProxyPilot reinstalls since cleanup.sh preserves /var/lib/caddy
     cat > /etc/caddy/Caddyfile <<GLOBALEOF
 # ProxyPilot Caddy Configuration
 {
     admin localhost:2019
     email ${email}
-    storage file_system /var/lib/caddy/certificates
 }
 
 import /etc/caddy/sites/*
@@ -477,36 +472,72 @@ ${domain} {
 }
 EOF
 
-    # Ensure cert storage directory exists and is owned by caddy
-    mkdir -p /var/lib/caddy/certificates
+    # Ensure Caddy data directory has correct ownership
+    mkdir -p /var/lib/caddy
     chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 
-    # Validate and restart Caddy
-    if caddy validate --config /etc/caddy/Caddyfile 2>/dev/null; then
-        # Restart caddy via systemctl
-        systemctl restart caddy 2>/dev/null || caddy reload --config /etc/caddy/Caddyfile --force 2>/dev/null || true
-        log_success "Caddy site configuration created for ${domain}"
+    # Check if ports 80/443 are free for ACME challenge
+    log_info "Checking port availability for TLS..."
+    for check_port in 80 443; do
+        local pid=$(fuser ${check_port}/tcp 2>/dev/null | awk '{print $1}')
+        if [[ -n "$pid" ]]; then
+            local proc=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
+            if [[ "$proc" != "caddy" ]]; then
+                log_warn "Port ${check_port} is in use by ${proc} (PID ${pid}) - Caddy needs this for TLS"
+            fi
+        fi
+    done
 
-        # Wait for Caddy to obtain TLS certificate
-        # Caddy obtains the cert independently of the backend being up
-        log_info "Waiting for Caddy to obtain TLS certificate for ${domain}..."
-        for i in $(seq 1 30); do
-            # Check if Caddy has a cert by probing the HTTPS port directly
-            if curl -sSk --max-time 3 -o /dev/null -w '%{http_code}' "https://${domain}" 2>/dev/null | grep -qE '^(200|502|503)$'; then
-                log_success "TLS certificate obtained for ${domain}"
-                break
-            fi
-            if [ "$i" -eq 30 ]; then
-                log_warn "TLS certificate not yet ready - Caddy will keep trying in the background"
-                log_warn "Check status with: journalctl -u caddy --no-pager -n 20"
-            fi
-            sleep 2
-        done
-    else
-        log_warn "Caddy config validation failed, checking logs..."
-        journalctl -u caddy --no-pager -n 10 2>/dev/null || true
-        systemctl restart caddy 2>/dev/null || true
+    # Validate config (show errors if any)
+    log_info "Validating Caddy configuration..."
+    if ! caddy validate --config /etc/caddy/Caddyfile; then
+        log_error "Caddy config validation failed! Config contents:"
+        cat /etc/caddy/Caddyfile
+        echo "--- Site config ---"
+        cat "/etc/caddy/sites/${domain}"
     fi
+
+    # Restart Caddy
+    log_info "Restarting Caddy..."
+    systemctl restart caddy
+    sleep 3
+
+    # Verify Caddy is actually running
+    if ! systemctl is-active --quiet caddy; then
+        log_error "Caddy failed to start! Logs:"
+        journalctl -u caddy --no-pager -n 20 2>/dev/null || true
+    else
+        log_success "Caddy is running"
+    fi
+
+    # Wait for TLS certificate
+    log_info "Waiting for Caddy to obtain TLS certificate for ${domain}..."
+    log_info "(Caddy contacts Let's Encrypt - this typically takes 10-30 seconds)"
+    for i in $(seq 1 30); do
+        # Any HTTPS response (even 502 = backend down) means cert was obtained
+        local http_code
+        http_code=$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code}' "https://${domain}" 2>/dev/null || echo "000")
+        if [[ "$http_code" != "000" ]]; then
+            log_success "TLS certificate obtained for ${domain} (HTTPS responding: HTTP ${http_code})"
+            break
+        fi
+        if [ "$i" -eq 15 ]; then
+            log_info "Still waiting... Caddy logs:"
+            journalctl -u caddy --no-pager -n 5 --since "1 min ago" 2>/dev/null || true
+        fi
+        if [ "$i" -eq 30 ]; then
+            log_warn "TLS certificate not ready after 60s. Caddy logs:"
+            journalctl -u caddy --no-pager -n 15 2>/dev/null || true
+            echo ""
+            log_warn "Common causes:"
+            log_warn "  - DNS for ${domain} does not point to this server's IP"
+            log_warn "  - Firewall blocking ports 80 or 443"
+            log_warn "  - Another service using ports 80 or 443"
+            log_warn ""
+            log_warn "Caddy will keep retrying automatically."
+        fi
+        sleep 2
+    done
 }
 
 # Create environment file

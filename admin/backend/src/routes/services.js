@@ -59,8 +59,10 @@ async function ensureCaddyStructure() {
 
   // Ensure main Caddyfile exists with global options and import directive
   if (!existsSync(CADDY_CONFIG_FILE)) {
+    const acmeEmail = process.env.ACME_EMAIL || '';
+    const emailLine = acmeEmail ? `\n    email ${acmeEmail}` : '';
     const mainConfig = `{
-    admin localhost:2019
+    admin localhost:2019${emailLine}
 }
 
 import ${CADDY_SITES_DIR}/*

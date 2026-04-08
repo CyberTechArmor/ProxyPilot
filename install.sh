@@ -432,11 +432,23 @@ SECUREDHTML
 create_proxypilot_caddy_config() {
     local domain=$1
     local port=$2
+    local email=$3
 
     log_info "Creating Caddy site configuration for ProxyPilot..."
 
     mkdir -p /etc/caddy/sites
     mkdir -p /var/log/caddy
+
+    # Update the global Caddyfile with ACME email for automatic TLS
+    cat > /etc/caddy/Caddyfile <<GLOBALEOF
+# ProxyPilot Caddy Configuration
+{
+    admin localhost:2019
+    email ${email}
+}
+
+import /etc/caddy/sites/*
+GLOBALEOF
 
     cat > "/etc/caddy/sites/${domain}" <<EOF
 # ProxyPilot Admin Dashboard
@@ -464,6 +476,21 @@ EOF
         # Restart caddy via systemctl (more reliable than caddy reload during install)
         systemctl restart caddy 2>/dev/null || caddy reload --config /etc/caddy/Caddyfile --force 2>/dev/null || true
         log_success "Caddy site configuration created for ${domain}"
+
+        # Wait for Caddy to obtain TLS certificate
+        log_info "Waiting for Caddy to obtain TLS certificate for ${domain}..."
+        for i in $(seq 1 30); do
+            # Check if Caddy has obtained a cert by testing HTTPS
+            if curl -sSf --max-time 3 "https://${domain}" -o /dev/null 2>/dev/null; then
+                log_success "TLS certificate obtained for ${domain}"
+                break
+            fi
+            if [ "$i" -eq 30 ]; then
+                log_warn "TLS certificate not yet ready - Caddy will keep trying in the background"
+                log_warn "Check status with: journalctl -u caddy --no-pager -n 20"
+            fi
+            sleep 2
+        done
     else
         log_warn "Caddy config validation failed, attempting restart anyway..."
         systemctl restart caddy 2>/dev/null || true
@@ -507,6 +534,7 @@ DATABASE_PATH=/data/proxypilot.db
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
+ACME_EMAIL=${ACME_EMAIL}
 EOF
 
     chmod 600 "${install_dir}/.env"
@@ -644,11 +672,19 @@ main() {
         read -rp "Enter domain for admin dashboard: " DOMAIN
     done
 
+    # Email for ACME (Caddy automatic TLS)
+    read -rp "Enter email for TLS certificates (ACME/Let's Encrypt): " EMAIL
+    while [[ -z "$EMAIL" ]]; do
+        log_error "Email cannot be empty"
+        read -rp "Enter email for TLS certificates: " EMAIL
+    done
+
     echo ""
     echo -e "${CYAN}=== Installation Summary ===${NC}"
     echo "  Dashboard Port: ${PORT}"
     echo "  Admin Username: ${ADMIN_USER}"
     echo "  Domain: ${DOMAIN}"
+    echo "  ACME Email: ${EMAIL}"
     echo ""
 
     read -rp "Proceed with installation? [Y/n]: " CONFIRM
@@ -678,6 +714,7 @@ main() {
     cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
 
     # Create configuration files
+    ACME_EMAIL="$EMAIL"
     create_env_file "$INSTALL_DIR" "$PORT" "$ADMIN_USER" "$ADMIN_PASS" "$TOTP_SECRET" "$DOMAIN"
     create_docker_compose "$INSTALL_DIR" "$PORT"
 
@@ -685,7 +722,7 @@ main() {
     create_secure_landing_page "$INSTALL_DIR"
 
     # Create Caddy site config (TLS is handled automatically by Caddy)
-    create_proxypilot_caddy_config "$DOMAIN" "$PORT"
+    create_proxypilot_caddy_config "$DOMAIN" "$PORT" "$EMAIL"
 
     # Build frontend on host (faster than building in Docker)
     log_info "Building frontend..."

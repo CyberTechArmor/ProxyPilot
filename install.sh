@@ -463,43 +463,51 @@ EOF
     # Remove any stray placeholder files
     rm -f /etc/caddy/sites/.keep 2>/dev/null || true
 
-    # Validate config syntax using 'caddy adapt' (does NOT start servers or bind ports)
-    # 'caddy validate' actually starts listeners briefly which causes port conflicts
+    # Validate config syntax using 'caddy adapt' (never binds ports)
     log_info "Validating Caddy configuration..."
     if ! caddy adapt --config /etc/caddy/Caddyfile > /dev/null 2>&1; then
-        log_error "Caddy config syntax error! Config contents:"
-        cat /etc/caddy/Caddyfile
-        echo "--- Site config ---"
-        cat "/etc/caddy/sites/${domain}"
-        echo "--- Adapt output ---"
+        log_error "Caddy config syntax error!"
         caddy adapt --config /etc/caddy/Caddyfile 2>&1 || true
     else
         log_success "Caddy configuration is valid"
     fi
 
-    # Stop any running Caddy instance, then start fresh
-    log_info "Starting Caddy..."
-    systemctl stop caddy 2>/dev/null || true
-    # Kill any stale caddy processes holding ports
-    pkill -9 caddy 2>/dev/null || true
-    sleep 1
-    systemctl start caddy
-    sleep 3
+    # The default Caddy systemd unit has ExecStartPre=caddy validate which
+    # starts listeners and can fail with port conflicts. Override it to skip
+    # the validate step (we already validated with 'caddy adapt' above).
+    log_info "Configuring Caddy systemd service..."
+    mkdir -p /etc/systemd/system/caddy.service.d
+    cat > /etc/systemd/system/caddy.service.d/override.conf <<'OVERRIDE'
+[Service]
+# Clear the default ExecStartPre which runs 'caddy validate' and binds ports
+ExecStartPre=
+OVERRIDE
+    systemctl daemon-reload
 
-    # Verify Caddy started
-    if ! systemctl is-active --quiet caddy; then
-        log_warn "Caddy failed to start on first attempt. Logs:"
-        journalctl -u caddy --no-pager -n 10 2>/dev/null || true
-        # Kill anything on 80/443 and retry
+    # Ensure no stale Caddy processes
+    systemctl stop caddy 2>/dev/null || true
+    pkill -9 caddy 2>/dev/null || true
+    fuser -k 80/tcp 2>/dev/null || true
+    fuser -k 443/tcp 2>/dev/null || true
+    sleep 1
+
+    # Start Caddy
+    log_info "Starting Caddy..."
+    if ! systemctl start caddy; then
+        log_warn "Caddy failed to start. Checking logs..."
+        journalctl -u caddy --no-pager -n 15 2>/dev/null || true
+        # One more attempt after full cleanup
+        sleep 2
         fuser -k 80/tcp 2>/dev/null || true
         fuser -k 443/tcp 2>/dev/null || true
-        sleep 2
-        log_info "Retrying Caddy start..."
+        sleep 1
+        log_info "Retrying..."
         systemctl start caddy
-        sleep 3
     fi
 
-    # Verify Caddy is actually running
+    sleep 3
+
+    # Verify Caddy is running
     if ! systemctl is-active --quiet caddy; then
         log_error "Caddy failed to start! Logs:"
         journalctl -u caddy --no-pager -n 20 2>/dev/null || true

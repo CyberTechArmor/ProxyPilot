@@ -460,43 +460,39 @@ EOF
     mkdir -p /var/lib/caddy
     chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 
-    # Remove any stray .keep placeholder files
+    # Remove any stray placeholder files
     rm -f /etc/caddy/sites/.keep 2>/dev/null || true
 
-    # Stop Caddy before validation so ports are free
-    # caddy validate can briefly bind ports, conflicting with the running service
-    log_info "Stopping Caddy for config update..."
-    systemctl stop caddy 2>/dev/null || true
-    sleep 1
-
-    # Validate config (show errors if any)
+    # Validate config syntax using 'caddy adapt' (does NOT start servers or bind ports)
+    # 'caddy validate' actually starts listeners briefly which causes port conflicts
     log_info "Validating Caddy configuration..."
-    if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
-        log_error "Caddy config validation failed! Config contents:"
+    if ! caddy adapt --config /etc/caddy/Caddyfile > /dev/null 2>&1; then
+        log_error "Caddy config syntax error! Config contents:"
         cat /etc/caddy/Caddyfile
         echo "--- Site config ---"
         cat "/etc/caddy/sites/${domain}"
+        echo "--- Adapt output ---"
+        caddy adapt --config /etc/caddy/Caddyfile 2>&1 || true
+    else
+        log_success "Caddy configuration is valid"
     fi
 
-    # Wait for validate to fully release resources
-    sleep 1
-
-    # Start Caddy fresh
+    # Stop any running Caddy instance, then start fresh
     log_info "Starting Caddy..."
+    systemctl stop caddy 2>/dev/null || true
+    # Kill any stale caddy processes holding ports
+    pkill -9 caddy 2>/dev/null || true
+    sleep 1
     systemctl start caddy
     sleep 3
 
-    # If start failed, check for port conflicts and retry
+    # Verify Caddy started
     if ! systemctl is-active --quiet caddy; then
-        log_warn "Caddy failed to start, checking for port conflicts..."
-        for check_port in 80 443; do
-            local pid=$(fuser ${check_port}/tcp 2>/dev/null | awk '{print $1}')
-            if [[ -n "$pid" ]]; then
-                local proc=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
-                log_warn "Port ${check_port} held by ${proc} (PID ${pid}), killing..."
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        done
+        log_warn "Caddy failed to start on first attempt. Logs:"
+        journalctl -u caddy --no-pager -n 10 2>/dev/null || true
+        # Kill anything on 80/443 and retry
+        fuser -k 80/tcp 2>/dev/null || true
+        fuser -k 443/tcp 2>/dev/null || true
         sleep 2
         log_info "Retrying Caddy start..."
         systemctl start caddy

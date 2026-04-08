@@ -157,137 +157,51 @@ generate_totp_qr() {
     echo -e "${YELLOW}IMPORTANT: Save this secret key securely! You will need it to recover access.${NC}"
 }
 
-# Check and install NGINX
-install_nginx() {
-    log_info "Checking NGINX installation..."
+# Check and install Caddy
+install_caddy() {
+    log_info "Checking Caddy installation..."
 
-    if command -v nginx &> /dev/null; then
-        log_success "NGINX is already installed ($(nginx -v 2>&1 | cut -d'/' -f2))"
+    if command -v caddy &> /dev/null; then
+        log_success "Caddy is already installed ($(caddy version 2>/dev/null | head -1))"
     else
-        log_info "Installing NGINX..."
+        log_info "Installing Caddy..."
         apt-get update -y
-        apt-get install -y nginx
-        log_success "NGINX installed successfully"
+        apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -y
+        apt-get install -y caddy
+        log_success "Caddy installed successfully"
     fi
 
-    # Clean up any broken NGINX configurations before starting
-    cleanup_broken_nginx_configs
+    # Create sites directory
+    mkdir -p /etc/caddy/sites
+    mkdir -p /var/log/caddy
 
-    # Ensure NGINX is enabled
-    systemctl enable nginx 2>/dev/null || true
+    # Create main Caddyfile if it doesn't exist or update it
+    log_info "Configuring Caddyfile..."
+    cat > /etc/caddy/Caddyfile <<'CADDYEOF'
+# ProxyPilot Caddy Configuration
+{
+    # Global options
+}
 
-    # Test NGINX config before starting
-    if ! nginx -t 2>/dev/null; then
-        log_warn "NGINX config test failed, attempting to fix..."
-        fix_nginx_config
-    fi
+import /etc/caddy/sites/*
+CADDYEOF
 
-    # Start NGINX
-    systemctl start nginx 2>/dev/null || true
+    # Enable and start Caddy
+    systemctl enable caddy 2>/dev/null || true
+    systemctl start caddy 2>/dev/null || true
 
-    # Verify NGINX is running
-    if ! systemctl is-active --quiet nginx; then
-        log_warn "NGINX service not running, attempting recovery..."
-        # Last resort: restore default config
-        if [[ -f /etc/nginx/nginx.conf.backup ]]; then
-            cp /etc/nginx/nginx.conf.backup /etc/nginx/nginx.conf
-        fi
-        # Remove all custom sites
-        rm -f /etc/nginx/sites-enabled/* 2>/dev/null || true
-        ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
-
-        systemctl start nginx || {
-            log_error "Failed to start NGINX. Check: journalctl -xeu nginx"
+    # Verify Caddy is running
+    if ! systemctl is-active --quiet caddy; then
+        log_warn "Caddy service not running, attempting to start..."
+        systemctl start caddy || {
+            log_error "Failed to start Caddy. Check: journalctl -xeu caddy"
             exit 1
         }
     fi
-    log_success "NGINX is running"
-}
-
-# Clean up broken NGINX configurations
-cleanup_broken_nginx_configs() {
-    log_info "Cleaning up any broken NGINX configurations..."
-
-    # Remove broken symlinks in sites-enabled
-    if [[ -d /etc/nginx/sites-enabled ]]; then
-        find /etc/nginx/sites-enabled -xtype l -delete 2>/dev/null || true
-    fi
-
-    # Remove configs that reference missing SSL certificates
-    for conf in /etc/nginx/sites-enabled/*.conf; do
-        [[ -f "$conf" ]] || continue
-
-        # Check if config references SSL cert that doesn't exist
-        if grep -q "ssl_certificate" "$conf" 2>/dev/null; then
-            cert_path=$(grep -oP "ssl_certificate\s+\K[^;]+" "$conf" | head -1)
-            if [[ -n "$cert_path" && ! -f "$cert_path" ]]; then
-                log_warn "Removing config with missing SSL cert: $(basename "$conf")"
-                rm -f "$conf"
-                # Also remove from sites-available
-                rm -f "/etc/nginx/sites-available/$(basename "$conf")" 2>/dev/null || true
-            fi
-        fi
-    done
-
-    # Ensure default site exists if no other sites
-    if [[ -z "$(ls -A /etc/nginx/sites-enabled 2>/dev/null)" ]]; then
-        if [[ -f /etc/nginx/sites-available/default ]]; then
-            ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
-            log_info "Re-enabled default NGINX site"
-        fi
-    fi
-}
-
-# Fix NGINX configuration issues
-fix_nginx_config() {
-    log_info "Attempting to fix NGINX configuration..."
-
-    # Temporarily disable all custom sites
-    for conf in /etc/nginx/sites-enabled/*.conf; do
-        [[ -f "$conf" ]] || continue
-        log_warn "Disabling problematic config: $(basename "$conf")"
-        rm -f "$conf"
-    done
-
-    # Ensure default site is enabled
-    if [[ -f /etc/nginx/sites-available/default ]]; then
-        ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
-    fi
-
-    # Test again
-    if nginx -t 2>/dev/null; then
-        log_success "NGINX configuration fixed"
-    else
-        log_error "Could not fix NGINX configuration automatically"
-    fi
-}
-
-# Configure NGINX global settings
-configure_nginx_global() {
-    local max_upload=$1
-
-    log_info "Configuring NGINX global settings..."
-
-    # Backup original config
-    if [[ ! -f /etc/nginx/nginx.conf.backup ]]; then
-        cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
-    fi
-
-    # Check if client_max_body_size is already set in http block
-    if grep -q "client_max_body_size" /etc/nginx/nginx.conf; then
-        sed -i "s/client_max_body_size.*/client_max_body_size ${max_upload};/" /etc/nginx/nginx.conf
-    else
-        # Add it inside http block
-        sed -i "/http {/a\\    client_max_body_size ${max_upload};" /etc/nginx/nginx.conf
-    fi
-
-    # Test and reload NGINX
-    if nginx -t 2>/dev/null; then
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx
-        log_success "NGINX configured with max upload size: ${max_upload}"
-    else
-        log_warn "NGINX config test failed, but continuing (will be fixed after SSL setup)"
-    fi
+    log_success "Caddy is running"
 }
 
 # Check and install Docker
@@ -405,78 +319,8 @@ check_docker_compose() {
 # Install additional dependencies
 install_dependencies() {
     log_info "Installing additional dependencies..."
-    apt-get install -y certbot python3-certbot-nginx qrencode jq
+    apt-get install -y qrencode jq
     log_success "Dependencies installed"
-}
-
-# Ensure SSL options file exists (created by certbot or manually)
-ensure_ssl_options() {
-    local ssl_options="/etc/letsencrypt/options-ssl-nginx.conf"
-    local ssl_dhparams="/etc/letsencrypt/ssl-dhparams.pem"
-
-    if [[ ! -f "$ssl_options" ]]; then
-        log_info "Creating SSL options file..."
-        mkdir -p /etc/letsencrypt
-
-        cat > "$ssl_options" <<'SSLOPTS'
-# Certbot SSL options for NGINX
-ssl_session_cache shared:le_nginx_SSL:10m;
-ssl_session_timeout 1440m;
-ssl_session_tickets off;
-
-ssl_protocols TLSv1.2 TLSv1.3;
-ssl_prefer_server_ciphers off;
-
-ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
-SSLOPTS
-        log_success "SSL options file created"
-    fi
-
-    if [[ ! -f "$ssl_dhparams" ]]; then
-        log_info "Creating DH parameters (this may take a moment)..."
-        openssl dhparam -out "$ssl_dhparams" 2048 2>/dev/null
-        log_success "DH parameters created"
-    fi
-}
-
-# Setup SSL certificate
-setup_ssl() {
-    local domain=$1
-    local email=$2
-
-    log_info "Setting up SSL certificate for ${domain}..."
-
-    # Create temporary NGINX config for ACME challenge
-    cat > "/etc/nginx/sites-available/${domain}-acme" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
-    }
-
-    location / {
-        return 404;
-    }
-}
-EOF
-
-    mkdir -p /var/www/letsencrypt
-    ln -sf "/etc/nginx/sites-available/${domain}-acme" "/etc/nginx/sites-enabled/${domain}"
-    nginx -t && systemctl reload nginx
-
-    # Obtain certificate
-    certbot certonly --webroot -w /var/www/letsencrypt \
-        -d "$domain" --agree-tos -m "$email" --non-interactive
-
-    # Remove temporary config
-    rm -f "/etc/nginx/sites-enabled/${domain}"
-    rm -f "/etc/nginx/sites-available/${domain}-acme"
-
-    log_success "SSL certificate obtained for ${domain}"
 }
 
 # Create secure landing page for when ProxyPilot is secured/stopped
@@ -576,78 +420,45 @@ SECUREDHTML
     log_success "Secure landing page created"
 }
 
-# Create ProxyPilot NGINX config
-create_proxypilot_nginx_config() {
+# Create ProxyPilot Caddy config
+create_proxypilot_caddy_config() {
     local domain=$1
     local port=$2
 
-    log_info "Creating NGINX configuration for ProxyPilot..."
+    log_info "Creating Caddy site configuration for ProxyPilot..."
 
-    cat > "/etc/nginx/sites-available/${domain}" <<EOF
+    mkdir -p /etc/caddy/sites
+    mkdir -p /var/log/caddy
+
+    cat > "/etc/caddy/sites/${domain}" <<EOF
 # ProxyPilot Admin Dashboard
 # Domain: ${domain}
 
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
+${domain} {
+    reverse_proxy 127.0.0.1:${port} {
     }
 
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${domain};
-
-    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    # Secure landing page location (shown when backend is down)
-    location = /secured.html {
-        internal;
-        root ${INSTALL_DIR}/secured;
-        try_files /index.html =503;
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
     }
 
-    location / {
-        proxy_pass http://127.0.0.1:${port};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 300;
-        proxy_connect_timeout 60;
-        proxy_send_timeout 300;
-
-        # Show secure landing page when backend is unavailable
-        proxy_intercept_errors on;
-        error_page 502 503 504 = /secured.html;
+    log {
+        output file /var/log/caddy/${domain}.log
     }
 }
 EOF
 
-    ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/${domain}"
-    nginx -t && systemctl reload nginx
-
-    log_success "NGINX configuration created for ${domain}"
+    # Validate and reload Caddy
+    if caddy validate --config /etc/caddy/Caddyfile 2>/dev/null; then
+        caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl reload caddy
+        log_success "Caddy site configuration created for ${domain}"
+    else
+        log_warn "Caddy config validation failed, attempting reload anyway..."
+        systemctl reload caddy || true
+    fi
 }
 
 # Create environment file
@@ -684,9 +495,9 @@ ADMIN_TOTP_SECRET=${totp_secret}
 # Database
 DATABASE_PATH=/data/proxypilot.db
 
-# NGINX Configuration Path
-NGINX_SITES_AVAILABLE=/etc/nginx/sites-available
-NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
+# Caddy Configuration Path
+CADDY_SITES_DIR=/etc/caddy/sites
+CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
 EOF
 
     chmod 600 "${install_dir}/.env"
@@ -716,15 +527,13 @@ services:
       - "127.0.0.1:${port}:${port}"
     volumes:
       - ./data:/data
-      - /etc/nginx/sites-available:/etc/nginx/sites-available
-      - /etc/nginx/sites-enabled:/etc/nginx/sites-enabled
-      - /etc/letsencrypt:/etc/letsencrypt
-      - /var/www/letsencrypt:/var/www/letsencrypt
+      - /etc/caddy/sites:/etc/caddy/sites
+      - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NODE_ENV=production
       - SERVICES_DATA_DIR=/data/services
-      - NGINX_STATIC_ROOT=${INSTALL_DIR}/data/services
+      - CADDY_STATIC_ROOT=${INSTALL_DIR}/data/services
       - DOCKER_CONTAINER=true
     env_file:
       - .env
@@ -767,10 +576,6 @@ main() {
     # Gather user input
     echo -e "${CYAN}=== Configuration ===${NC}"
     echo ""
-
-    # NGINX Max Upload Size
-    read -rp "Enter default NGINX max upload size [1G]: " MAX_UPLOAD
-    MAX_UPLOAD=${MAX_UPLOAD:-1G}
 
     # Port with availability check
     DEFAULT_PORT=3001
@@ -830,20 +635,11 @@ main() {
         read -rp "Enter domain for admin dashboard: " DOMAIN
     done
 
-    # Email for Let's Encrypt
-    read -rp "Enter email for Let's Encrypt SSL: " EMAIL
-    while [[ -z "$EMAIL" ]]; do
-        log_error "Email cannot be empty"
-        read -rp "Enter email for Let's Encrypt SSL: " EMAIL
-    done
-
     echo ""
     echo -e "${CYAN}=== Installation Summary ===${NC}"
-    echo "  Max Upload Size: ${MAX_UPLOAD}"
     echo "  Dashboard Port: ${PORT}"
     echo "  Admin Username: ${ADMIN_USER}"
     echo "  Domain: ${DOMAIN}"
-    echo "  Email: ${EMAIL}"
     echo ""
 
     read -rp "Proceed with installation? [Y/n]: " CONFIRM
@@ -858,8 +654,7 @@ main() {
     echo ""
 
     # Install components
-    install_nginx
-    configure_nginx_global "$MAX_UPLOAD"
+    install_caddy
     install_docker
     check_docker_compose
     install_dependencies
@@ -877,17 +672,11 @@ main() {
     create_env_file "$INSTALL_DIR" "$PORT" "$ADMIN_USER" "$ADMIN_PASS" "$TOTP_SECRET" "$DOMAIN"
     create_docker_compose "$INSTALL_DIR" "$PORT"
 
-    # Ensure SSL options file exists before setting up SSL
-    ensure_ssl_options
-
-    # Setup SSL
-    setup_ssl "$DOMAIN" "$EMAIL"
-
     # Create secure landing page
     create_secure_landing_page "$INSTALL_DIR"
 
-    # Create NGINX config
-    create_proxypilot_nginx_config "$DOMAIN" "$PORT"
+    # Create Caddy site config (TLS is handled automatically by Caddy)
+    create_proxypilot_caddy_config "$DOMAIN" "$PORT"
 
     # Build frontend on host (faster than building in Docker)
     log_info "Building frontend..."

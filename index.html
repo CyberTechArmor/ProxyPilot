@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NGINX Config Script Generator</title>
+  <title>Caddy Config Script Generator</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
   <style>
@@ -56,7 +56,7 @@
 <body>
   <div class="container" role="main">
     <div class="rocket" aria-hidden="true">🚀</div>
-    <h1>NGINX Setup Script Generator</h1>
+    <h1>Caddy Setup Script Generator</h1>
 
     <div class="input-group">
       <label>Deployment Mode</label>
@@ -72,7 +72,7 @@
       <input type="text" id="serverName" placeholder="e.g., sub.domain.com" required />
     </div>
     <div class="input-group">
-      <label for="email">Your Email (for Let's Encrypt SSL)</label>
+      <label for="email">Your Email (for Caddy automatic TLS)</label>
       <input type="email" id="email" placeholder="you@example.com" required />
     </div>
     <div class="input-group">
@@ -117,7 +117,7 @@
 
     <div class="bar">
       <button class="btn" id="generateBtn" type="button">Generate Script</button>
-      <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install NGINX Only)</button>
+      <button class="btn recovery-btn" id="recoveryBtn" type="button">+Recovery (Install Caddy Only)</button>
     </div>
 
     <div class="output-container" id="outputContainer" aria-live="polite" aria-label="Generated script">
@@ -173,7 +173,7 @@
       const name = serverNameInput.value.trim();
       const email = emailInput.value.trim();
       if(!name || !hostRe.test(name)){ alert('Enter a valid Server Name (domain).'); serverNameInput.focus(); return false; }
-      if(!email || !emailRe.test(email)){ alert("Enter a valid email for Let's Encrypt."); emailInput.focus(); return false; }
+      if(!email || !emailRe.test(email)){ alert("Enter a valid email for Caddy automatic TLS."); emailInput.focus(); return false; }
 
       if(modeStatic.checked){
         const rd = (rootDirInput.value||'').trim();
@@ -191,59 +191,12 @@
       return true;
     }
 
-    function httpBlock(forceHttps, maxUpload){
-      const uploadDirective = maxUpload ? `\n    client_max_body_size ${maxUpload};` : '';
-      return forceHttps ? `server {
-    listen 80;
-    listen [::]:80;
-    server_name __DOMAIN__;
-    root __WEBROOT__;
-    index index.html;${uploadDirective}
-    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { return 301 https://\\$host\\$request_uri; }
-}
-` : `server {
-    listen 80;
-    listen [::]:80;
-    server_name __DOMAIN__;
-    root __WEBROOT__;
-    index index.html;${uploadDirective}
-    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { try_files \\$uri \\$uri/ /index.html; }
-}
-`;
-    }
-
-    // --- Static-site script (webroot challenge; path REQUIRED) ---
+    // --- Static-site script (Caddy auto-TLS; path REQUIRED) ---
     function genStaticFullScript({serverName, email, rootDir, forceHttps, maxUploadSize}){
       const maxUpload = maxUploadSize || '1G';
-      const redirectLabel = forceHttps ? ' redirect' : '';
-
-      // Generate HTTP block directly with proper escaping
-      const httpBlockContent = forceHttps
-        ? `server {
-    listen 80;
-    listen [::]:80;
-    server_name ${serverName};
-    root ${rootDir};
-    index index.html;
-    client_max_body_size ${maxUpload};
-    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { return 301 https://\\$host\\$request_uri; }
-}`
-        : `server {
-    listen 80;
-    listen [::]:80;
-    server_name ${serverName};
-    root ${rootDir};
-    index index.html;
-    client_max_body_size ${maxUpload};
-    location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; }
-    location / { try_files \\$uri \\$uri/ /index.html; }
-}`;
 
       return `#!/bin/bash
-# Setup for ${serverName} — static site (WEBROOT required)
+# Setup for ${serverName} — static site (Caddy)
 set -euo pipefail
 
 pause_if_tty(){ if [ -t 1 ]; then echo; read -rp "Press Enter to close..." _; fi; }
@@ -254,18 +207,17 @@ WEBROOT="${rootDir}"
 EMAIL="${email}"
 MAX_UPLOAD="${maxUpload}"
 
-echo "[1/8] Ensure webroot + sample index at \${WEBROOT}..."
+echo "[1/5] Ensure webroot + sample index at \${WEBROOT}..."
 sudo mkdir -p "\${WEBROOT}"
 if [ ! -f "\${WEBROOT}/index.html" ]; then
   sudo tee "\${WEBROOT}/index.html" >/dev/null <<'HTML'
 <!doctype html><html><head><meta charset="utf-8"><title>It works</title></head>
-<body style="font-family:system-ui;margin:2rem"><h1>✅ It works!</h1></body></html>
+<body style="font-family:system-ui;margin:2rem"><h1>It works!</h1></body></html>
 HTML
 fi
-sudo mkdir -p "\${WEBROOT}/.well-known/acme-challenge"
 
-echo "[2/8] Permissions (ensure nginx can traverse to WEBROOT)..."
-sudo chown -R www-data:www-data "\${WEBROOT}"
+echo "[2/5] Permissions (ensure caddy can traverse to WEBROOT)..."
+sudo chown -R caddy:caddy "\${WEBROOT}"
 sudo chmod -R 755 "\${WEBROOT}"
 
 # Carefully ensure traverse bits for parents
@@ -287,86 +239,41 @@ elif [[ "\${WEBROOT}" == /var/www/* ]]; then
   sudo chmod 755 /var/www || true
 fi
 
-echo "[3/8] Install nginx/certbot if needed..."
+echo "[3/5] Install Caddy if needed..."
 sudo apt-get update -y
-sudo apt-get install -y nginx certbot python3-certbot-nginx
-sudo rm -f /etc/nginx/sites-enabled/default || true
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+sudo apt-get update -y
+sudo apt-get install -y caddy
 
-echo "[4/8] Remove old configs for this domain..."
-sudo find /etc/nginx/sites-available -maxdepth 1 -type f -name "\${DOMAIN}-*" -delete || true
-sudo find /etc/nginx/sites-enabled   -maxdepth 1 -type l -name "\${DOMAIN}-*" -delete || true
-sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}" || true
-sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}" || true
-
-echo "[5/8] Write TEMPORARY HTTP-only config for ACME..."
-TMPHTTP="/tmp/\${DOMAIN}.acme.http.tmp"
-sudo tee "\${TMPHTTP}" >/dev/null <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name \${DOMAIN};
-    root \${WEBROOT};
-    index index.html;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root \${WEBROOT};
-        default_type "text/plain";
+echo "[4/5] Write Caddy site config..."
+sudo mkdir -p /etc/caddy/sites /var/log/caddy
+sudo tee /etc/caddy/sites/\${DOMAIN}.caddy >/dev/null <<EOF
+\${DOMAIN} {
+    tls \${EMAIL}
+    root * \${WEBROOT}
+    file_server
+    try_files {path} {path}/ /index.html
+    request_body {
+        max_size \${MAX_UPLOAD}
     }
-
-    location / { try_files \\$uri \\$uri/ /index.html; }
-}
-EOF
-sudo mv "\${TMPHTTP}" "/etc/nginx/sites-available/\${DOMAIN}-acme"
-sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}-acme" "/etc/nginx/sites-enabled/\${DOMAIN}-acme"
-sudo nginx -t && sudo systemctl reload nginx
-
-echo "[6/8] Obtain certificate via webroot (no NGINX edits by Certbot)..."
-sudo certbot certonly --non-interactive --agree-tos --email "\${EMAIL}" -d "\${DOMAIN}" --webroot -w "\${WEBROOT}"
-
-CERT_DIR="/etc/letsencrypt/live/\${DOMAIN}"
-FULLCHAIN="\${CERT_DIR}/fullchain.pem"
-PRIVKEY="\${CERT_DIR}/privkey.pem"
-CHAIN="\${CERT_DIR}/chain.pem"
-
-echo "[7/8] Write FINAL canonical config (HTTP${redirectLabel} + HTTPS serve)..."
-TMP="/tmp/\${DOMAIN}.nginx.tmp"
-sudo tee "\${TMP}" >/dev/null <<EOF
-# =========================
-# \${DOMAIN} — canonical site
-# =========================
-
-${httpBlockContent}
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${serverName};
-    root ${rootDir};
-    index index.html;
-    client_max_body_size ${maxUpload};
-
-    ssl_certificate           \${FULLCHAIN};
-    ssl_certificate_key       \${PRIVKEY};
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_trusted_certificate   \${CHAIN};
-
-    location / { try_files \\$uri \\$uri/ /index.html; }
+    log {
+        output file /var/log/caddy/\${DOMAIN}.log
+    }
 }
 EOF
 
-sudo mv "\${TMP}" "/etc/nginx/sites-available/\${DOMAIN}"
-sudo ln -sf "/etc/nginx/sites-available/\${DOMAIN}" "/etc/nginx/sites-enabled/\${DOMAIN}"
+# Ensure main Caddyfile imports site configs
+if ! grep -q 'import /etc/caddy/sites/\\*' /etc/caddy/Caddyfile 2>/dev/null; then
+  echo 'import /etc/caddy/sites/*' | sudo tee /etc/caddy/Caddyfile >/dev/null
+fi
 
-# Disable the temporary ACME site
-sudo rm -f "/etc/nginx/sites-enabled/\${DOMAIN}-acme" || true
-sudo rm -f "/etc/nginx/sites-available/\${DOMAIN}-acme" || true
-
-echo "[8/8] Test & reload..."
-sudo nginx -t
-sudo systemctl reload nginx
+echo "[5/5] Reload Caddy..."
+sudo caddy reload --config /etc/caddy/Caddyfile --force 2>/dev/null || sudo systemctl restart caddy
 
 echo
-echo "✅ Done for \${DOMAIN}"
+echo "Done for \${DOMAIN}"
 echo "WEBROOT: \${WEBROOT}"
 echo "Try:"
 echo "  curl -I http://\${DOMAIN}"
@@ -375,55 +282,13 @@ pause_if_tty
 `;
     }
 
-    // Full reverse-proxy script generator (webroot-only, two-phase, WS-ready, optional redirect)
+    // Full reverse-proxy script generator (Caddy auto-TLS, WS-ready)
     function genProxyFullScript({ serverName, email, backendIP, backendPort, websocketEnabled, maxUploadSize, forceHttps }) {
       const maxUpload = maxUploadSize || '1G';
-      const redirectLabel = forceHttps ? 'on' : 'off';
 
-      const ws = websocketEnabled ? `        proxy_http_version 1.1;
-        proxy_set_header Upgrade \\$http_upgrade;
-        proxy_set_header Connection "upgrade";` : `        proxy_http_version 1.1;`;
-
-      const httpFinalBlock = forceHttps
-        ? `# HTTP -> HTTPS redirect (keeps ACME path)
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${serverName};
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
-    }
-    location / { return 301 https://\\$host\\$request_uri; }
-}`
-        : `# HTTP proxy (no redirect)
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${serverName};
-
-    client_max_body_size ${maxUpload};
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/letsencrypt;
-        default_type "text/plain";
-    }
-    location / {
-${ws}
-        proxy_set_header Host \\$host;
-        proxy_set_header X-Real-IP \\$remote_addr;
-        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\$scheme;
-
-        proxy_read_timeout 300;
-        proxy_connect_timeout 60;
-        proxy_send_timeout 300;
-        proxy_buffering off;
-
-        proxy_pass http://${backendIP}:${backendPort};
-    }
-}`;
+      // Format backend address: wrap IPv6 in brackets
+      const ipv6Re = /:/;
+      const formattedHost = ipv6Re.test(backendIP) ? `[${backendIP}]` : backendIP;
 
       return `#!/bin/bash
 # Reverse proxy for ${serverName} -> ${backendIP}:${backendPort}
@@ -434,94 +299,43 @@ trap 'echo "An error occurred. Check the output above."; pause_if_tty' ERR
 
 DOMAIN="${serverName}"
 EMAIL="${email}"
-ACME_ROOT="/var/www/letsencrypt"
-APP_HOST="${backendIP}"
+APP_HOST="${formattedHost}"
 APP_PORT="${backendPort}"
 MAX_UPLOAD="${maxUpload}"
 
-echo "[1/6] Install NGINX & Certbot..."
+echo "[1/3] Install Caddy..."
 sudo apt-get update -y
-sudo apt-get install -y nginx certbot python3-certbot-nginx
-sudo rm -f /etc/nginx/sites-enabled/default || true
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+sudo apt-get update -y
+sudo apt-get install -y caddy
 
-echo "[2/6] Prepare ACME webroot..."
-sudo mkdir -p "$ACME_ROOT" /etc/letsencrypt
-sudo chown -R www-data:www-data "$ACME_ROOT"
-
-echo "[3/6] Temporary HTTP-only vhost for ACME..."
-sudo tee /etc/nginx/sites-available/$DOMAIN.acme >/dev/null <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN;
-
-    client_max_body_size $MAX_UPLOAD;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root $ACME_ROOT;
-        default_type "text/plain";
+echo "[2/3] Write Caddy site config..."
+sudo mkdir -p /etc/caddy/sites /var/log/caddy
+sudo tee /etc/caddy/sites/\${DOMAIN}.caddy >/dev/null <<EOF
+\${DOMAIN} {
+    tls \${EMAIL}
+    reverse_proxy \${APP_HOST}:\${APP_PORT}
+    request_body {
+        max_size \${MAX_UPLOAD}
     }
-    # Block everything else until cert is issued
-    location / { return 404; }
+    log {
+        output file /var/log/caddy/\${DOMAIN}.log
+    }
 }
 EOF
-sudo ln -sf /etc/nginx/sites-available/$DOMAIN.acme /etc/nginx/sites-enabled/$DOMAIN
-sudo nginx -t && sudo systemctl reload nginx
 
-echo "[4/6] Obtain certificate via webroot..."
-sudo certbot certonly --webroot -w "$ACME_ROOT" \
-  -d "$DOMAIN" --agree-tos -m "$EMAIL" --non-interactive
-
-# Ensure SSL options file exists
-if [ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]; then
-  sudo wget -q https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/options-ssl-nginx.conf \
-    -O /etc/letsencrypt/options-ssl-nginx.conf
+# Ensure main Caddyfile imports site configs
+if ! grep -q 'import /etc/caddy/sites/\\*' /etc/caddy/Caddyfile 2>/dev/null; then
+  echo 'import /etc/caddy/sites/*' | sudo tee /etc/caddy/Caddyfile >/dev/null
 fi
 
-echo "[5/6] Final HTTPS vhost (redirect=${redirectLabel})..."
-sudo tee /etc/nginx/sites-available/$DOMAIN >/dev/null <<EOF
-${httpFinalBlock}
-
-# HTTPS proxy to app (WebSocket-ready)
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${serverName};
-
-    ssl_certificate     /etc/letsencrypt/live/${serverName}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${serverName}/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-
-    client_max_body_size ${maxUpload};
-
-    location / {
-${ws}
-        proxy_set_header Host \\$host;
-        proxy_set_header X-Real-IP \\$remote_addr;
-        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\$scheme;
-
-        proxy_read_timeout 300;
-        proxy_connect_timeout 60;
-        proxy_send_timeout 300;
-        proxy_buffering off;
-
-        proxy_pass http://\${APP_HOST}:\${APP_PORT};
-    }
-}
-EOF
-
-sudo ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-sudo rm -f /etc/nginx/sites-available/$DOMAIN.acme || true
-sudo nginx -t && sudo systemctl reload nginx
-
-echo "[6/6] Auto-renew + reload..."
-grep -qE "^post-hook *= *systemctl reload nginx" /etc/letsencrypt/cli.ini 2>/dev/null || echo "post-hook = systemctl reload nginx" | sudo tee -a /etc/letsencrypt/cli.ini >/dev/null
-sudo systemctl enable --now certbot.timer
-sudo certbot renew --dry-run || true
+echo "[3/3] Reload Caddy..."
+sudo caddy reload --config /etc/caddy/Caddyfile --force 2>/dev/null || sudo systemctl restart caddy
 
 echo
-echo "✅ Done. Proxy https://${serverName} → ${backendIP}:${backendPort}"
+echo "Done. Proxy https://${serverName} -> ${backendIP}:${backendPort}"
 pause_if_tty`;
     }
 
@@ -556,7 +370,7 @@ pause_if_tty`;
       outputTextarea.value = script.trim();
       outputContainer.style.display = 'block';
       document.getElementById('copyBtn').disabled = false;
-      ariaStatus.textContent = `NGINX config script generated for ${name}`;
+      ariaStatus.textContent = `Caddy config script generated for ${name}`;
       outputContainer.scrollIntoView({behavior:'smooth', block:'start'});
       outputTextarea.focus(); outputTextarea.select();
     }
@@ -611,9 +425,13 @@ pause_if_tty`;
     }
 
     function copyRecovery(){
-      const s=`# Recovery: install NGINX & Certbot
-sudo apt update
-sudo apt install -y nginx certbot python3-certbot-nginx`;
+      const s=`# Recovery: install Caddy
+sudo apt-get update -y
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+sudo apt-get update -y
+sudo apt-get install -y caddy`;
       copyToClipboard(s).then(()=>alert('Recovery commands copied!')).catch(e=>alert('Failed to copy: '+e));
     }
 

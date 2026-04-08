@@ -1,21 +1,22 @@
 # ProxyPilot
 
-A comprehensive NGINX management solution with an admin dashboard for managing proxy services, SSL certificates, and domains. **ProxyPilot** includes both a standalone script generator and a full-featured admin dashboard with TOTP authentication.
+A comprehensive reverse proxy management solution with an admin dashboard for managing proxy services, SSL certificates, and domains. **ProxyPilot** uses **Caddy** as its reverse proxy backend with automatic TLS certificate management. It includes both a standalone script generator and a full-featured admin dashboard with TOTP authentication.
 
 ## Features
 
 ### Standalone Script Generator (index.html)
-- Generate ready-to-run Bash scripts for NGINX configuration
+- Generate ready-to-run Bash scripts for Caddy configuration
 - Support for reverse proxies and static sites
-- Automatic SSL certificate setup with Let's Encrypt
+- Automatic SSL certificate management via Caddy's built-in ACME
 - WebSocket support for real-time applications
 - [Try it online](https://cybertecharmor.github.io/ProxyPilot/)
 
-### Admin Dashboard (New!)
+### Admin Dashboard
 - **Web-based management UI** for all your proxy services
 - **Secure authentication** with password + TOTP two-factor authentication
 - **Service management**: Add, edit, and delete proxy services
 - **Docker integration**: Manage Docker containers as proxy targets
+- **Automatic TLS**: Caddy auto-obtains and renews SSL certificates
 - **Audit logging**: Track all administrative actions
 - **Profile management**: Change password and reset TOTP
 
@@ -41,13 +42,12 @@ sudo ./install.sh
 ```
 
 The installer will:
-1. Check and install NGINX (if not present)
-2. Configure global NGINX settings
-3. Install Docker and Docker Compose (if not present)
-4. Set up the admin dashboard on your chosen port
-5. Generate secure credentials and TOTP secret
-6. Configure SSL with Let's Encrypt
-7. Start the dashboard in a Docker container
+1. Install Caddy (if not present)
+2. Install Docker and Docker Compose (if not present)
+3. Set up the admin dashboard on your chosen port
+4. Generate secure credentials
+5. Configure Caddy with automatic TLS
+6. Start the dashboard
 
 ---
 
@@ -80,7 +80,7 @@ The installer will:
 
 ### Installation Requirements
 
-- Ubuntu/Debian-based Linux server
+- Debian/Ubuntu-based Linux server
 - Root access (sudo)
 - Domain name pointing to your server
 - Ports 80 and 443 available
@@ -91,20 +91,15 @@ During installation, you'll be prompted for:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| Max Upload Size | Global NGINX client_max_body_size | 1G |
 | Dashboard Port | Port for the admin dashboard | 3001 |
 | Admin Username | Login username | (required) |
 | Domain | Domain for the admin dashboard | (required) |
-| Email | Email for Let's Encrypt certificates | (required) |
 
 ### Post-Installation
 
 After installation, you'll receive:
 - Dashboard URL (https://your-domain)
-- Admin username and generated password
-- TOTP QR code and secret key
-
-**Important:** Save these credentials securely! The password is only shown once.
+- Admin username (password set via web UI on first login)
 
 ### Managing the Dashboard
 
@@ -163,16 +158,15 @@ The reset tool provides:
 2. Choose deployment mode:
    - **Reverse Proxy**: Enter backend IP and port
    - **Static Site**: Enter the absolute path to your files
-3. Configure options (SSL, HTTPS redirect, WebSocket support)
+3. Configure options (SSL is automatic with Caddy)
 4. Click "Generate Script"
 5. Copy and run the script on your server
 
 ### Generated Script Features
 
-- Installs NGINX and Certbot if needed
-- Configures NGINX server blocks
-- Obtains SSL certificates via Let's Encrypt
-- Sets up automatic certificate renewal
+- Installs Caddy if needed
+- Creates Caddyfile site configurations
+- TLS certificates are automatically obtained and renewed by Caddy
 - Handles directory permissions for static sites
 
 ---
@@ -196,7 +190,7 @@ ProxyPilot/
     │       │   └── auth.js # JWT authentication
     │       └── routes/
     │           ├── auth.js     # Login/logout endpoints
-    │           ├── services.js # Service CRUD
+    │           ├── services.js # Service CRUD + Caddy config
     │           └── user.js     # Profile management
     └── frontend/
         ├── package.json
@@ -250,6 +244,7 @@ ProxyPilot/
 - API rate limiting: 100 requests per 15 minutes
 - Security headers (X-Frame-Options, CSP, etc.)
 - Audit logging for all administrative actions
+- Caddy provides automatic HTTPS with OCSP stapling
 
 ---
 
@@ -264,13 +259,19 @@ docker compose -f /opt/proxypilot/docker-compose.yml logs
 ss -tlnp | grep 3001
 ```
 
-### Certificate issues
+### Caddy issues
 ```bash
-# Test certificate renewal
-sudo certbot renew --dry-run
+# Validate Caddy configuration
+sudo caddy validate --config /etc/caddy/Caddyfile
 
-# Check NGINX configuration
-sudo nginx -t
+# Reload Caddy
+sudo caddy reload --config /etc/caddy/Caddyfile
+
+# Check Caddy status
+sudo systemctl status caddy
+
+# View Caddy logs
+sudo journalctl -u caddy -f
 ```
 
 ### Database issues
@@ -295,7 +296,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- Thanks to the open-source community for **NGINX** and **Certbot**
+- Thanks to the open-source community for **Caddy** and its automatic HTTPS
 - Built with React, shadcn/ui, Express, and SQLite
 - Special thanks to contributors and testers
 

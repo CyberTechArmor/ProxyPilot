@@ -96,12 +96,12 @@ export const api = {
 
   getDockerContainers: () => request('/services/docker/containers'),
 
-  // NGINX
-  reloadNginx: () => request('/services/nginx/reload', {
+  // Caddy
+  reloadCaddy: () => request('/services/caddy/reload', {
     method: 'POST',
   }),
 
-  regenerateAllConfigs: () => request('/services/nginx/regenerate-all', {
+  regenerateAllConfigs: () => request('/services/caddy/regenerate-all', {
     method: 'POST',
   }),
 
@@ -254,10 +254,10 @@ export const api = {
     method: 'POST',
   }),
 
-  // Nginx Config (Advanced)
-  getNginxConfig: (serviceId) => request(`/services/${serviceId}/nginx-config`),
+  // Caddy Config (Advanced)
+  getCaddyConfig: (serviceId) => request(`/services/${serviceId}/caddy-config`),
 
-  saveNginxConfig: (serviceId, config) => request(`/services/${serviceId}/nginx-config`, {
+  saveCaddyConfig: (serviceId, config) => request(`/services/${serviceId}/caddy-config`, {
     method: 'PUT',
     body: JSON.stringify({ config }),
   }),
@@ -269,7 +269,7 @@ export const api = {
   }),
 
   // Discover existing sites
-  discoverNginxSites: () => request('/services/discover/nginx-sites'),
+  discoverCaddySites: () => request('/services/discover/caddy-sites'),
 
   importDiscoveredSite: (site) => request('/services/discover/import', {
     method: 'POST',

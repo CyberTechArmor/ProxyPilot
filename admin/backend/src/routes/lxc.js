@@ -513,31 +513,74 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
 
   const child = spawnOnHost(execCmd);
+  let stdoutDone = false;
+  let stderrDone = false;
+  let exitCode = null;
+  let ended = false;
+
+  const tryFinish = () => {
+    if (ended) return;
+    if (stdoutDone && stderrDone && exitCode !== null) {
+      ended = true;
+      res.write(`data: ${JSON.stringify({ type: 'exit', code: exitCode })}\n\n`);
+      res.end();
+    }
+  };
 
   child.stdout.on('data', (data) => {
-    res.write(`data: ${JSON.stringify({ type: 'stdout', text: data.toString() })}\n\n`);
+    if (!ended) res.write(`data: ${JSON.stringify({ type: 'stdout', text: data.toString() })}\n\n`);
+  });
+
+  child.stdout.on('end', () => {
+    stdoutDone = true;
+    tryFinish();
   });
 
   child.stderr.on('data', (data) => {
-    res.write(`data: ${JSON.stringify({ type: 'stderr', text: data.toString() })}\n\n`);
+    if (!ended) res.write(`data: ${JSON.stringify({ type: 'stderr', text: data.toString() })}\n\n`);
+  });
+
+  child.stderr.on('end', () => {
+    stderrDone = true;
+    tryFinish();
   });
 
   child.on('close', (code) => {
-    res.write(`data: ${JSON.stringify({ type: 'exit', code: code || 0 })}\n\n`);
-    res.end();
+    exitCode = code ?? 0;
+    tryFinish();
   });
 
   child.on('error', (err) => {
-    res.write(`data: ${JSON.stringify({ type: 'stderr', text: err.message })}\n\n`);
-    res.write(`data: ${JSON.stringify({ type: 'exit', code: 1 })}\n\n`);
-    res.end();
+    if (!ended) {
+      ended = true;
+      res.write(`data: ${JSON.stringify({ type: 'stderr', text: err.message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'exit', code: 1 })}\n\n`);
+      res.end();
+    }
   });
 
+  // Timeout after 5 minutes
+  const timeout = setTimeout(() => {
+    if (!ended) {
+      child.kill('SIGKILL');
+      ended = true;
+      res.write(`data: ${JSON.stringify({ type: 'stderr', text: 'Command timed out after 5 minutes.' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'exit', code: 124 })}\n\n`);
+      res.end();
+    }
+  }, 5 * 60 * 1000);
+
+  // Client disconnect = cancel
   req.on('close', () => {
-    child.kill();
+    clearTimeout(timeout);
+    if (!ended) {
+      ended = true;
+      child.kill('SIGKILL');
+    }
   });
 });
 

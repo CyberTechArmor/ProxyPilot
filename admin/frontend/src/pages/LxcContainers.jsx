@@ -81,8 +81,11 @@ function ContainerTerminal({ containerName }) {
   const [cmdHistory, setCmdHistory] = useState([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [cwd, setCwd] = useState('/root');
+  const [elapsed, setElapsed] = useState(0);
   const outputRef = useRef(null);
   const inputRef = useRef(null);
+  const abortRef = useRef(null);
+  const timerRef = useRef(null);
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -90,22 +93,53 @@ function ContainerTerminal({ containerName }) {
     }, 30);
   };
 
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, []);
+
+  const cancelCommand = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setHistory(prev => [...prev, { type: 'stderr', text: '^C Cancelled' }]);
+    setRunning(false);
+    scrollToBottom();
+    inputRef.current?.focus();
+  };
+
   const runCommand = async () => {
     const cmd = command.trim();
     if (!cmd || running) return;
     setRunning(true);
     setCommand('');
+    setElapsed(0);
     setCmdHistory(prev => [cmd, ...prev]);
     setHistoryIdx(-1);
 
     setHistory(prev => [...prev, { type: 'input', text: `${cwd}$ ${cmd}` }]);
     scrollToBottom();
 
+    // Start elapsed timer
+    const startTime = Date.now();
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
+
+    // Create abort controller for cancellation
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     // Handle cd locally to track cwd
     const cdMatch = cmd.match(/^cd\s+(.*)/);
 
     try {
-      const response = await api.execInContainer(containerName, cmd, cwd);
+      const response = await api.execInContainer(containerName, cmd, cwd, controller.signal);
 
       if (!response.ok) {
         let errMsg = `Command failed (HTTP ${response.status})`;
@@ -115,8 +149,6 @@ function ContainerTerminal({ containerName }) {
         } catch {}
         setHistory(prev => [...prev, { type: 'stderr', text: errMsg }]);
         scrollToBottom();
-        setRunning(false);
-        inputRef.current?.focus();
         return;
       }
 
@@ -139,12 +171,11 @@ function ContainerTerminal({ containerName }) {
             exitCode = evt.code;
           }
         } catch {
-          // If JSON parse fails, show raw data as output
           outputEntries.push({ type: 'stderr', text: match[1] });
         }
       }
 
-      // If no SSE events found but response has content, show it as raw output
+      // If no SSE events found but response has content, show it raw
       if (outputEntries.length === 0 && text.trim()) {
         outputEntries.push({ type: 'stdout', text: text.trim() });
       }
@@ -169,8 +200,15 @@ function ContainerTerminal({ containerName }) {
 
       scrollToBottom();
     } catch (err) {
-      setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
+      if (err.name !== 'AbortError') {
+        setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
+      }
     } finally {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      abortRef.current = null;
       setRunning(false);
       scrollToBottom();
       inputRef.current?.focus();
@@ -180,9 +218,11 @@ function ContainerTerminal({ containerName }) {
   const handleKeyDown = async (e) => {
     if (e.key === 'Enter') {
       runCommand();
+    } else if (e.key === 'c' && e.ctrlKey && running) {
+      e.preventDefault();
+      cancelCommand();
     } else if (e.key === 'Tab') {
       e.preventDefault();
-      // Tab completion: get the last word and try to complete it
       const parts = command.split(/\s+/);
       const partial = parts[parts.length - 1] || '';
       if (!partial) return;
@@ -226,15 +266,26 @@ function ContainerTerminal({ containerName }) {
     }
   };
 
+  const formatElapsed = (s) => {
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m ${s % 60}s`;
+  };
+
   return (
     <div className="flex flex-col gap-2 flex-1 min-h-0 h-full overflow-hidden">
       <div className="flex items-center justify-between shrink-0">
         <span className="text-xs text-muted-foreground font-mono">{cwd}</span>
-        {history.length > 0 && (
-          <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
-            Clear
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {running && (
+            <span className="text-xs text-yellow-500 font-mono">{formatElapsed(elapsed)}</span>
+          )}
+          {history.length > 0 && (
+            <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
+              Clear
+            </Button>
+          )}
+        </div>
       </div>
       <div
         ref={outputRef}
@@ -254,6 +305,7 @@ function ContainerTerminal({ containerName }) {
         {running && (
           <div className="flex items-center gap-1 text-yellow-500">
             <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Running...</span>
           </div>
         )}
       </div>
@@ -273,11 +325,17 @@ function ContainerTerminal({ containerName }) {
             autoFocus
           />
         </div>
-        <Button size="sm" onClick={runCommand} disabled={running || !command.trim()}>
-          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
-        </Button>
+        {running ? (
+          <Button size="sm" variant="destructive" onClick={cancelCommand} title="Cancel (Ctrl+C)">
+            <Square className="h-3 w-3 mr-1" />Ctrl-C
+          </Button>
+        ) : (
+          <Button size="sm" onClick={runCommand} disabled={!command.trim()}>
+            Run
+          </Button>
+        )}
       </div>
-      <p className="text-[10px] text-muted-foreground shrink-0">Tab to autocomplete · Up/Down for history · Paste multi-line to auto-join with &amp;&amp;</p>
+      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history</p>
     </div>
   );
 }

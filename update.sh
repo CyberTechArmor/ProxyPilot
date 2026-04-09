@@ -242,16 +242,30 @@ else
     log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
     log ""
 
-    # Check if running via Docker (installed at /opt/proxypilot with docker-compose.yml)
-    INSTALL_DIR="/opt/proxypilot"
-    if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
+    # Check if running via Docker - check multiple possible locations
+    INSTALL_DIR=""
+    for candidate in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
+        if [[ -f "${candidate}/docker-compose.yml" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -q proxypilot-admin; then
+            INSTALL_DIR="$candidate"
+            break
+        fi
+        # Also check if docker-compose.yml exists even if container isn't running
+        if [[ -f "${candidate}/docker-compose.yml" ]] && grep -q proxypilot "${candidate}/docker-compose.yml" 2>/dev/null; then
+            INSTALL_DIR="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$INSTALL_DIR" ]]; then
         log "Detected Docker deployment at ${INSTALL_DIR}"
 
-        # Copy updated admin files to install directory
-        log "Copying updated files..."
-        cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+        # Copy updated admin files to install directory (if running from a different dir)
+        if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
+            log "Copying updated files from ${SCRIPT_DIR} to ${INSTALL_DIR}..."
+            cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+        fi
 
-        # Rebuild frontend
+        # Rebuild frontend at the install location
         log "Rebuilding frontend..."
         cd "${INSTALL_DIR}/admin/frontend"
         $NPM_CMD ci 2>&1 | tee -a "$LOG_FILE"

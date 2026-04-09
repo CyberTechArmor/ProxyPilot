@@ -274,9 +274,22 @@ else
         # Rebuild and restart Docker container
         log "Rebuilding Docker container..."
         cd "$INSTALL_DIR"
-        docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true
-        docker compose build --no-cache 2>/dev/null || docker-compose build --no-cache 2>/dev/null
-        docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null
+
+        # Determine docker compose command
+        local DC_CMD="docker compose"
+        if ! docker compose version &>/dev/null; then
+            DC_CMD="docker-compose"
+        fi
+
+        $DC_CMD down --remove-orphans 2>/dev/null || true
+        log "Building with --no-cache..."
+        $DC_CMD build --no-cache
+        $DC_CMD up -d
+
+        # Wait and show container logs
+        sleep 5
+        log "Container logs:"
+        docker logs proxypilot-admin --tail 20 2>&1 || true
 
         log "${GREEN}Docker container rebuilt and restarted${NC}"
         log ""

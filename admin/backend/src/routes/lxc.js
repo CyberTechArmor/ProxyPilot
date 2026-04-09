@@ -79,13 +79,27 @@ async function ensureNetworkNat() {
           await execOnHost(`incus network set ${net.name} ipv4.nat true`, { timeout: 10000 });
           console.log(`[LXC] Enabled ipv4.nat on bridge '${net.name}'`);
         } catch {}
+
+        // Step 3: Allow Incus bridge traffic through Docker's FORWARD chain
+        // Docker sets FORWARD policy to DROP, blocking Incus container traffic
+        try {
+          await execOnHost(
+            `iptables -C DOCKER-USER -i ${net.name} -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i ${net.name} -j ACCEPT`,
+            { timeout: 10000 }
+          );
+          await execOnHost(
+            `iptables -C DOCKER-USER -o ${net.name} -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o ${net.name} -j ACCEPT`,
+            { timeout: 10000 }
+          );
+          console.log(`[LXC] Docker FORWARD rules added for bridge '${net.name}'`);
+        } catch {}
       }
     }
   } catch (err) {
     console.error('[LXC] incus network NAT setup failed:', err.message);
   }
 
-  // Step 3: Fallback — add iptables MASQUERADE directly for container subnets
+  // Step 4: Fallback — add iptables MASQUERADE directly for container subnets
   try {
     await execOnHost(
       'iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE',
@@ -1329,7 +1343,7 @@ lxcRouter.get('/profiles/:name', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid profile name.' });
   }
   try {
-    const result = await execOnHost(`incus profile show ${name} --format json`, { timeout: 10000 });
+    const result = await execOnHost(`incus query /1.0/profiles/${name}`, { timeout: 10000 });
     const profile = JSON.parse(result.stdout || '{}');
     res.json({ success: true, profile });
   } catch (error) {

@@ -101,36 +101,41 @@ function NetworksTab() {
 
   const importantKeys = ['ipv4.address', 'ipv4.nat', 'ipv4.dhcp', 'ipv4.dhcp.ranges', 'ipv6.address', 'ipv6.nat', 'dns.domain', 'dns.mode'];
 
+  // Separate managed Incus networks from host interfaces
+  const managedNetworks = networks.filter(n => n.managed);
+  const hostInterfaces = networks.filter(n => !n.managed);
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{networks.length} network{networks.length !== 1 ? 's' : ''}</p>
+        <p className="text-sm text-muted-foreground">{managedNetworks.length} managed network{managedNetworks.length !== 1 ? 's' : ''}{hostInterfaces.length > 0 ? `, ${hostInterfaces.length} host interface${hostInterfaces.length !== 1 ? 's' : ''}` : ''}</p>
         <Button size="sm" variant="outline" onClick={fetchNetworks}><RefreshCw className="h-3.5 w-3.5 mr-1" />Refresh</Button>
       </div>
 
-      {networks.length === 0 ? (
+      {managedNetworks.length === 0 && hostInterfaces.length === 0 ? (
         <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No networks found.</CardContent></Card>
       ) : (
-        networks.map((net) => (
-          <Card key={net.name} className="overflow-hidden">
-            <div
-              className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
-              onClick={() => setExpandedNet(expandedNet === net.name ? null : net.name)}
-            >
-              <div className="flex items-center gap-3">
-                {expandedNet === net.name ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                <Network className="h-4 w-4 text-primary" />
-                <div>
-                  <span className="font-medium text-sm">{net.name}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">{net.type}</span>
-                  {net.managed && <span className="ml-2 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>}
+        <>
+          {/* Managed Incus Networks */}
+          {managedNetworks.map((net) => (
+            <Card key={net.name} className="overflow-hidden">
+              <div
+                className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
+                onClick={() => setExpandedNet(expandedNet === net.name ? null : net.name)}
+              >
+                <div className="flex items-center gap-3">
+                  {expandedNet === net.name ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  <Network className="h-4 w-4 text-primary" />
+                  <div>
+                    <span className="font-medium text-sm">{net.name}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">{net.type}</span>
+                    <span className="ml-2 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-3">
-                {net.config?.['ipv4.address'] && (
-                  <span className="text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
-                )}
-                {net.managed && (
+                <div className="flex items-center gap-3">
+                  {net.config?.['ipv4.address'] && (
+                    <span className="text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
+                  )}
                   <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <span className="text-xs text-muted-foreground">NAT</span>
                     <Switch
@@ -139,51 +144,73 @@ function NetworksTab() {
                       className="scale-75"
                     />
                   </div>
-                )}
+                </div>
               </div>
-            </div>
 
-            {expandedNet === net.name && (
-              <div className="border-t px-4 py-3 bg-muted/10">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Configuration</span>
-                  {net.managed && (
+              {expandedNet === net.name && (
+                <div className="border-t px-4 py-3 bg-muted/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Configuration</span>
                     <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => handleEdit(net)}>
                       <Settings className="h-3 w-3 mr-1" />Edit
                     </Button>
+                  </div>
+                  {net.config && Object.keys(net.config).length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+                      {Object.entries(net.config)
+                        .sort(([a], [b]) => {
+                          const ai = importantKeys.indexOf(a);
+                          const bi = importantKeys.indexOf(b);
+                          if (ai !== -1 && bi !== -1) return ai - bi;
+                          if (ai !== -1) return -1;
+                          if (bi !== -1) return 1;
+                          return a.localeCompare(b);
+                        })
+                        .map(([key, value]) => (
+                          <div key={key} className="flex items-baseline gap-2 py-0.5">
+                            <span className={cn("text-xs font-mono", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
+                            <span className="text-xs font-mono text-primary">{value || '(empty)'}</span>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No configuration.</p>
+                  )}
+                  {net.status && (
+                    <div className="mt-2 pt-2 border-t">
+                      <span className="text-xs text-muted-foreground">Status: </span>
+                      <span className={cn("text-xs font-medium", net.status === 'Created' ? 'text-green-500' : 'text-yellow-500')}>{net.status}</span>
+                    </div>
                   )}
                 </div>
-                {net.config && Object.keys(net.config).length > 0 ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
-                    {Object.entries(net.config)
-                      .sort(([a], [b]) => {
-                        const ai = importantKeys.indexOf(a);
-                        const bi = importantKeys.indexOf(b);
-                        if (ai !== -1 && bi !== -1) return ai - bi;
-                        if (ai !== -1) return -1;
-                        if (bi !== -1) return 1;
-                        return a.localeCompare(b);
-                      })
-                      .map(([key, value]) => (
-                        <div key={key} className="flex items-baseline gap-2 py-0.5">
-                          <span className={cn("text-xs font-mono", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
-                          <span className="text-xs font-mono text-primary">{value || '(empty)'}</span>
-                        </div>
-                      ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">No configuration.</p>
-                )}
-                {net.status && (
-                  <div className="mt-2 pt-2 border-t">
-                    <span className="text-xs text-muted-foreground">Status: </span>
-                    <span className={cn("text-xs font-medium", net.status === 'Created' ? 'text-green-500' : 'text-yellow-500')}>{net.status}</span>
-                  </div>
-                )}
-              </div>
-            )}
-          </Card>
-        ))
+              )}
+            </Card>
+          ))}
+
+          {/* Host Interfaces (collapsed section) */}
+          {hostInterfaces.length > 0 && (
+            <div className="pt-2">
+              <button
+                className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2"
+                onClick={() => setExpandedNet(expandedNet === '__host__' ? null : '__host__')}
+              >
+                {expandedNet === '__host__' ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                Host Interfaces ({hostInterfaces.length})
+              </button>
+              {expandedNet === '__host__' && (
+                <div className="space-y-1">
+                  {hostInterfaces.map((net) => (
+                    <div key={net.name} className="flex items-center gap-3 px-4 py-2 rounded-md bg-muted/20 text-sm">
+                      <Network className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="font-mono text-sm">{net.name}</span>
+                      <span className="text-xs text-muted-foreground">{net.type}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* Edit Network Dialog */}

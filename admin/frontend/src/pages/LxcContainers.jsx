@@ -194,14 +194,24 @@ export default function LxcContainers() {
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
       };
-      await api.createLxcContainer(data);
-      toast({ title: 'Container created', description: `${createForm.name} has been created successfully.` });
+      const result = await api.createLxcContainer(data);
+      const ct = result.container;
+      const statusInfo = ct?.ipv4 ? ` (IP: ${ct.ipv4})` : '';
+      toast({
+        title: 'Container created',
+        description: `${createForm.name} is ${ct?.status || 'running'}${statusInfo}`,
+      });
       setCreateOpen(false);
       setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '' });
       setImageSelection('');
       await fetchContainers();
     } catch (err) {
-      toast({ title: 'Creation failed', description: err.message, variant: 'destructive' });
+      toast({
+        title: 'Creation failed',
+        description: err.message || 'Unknown error occurred',
+        variant: 'destructive',
+        duration: 10000,
+      });
     } finally {
       setCreating(false);
     }

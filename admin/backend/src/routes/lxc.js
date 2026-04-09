@@ -89,8 +89,8 @@ lxcRouter.get('/status', async (req, res) => {
 // GET /containers - List all pp-* containers with their state
 lxcRouter.get('/containers', async (req, res) => {
   try {
-    const result = await execOnHost('incus list --format json 2>/dev/null');
-    const all = JSON.parse(result.stdout);
+    const result = await execOnHost('incus list --format json');
+    const all = JSON.parse(result.stdout || '[]');
     const containers = all
       .filter(c => c.name.startsWith(INSTANCE_PREFIX))
       .map(c => ({
@@ -252,7 +252,7 @@ lxcRouter.post('/containers', async (req, res) => {
 
   // Check if container already exists
   try {
-    await execOnHost(`incus info ${incusName} 2>/dev/null`);
+    await execOnHost(`incus info ${incusName}`);
     return res.status(409).json({
       success: false,
       error: `Container '${name}' already exists.`,
@@ -262,10 +262,32 @@ lxcRouter.post('/containers', async (req, res) => {
   }
 
   try {
-    // Build launch command
+    // Build launch command - use 180s timeout for first-time image downloads
     const profileArg = profile ? `--profile ${profile}` : '--profile default';
     const launchCmd = `incus launch ${image} ${incusName} ${profileArg}`;
-    await execOnHost(launchCmd, { timeout: 60000 });
+    console.log(`[LXC] Launching container: ${launchCmd}`);
+    const launchResult = await execOnHost(launchCmd, { timeout: 180000 });
+    console.log(`[LXC] Launch stdout: ${launchResult.stdout}`);
+    if (launchResult.stderr) {
+      console.log(`[LXC] Launch stderr: ${launchResult.stderr}`);
+    }
+
+    // Verify container was actually created
+    let containerExists = false;
+    try {
+      const verifyResult = await execOnHost(`incus info ${incusName}`);
+      containerExists = true;
+      console.log(`[LXC] Container ${incusName} verified as created`);
+    } catch (verifyErr) {
+      console.error(`[LXC] Container ${incusName} not found after launch:`, verifyErr.stderr || verifyErr.message);
+    }
+
+    if (!containerExists) {
+      return res.status(500).json({
+        success: false,
+        error: `Container launch command succeeded but container '${name}' was not found. Check Incus logs: journalctl -u incus`,
+      });
+    }
 
     // Set resource limits if provided
     if (cpu) {
@@ -280,7 +302,7 @@ lxcRouter.post('/containers', async (req, res) => {
     for (let i = 0; i < 15; i++) {
       await sleep(1000);
       try {
-        const listResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`);
+        const listResult = await execOnHost(`incus list ${incusName} --format json`);
         const containers = JSON.parse(listResult.stdout);
         if (containers.length > 0) {
           ip = extractIPv4(containers[0]);
@@ -312,9 +334,14 @@ lxcRouter.post('/containers', async (req, res) => {
     }
 
     // Get final container info
-    const finalResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`);
-    const finalContainers = JSON.parse(finalResult.stdout);
-    const container = finalContainers[0];
+    let container = null;
+    try {
+      const finalResult = await execOnHost(`incus list ${incusName} --format json`);
+      const finalContainers = JSON.parse(finalResult.stdout);
+      container = finalContainers[0];
+    } catch (listErr) {
+      console.error(`[LXC] Failed to get final container info:`, listErr.stderr || listErr.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -332,6 +359,7 @@ lxcRouter.post('/containers', async (req, res) => {
       },
     });
   } catch (error) {
+    console.error(`[LXC] Container creation failed:`, error.stderr || error.message);
     // Attempt cleanup on failure
     try {
       await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`);
@@ -339,9 +367,14 @@ lxcRouter.post('/containers', async (req, res) => {
       // Ignore cleanup errors
     }
     const details = error.stderr || error.message || '';
+    // Check for timeout
+    const isTimeout = error.killed || details.includes('TIMEOUT') || details.includes('timed out');
+    const errorMsg = isTimeout
+      ? `Container creation timed out. The image download may still be in progress. Wait a minute and try again.`
+      : (details ? `Failed to create container: ${details.trim()}` : 'Failed to create container');
     res.status(500).json({
       success: false,
-      error: details ? `Failed to create container: ${details.trim()}` : 'Failed to create container',
+      error: errorMsg,
       details,
     });
   }

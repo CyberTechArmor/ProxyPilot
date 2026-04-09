@@ -27,3 +27,6 @@ npm-debug.log*
 *.db-shm
 data/
 
+# CLI data
+cli/node_modules/
+

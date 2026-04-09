@@ -1,0 +1,17 @@
+{
+  "name": "proxypilot-cli",
+  "version": "1.0.0",
+  "description": "ProxyPilot CLI - LXC container and infrastructure management",
+  "type": "module",
+  "bin": {
+    "proxypilot": "./bin/proxypilot.js"
+  },
+  "scripts": {
+    "start": "node bin/proxypilot.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.2.2",
+    "commander": "^12.0.0",
+    "yaml": "^2.3.4"
+  }
+}

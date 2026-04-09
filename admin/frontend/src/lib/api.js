@@ -380,6 +380,8 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
+  getLxcCreateStatus: (name) => request(`/lxc/containers/${name}/create-status`),
+
   startLxcContainer: (name) => request(`/lxc/containers/${name}/start`, {
     method: 'POST',
   }),

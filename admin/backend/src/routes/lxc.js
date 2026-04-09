@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, readdir, readFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -14,6 +14,9 @@ const INSTANCE_PREFIX = 'pp-';
 const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
 const NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 
+// In-memory tracking of active container creation jobs
+const activeCreations = new Map();
+
 // Check if running in Docker container
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
@@ -26,6 +29,19 @@ async function execOnHost(command, options = {}) {
     return execAsync(hostCommand, { timeout });
   } else {
     return execAsync(command, { timeout });
+  }
+}
+
+// Spawn a command on host without timeout (for long-running operations)
+function spawnOnHost(command) {
+  if (isInDocker) {
+    return spawn('nsenter', ['-t', '1', '-m', '-u', '-n', '-i', 'sh', '-c', command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } else {
+    return spawn('sh', ['-c', command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
   }
 }
 
@@ -229,11 +245,10 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
   }
 });
 
-// POST /containers - Create a new container
+// POST /containers - Start async container creation
 lxcRouter.post('/containers', async (req, res) => {
-  const { name, image, profile, domain, port, cpu, memory, disk } = req.body;
+  const { name, image, profile, domain, port, cpu, memory } = req.body;
 
-  // Validate name
   if (!validateName(name)) {
     return res.status(400).json({
       success: false,
@@ -252,132 +267,223 @@ lxcRouter.post('/containers', async (req, res) => {
 
   // Check if container already exists
   try {
-    await execOnHost(`incus info ${incusName}`);
+    await execOnHost(`incus info ${incusName} 2>/dev/null`);
     return res.status(409).json({
       success: false,
       error: `Container '${name}' already exists.`,
     });
   } catch {
-    // Container doesn't exist, which is what we want
+    // Container doesn't exist — good
   }
 
-  try {
-    // Build launch command - use 180s timeout for first-time image downloads
-    const profileArg = profile ? `--profile ${profile}` : '--profile default';
-    const launchCmd = `incus launch ${image} ${incusName} ${profileArg}`;
-    console.log(`[LXC] Launching container: ${launchCmd}`);
-    const launchResult = await execOnHost(launchCmd, { timeout: 180000 });
-    console.log(`[LXC] Launch stdout: ${launchResult.stdout}`);
-    if (launchResult.stderr) {
-      console.log(`[LXC] Launch stderr: ${launchResult.stderr}`);
-    }
-
-    // Verify container was actually created
-    let containerExists = false;
-    try {
-      const verifyResult = await execOnHost(`incus info ${incusName}`);
-      containerExists = true;
-      console.log(`[LXC] Container ${incusName} verified as created`);
-    } catch (verifyErr) {
-      console.error(`[LXC] Container ${incusName} not found after launch:`, verifyErr.stderr || verifyErr.message);
-    }
-
-    if (!containerExists) {
-      return res.status(500).json({
+  // Check if a creation is already in progress for this name
+  if (activeCreations.has(incusName)) {
+    const existing = activeCreations.get(incusName);
+    if (existing.phase !== 'ready' && existing.phase !== 'failed') {
+      return res.status(409).json({
         success: false,
-        error: `Container launch command succeeded but container '${name}' was not found. Check Incus logs: journalctl -u incus`,
+        error: `Container '${name}' creation is already in progress.`,
       });
     }
+  }
 
-    // Set resource limits if provided
-    if (cpu) {
-      await execOnHost(`incus config set ${incusName} limits.cpu=${cpu}`);
+  // Initialize creation tracking
+  const creation = {
+    phase: 'downloading',
+    message: 'Downloading image...',
+    startTime: Date.now(),
+    name,
+    incusName,
+    image,
+    domain: domain || null,
+    port: port || null,
+    cpu: cpu || null,
+    memory: memory || null,
+    error: null,
+    ip: null,
+    stderr: '',
+  };
+  activeCreations.set(incusName, creation);
+
+  // Start the launch process asynchronously (no timeout — runs until done)
+  const profileArg = profile ? `--profile ${profile}` : '--profile default';
+  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}`;
+  console.log(`[LXC] Starting async launch: ${launchCmd}`);
+
+  const child = spawnOnHost(launchCmd);
+
+  child.stderr.on('data', (data) => {
+    creation.stderr += data.toString();
+    const output = data.toString().toLowerCase();
+    // Detect download progress from Incus output
+    if (output.includes('retrieving') || output.includes('download') || output.includes('unpack')) {
+      creation.phase = 'downloading';
+      creation.message = 'Downloading image...';
     }
-    if (memory) {
-      await execOnHost(`incus config set ${incusName} limits.memory=${memory}MB`);
+  });
+
+  child.stdout.on('data', (data) => {
+    console.log(`[LXC] Launch stdout: ${data.toString().trim()}`);
+  });
+
+  child.on('close', async (code) => {
+    console.log(`[LXC] Launch process exited with code ${code}`);
+
+    if (code !== 0) {
+      creation.phase = 'failed';
+      creation.error = creation.stderr.trim() || `Launch exited with code ${code}`;
+      creation.message = creation.error;
+      console.error(`[LXC] Launch failed: ${creation.error}`);
+      // Clean up partial container
+      try { await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`); } catch {}
+      // Keep the creation record for 2 minutes so the frontend can read the error
+      setTimeout(() => activeCreations.delete(incusName), 120000);
+      return;
     }
 
-    // Wait for container to get an IP address (poll up to 15 seconds)
-    let ip = null;
-    for (let i = 0; i < 15; i++) {
-      await sleep(1000);
-      try {
-        const listResult = await execOnHost(`incus list ${incusName} --format json`);
-        const containers = JSON.parse(listResult.stdout);
-        if (containers.length > 0) {
-          ip = extractIPv4(containers[0]);
-          if (ip) break;
+    // Launch succeeded — configure the container
+    try {
+      creation.phase = 'configuring';
+      creation.message = 'Configuring container...';
+
+      // Set resource limits
+      if (cpu) {
+        await execOnHost(`incus config set ${incusName} limits.cpu=${cpu}`);
+      }
+      if (memory) {
+        await execOnHost(`incus config set ${incusName} limits.memory=${memory}MB`);
+      }
+
+      // Wait for IP address
+      creation.phase = 'network';
+      creation.message = 'Waiting for network...';
+
+      let ip = null;
+      for (let i = 0; i < 30; i++) {
+        await sleep(1000);
+        try {
+          const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+          const containers = JSON.parse(result.stdout || '[]');
+          if (containers.length > 0) {
+            ip = extractIPv4(containers[0]);
+            if (ip) break;
+          }
+        } catch {}
+      }
+      creation.ip = ip;
+
+      // Configure Caddy reverse proxy
+      if (domain && port && ip) {
+        creation.phase = 'caddy';
+        creation.message = 'Configuring reverse proxy...';
+
+        const caddyConfig = `${domain} {\n    reverse_proxy ${ip}:${port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${domain}.log\n    }\n}\n`;
+        const configPath = join(CADDY_SITES_DIR, domain);
+        await writeFile(configPath, caddyConfig);
+        try {
+          await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+        } catch (reloadError) {
+          console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
         }
-      } catch {
-        // Ignore polling errors
       }
+
+      creation.phase = 'ready';
+      creation.message = 'Container is ready';
+      console.log(`[LXC] Container ${incusName} is ready (IP: ${ip || 'none'})`);
+
+    } catch (err) {
+      creation.phase = 'failed';
+      creation.error = err.stderr || err.message || 'Post-launch configuration failed';
+      creation.message = creation.error;
+      console.error(`[LXC] Post-launch config failed: ${creation.error}`);
     }
 
-    // If domain and port provided, generate Caddy config and reload
-    if (domain && port && ip) {
-      const caddyConfig = `${domain} {
-    reverse_proxy ${ip}:${port}
-    encode gzip zstd
-    log {
-        output file /var/log/caddy/${domain}.log
-    }
-}
-`;
-      const configPath = join(CADDY_SITES_DIR, domain);
-      await writeFile(configPath, caddyConfig);
-      try {
-        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-      } catch (reloadError) {
-        console.error('Caddy reload failed:', reloadError.stderr || reloadError.message);
-        // Don't fail the whole operation if Caddy reload fails
-      }
-    }
+    // Clean up creation tracking after 2 minutes
+    setTimeout(() => activeCreations.delete(incusName), 120000);
+  });
 
-    // Get final container info
-    let container = null;
-    try {
-      const finalResult = await execOnHost(`incus list ${incusName} --format json`);
-      const finalContainers = JSON.parse(finalResult.stdout);
-      container = finalContainers[0];
-    } catch (listErr) {
-      console.error(`[LXC] Failed to get final container info:`, listErr.stderr || listErr.message);
-    }
+  child.on('error', (err) => {
+    creation.phase = 'failed';
+    creation.error = err.message;
+    creation.message = err.message;
+    console.error(`[LXC] Launch spawn error: ${err.message}`);
+    setTimeout(() => activeCreations.delete(incusName), 120000);
+  });
 
-    res.status(201).json({
+  // Return immediately — frontend will poll for progress
+  res.status(202).json({
+    success: true,
+    message: 'Container creation started',
+    name,
+    incusName,
+  });
+});
+
+// GET /containers/:name/create-status - Poll creation progress
+lxcRouter.get('/containers/:name/create-status', async (req, res) => {
+  const { name } = req.params;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const creation = activeCreations.get(incusName);
+
+  // If we have an active creation record, use it
+  if (creation) {
+    return res.json({
       success: true,
-      container: {
-        name,
-        incusName,
-        status: container?.status?.toLowerCase() || 'unknown',
-        ipv4: ip,
-        domain: domain || null,
-        port: port || null,
-        config: {
-          cpu: cpu || 'unlimited',
-          memory: memory ? `${memory}MB` : 'unlimited',
-        },
-      },
-    });
-  } catch (error) {
-    console.error(`[LXC] Container creation failed:`, error.stderr || error.message);
-    // Attempt cleanup on failure
-    try {
-      await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`);
-    } catch {
-      // Ignore cleanup errors
-    }
-    const details = error.stderr || error.message || '';
-    // Check for timeout
-    const isTimeout = error.killed || details.includes('TIMEOUT') || details.includes('timed out');
-    const errorMsg = isTimeout
-      ? `Container creation timed out. The image download may still be in progress. Wait a minute and try again.`
-      : (details ? `Failed to create container: ${details.trim()}` : 'Failed to create container');
-    res.status(500).json({
-      success: false,
-      error: errorMsg,
-      details,
+      phase: creation.phase,
+      message: creation.message,
+      error: creation.error,
+      ip: creation.ip,
+      elapsed: Math.round((Date.now() - creation.startTime) / 1000),
     });
   }
+
+  // No active creation — check if container exists already (maybe from a previous creation)
+  try {
+    const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(result.stdout || '[]');
+    if (containers.length > 0) {
+      const ip = extractIPv4(containers[0]);
+      return res.json({
+        success: true,
+        phase: 'ready',
+        message: 'Container is ready',
+        ip,
+        elapsed: 0,
+      });
+    }
+  } catch {}
+
+  // Check if Incus has an active operation (e.g. image download in progress)
+  try {
+    const opsResult = await execOnHost('incus operation list --format json 2>/dev/null', { timeout: 5000 });
+    const ops = JSON.parse(opsResult.stdout || '[]');
+    const relevantOp = ops.find(op =>
+      op.status === 'Running' &&
+      (op.description?.toLowerCase().includes('download') ||
+       op.description?.toLowerCase().includes('creating') ||
+       op.description?.toLowerCase().includes('image'))
+    );
+    if (relevantOp) {
+      return res.json({
+        success: true,
+        phase: 'downloading',
+        message: relevantOp.description || 'Downloading image...',
+        elapsed: 0,
+      });
+    }
+  } catch {}
+
+  res.json({
+    success: true,
+    phase: 'unknown',
+    message: 'No active creation found for this container.',
+    elapsed: 0,
+  });
 });
 
 // POST /containers/:name/start - Start a container

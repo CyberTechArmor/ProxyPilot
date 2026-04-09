@@ -120,6 +120,7 @@ lxcRouter.get('/containers', async (req, res) => {
         type: c.type,
         architecture: c.architecture,
         created_at: c.created_at,
+        image: c.config?.['image.description'] || c.config?.['image.os'] || '',
         ipv4: extractIPv4(c),
         profiles: c.profiles,
         config: {
@@ -504,25 +505,26 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
   }
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
-  // Wrap command to cd to cwd first if provided
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
-  const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
+  const innerCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
 
-  // Redirect stdin from /dev/null at shell level to prevent incus exec from hanging
+  // Replicate execOnHost logic with timeout (required: incus exec hangs without it)
   const hostCmd = isInDocker
-    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(execCmd)} < /dev/null`
-    : `${execCmd} < /dev/null`;
+    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(innerCmd)}`
+    : innerCmd;
 
   let finished = false;
 
-  const child = exec(hostCmd, { timeout: 0, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+  const child = exec(hostCmd, { timeout: 600000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (finished) return;
     finished = true;
     res.json({
       success: true,
       stdout: stdout || '',
-      stderr: stderr || '',
-      exitCode: error ? (error.code || 1) : 0,
+      stderr: error?.killed
+        ? (stderr || '') + '\nCommand timed out after 10 minutes.'
+        : (stderr || ''),
+      exitCode: error ? (error.killed ? 124 : (error.code || 1)) : 0,
     });
   });
 

@@ -1,7 +1,7 @@
 import * as React from "react"
 
 const TOAST_LIMIT = 3
-const TOAST_REMOVE_DELAY = 20000
+const TOAST_REMOVE_DELAY = 5000
 
 // Notification history - persists across renders
 const notificationHistory = []

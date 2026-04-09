@@ -25,8 +25,10 @@ import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
-  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote, PackagePlus
+  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote, PackagePlus,
+  X, Shield, FlaskConical
 } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 
 const STATUS_COLORS = {
   Running: 'bg-green-500',
@@ -604,7 +606,8 @@ export default function LxcContainers() {
   // Create form
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', domain: '', port: '', cpu: '', memory: '', initScript: '',
+    name: '', image: '', cpu: '', memory: '', initScript: '',
+    services: [{ domain: '', port: '', obtainCert: true }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
   const [creating, setCreating] = useState(false);
@@ -697,11 +700,19 @@ export default function LxcContainers() {
     setCreateProgress({ phase: 'starting', message: 'Starting creation...', elapsed: 0 });
 
     try {
+      // Filter services to only include entries with at least a domain specified
+      const validServices = createForm.services
+        .filter((s) => s.domain.trim())
+        .map((s) => ({
+          domain: s.domain.trim(),
+          port: s.port ? parseInt(s.port, 10) : 80,
+          obtainCert: s.obtainCert,
+        }));
+
       const data = {
         name: createForm.name,
         image: createForm.image,
-        ...(createForm.domain && { domain: createForm.domain }),
-        ...(createForm.port && { port: parseInt(createForm.port, 10) }),
+        ...(validServices.length > 0 && { services: validServices }),
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
         ...(createForm.initScript && { initScript: createForm.initScript }),
@@ -722,7 +733,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '', initScript: '' });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', services: [{ domain: '', port: '', obtainCert: true }] });
             setImageSelection('');
             setTemplateSelection('');
             toast({
@@ -1187,7 +1198,7 @@ export default function LxcContainers() {
                 { key: 'configuring', icon: Settings, label: 'Configuring container' },
                 { key: 'network', icon: Wifi, label: 'Waiting for network' },
                 ...(createForm.initScript ? [{ key: 'init-script', icon: Terminal, label: 'Running init script' }] : []),
-                ...(createForm.domain ? [{ key: 'caddy', icon: Globe, label: 'Setting up reverse proxy' }] : []),
+                ...(createForm.services.some((s) => s.domain.trim()) ? [{ key: 'caddy', icon: Globe, label: 'Setting up reverse proxy' }] : []),
                 { key: 'ready', icon: Check, label: 'Ready' },
               ].map((step, idx, arr) => {
                 const phaseOrder = ['starting', 'downloading', 'configuring', 'network', 'init-script', 'caddy', 'ready'];
@@ -1288,25 +1299,81 @@ export default function LxcContainers() {
                     image server.
                   </p>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="ct-domain">Domain</Label>
-                    <Input
-                      id="ct-domain"
-                      placeholder="myapp.example.com"
-                      value={createForm.domain}
-                      onChange={(e) => setCreateForm((f) => ({ ...f, domain: e.target.value }))}
-                    />
+                {/* Services / Port Mappings */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>Services</Label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-cyan-500 hover:text-cyan-400"
+                      onClick={() => setCreateForm((f) => ({
+                        ...f,
+                        services: [...f.services, { domain: '', port: '', obtainCert: true }],
+                      }))}
+                    >
+                      <Plus className="h-3 w-3 mr-1" />Add Service
+                    </Button>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="ct-port">Port</Label>
-                    <Input
-                      id="ct-port"
-                      type="number"
-                      placeholder="8080"
-                      value={createForm.port}
-                      onChange={(e) => setCreateForm((f) => ({ ...f, port: e.target.value }))}
-                    />
+                    {createForm.services.map((svc, idx) => (
+                      <div key={idx} className="flex items-start gap-2 p-2.5 rounded-lg border border-border/50 bg-muted/30">
+                        <div className="flex-1 grid grid-cols-2 gap-2">
+                          <Input
+                            placeholder="myapp.example.com"
+                            value={svc.domain}
+                            onChange={(e) => setCreateForm((f) => {
+                              const services = [...f.services];
+                              services[idx] = { ...services[idx], domain: e.target.value };
+                              return { ...f, services };
+                            })}
+                            className="h-8 text-xs"
+                          />
+                          <Input
+                            type="number"
+                            placeholder="8080"
+                            value={svc.port}
+                            onChange={(e) => setCreateForm((f) => {
+                              const services = [...f.services];
+                              services[idx] = { ...services[idx], port: e.target.value };
+                              return { ...f, services };
+                            })}
+                            className="h-8 text-xs"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1.5 pt-1">
+                          <Switch
+                            checked={svc.obtainCert}
+                            onCheckedChange={(checked) => setCreateForm((f) => {
+                              const services = [...f.services];
+                              services[idx] = { ...services[idx], obtainCert: checked };
+                              return { ...f, services };
+                            })}
+                            className="scale-75"
+                          />
+                          <Shield className={`h-3.5 w-3.5 ${svc.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
+                        </div>
+                        {createForm.services.length > 1 && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0 text-muted-foreground hover:text-red-500 mt-0.5"
+                            onClick={() => setCreateForm((f) => ({
+                              ...f,
+                              services: f.services.filter((_, i) => i !== idx),
+                            }))}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                    <span>Domain + Port per service</span>
+                    <span className="flex items-center gap-1"><Shield className="h-3 w-3" /> = obtain TLS cert</span>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -1374,10 +1441,11 @@ export default function LxcContainers() {
                     Runs automatically after container is created and has network. Takes up to 5 minutes.
                   </p>
                 </div>
-                {createForm.domain && (
+                {createForm.services.some((s) => s.domain.trim()) && (
                   <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
                     <p className="text-xs text-green-500">
-                      Caddy will automatically provision a TLS certificate for the domain.
+                      Caddy will configure reverse proxy routing for {createForm.services.filter((s) => s.domain.trim()).length} service{createForm.services.filter((s) => s.domain.trim()).length > 1 ? 's' : ''}.
+                      {createForm.services.some((s) => s.domain.trim() && s.obtainCert) && ' TLS certificates will be provisioned for domains with SSL enabled.'}
                     </p>
                   </div>
                 )}
@@ -1409,9 +1477,14 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-3 shrink-0">
+              <TabsList className="w-full grid grid-cols-4 shrink-0">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
+                <TabsTrigger value="terminal-beta" className="flex items-center gap-1">
+                  <FlaskConical className="h-3 w-3" />
+                  Terminal
+                  <span className="text-[9px] font-medium bg-cyan-500/20 text-cyan-500 px-1 rounded">BETA</span>
+                </TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
               </TabsList>
 
@@ -1691,6 +1764,44 @@ export default function LxcContainers() {
               {/* Terminal Tab */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <ContainerTerminal containerName={selectedContainer.name} />
+              </TabsContent>
+
+              {/* Terminal Beta Tab - Interactive WebSocket Terminal (Placeholder) */}
+              <TabsContent value="terminal-beta" className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                <div className="flex-1 flex flex-col items-center justify-center bg-black/90 rounded-lg border border-border/50 p-8">
+                  <div className="text-center space-y-4 max-w-md">
+                    <div className="flex items-center justify-center gap-2 mb-2">
+                      <FlaskConical className="h-8 w-8 text-cyan-500" />
+                      <span className="text-xs font-medium bg-cyan-500/20 text-cyan-500 px-2 py-0.5 rounded-full">BETA</span>
+                    </div>
+                    <h3 className="text-lg font-semibold text-white">Interactive Terminal</h3>
+                    <p className="text-sm text-gray-400 leading-relaxed">
+                      A full interactive WebSocket-based terminal is coming soon. This will provide a real PTY session
+                      with proper shell support, tab completion, colors, and interactive programs like <code className="text-cyan-400">vim</code>, <code className="text-cyan-400">htop</code>, and <code className="text-cyan-400">nano</code>.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
+                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
+                        <Terminal className="h-4 w-4 text-green-500" />
+                        <span>Full PTY support</span>
+                      </div>
+                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
+                        <span className="text-green-500 font-mono text-sm">$_</span>
+                        <span>Interactive programs</span>
+                      </div>
+                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
+                        <Wifi className="h-4 w-4 text-blue-500" />
+                        <span>WebSocket streaming</span>
+                      </div>
+                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
+                        <Settings className="h-4 w-4 text-yellow-500" />
+                        <span>Resize support</span>
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-600 pt-2">
+                      Use the standard Terminal tab for command execution in the meantime.
+                    </p>
+                  </div>
+                </div>
               </TabsContent>
 
               {/* Files Tab */}

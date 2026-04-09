@@ -377,6 +377,11 @@ lxcRouter.post('/containers', async (req, res) => {
       }
       creation.ip = ip;
 
+      // Configure DNS with public resolvers
+      try {
+        await execOnHost(`incus exec ${incusName} -- sh -c 'echo "nameserver 9.9.9.9" > /etc/resolv.conf && echo "nameserver 1.1.1.1" >> /etc/resolv.conf'`, { timeout: 10000 });
+      } catch {}
+
       // Configure Caddy reverse proxy
       if (domain && port && ip) {
         creation.phase = 'caddy';

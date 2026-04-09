@@ -516,6 +516,7 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
   let finished = false;
 
   const child = exec(hostCmd, { timeout: 0, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    // This callback fires when the process exits and all I/O is collected
     if (finished) return;
     finished = true;
     res.json({
@@ -525,6 +526,9 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
       exitCode: error ? (error.code || 1) : 0,
     });
   });
+
+  // Close stdin immediately so incus exec doesn't wait for input
+  child.stdin.end();
 
   // Client disconnect = cancel (Ctrl-C)
   req.on('close', () => {

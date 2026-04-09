@@ -25,7 +25,7 @@ import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
-  Terminal, FolderOpen, File, Upload, ChevronRight, ArrowLeft, FolderUp
+  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote
 } from 'lucide-react';
 
 const STATUS_COLORS = {
@@ -120,47 +120,36 @@ function ContainerTerminal({ containerName }) {
         return;
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const jsonStr = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed.slice(5);
-          if (!jsonStr) continue;
-          try {
-            const evt = JSON.parse(jsonStr);
-            if (evt.type === 'stdout' && evt.text) {
-              setHistory(prev => [...prev, { type: 'stdout', text: evt.text }]);
-              scrollToBottom();
-            } else if (evt.type === 'stderr' && evt.text) {
-              setHistory(prev => [...prev, { type: 'stderr', text: evt.text }]);
-              scrollToBottom();
-            } else if (evt.type === 'exit') {
-              // Update cwd if cd was successful
-              if (cdMatch && evt.code === 0) {
-                const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
-                if (target.startsWith('/')) {
-                  setCwd(target);
-                } else if (target === '~' || target === '') {
-                  setCwd('/root');
-                } else if (target === '..') {
-                  setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
-                } else {
-                  setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
-                }
+      // Read full response text and parse SSE events
+      const text = await response.text();
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
+        const jsonStr = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
+        if (!jsonStr.trim()) continue;
+        try {
+          const evt = JSON.parse(jsonStr.trim());
+          if (evt.type === 'stdout' && evt.text) {
+            setHistory(prev => [...prev, { type: 'stdout', text: evt.text }]);
+          } else if (evt.type === 'stderr' && evt.text) {
+            setHistory(prev => [...prev, { type: 'stderr', text: evt.text }]);
+          } else if (evt.type === 'exit') {
+            if (cdMatch && evt.code === 0) {
+              const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
+              if (target.startsWith('/')) {
+                setCwd(target);
+              } else if (target === '~' || target === '') {
+                setCwd('/root');
+              } else if (target === '..') {
+                setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
+              } else {
+                setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
               }
             }
-          } catch {}
-        }
+          }
+        } catch {}
       }
+      scrollToBottom();
     } catch (err) {
       setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
     } finally {
@@ -475,6 +464,9 @@ export default function LxcContainers() {
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotNotes, setSnapshotNotes] = useState({}); // { snapName: [notes] }
+  const [expandedSnapshot, setExpandedSnapshot] = useState(null);
+  const [newNoteText, setNewNoteText] = useState('');
   const [exporting, setExporting] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
@@ -798,6 +790,46 @@ export default function LxcContainers() {
       toast({ title: 'Delete failed', description: err.message, variant: 'destructive' });
     } finally {
       setSnapshotLoading(false);
+    }
+  };
+
+  const fetchSnapshotNotes = async (snapName) => {
+    if (!selectedContainer) return;
+    try {
+      const res = await api.getSnapshotNotes(selectedContainer.name, snapName);
+      setSnapshotNotes(prev => ({ ...prev, [snapName]: res.notes || [] }));
+    } catch {}
+  };
+
+  const handleAddNote = async (snapName) => {
+    if (!selectedContainer || !newNoteText.trim()) return;
+    try {
+      await api.addSnapshotNote(selectedContainer.name, snapName, newNoteText.trim());
+      setNewNoteText('');
+      fetchSnapshotNotes(snapName);
+    } catch (err) {
+      toast({ title: 'Failed to add note', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteNote = async (snapName, noteId) => {
+    if (!selectedContainer) return;
+    try {
+      await api.deleteSnapshotNote(selectedContainer.name, snapName, noteId);
+      fetchSnapshotNotes(snapName);
+    } catch (err) {
+      toast({ title: 'Failed to delete note', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const toggleSnapshotExpand = (snapName) => {
+    if (expandedSnapshot === snapName) {
+      setExpandedSnapshot(null);
+      setNewNoteText('');
+    } else {
+      setExpandedSnapshot(snapName);
+      setNewNoteText('');
+      fetchSnapshotNotes(snapName);
     }
   };
 
@@ -1386,45 +1418,108 @@ export default function LxcContainers() {
                     {snapshots.length === 0 ? (
                       <p className="text-xs text-muted-foreground py-2">No snapshots yet.</p>
                     ) : (
-                      <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                        {snapshots.map((snap) => (
-                          <div
-                            key={snap.name || snap}
-                            className="border rounded-md p-2 text-xs"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div>
-                                <span className="font-medium">{snap.name || snap}</span>
-                                {snap.created_at && (
-                                  <span className="ml-2 text-muted-foreground">{formatDate(snap.created_at)}</span>
-                                )}
+                      <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                        {snapshots.map((snap) => {
+                          const sName = snap.name || snap;
+                          const isExpanded = expandedSnapshot === sName;
+                          const notes = snapshotNotes[sName] || [];
+                          return (
+                            <div
+                              key={sName}
+                              className="border rounded-md p-2 text-xs"
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => toggleSnapshotExpand(sName)}
+                                    className="p-0.5 hover:bg-muted rounded transition-colors"
+                                  >
+                                    {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                                  </button>
+                                  <span className="font-medium">{sName}</span>
+                                  {snap.created_at && (
+                                    <span className="ml-1 text-muted-foreground">{formatDate(snap.created_at)}</span>
+                                  )}
+                                  {notes.length > 0 && (
+                                    <span className="ml-1 text-muted-foreground flex items-center gap-0.5">
+                                      <StickyNote className="h-3 w-3" />
+                                      {notes.length}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
+                                    onClick={() => handleRestoreSnapshot(sName)}
+                                    disabled={snapshotLoading}
+                                  >
+                                    Restore
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
+                                    onClick={() => handleDeleteSnapshot(sName)}
+                                    disabled={snapshotLoading}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </Button>
+                                </div>
                               </div>
-                              <div className="flex gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
-                                  onClick={() => handleRestoreSnapshot(snap.name || snap)}
-                                  disabled={snapshotLoading}
-                                >
-                                  Restore
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
-                                  onClick={() => handleDeleteSnapshot(snap.name || snap)}
-                                  disabled={snapshotLoading}
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                              </div>
+                              {snap.description && (
+                                <p className="text-muted-foreground mt-1 italic ml-5">{snap.description}</p>
+                              )}
+
+                              {/* Expanded notes section */}
+                              {isExpanded && (
+                                <div className="mt-2 ml-5 space-y-2">
+                                  {/* Existing notes */}
+                                  {notes.length > 0 && (
+                                    <div className="space-y-1">
+                                      {notes.map((n) => (
+                                        <div key={n.id} className="flex items-start justify-between gap-2 bg-muted/50 rounded px-2 py-1.5">
+                                          <div className="min-w-0 flex-1">
+                                            <p className="text-xs whitespace-pre-wrap break-words">{n.note}</p>
+                                            <p className="text-[10px] text-muted-foreground mt-0.5">{formatDate(n.created_at)}</p>
+                                          </div>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-5 w-5 p-0 text-muted-foreground hover:text-red-500 shrink-0"
+                                            onClick={() => handleDeleteNote(sName, n.id)}
+                                          >
+                                            <Trash2 className="h-2.5 w-2.5" />
+                                          </Button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {/* Add new note */}
+                                  <div className="flex gap-1">
+                                    <Input
+                                      placeholder="Add a note..."
+                                      value={newNoteText}
+                                      onChange={(e) => setNewNoteText(e.target.value)}
+                                      onKeyDown={(e) => e.key === 'Enter' && handleAddNote(sName)}
+                                      className="h-7 text-xs flex-1"
+                                    />
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 px-2 text-xs shrink-0"
+                                      onClick={() => handleAddNote(sName)}
+                                      disabled={!newNoteText.trim()}
+                                    >
+                                      Add
+                                    </Button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                            {snap.description && (
-                              <p className="text-muted-foreground mt-1 italic">{snap.description}</p>
-                            )}
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

@@ -418,6 +418,17 @@ export const api = {
     method: 'DELETE',
   }),
 
+  getSnapshotNotes: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`),
+
+  addSnapshotNote: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  }),
+
+  deleteSnapshotNote: (name, snapshotName, noteId) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes/${noteId}`, {
+    method: 'DELETE',
+  }),
+
   getLxcImages: () => request('/lxc/images'),
 
   // Container exec and file management

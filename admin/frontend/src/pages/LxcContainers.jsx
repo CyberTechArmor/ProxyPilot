@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
@@ -23,7 +23,7 @@ import {
 import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
-  Box, AlertCircle
+  Box, AlertCircle, Check, Download, Settings, Wifi
 } from 'lucide-react';
 
 const STATUS_COLORS = {
@@ -108,6 +108,8 @@ export default function LxcContainers() {
     name: '', image: '', domain: '', port: '', cpu: '', memory: '',
   });
   const [creating, setCreating] = useState(false);
+  const [createProgress, setCreateProgress] = useState(null); // { phase, message, elapsed, error, ip }
+  const pollRef = useRef(null);
 
   // Resize form
   const [resizeForm, setResizeForm] = useState({ cpu: '', memory: '' });
@@ -178,13 +180,22 @@ export default function LxcContainers() {
     }
   };
 
-  // Create container
+  // Stop polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Create container (async with progress polling)
   const handleCreate = async () => {
     if (!createForm.name || !createForm.image) {
       toast({ title: 'Validation error', description: 'Name and image are required.', variant: 'destructive' });
       return;
     }
     setCreating(true);
+    setCreateProgress({ phase: 'starting', message: 'Starting creation...', elapsed: 0 });
+
     try {
       const data = {
         name: createForm.name,
@@ -194,26 +205,58 @@ export default function LxcContainers() {
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
       };
-      const result = await api.createLxcContainer(data);
-      const ct = result.container;
-      const statusInfo = ct?.ipv4 ? ` (IP: ${ct.ipv4})` : '';
-      toast({
-        title: 'Container created',
-        description: `${createForm.name} is ${ct?.status || 'running'}${statusInfo}`,
-      });
-      setCreateOpen(false);
-      setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '' });
-      setImageSelection('');
-      await fetchContainers();
+      await api.createLxcContainer(data);
+
+      // Start polling for progress
+      const containerName = createForm.name;
+      const pollStatus = async () => {
+        try {
+          const status = await api.getLxcCreateStatus(containerName);
+          setCreateProgress(status);
+
+          if (status.phase === 'ready') {
+            // Success — stop polling
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
+            setCreating(false);
+            setCreateProgress(null);
+            setCreateOpen(false);
+            setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '' });
+            setImageSelection('');
+            toast({
+              title: 'Container created',
+              description: `${containerName} is running${status.ip ? ` (IP: ${status.ip})` : ''}`,
+            });
+            await fetchContainers();
+          } else if (status.phase === 'failed') {
+            // Failed — stop polling
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
+            setCreating(false);
+            toast({
+              title: 'Creation failed',
+              description: status.error || 'Unknown error',
+              variant: 'destructive',
+            });
+          }
+        } catch (err) {
+          console.error('Poll error:', err);
+        }
+      };
+
+      // Poll every 2 seconds
+      pollRef.current = setInterval(pollStatus, 2000);
+      // Run first check immediately
+      setTimeout(pollStatus, 500);
+
     } catch (err) {
+      setCreating(false);
+      setCreateProgress(null);
       toast({
         title: 'Creation failed',
         description: err.message || 'Unknown error occurred',
         variant: 'destructive',
-        duration: 10000,
       });
-    } finally {
-      setCreating(false);
     }
   };
 
@@ -527,8 +570,8 @@ export default function LxcContainers() {
       )}
 
       {/* Create Container Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-lg">
+      <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
+        <DialogContent className="sm:max-w-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="h-5 w-5 text-cyan-500" />
@@ -538,119 +581,179 @@ export default function LxcContainers() {
               Launch a new system container with Incus.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label htmlFor="ct-name">Name *</Label>
-              <Input
-                id="ct-name"
-                placeholder="my-container"
-                value={createForm.name}
-                onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Image *</Label>
-              <Select
-                value={imageSelection}
-                onValueChange={(val) => {
-                  setImageSelection(val);
-                  if (val !== '__custom__') {
-                    setCreateForm((f) => ({ ...f, image: val }));
-                  } else {
-                    setCreateForm((f) => ({ ...f, image: '' }));
-                  }
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select an image..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRESET_IMAGES.map((img) => (
-                    <SelectItem key={img.value} value={img.value}>
-                      {img.label}
-                    </SelectItem>
-                  ))}
-                  <SelectItem value="__custom__">Custom image...</SelectItem>
-                </SelectContent>
-              </Select>
-              {imageSelection === '__custom__' && (
-                <Input
-                  placeholder="images:ubuntu/24.04 or ubuntu:24.04"
-                  value={createForm.image}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, image: e.target.value }))}
-                />
+
+          {/* Progress View (shown during creation) */}
+          {creating && createProgress ? (
+            <div className="py-4 space-y-4">
+              <div className="text-sm font-medium text-center mb-4">
+                Creating <span className="text-cyan-500">{createForm.name}</span>
+              </div>
+              {[
+                { key: 'downloading', icon: Download, label: 'Downloading image' },
+                { key: 'configuring', icon: Settings, label: 'Configuring container' },
+                { key: 'network', icon: Wifi, label: 'Waiting for network' },
+                { key: 'caddy', icon: Globe, label: 'Setting up reverse proxy' },
+                { key: 'ready', icon: Check, label: 'Ready' },
+              ].map((step, idx, arr) => {
+                const phaseOrder = ['starting', 'downloading', 'configuring', 'network', 'caddy', 'ready'];
+                const currentIdx = phaseOrder.indexOf(createProgress.phase);
+                const stepIdx = phaseOrder.indexOf(step.key);
+                const isActive = step.key === createProgress.phase;
+                const isDone = stepIdx < currentIdx;
+                const isFailed = createProgress.phase === 'failed' && isActive;
+                const Icon = step.icon;
+
+                return (
+                  <div key={step.key} className="flex items-center gap-3">
+                    <div className={`flex items-center justify-center w-8 h-8 rounded-full border-2 shrink-0 ${
+                      isDone ? 'bg-green-500/20 border-green-500 text-green-500' :
+                      isActive ? 'border-cyan-500 text-cyan-500' :
+                      isFailed ? 'border-red-500 text-red-500' :
+                      'border-muted-foreground/30 text-muted-foreground/30'
+                    }`}>
+                      {isDone ? (
+                        <Check className="h-4 w-4" />
+                      ) : isActive ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Icon className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className={`text-sm ${
+                        isDone ? 'text-green-500' :
+                        isActive ? 'text-foreground font-medium' :
+                        'text-muted-foreground/50'
+                      }`}>
+                        {step.label}
+                      </p>
+                    </div>
+                    {isActive && createProgress.elapsed > 0 && (
+                      <span className="text-xs text-muted-foreground">{createProgress.elapsed}s</span>
+                    )}
+                  </div>
+                );
+              })}
+              {createProgress.phase === 'failed' && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg mt-2">
+                  <p className="text-xs text-red-500">{createProgress.error}</p>
+                </div>
               )}
-              <p className="text-xs text-muted-foreground">
-                Images are pulled from the{' '}
-                <a href="https://images.linuxcontainers.org" target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:underline">
-                  linuxcontainers.org
-                </a>{' '}
-                image server.
-              </p>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="ct-domain">Domain</Label>
-                <Input
-                  id="ct-domain"
-                  placeholder="myapp.example.com"
-                  value={createForm.domain}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, domain: e.target.value }))}
-                />
+          ) : (
+            /* Form View (shown before creation starts) */
+            <>
+              <div className="space-y-4 py-2">
+                <div className="space-y-2">
+                  <Label htmlFor="ct-name">Name *</Label>
+                  <Input
+                    id="ct-name"
+                    placeholder="my-container"
+                    value={createForm.name}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Image *</Label>
+                  <Select
+                    value={imageSelection}
+                    onValueChange={(val) => {
+                      setImageSelection(val);
+                      if (val !== '__custom__') {
+                        setCreateForm((f) => ({ ...f, image: val }));
+                      } else {
+                        setCreateForm((f) => ({ ...f, image: '' }));
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select an image..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PRESET_IMAGES.map((img) => (
+                        <SelectItem key={img.value} value={img.value}>
+                          {img.label}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">Custom image...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {imageSelection === '__custom__' && (
+                    <Input
+                      placeholder="images:ubuntu/24.04 or ubuntu:24.04"
+                      value={createForm.image}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, image: e.target.value }))}
+                    />
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Images are pulled from the{' '}
+                    <a href="https://images.linuxcontainers.org" target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:underline">
+                      linuxcontainers.org
+                    </a>{' '}
+                    image server.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="ct-domain">Domain</Label>
+                    <Input
+                      id="ct-domain"
+                      placeholder="myapp.example.com"
+                      value={createForm.domain}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, domain: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="ct-port">Port</Label>
+                    <Input
+                      id="ct-port"
+                      type="number"
+                      placeholder="8080"
+                      value={createForm.port}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, port: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="ct-cpu">CPU Limit</Label>
+                    <Input
+                      id="ct-cpu"
+                      type="number"
+                      placeholder="2"
+                      value={createForm.cpu}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, cpu: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="ct-memory">Memory (MB)</Label>
+                    <Input
+                      id="ct-memory"
+                      type="number"
+                      placeholder="2048"
+                      value={createForm.memory}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, memory: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                {createForm.domain && (
+                  <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <p className="text-xs text-green-500">
+                      Caddy will automatically provision a TLS certificate for the domain.
+                    </p>
+                  </div>
+                )}
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="ct-port">Port</Label>
-                <Input
-                  id="ct-port"
-                  type="number"
-                  placeholder="8080"
-                  value={createForm.port}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, port: e.target.value }))}
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="ct-cpu">CPU Limit</Label>
-                <Input
-                  id="ct-cpu"
-                  type="number"
-                  placeholder="2"
-                  value={createForm.cpu}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, cpu: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="ct-memory">Memory (MB)</Label>
-                <Input
-                  id="ct-memory"
-                  type="number"
-                  placeholder="2048"
-                  value={createForm.memory}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, memory: e.target.value }))}
-                />
-              </div>
-            </div>
-            {createForm.domain && (
-              <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
-                <p className="text-xs text-green-500">
-                  Caddy will automatically provision a TLS certificate for the domain.
-                </p>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
-              Cancel
-            </Button>
-            <Button onClick={handleCreate} disabled={creating || !createForm.name || !createForm.image}>
-              {creating ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Creating...</>
-              ) : (
-                <><Plus className="h-4 w-4 mr-2" />Create</>
-              )}
-            </Button>
-          </DialogFooter>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCreateOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleCreate} disabled={!createForm.name || !createForm.image}>
+                  <Plus className="h-4 w-4 mr-2" />Create
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

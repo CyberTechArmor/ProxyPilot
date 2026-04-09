@@ -136,10 +136,10 @@ function ContainerTerminal({ containerName }) {
   };
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2 flex-1 min-h-0">
       <div
         ref={outputRef}
-        className="bg-black rounded-lg p-3 h-72 overflow-y-auto font-mono text-xs leading-relaxed"
+        className="bg-black rounded-lg p-3 flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-relaxed"
         onClick={() => inputRef.current?.focus()}
       >
         <div className="text-green-500 mb-2">Connected to {containerName}</div>
@@ -310,7 +310,7 @@ function ContainerFiles({ containerName }) {
             Empty directory
           </div>
         ) : (
-          <div className="max-h-64 overflow-y-auto divide-y">
+          <div className="overflow-y-auto divide-y">
             {files
               .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
               .map((file) => (
@@ -1052,7 +1052,7 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -1063,7 +1063,7 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs defaultValue="details" className="w-full">
+            <Tabs defaultValue="details" className="w-full flex-1 flex flex-col min-h-0">
               <TabsList className="w-full grid grid-cols-3">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
@@ -1071,7 +1071,7 @@ export default function LxcContainers() {
               </TabsList>
 
               {/* Details Tab */}
-              <TabsContent value="details" className="space-y-4">
+              <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">Status</span>
@@ -1245,12 +1245,12 @@ export default function LxcContainers() {
               </TabsContent>
 
               {/* Terminal Tab */}
-              <TabsContent value="terminal">
+              <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0">
                 <ContainerTerminal containerName={selectedContainer.name} />
               </TabsContent>
 
               {/* Files Tab */}
-              <TabsContent value="files">
+              <TabsContent value="files" className="flex-1 flex flex-col min-h-0 overflow-y-auto">
                 <ContainerFiles containerName={selectedContainer.name} />
               </TabsContent>
             </Tabs>

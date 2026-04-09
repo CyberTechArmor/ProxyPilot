@@ -60,35 +60,40 @@ async function ensureDns(incusName) {
 }
 
 // Ensure NAT and IP forwarding are enabled so containers have internet
-async function ensureNetworkNat(profileName) {
+async function ensureNetworkNat() {
+  // Step 1: Enable IP forwarding on the host
   try {
-    // Enable IP forwarding on the host (required for NAT to work)
-    await execOnHost(
-      `sysctl -w net.ipv4.ip_forward=1 2>/dev/null; grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf`,
-      { timeout: 10000 }
-    );
-  } catch {}
+    await execOnHost('sysctl -w net.ipv4.ip_forward=1', { timeout: 5000 });
+    console.log('[LXC] IP forwarding enabled');
+  } catch (err) {
+    console.error('[LXC] Failed to enable IP forwarding:', err.message);
+  }
 
+  // Step 2: Enable NAT on all managed Incus bridge networks
   try {
-    // Enable NAT on all managed bridge networks
-    const result = await execOnHost(
-      `incus network list --format json 2>/dev/null`,
-      { timeout: 10000 }
-    );
+    const result = await execOnHost('incus network list --format json', { timeout: 10000 });
     const networks = JSON.parse(result.stdout || '[]');
     for (const net of networks) {
       if (net.type === 'bridge' && net.managed) {
-        if (!net.config || net.config['ipv4.nat'] !== 'true') {
-          await execOnHost(
-            `incus network set ${net.name} ipv4.nat true`,
-            { timeout: 10000 }
-          );
+        try {
+          await execOnHost(`incus network set ${net.name} ipv4.nat true`, { timeout: 10000 });
           console.log(`[LXC] Enabled ipv4.nat on bridge '${net.name}'`);
-        }
+        } catch {}
       }
     }
   } catch (err) {
-    console.error(`[LXC] NAT setup failed: ${err.message || 'unknown error'}`);
+    console.error('[LXC] incus network NAT setup failed:', err.message);
+  }
+
+  // Step 3: Fallback — add iptables MASQUERADE directly for container subnets
+  try {
+    await execOnHost(
+      'iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE',
+      { timeout: 10000 }
+    );
+    console.log('[LXC] iptables MASQUERADE rule ensured');
+  } catch (err) {
+    console.error('[LXC] iptables MASQUERADE failed:', err.message);
   }
 }
 
@@ -395,7 +400,7 @@ lxcRouter.post('/containers', async (req, res) => {
       creation.message = 'Configuring container...';
 
       // Ensure NAT is enabled on the bridge so containers have internet
-      await ensureNetworkNat(profile);
+      await ensureNetworkNat();
 
       // Set resource limits
       if (cpu) {
@@ -1212,5 +1217,147 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/notes/:noteId', (req,
     res.json({ success: true, message: 'Note deleted.' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete note.' });
+  }
+});
+
+// ─── Incus Infrastructure Management ─────────────────────────────────────────
+
+// GET /networks - List all Incus networks
+lxcRouter.get('/networks', async (req, res) => {
+  try {
+    const result = await execOnHost('incus network list --format json', { timeout: 10000 });
+    const networks = JSON.parse(result.stdout || '[]');
+    res.json({ success: true, networks });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// GET /networks/:name - Get network details
+lxcRouter.get('/networks/:name', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid network name.' });
+  }
+  try {
+    const result = await execOnHost(`incus network show ${name} --format json`, { timeout: 10000 });
+    const network = JSON.parse(result.stdout || '{}');
+    res.json({ success: true, network });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// PUT /networks/:name - Update network config
+lxcRouter.put('/networks/:name', async (req, res) => {
+  const { name } = req.params;
+  const { config } = req.body;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid network name.' });
+  }
+  if (!config || typeof config !== 'object') {
+    return res.status(400).json({ success: false, error: 'Config object required.' });
+  }
+  try {
+    for (const [key, value] of Object.entries(config)) {
+      // Validate key format (only alphanumeric, dots, dashes)
+      if (!/^[a-zA-Z0-9._-]+$/.test(key)) continue;
+      const safeValue = String(value).replace(/['"\\]/g, '');
+      await execOnHost(`incus network set ${name} ${key} ${safeValue}`, { timeout: 10000 });
+    }
+    res.json({ success: true, message: `Network '${name}' updated.` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// POST /networks/:name/unset - Unset a network config key
+lxcRouter.post('/networks/:name/unset', async (req, res) => {
+  const { name } = req.params;
+  const { key } = req.body;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid network name.' });
+  }
+  if (!key || !/^[a-zA-Z0-9._-]+$/.test(key)) {
+    return res.status(400).json({ success: false, error: 'Invalid config key.' });
+  }
+  try {
+    await execOnHost(`incus network unset ${name} ${key}`, { timeout: 10000 });
+    res.json({ success: true, message: `Key '${key}' unset on network '${name}'.` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// GET /storage-pools - List storage pools
+lxcRouter.get('/storage-pools', async (req, res) => {
+  try {
+    const result = await execOnHost('incus storage list --format json', { timeout: 10000 });
+    const pools = JSON.parse(result.stdout || '[]');
+    // Get usage info for each pool
+    const poolsWithUsage = [];
+    for (const pool of pools) {
+      try {
+        const infoResult = await execOnHost(`incus storage info ${pool.name} --format json`, { timeout: 10000 });
+        const info = JSON.parse(infoResult.stdout || '{}');
+        poolsWithUsage.push({ ...pool, info });
+      } catch {
+        poolsWithUsage.push(pool);
+      }
+    }
+    res.json({ success: true, pools: poolsWithUsage });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// GET /profiles - List profiles
+lxcRouter.get('/profiles', async (req, res) => {
+  try {
+    const result = await execOnHost('incus profile list --format json', { timeout: 10000 });
+    const profiles = JSON.parse(result.stdout || '[]');
+    res.json({ success: true, profiles });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// GET /profiles/:name - Get profile details
+lxcRouter.get('/profiles/:name', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid profile name.' });
+  }
+  try {
+    const result = await execOnHost(`incus profile show ${name} --format json`, { timeout: 10000 });
+    const profile = JSON.parse(result.stdout || '{}');
+    res.json({ success: true, profile });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// GET /cached-images - List locally cached images
+lxcRouter.get('/cached-images', async (req, res) => {
+  try {
+    const result = await execOnHost('incus image list --format json', { timeout: 15000 });
+    const images = JSON.parse(result.stdout || '[]');
+    res.json({ success: true, images });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
+  }
+});
+
+// DELETE /cached-images/:fingerprint - Delete a cached image
+lxcRouter.delete('/cached-images/:fingerprint', async (req, res) => {
+  const { fingerprint } = req.params;
+  if (!fingerprint || !/^[a-f0-9]+$/.test(fingerprint)) {
+    return res.status(400).json({ success: false, error: 'Invalid image fingerprint.' });
+  }
+  try {
+    await execOnHost(`incus image delete ${fingerprint}`, { timeout: 15000 });
+    res.json({ success: true, message: 'Image deleted.' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.stderr || error.message });
   }
 });

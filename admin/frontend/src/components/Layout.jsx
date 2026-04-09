@@ -18,6 +18,7 @@ import {
   Users,
   LogOut,
   Rocket,
+  Server,
   Download,
   X,
   Loader2,
@@ -212,6 +213,7 @@ export default function Layout() {
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+    { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];

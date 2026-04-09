@@ -151,7 +151,7 @@ if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
 fi
 
 # Fetch latest changes
-log "${BLUE}[1/6] Fetching latest changes...${NC}"
+log "${BLUE}[1/7] Fetching latest changes...${NC}"
 log_verbose "Running: $GIT_CMD fetch origin main"
 if ! $GIT_CMD fetch origin main 2>&1 | tee -a "$LOG_FILE"; then
     log "${RED}Error: Failed to fetch from remote${NC}"
@@ -178,7 +178,7 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         fi
     fi
 else
-    log "${BLUE}[2/6] Pulling latest code...${NC}"
+    log "${BLUE}[2/7] Pulling latest code...${NC}"
     log_verbose "Running: $GIT_CMD pull origin main"
     if ! $GIT_CMD pull origin main 2>&1 | tee -a "$LOG_FILE"; then
         log "${RED}Error: Failed to pull from remote${NC}"
@@ -193,8 +193,77 @@ if [ "$LOCAL" != "$REMOTE" ]; then
 fi
 log ""
 
+# Check and install Incus if not present
+log "${BLUE}[3/7] Checking Incus installation...${NC}"
+if command -v incus &> /dev/null; then
+    log "${GREEN}Incus is already installed ($(incus version 2>/dev/null || echo 'unknown'))${NC}"
+else
+    log "${YELLOW}Incus is not installed. Installing...${NC}"
+
+    if [ "$EUID" -ne 0 ]; then
+        log "${YELLOW}Note: Installing Incus requires root privileges. Attempting with sudo...${NC}"
+    fi
+
+    # Try installing from default repos first (Ubuntu 24.04+, Debian Trixie+)
+    INSTALL_CMD="apt-get"
+    if [ "$EUID" -ne 0 ]; then
+        INSTALL_CMD="sudo apt-get"
+    fi
+
+    $INSTALL_CMD update -y 2>&1 | tee -a "$LOG_FILE"
+    if $INSTALL_CMD install -y incus 2>/dev/null; then
+        log "${GREEN}Incus installed from default repositories${NC}"
+    else
+        # Fall back to Zabbly repository
+        log "Adding Zabbly repository for Incus..."
+
+        SUDO_CMD=""
+        if [ "$EUID" -ne 0 ]; then
+            SUDO_CMD="sudo"
+        fi
+
+        $SUDO_CMD mkdir -p /etc/apt/keyrings/
+        curl -fsSL https://pkgs.zabbly.com/key.asc | $SUDO_CMD gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+
+        CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME}")
+
+        $SUDO_CMD tee /etc/apt/sources.list.d/zabbly-incus-stable.sources > /dev/null <<REPOEOF
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: ${CODENAME}
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.gpg
+REPOEOF
+
+        $INSTALL_CMD update -y 2>&1 | tee -a "$LOG_FILE"
+        if ! $INSTALL_CMD install -y incus 2>&1 | tee -a "$LOG_FILE"; then
+            log "${RED}Failed to install Incus. LXC container features will not be available.${NC}"
+            log "${YELLOW}You can install manually: sudo apt install incus${NC}"
+        else
+            log "${GREEN}Incus installed from Zabbly repository${NC}"
+        fi
+    fi
+
+    # Enable and start Incus if installed
+    if command -v incus &> /dev/null; then
+        $SUDO_CMD systemctl enable incus 2>/dev/null || true
+        $SUDO_CMD systemctl start incus 2>/dev/null || true
+
+        # Minimal initialization if not already set up
+        if ! incus storage list --format json 2>/dev/null | grep -q '"name"'; then
+            log "Initializing Incus with minimal configuration..."
+            $SUDO_CMD incus admin init --minimal 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+
+        log "${GREEN}Incus is ready ($(incus version 2>/dev/null))${NC}"
+    fi
+fi
+log ""
+
 # Install backend dependencies
-log "${BLUE}[3/6] Installing backend dependencies...${NC}"
+log "${BLUE}[4/7] Installing backend dependencies...${NC}"
 cd "$BACKEND_DIR"
 log_verbose "Running: $NPM_CMD install in $BACKEND_DIR"
 if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
@@ -203,7 +272,7 @@ if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
 fi
 
 # Install frontend dependencies
-log "${BLUE}[4/6] Installing frontend dependencies...${NC}"
+log "${BLUE}[5/7] Installing frontend dependencies...${NC}"
 cd "$FRONTEND_DIR"
 log_verbose "Running: $NPM_CMD install in $FRONTEND_DIR"
 if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
@@ -212,7 +281,7 @@ if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
 fi
 
 # Build frontend
-log "${BLUE}[5/6] Building frontend...${NC}"
+log "${BLUE}[6/7] Building frontend...${NC}"
 log_verbose "Running: $NPM_CMD run build in $FRONTEND_DIR"
 if ! $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"; then
     log "${RED}Error: Failed to build frontend${NC}"
@@ -239,7 +308,7 @@ if [ "$SKIP_RESTART" = true ]; then
     log "${YELLOW}Skipping restart (--no-restart specified)${NC}"
     log "Run manually: sudo $SCRIPT_DIR/restart.sh"
 else
-    log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
+    log "${BLUE}[7/7] Restarting ProxyPilot...${NC}"
     log ""
 
     # Check if running via Docker - check multiple possible locations

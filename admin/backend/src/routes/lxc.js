@@ -53,7 +53,7 @@ function spawnOnHost(command) {
 async function ensureDns(incusName) {
   try {
     await execOnHost(
-      `incus exec ${incusName} -- sh -c 'grep -q "9.9.9.9" /etc/resolv.conf 2>/dev/null || (echo "nameserver 9.9.9.9" > /etc/resolv.conf && echo "nameserver 1.1.1.1" >> /etc/resolv.conf)'`,
+      `incus exec ${incusName} -- sh -c 'if ! grep -q "9.9.9.9" /etc/resolv.conf 2>/dev/null; then rm -f /etc/resolv.conf; printf "nameserver 9.9.9.9\\nnameserver 1.1.1.1\\n" > /etc/resolv.conf; fi'`,
       { timeout: 10000 }
     );
   } catch {}

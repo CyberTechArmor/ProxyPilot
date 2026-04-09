@@ -25,7 +25,7 @@ import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
-  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote
+  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote, PackagePlus
 } from 'lucide-react';
 
 const STATUS_COLORS = {
@@ -342,6 +342,17 @@ function ContainerTerminal({ containerName }) {
             View Log
           </Button>
         )}
+        {!running && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => runCommand('export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3')}
+            title="Install essential packages (git, sudo, curl, wget, nano, htop, build-essential, python3, etc.)"
+            className="shrink-0 text-xs px-2"
+          >
+            <PackagePlus className="h-3 w-3 mr-1" />Setup
+          </Button>
+        )}
         {running ? (
           <Button size="sm" variant="destructive" onClick={cancelCommand} title="Cancel (Ctrl+C)">
             <Square className="h-3 w-3 mr-1" />Ctrl-C
@@ -579,11 +590,23 @@ export default function LxcContainers() {
     { value: 'images:rockylinux/9', label: 'Rocky Linux 9' },
   ];
 
+  const INIT_TEMPLATES = [
+    { value: 'essentials', label: 'Essentials (git, curl, sudo, nano, htop)',
+      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client' },
+    { value: 'webdev', label: 'Web Development (Node.js, git, build tools)',
+      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential\ncurl -fsSL https://deb.nodesource.com/setup_22.x | bash -\napt-get install -y nodejs' },
+    { value: 'python', label: 'Python Development',
+      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3 python3-pip python3-venv' },
+    { value: 'docker', label: 'Docker-in-LXC',
+      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh' },
+  ];
+
   // Create form
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', domain: '', port: '', cpu: '', memory: '',
+    name: '', image: '', domain: '', port: '', cpu: '', memory: '', initScript: '',
   });
+  const [templateSelection, setTemplateSelection] = useState('');
   const [creating, setCreating] = useState(false);
   const [createProgress, setCreateProgress] = useState(null); // { phase, message, elapsed, error, ip }
   const pollRef = useRef(null);
@@ -681,6 +704,7 @@ export default function LxcContainers() {
         ...(createForm.port && { port: parseInt(createForm.port, 10) }),
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
+        ...(createForm.initScript && { initScript: createForm.initScript }),
       };
       await api.createLxcContainer(data);
 
@@ -698,8 +722,9 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '' });
+            setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '', initScript: '' });
             setImageSelection('');
+            setTemplateSelection('');
             toast({
               title: 'Container created',
               description: `${containerName} is running${status.ip ? ` (IP: ${status.ip})` : ''}`,
@@ -1161,10 +1186,11 @@ export default function LxcContainers() {
                 { key: 'downloading', icon: Download, label: 'Downloading image' },
                 { key: 'configuring', icon: Settings, label: 'Configuring container' },
                 { key: 'network', icon: Wifi, label: 'Waiting for network' },
-                { key: 'caddy', icon: Globe, label: 'Setting up reverse proxy' },
+                ...(createForm.initScript ? [{ key: 'init-script', icon: Terminal, label: 'Running init script' }] : []),
+                ...(createForm.domain ? [{ key: 'caddy', icon: Globe, label: 'Setting up reverse proxy' }] : []),
                 { key: 'ready', icon: Check, label: 'Ready' },
               ].map((step, idx, arr) => {
-                const phaseOrder = ['starting', 'downloading', 'configuring', 'network', 'caddy', 'ready'];
+                const phaseOrder = ['starting', 'downloading', 'configuring', 'network', 'init-script', 'caddy', 'ready'];
                 const currentIdx = phaseOrder.indexOf(createProgress.phase);
                 const stepIdx = phaseOrder.indexOf(step.key);
                 const isActive = step.key === createProgress.phase;
@@ -1304,6 +1330,49 @@ export default function LxcContainers() {
                       onChange={(e) => setCreateForm((f) => ({ ...f, memory: e.target.value }))}
                     />
                   </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Init Template</Label>
+                  <Select
+                    value={templateSelection}
+                    onValueChange={(val) => {
+                      setTemplateSelection(val);
+                      if (val === '__custom__') {
+                        setCreateForm((f) => ({ ...f, initScript: '' }));
+                      } else if (val === '') {
+                        setCreateForm((f) => ({ ...f, initScript: '' }));
+                      } else {
+                        const tpl = INIT_TEMPLATES.find((t) => t.value === val);
+                        if (tpl) setCreateForm((f) => ({ ...f, initScript: tpl.script }));
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="None (bare image)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None (bare image)</SelectItem>
+                      {INIT_TEMPLATES.map((tpl) => (
+                        <SelectItem key={tpl.value} value={tpl.value}>{tpl.label}</SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">Custom script...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {(templateSelection === '__custom__' || (templateSelection && templateSelection !== 'none' && createForm.initScript)) && (
+                    <textarea
+                      value={createForm.initScript}
+                      onChange={(e) => {
+                        setCreateForm((f) => ({ ...f, initScript: e.target.value }));
+                        setTemplateSelection('__custom__');
+                      }}
+                      placeholder="#!/bin/sh&#10;apt-get update && apt-get install -y ..."
+                      rows={4}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]"
+                    />
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Runs automatically after container is created and has network. Takes up to 5 minutes.
+                  </p>
                 </div>
                 {createForm.domain && (
                   <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">

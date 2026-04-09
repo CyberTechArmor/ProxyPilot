@@ -432,8 +432,7 @@ export const api = {
   getLxcImages: () => request('/lxc/images'),
 
   // Container exec and file management
-  execInContainer: (name, command, cwd) => {
-    // Returns an EventSource-like interface for streaming
+  execInContainer: (name, command, cwd, signal) => {
     const token = localStorage.getItem('token');
     return fetch(`${API_BASE}/lxc/containers/${name}/exec`, {
       method: 'POST',
@@ -442,6 +441,7 @@ export const api = {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({ command, cwd }),
+      ...(signal ? { signal } : {}),
     });
   },
 

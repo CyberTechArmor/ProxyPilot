@@ -490,7 +490,7 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   });
 });
 
-// POST /containers/:name/exec - Execute a command with streaming output
+// POST /containers/:name/exec - Execute a command and return JSON result
 lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const { name } = req.params;
   const { command, cwd } = req.body;
@@ -508,36 +508,46 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
   const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
 
-  // Stream output via SSE
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-  });
-
   const child = spawnOnHost(execCmd);
+  let stdout = '';
+  let stderr = '';
+  let stdoutDone = false;
+  let stderrDone = false;
+  let exitCode = null;
+  let finished = false;
 
-  child.stdout.on('data', (data) => {
-    res.write(`data: ${JSON.stringify({ type: 'stdout', text: data.toString() })}\n\n`);
-  });
+  const tryFinish = () => {
+    if (finished) return;
+    if (stdoutDone && stderrDone && exitCode !== null) {
+      finished = true;
+      res.json({ success: true, stdout, stderr, exitCode });
+    }
+  };
 
-  child.stderr.on('data', (data) => {
-    res.write(`data: ${JSON.stringify({ type: 'stderr', text: data.toString() })}\n\n`);
-  });
+  child.stdout.on('data', (data) => { stdout += data.toString(); });
+  child.stdout.on('end', () => { stdoutDone = true; tryFinish(); });
+
+  child.stderr.on('data', (data) => { stderr += data.toString(); });
+  child.stderr.on('end', () => { stderrDone = true; tryFinish(); });
 
   child.on('close', (code) => {
-    res.write(`data: ${JSON.stringify({ type: 'exit', code: code || 0 })}\n\n`);
-    res.end();
+    exitCode = code ?? 0;
+    tryFinish();
   });
 
   child.on('error', (err) => {
-    res.write(`data: ${JSON.stringify({ type: 'stderr', text: err.message })}\n\n`);
-    res.write(`data: ${JSON.stringify({ type: 'exit', code: 1 })}\n\n`);
-    res.end();
+    if (!finished) {
+      finished = true;
+      res.json({ success: true, stdout, stderr: stderr + '\n' + err.message, exitCode: 1 });
+    }
   });
 
+  // Client disconnect = cancel
   req.on('close', () => {
-    child.kill();
+    if (!finished) {
+      finished = true;
+      child.kill('SIGKILL');
+    }
   });
 });
 

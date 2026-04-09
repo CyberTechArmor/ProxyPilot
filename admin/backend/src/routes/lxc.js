@@ -314,7 +314,7 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 
 // POST /containers - Start async container creation
 lxcRouter.post('/containers', async (req, res) => {
-  const { name, image, profile, domain, port, cpu, memory } = req.body;
+  const { name, image, profile, domain, port, cpu, memory, initScript } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -444,6 +444,33 @@ lxcRouter.post('/containers', async (req, res) => {
 
       // Configure DNS with public resolvers
       await ensureDns(incusName);
+
+      // Run init script if provided
+      if (initScript && typeof initScript === 'string' && initScript.trim()) {
+        creation.phase = 'init-script';
+        creation.message = 'Running init script...';
+        try {
+          // Write script to container and execute it
+          const scriptContent = initScript.trim();
+          await execOnHost(
+            `printf '%s' ${JSON.stringify(scriptContent)} | incus exec ${incusName} -- tee /tmp/pp-init.sh > /dev/null`,
+            { timeout: 15000 }
+          );
+          await execOnHost(`incus exec ${incusName} -- chmod +x /tmp/pp-init.sh`, { timeout: 5000 });
+          // Run with generous timeout (5 minutes for package installs)
+          const initChild = spawnOnHost(`incus exec ${incusName} -- sh /tmp/pp-init.sh`);
+          await new Promise((resolve) => {
+            const timeout = setTimeout(() => { try { initChild.kill(); } catch {} resolve(); }, 300000);
+            initChild.on('close', () => { clearTimeout(timeout); resolve(); });
+            initChild.on('error', () => { clearTimeout(timeout); resolve(); });
+          });
+          await execOnHost(`incus exec ${incusName} -- rm -f /tmp/pp-init.sh`, { timeout: 5000 }).catch(() => {});
+          console.log(`[LXC] Init script completed for ${incusName}`);
+        } catch (initErr) {
+          console.error(`[LXC] Init script failed: ${initErr.message}`);
+          // Don't fail the whole creation for init script errors
+        }
+      }
 
       // Configure Caddy reverse proxy
       if (domain && port && ip) {

@@ -110,7 +110,7 @@ function ContainerTerminal({ containerName }) {
     setHistory(prev => [...prev, { type: 'stderr', text: '^C Cancelled' }]);
     setRunning(false);
     scrollToBottom();
-    inputRef.current?.focus();
+    setTimeout(() => inputRef.current?.focus(), 50);
   };
 
   const runCommand = async () => {
@@ -183,7 +183,8 @@ function ContainerTerminal({ containerName }) {
       abortRef.current = null;
       setRunning(false);
       scrollToBottom();
-      inputRef.current?.focus();
+      // Delay focus until after React re-renders and removes disabled attr
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 

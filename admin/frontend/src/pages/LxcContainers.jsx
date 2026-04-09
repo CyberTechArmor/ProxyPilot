@@ -73,15 +73,22 @@ function formatSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// Terminal component for executing commands inside a container
+// Terminal component with streaming output, cd persistence, tab completion
 function ContainerTerminal({ containerName }) {
   const [command, setCommand] = useState('');
   const [history, setHistory] = useState([]);
   const [running, setRunning] = useState(false);
   const [cmdHistory, setCmdHistory] = useState([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
+  const [cwd, setCwd] = useState('/root');
   const outputRef = useRef(null);
   const inputRef = useRef(null);
+
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }, 30);
+  };
 
   const runCommand = async () => {
     const cmd = command.trim();
@@ -91,30 +98,82 @@ function ContainerTerminal({ containerName }) {
     setCmdHistory(prev => [cmd, ...prev]);
     setHistoryIdx(-1);
 
-    setHistory(prev => [...prev, { type: 'input', text: cmd }]);
+    setHistory(prev => [...prev, { type: 'input', text: `${cwd}$ ${cmd}` }]);
+    scrollToBottom();
+
+    // Handle cd locally to track cwd
+    const cdMatch = cmd.match(/^cd\s+(.*)/);
 
     try {
-      const result = await api.execInContainer(containerName, cmd);
-      if (result.stdout) {
-        setHistory(prev => [...prev, { type: 'stdout', text: result.stdout }]);
-      }
-      if (result.stderr) {
-        setHistory(prev => [...prev, { type: 'stderr', text: result.stderr }]);
+      const response = await api.execInContainer(containerName, cmd, cwd);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'stdout' && evt.text) {
+              setHistory(prev => [...prev, { type: 'stdout', text: evt.text }]);
+              scrollToBottom();
+            } else if (evt.type === 'stderr' && evt.text) {
+              setHistory(prev => [...prev, { type: 'stderr', text: evt.text }]);
+              scrollToBottom();
+            } else if (evt.type === 'exit') {
+              // Update cwd if cd was successful
+              if (cdMatch && evt.code === 0) {
+                const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
+                if (target.startsWith('/')) {
+                  setCwd(target);
+                } else if (target === '~' || target === '') {
+                  setCwd('/root');
+                } else if (target === '..') {
+                  setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
+                } else {
+                  setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
+                }
+              }
+            }
+          } catch {}
+        }
       }
     } catch (err) {
       setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
     } finally {
       setRunning(false);
-      setTimeout(() => {
-        outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
-        inputRef.current?.focus();
-      }, 50);
+      scrollToBottom();
+      inputRef.current?.focus();
     }
   };
 
-  const handleKeyDown = (e) => {
+  const handleKeyDown = async (e) => {
     if (e.key === 'Enter') {
       runCommand();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      // Tab completion: get the last word and try to complete it
+      const parts = command.split(/\s+/);
+      const partial = parts[parts.length - 1] || '';
+      if (!partial) return;
+      try {
+        const res = await api.tabComplete(containerName, partial, cwd);
+        if (res.completions?.length === 1) {
+          parts[parts.length - 1] = partial.includes('/')
+            ? partial.substring(0, partial.lastIndexOf('/') + 1) + res.completions[0]
+            : res.completions[0];
+          setCommand(parts.join(' '));
+        } else if (res.completions?.length > 1) {
+          setHistory(prev => [...prev, { type: 'stdout', text: res.completions.join('  ') }]);
+          scrollToBottom();
+        }
+      } catch {}
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (cmdHistory.length > 0) {
@@ -125,9 +184,8 @@ function ContainerTerminal({ containerName }) {
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (historyIdx > 0) {
-        const newIdx = historyIdx - 1;
-        setHistoryIdx(newIdx);
-        setCommand(cmdHistory[newIdx]);
+        setHistoryIdx(historyIdx - 1);
+        setCommand(cmdHistory[historyIdx - 1]);
       } else {
         setHistoryIdx(-1);
         setCommand('');
@@ -139,22 +197,15 @@ function ContainerTerminal({ containerName }) {
     const text = e.clipboardData?.getData('text') || '';
     if (text.includes('\n')) {
       e.preventDefault();
-      // Split lines, remove empty ones, trim, and join with &&
       const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-      if (lines.length > 1) {
-        setCommand(prev => prev + lines.join(' && '));
-      } else {
-        setCommand(prev => prev + lines[0]);
-      }
+      setCommand(prev => prev + (lines.length > 1 ? lines.join(' && ') : lines[0]));
     }
   };
 
   return (
     <div className="flex flex-col gap-2 flex-1 min-h-0">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground">
-          Paste multi-line code to auto-join with &amp;&amp;
-        </span>
+      <div className="flex items-center justify-between shrink-0">
+        <span className="text-xs text-muted-foreground font-mono">{cwd}</span>
         {history.length > 0 && (
           <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
             Clear
@@ -173,20 +224,18 @@ function ContainerTerminal({ containerName }) {
             entry.type === 'stderr' ? 'text-red-400' :
             'text-gray-300'
           }`}>
-            {entry.type === 'input' && <span className="text-green-500">$ </span>}
             {entry.text}
           </div>
         ))}
         {running && (
           <div className="flex items-center gap-1 text-yellow-500">
             <Loader2 className="h-3 w-3 animate-spin" />
-            Running...
           </div>
         )}
       </div>
-      <div className="flex gap-2">
+      <div className="flex gap-2 shrink-0">
         <div className="flex-1 flex items-center bg-black rounded-lg px-3 font-mono text-xs">
-          <span className="text-green-500 mr-1">$</span>
+          <span className="text-green-500 mr-1 shrink-0">$</span>
           <input
             ref={inputRef}
             type="text"
@@ -194,7 +243,7 @@ function ContainerTerminal({ containerName }) {
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder="Enter command..."
+            placeholder="Enter command... (Tab to autocomplete)"
             disabled={running}
             className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"
             autoFocus
@@ -409,6 +458,10 @@ export default function LxcContainers() {
   const [snapshotNote, setSnapshotNote] = useState('');
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importName, setImportName] = useState('');
+  const [importFile, setImportFile] = useState(null);
+  const [importing, setImporting] = useState(false);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -667,6 +720,24 @@ export default function LxcContainers() {
     }
   };
 
+  // Import container from backup
+  const handleImport = async () => {
+    if (!importName.trim() || !importFile) return;
+    setImporting(true);
+    try {
+      await api.importContainer(importName.trim(), importFile);
+      toast({ title: 'Import complete', description: `Container '${importName}' imported successfully.` });
+      setImportOpen(false);
+      setImportName('');
+      setImportFile(null);
+      await fetchContainers();
+    } catch (err) {
+      toast({ title: 'Import failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleCreateSnapshot = async () => {
     if (!selectedContainer || !snapshotName.trim()) return;
     setSnapshotLoading(true);
@@ -766,6 +837,10 @@ export default function LxcContainers() {
           <Button variant="outline" size="sm" onClick={fetchContainers}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+            <Upload className="h-4 w-4 mr-2" />
+            Import
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
@@ -1110,7 +1185,7 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] flex flex-col overflow-hidden">
+        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] !overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -1349,6 +1424,54 @@ export default function LxcContainers() {
               </TabsContent>
             </Tabs>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Import Container Dialog */}
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="h-5 w-5 text-cyan-500" />
+              Import Container
+            </DialogTitle>
+            <DialogDescription>
+              Restore a container from a backup (.tar.gz) file.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Container Name *</Label>
+              <Input
+                placeholder="my-container"
+                value={importName}
+                onChange={(e) => setImportName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Backup File *</Label>
+              <Input
+                type="file"
+                accept=".tar.gz,.tar,.gz"
+                onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Upload a .tar.gz backup file created by the export feature.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>
+              Cancel
+            </Button>
+            <Button onClick={handleImport} disabled={importing || !importName.trim() || !importFile}>
+              {importing ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Importing...</>
+              ) : (
+                <><Upload className="h-4 w-4 mr-2" />Import</>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

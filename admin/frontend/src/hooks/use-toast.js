@@ -1,7 +1,10 @@
 import * as React from "react"
 
 const TOAST_LIMIT = 3
-const TOAST_REMOVE_DELAY = 1000000
+const TOAST_REMOVE_DELAY = 20000
+
+// Notification history - persists across renders
+const notificationHistory = []
 
 let count = 0
 
@@ -102,6 +105,17 @@ function toast({ ...props }) {
     })
   const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
 
+  // Add to notification history
+  notificationHistory.unshift({
+    id,
+    title: props.title,
+    description: props.description,
+    variant: props.variant,
+    timestamp: new Date(),
+  })
+  // Keep last 50 notifications
+  if (notificationHistory.length > 50) notificationHistory.pop()
+
   dispatch({
     type: "ADD_TOAST",
     toast: {
@@ -119,6 +133,10 @@ function toast({ ...props }) {
     dismiss,
     update,
   }
+}
+
+function getNotificationHistory() {
+  return notificationHistory
 }
 
 function useToast() {
@@ -141,4 +159,4 @@ function useToast() {
   }
 }
 
-export { useToast, toast }
+export { useToast, toast, getNotificationHistory }

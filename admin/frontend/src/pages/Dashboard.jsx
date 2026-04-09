@@ -33,7 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useToast } from '@/hooks/use-toast';
+import { useToast, getNotificationHistory } from '@/hooks/use-toast';
 import {
   Plus,
   Trash2,
@@ -91,6 +91,8 @@ import {
   Activity,
   Clock,
   Settings,
+  Bell,
+  X,
 } from 'lucide-react';
 
 // Language detection based on file extension
@@ -260,6 +262,7 @@ export default function Dashboard() {
 
   // Kill switch state
   const [killSwitchDialogOpen, setKillSwitchDialogOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const [securingSystem, setSecuringSystem] = useState(false);
 
   // Discovery state
@@ -2696,6 +2699,40 @@ volumes:
             <Rocket className="h-4 w-4 mr-2" />
             One-Click
           </Button>
+          <div className="relative">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-9 w-9 p-0"
+              onClick={() => setNotifOpen(!notifOpen)}
+              title="Notifications"
+            >
+              <Bell className="h-4 w-4" />
+            </Button>
+            {notifOpen && (
+              <div className="absolute right-0 top-10 z-50 w-80 max-h-96 overflow-y-auto border rounded-lg bg-background shadow-lg">
+                <div className="flex items-center justify-between p-3 border-b">
+                  <h4 className="text-sm font-medium">Notifications</h4>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setNotifOpen(false)}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+                {getNotificationHistory().length === 0 ? (
+                  <p className="p-4 text-xs text-muted-foreground text-center">No notifications yet</p>
+                ) : (
+                  <div className="divide-y">
+                    {getNotificationHistory().map((n) => (
+                      <div key={n.id} className={`p-3 text-xs ${n.variant === 'destructive' ? 'border-l-2 border-l-red-500' : ''}`}>
+                        <div className="font-medium">{n.title}</div>
+                        {n.description && <div className="text-muted-foreground mt-0.5">{n.description}</div>}
+                        <div className="text-muted-foreground/60 mt-1">{n.timestamp.toLocaleTimeString()}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           <Button
             variant="outline"
             className="text-red-500 border-red-500 hover:bg-red-500/10"

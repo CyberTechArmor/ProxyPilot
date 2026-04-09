@@ -8,7 +8,7 @@ import multer from 'multer';
 import { requireAdmin } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB limit
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB limit
 
 export const lxcRouter = Router();
 
@@ -488,10 +488,10 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   });
 });
 
-// POST /containers/:name/exec - Execute a command inside a container
+// POST /containers/:name/exec - Execute a command with streaming output
 lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const { name } = req.params;
-  const { command } = req.body;
+  const { command, cwd } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -501,24 +501,113 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Command is required.' });
   }
 
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  // Wrap command to cd to cwd first if provided
+  const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
+  const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
+
+  // Stream output via SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  const child = spawnOnHost(execCmd);
+
+  child.stdout.on('data', (data) => {
+    res.write(`data: ${JSON.stringify({ type: 'stdout', text: data.toString() })}\n\n`);
+  });
+
+  child.stderr.on('data', (data) => {
+    res.write(`data: ${JSON.stringify({ type: 'stderr', text: data.toString() })}\n\n`);
+  });
+
+  child.on('close', (code) => {
+    res.write(`data: ${JSON.stringify({ type: 'exit', code: code || 0 })}\n\n`);
+    res.end();
+  });
+
+  child.on('error', (err) => {
+    res.write(`data: ${JSON.stringify({ type: 'stderr', text: err.message })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'exit', code: 1 })}\n\n`);
+    res.end();
+  });
+
+  req.on('close', () => {
+    child.kill();
+  });
+});
+
+// POST /containers/:name/tab-complete - Tab completion for paths
+lxcRouter.post('/containers/:name/tab-complete', async (req, res) => {
+  const { name } = req.params;
+  const { partial, cwd } = req.body;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(command)}`;
-    const result = await execOnHost(execCmd, { timeout: 30000 });
-    res.json({
-      success: true,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: 0,
+    const dir = partial.includes('/') ? partial.substring(0, partial.lastIndexOf('/') + 1) : (cwd || '.');
+    const prefix = partial.includes('/') ? partial.substring(partial.lastIndexOf('/') + 1) : partial;
+    const lsCmd = `cd ${JSON.stringify(cwd || '/root')} 2>/dev/null; ls -1a ${JSON.stringify(dir)} 2>/dev/null`;
+    const result = await execOnHost(`incus exec ${incusName} -- bash -c ${JSON.stringify(lsCmd)}`, { timeout: 5000 });
+    const entries = (result.stdout || '').split('\n').filter(e => e && e !== '.' && e !== '..' && e.startsWith(prefix));
+    res.json({ success: true, completions: entries });
+  } catch {
+    res.json({ success: true, completions: [] });
+  }
+});
+
+// POST /containers/import - Import a container from a backup tarball
+lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
+  const { name } = req.body;
+
+  if (!name || !validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Valid container name is required.' });
+  }
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'Backup file is required.' });
+  }
+
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+
+  // Check if container already exists
+  try {
+    await execOnHost(`incus info ${incusName} 2>/dev/null`);
+    return res.status(409).json({ success: false, error: `Container '${name}' already exists.` });
+  } catch {
+    // Good — doesn't exist
+  }
+
+  try {
+    const importCmd = `incus import - ${incusName}`;
+    await new Promise((resolve, reject) => {
+      const child = spawnOnHost(importCmd);
+      let stderr = '';
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      child.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `Import exited with code ${code}`));
+      });
+      child.on('error', reject);
+      child.stdin.write(req.file.buffer);
+      child.stdin.end();
     });
+
+    // Start the container
+    try {
+      await execOnHost(`incus start ${incusName}`, { timeout: 30000 });
+    } catch {}
+
+    res.status(201).json({ success: true, message: `Container '${name}' imported successfully.` });
   } catch (error) {
-    // exec throws on non-zero exit codes, but we still want to return output
-    res.json({
-      success: true,
-      stdout: error.stdout || '',
-      stderr: error.stderr || error.message || '',
-      exitCode: error.code || 1,
-    });
+    // Cleanup on failure
+    try { await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`); } catch {}
+    res.status(500).json({ success: false, error: `Import failed: ${error.message}` });
   }
 });
 

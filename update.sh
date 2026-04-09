@@ -242,6 +242,52 @@ else
     log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
     log ""
 
+    # Check if running via Docker - check multiple possible locations
+    INSTALL_DIR=""
+    for candidate in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
+        if [[ -f "${candidate}/docker-compose.yml" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -q proxypilot-admin; then
+            INSTALL_DIR="$candidate"
+            break
+        fi
+        # Also check if docker-compose.yml exists even if container isn't running
+        if [[ -f "${candidate}/docker-compose.yml" ]] && grep -q proxypilot "${candidate}/docker-compose.yml" 2>/dev/null; then
+            INSTALL_DIR="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$INSTALL_DIR" ]]; then
+        log "Detected Docker deployment at ${INSTALL_DIR}"
+
+        # Copy updated admin files to install directory (if running from a different dir)
+        if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
+            log "Copying updated files from ${SCRIPT_DIR} to ${INSTALL_DIR}..."
+            cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+        fi
+
+        # Rebuild frontend at the install location
+        log "Rebuilding frontend..."
+        cd "${INSTALL_DIR}/admin/frontend"
+        $NPM_CMD ci 2>&1 | tee -a "$LOG_FILE"
+        NODE_ENV=production $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"
+
+        # Rebuild and restart Docker container
+        log "Rebuilding Docker container..."
+        cd "$INSTALL_DIR"
+        docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true
+        docker compose build --no-cache 2>/dev/null || docker-compose build --no-cache 2>/dev/null
+        docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null
+
+        log "${GREEN}Docker container rebuilt and restarted${NC}"
+        log ""
+        log "${GREEN}========================================${NC}"
+        log "${GREEN}       Restart completed!               ${NC}"
+        log "${GREEN}========================================${NC}"
+        log ""
+        exit 0
+    fi
+
+    # Non-Docker deployment: restart the process directly
     # Stop existing processes and free the port
     log "Stopping existing ProxyPilot processes..."
     PORT_TO_FREE=${PORT:-3001}

@@ -783,6 +783,10 @@ main() {
     fi
     npm ci
     NODE_ENV=production npm run build
+    if [[ ! -f "${INSTALL_DIR}/admin/frontend/dist/index.html" ]]; then
+        log_error "Frontend build failed - dist/index.html not found"
+        exit 1
+    fi
     log_success "Frontend built successfully"
 
     # Build and start Docker container
@@ -796,7 +800,8 @@ main() {
     # Also try compose down to clean up any orphaned resources
     run_docker_compose down --remove-orphans 2>/dev/null || true
 
-    run_docker_compose build
+    # Build with --no-cache to ensure frontend dist is included fresh
+    run_docker_compose build --no-cache
     run_docker_compose up -d
 
     # Wait for container to be healthy

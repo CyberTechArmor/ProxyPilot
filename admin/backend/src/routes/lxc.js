@@ -314,7 +314,16 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 
 // POST /containers - Start async container creation
 lxcRouter.post('/containers', async (req, res) => {
-  const { name, image, profile, domain, port, cpu, memory, initScript } = req.body;
+  const { name, image, profile, domain, port, cpu, memory, initScript, services: rawServices } = req.body;
+
+  // Normalize services: support both new multi-service array and legacy single domain/port
+  const services = Array.isArray(rawServices) && rawServices.length > 0
+    ? rawServices.filter(s => s.domain && typeof s.domain === 'string' && s.domain.trim()).map(s => ({
+        domain: s.domain.trim(),
+        port: parseInt(s.port, 10) || 80,
+        obtainCert: s.obtainCert !== false,
+      }))
+    : (domain && port ? [{ domain, port: parseInt(port, 10), obtainCert: true }] : []);
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -362,8 +371,9 @@ lxcRouter.post('/containers', async (req, res) => {
     name,
     incusName,
     image,
-    domain: domain || null,
-    port: port || null,
+    services,
+    domain: services.length > 0 ? services[0].domain : null,
+    port: services.length > 0 ? services[0].port : null,
     cpu: cpu || null,
     memory: memory || null,
     error: null,
@@ -472,14 +482,19 @@ lxcRouter.post('/containers', async (req, res) => {
         }
       }
 
-      // Configure Caddy reverse proxy
-      if (domain && port && ip) {
+      // Configure Caddy reverse proxy for all services
+      if (services.length > 0 && ip) {
         creation.phase = 'caddy';
-        creation.message = 'Configuring reverse proxy...';
+        creation.message = `Configuring reverse proxy for ${services.length} service${services.length > 1 ? 's' : ''}...`;
 
-        const caddyConfig = `${domain} {\n    reverse_proxy ${ip}:${port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${domain}.log\n    }\n}\n`;
-        const configPath = join(CADDY_SITES_DIR, domain);
-        await writeFile(configPath, caddyConfig);
+        for (const svc of services) {
+          const tlsDirective = svc.obtainCert ? '' : '\n    tls internal';
+          const caddyConfig = `${svc.domain} {${tlsDirective}\n    reverse_proxy ${ip}:${svc.port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${svc.domain}.log\n    }\n}\n`;
+          const configPath = join(CADDY_SITES_DIR, svc.domain);
+          await writeFile(configPath, caddyConfig);
+          console.log(`[LXC] Wrote Caddy config for ${svc.domain} -> ${ip}:${svc.port} (cert: ${svc.obtainCert})`);
+        }
+
         try {
           await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
         } catch (reloadError) {
@@ -993,22 +1008,25 @@ lxcRouter.delete('/containers/:name', async (req, res) => {
     // Delete container
     await execOnHost(`incus delete ${incusName} --force 2>&1`);
 
-    // Remove associated Caddy config if the container had an IP
+    // Remove ALL associated Caddy configs if the container had an IP (supports multi-service)
     if (containerIp) {
       try {
         const files = await readdir(CADDY_SITES_DIR);
+        let removedAny = false;
         for (const file of files) {
           const filePath = join(CADDY_SITES_DIR, file);
           const content = await readFile(filePath, 'utf-8');
           if (content.includes(containerIp)) {
             await unlink(filePath);
-            // Reload Caddy after removing config
-            try {
-              await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
-            } catch {
-              // Ignore reload errors
-            }
-            break;
+            console.log(`[LXC] Removed Caddy config: ${file} (contained IP ${containerIp})`);
+            removedAny = true;
+          }
+        }
+        if (removedAny) {
+          try {
+            await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+          } catch {
+            // Ignore reload errors
           }
         }
       } catch {

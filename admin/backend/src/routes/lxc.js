@@ -492,7 +492,7 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
 });
 
 // POST /containers/:name/exec - Execute a command and return JSON result
-lxcRouter.post('/containers/:name/exec', (req, res) => {
+lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const { name } = req.params;
   const { command, cwd } = req.body;
 
@@ -506,35 +506,24 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
-  const innerCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
+  const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
 
-  // Replicate execOnHost logic with timeout (required: incus exec hangs without it)
-  const hostCmd = isInDocker
-    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(innerCmd)}`
-    : innerCmd;
-
-  let finished = false;
-
-  const child = exec(hostCmd, { timeout: 600000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-    if (finished) return;
-    finished = true;
+  // Use execOnHost directly - same function that works for file listing and tab-complete.
+  // Timeout is required because incus exec hangs waiting for stdin; output is collected
+  // before the timeout fires, so quick commands return their full output.
+  try {
+    const result = await execOnHost(execCmd, { timeout: 30000 });
+    res.json({ success: true, stdout: result.stdout || '', stderr: result.stderr || '', exitCode: 0 });
+  } catch (error) {
+    // exec throws on non-zero exit OR timeout - both return collected output
+    if (res.headersSent) return;
     res.json({
       success: true,
-      stdout: stdout || '',
-      stderr: error?.killed
-        ? (stderr || '') + '\nCommand timed out after 10 minutes.'
-        : (stderr || ''),
-      exitCode: error ? (error.killed ? 124 : (error.code || 1)) : 0,
+      stdout: error.stdout || '',
+      stderr: error.stderr || '',
+      exitCode: error.killed ? 124 : (error.code || 1),
     });
-  });
-
-  // Client disconnect = cancel (Ctrl-C)
-  req.on('close', () => {
-    if (!finished) {
-      finished = true;
-      child.kill('SIGKILL');
-    }
-  });
+  }
 });
 
 // POST /containers/:name/tab-complete - Tab completion for paths

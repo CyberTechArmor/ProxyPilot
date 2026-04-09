@@ -506,18 +506,16 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
   const incusName = `${INSTANCE_PREFIX}${name}`;
   // Wrap command to cd to cwd first if provided
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
-  // -n disables stdin (reads /dev/null), --force-noninteractive disables PTY allocation
-  const execCmd = `incus exec -n --force-noninteractive ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
+  const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
 
-  // Use exec (not spawn) - same as execOnHost which works for tab-complete
+  // Redirect stdin from /dev/null at shell level to prevent incus exec from hanging
   const hostCmd = isInDocker
-    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(execCmd)}`
-    : execCmd;
+    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(execCmd)} < /dev/null`
+    : `${execCmd} < /dev/null`;
 
   let finished = false;
 
   const child = exec(hostCmd, { timeout: 0, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-    // This callback fires when the process exits and all I/O is collected
     if (finished) return;
     finished = true;
     res.json({
@@ -527,9 +525,6 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
       exitCode: error ? (error.code || 1) : 0,
     });
   });
-
-  // Close stdin immediately so incus exec doesn't wait for input
-  child.stdin.end();
 
   // Client disconnect = cancel (Ctrl-C)
   req.on('close', () => {

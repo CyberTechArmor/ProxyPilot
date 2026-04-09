@@ -242,6 +242,38 @@ else
     log "${BLUE}[6/6] Restarting ProxyPilot...${NC}"
     log ""
 
+    # Check if running via Docker (installed at /opt/proxypilot with docker-compose.yml)
+    INSTALL_DIR="/opt/proxypilot"
+    if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
+        log "Detected Docker deployment at ${INSTALL_DIR}"
+
+        # Copy updated admin files to install directory
+        log "Copying updated files..."
+        cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+
+        # Rebuild frontend
+        log "Rebuilding frontend..."
+        cd "${INSTALL_DIR}/admin/frontend"
+        $NPM_CMD ci 2>&1 | tee -a "$LOG_FILE"
+        NODE_ENV=production $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"
+
+        # Rebuild and restart Docker container
+        log "Rebuilding Docker container..."
+        cd "$INSTALL_DIR"
+        docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true
+        docker compose build --no-cache 2>/dev/null || docker-compose build --no-cache 2>/dev/null
+        docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null
+
+        log "${GREEN}Docker container rebuilt and restarted${NC}"
+        log ""
+        log "${GREEN}========================================${NC}"
+        log "${GREEN}       Restart completed!               ${NC}"
+        log "${GREEN}========================================${NC}"
+        log ""
+        exit 0
+    fi
+
+    # Non-Docker deployment: restart the process directly
     # Stop existing processes and free the port
     log "Stopping existing ProxyPilot processes..."
     PORT_TO_FREE=${PORT:-3001}

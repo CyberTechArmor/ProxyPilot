@@ -755,7 +755,14 @@ main() {
 
     # Create installation directory
     log_info "Creating installation directory..."
-    mkdir -p "$INSTALL_DIR/data"
+    mkdir -p "$INSTALL_DIR/data/services"
+
+    # Restore service data from backup if available (from previous cleanup)
+    if [[ -d "/var/lib/proxypilot/services-backup" ]] && [[ -n "$(ls -A /var/lib/proxypilot/services-backup 2>/dev/null)" ]]; then
+        log_info "Restoring service data from previous installation..."
+        cp -r /var/lib/proxypilot/services-backup/* "$INSTALL_DIR/data/services/" 2>/dev/null || true
+        log_success "Service data restored"
+    fi
 
     # Copy admin files
     log_info "Copying ProxyPilot files..."

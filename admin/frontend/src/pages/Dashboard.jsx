@@ -2793,10 +2793,6 @@ volumes:
                         <Label htmlFor="port">Port</Label>
                         <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
                       </div>
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="websocketEnabled">WebSocket Support</Label>
-                        <Switch id="websocketEnabled" checked={formData.websocketEnabled} onCheckedChange={(checked) => setFormData({ ...formData, websocketEnabled: checked })} />
-                      </div>
                     </>
                   )}
                   <div className="space-y-2">
@@ -4750,17 +4746,6 @@ volumes:
             {/* Caddy Settings */}
             <div className="space-y-3">
               <h4 className="font-medium text-sm">Caddy Configuration</h4>
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label htmlFor="websocket">WebSocket Support</Label>
-                  <p className="text-xs text-muted-foreground">Enable WebSocket proxy headers</p>
-                </div>
-                <Switch
-                  id="websocket"
-                  checked={settingsForm.websocketEnabled}
-                  onCheckedChange={(checked) => setSettingsForm({ ...settingsForm, websocketEnabled: checked })}
-                />
-              </div>
               <div className="flex items-center justify-between">
                 <div>
                   <Label htmlFor="forceHttps">Force HTTPS</Label>

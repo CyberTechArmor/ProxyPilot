@@ -77,9 +77,23 @@ log_info "Reloading Caddy..."
 caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl reload caddy || true
 log_success "Caddy reloaded"
 
-# Remove installation directory
+# Kill any stale ProxyPilot Node processes
+log_info "Stopping any ProxyPilot processes..."
+pgrep -f "node.*proxypilot.*index.js" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+pgrep -f "node.*src/index.js" 2>/dev/null | xargs -r kill 2>/dev/null || true
+# Free port 3001 in case something is still bound
+fuser -k 3001/tcp 2>/dev/null || true
+
+# Remove installation directory but preserve service data
 log_info "Removing installation directory..."
 if [[ -d "$INSTALL_DIR" ]]; then
+    # Back up service data if it exists
+    if [[ -d "$INSTALL_DIR/data/services" ]] && [[ -n "$(ls -A $INSTALL_DIR/data/services 2>/dev/null)" ]]; then
+        log_info "Preserving service data at /var/lib/proxypilot/services-backup..."
+        mkdir -p /var/lib/proxypilot
+        cp -r "$INSTALL_DIR/data/services" /var/lib/proxypilot/services-backup
+        log_success "Service data backed up to /var/lib/proxypilot/services-backup"
+    fi
     rm -rf "$INSTALL_DIR"
     log_success "Removed ${INSTALL_DIR}"
 else

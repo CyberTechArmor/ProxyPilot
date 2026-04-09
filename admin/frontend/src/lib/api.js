@@ -403,6 +403,23 @@ export const api = {
     body: JSON.stringify(limits),
   }),
 
+  // LXC Container Services (Caddy reverse proxy mappings)
+  getLxcServices: (name) => request(`/lxc/containers/${name}/services`),
+
+  addLxcService: (name, service) => request(`/lxc/containers/${name}/services`, {
+    method: 'POST',
+    body: JSON.stringify(service),
+  }),
+
+  updateLxcService: (name, oldDomain, service) => request(`/lxc/containers/${name}/services/${encodeURIComponent(oldDomain)}`, {
+    method: 'PUT',
+    body: JSON.stringify(service),
+  }),
+
+  deleteLxcService: (name, domain) => request(`/lxc/containers/${name}/services/${encodeURIComponent(domain)}`, {
+    method: 'DELETE',
+  }),
+
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
   createLxcSnapshot: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot`, {

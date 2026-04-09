@@ -601,6 +601,199 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   });
 });
 
+// GET /containers/:name/services - List Caddy services for this container (by IP)
+lxcRouter.get('/containers/:name/services', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    // Get container IP
+    const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(result.stdout || '[]');
+    if (containers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Container not found.' });
+    }
+    const ip = extractIPv4(containers[0]);
+    if (!ip) {
+      return res.json({ success: true, services: [], ip: null });
+    }
+
+    // Scan Caddy sites directory for configs referencing this IP
+    const services = [];
+    try {
+      const files = await readdir(CADDY_SITES_DIR);
+      for (const file of files) {
+        const filePath = join(CADDY_SITES_DIR, file);
+        const content = await readFile(filePath, 'utf-8');
+        if (content.includes(ip)) {
+          // Parse domain, port, and TLS setting from the config
+          const domainMatch = content.match(/^(\S+)\s*\{/m);
+          const portMatch = content.match(/reverse_proxy\s+[\d.]+:(\d+)/);
+          const hasTlsInternal = content.includes('tls internal');
+          if (domainMatch) {
+            services.push({
+              domain: domainMatch[1],
+              port: portMatch ? parseInt(portMatch[1], 10) : null,
+              obtainCert: !hasTlsInternal,
+            });
+          }
+        }
+      }
+    } catch {
+      // CADDY_SITES_DIR may not exist yet
+    }
+
+    res.json({ success: true, services, ip });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to get services: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
+
+// POST /containers/:name/services - Add a new service/domain mapping
+lxcRouter.post('/containers/:name/services', async (req, res) => {
+  const { name } = req.params;
+  const { domain, port, obtainCert } = req.body;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  if (!domain || typeof domain !== 'string' || !domain.trim()) {
+    return res.status(400).json({ success: false, error: 'Domain is required.' });
+  }
+
+  const cleanDomain = domain.trim();
+  const svcPort = parseInt(port, 10) || 80;
+  const cert = obtainCert !== false;
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(result.stdout || '[]');
+    if (containers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Container not found.' });
+    }
+    const ip = extractIPv4(containers[0]);
+    if (!ip) {
+      return res.status(400).json({ success: false, error: 'Container has no IP address. Is it running?' });
+    }
+
+    // Check if domain config already exists
+    const configPath = join(CADDY_SITES_DIR, cleanDomain);
+    if (existsSync(configPath)) {
+      return res.status(409).json({ success: false, error: `Domain '${cleanDomain}' already has a Caddy config.` });
+    }
+
+    // Write Caddy config
+    const tlsDirective = cert ? '' : '\n    tls internal';
+    const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
+    await writeFile(configPath, caddyConfig);
+
+    try {
+      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+    } catch (reloadError) {
+      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+    }
+
+    console.log(`[LXC] Added service ${cleanDomain} -> ${ip}:${svcPort} for container ${name}`);
+    res.json({ success: true, service: { domain: cleanDomain, port: svcPort, obtainCert: cert } });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to add service: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
+
+// PUT /containers/:name/services/:domain - Update an existing service
+lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
+  const { name, domain: oldDomain } = req.params;
+  const { domain: newDomain, port, obtainCert } = req.body;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(result.stdout || '[]');
+    if (containers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Container not found.' });
+    }
+    const ip = extractIPv4(containers[0]);
+    if (!ip) {
+      return res.status(400).json({ success: false, error: 'Container has no IP address.' });
+    }
+
+    // Remove old config
+    const oldConfigPath = join(CADDY_SITES_DIR, oldDomain);
+    if (existsSync(oldConfigPath)) {
+      await unlink(oldConfigPath);
+    }
+
+    // Write new config
+    const cleanDomain = (newDomain || oldDomain).trim();
+    const svcPort = parseInt(port, 10) || 80;
+    const cert = obtainCert !== false;
+    const tlsDirective = cert ? '' : '\n    tls internal';
+    const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
+    const newConfigPath = join(CADDY_SITES_DIR, cleanDomain);
+    await writeFile(newConfigPath, caddyConfig);
+
+    try {
+      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+    } catch (reloadError) {
+      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+    }
+
+    console.log(`[LXC] Updated service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
+    res.json({ success: true, service: { domain: cleanDomain, port: svcPort, obtainCert: cert } });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to update service: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
+
+// DELETE /containers/:name/services/:domain - Remove a service/domain mapping
+lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
+  const { name, domain } = req.params;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  try {
+    const configPath = join(CADDY_SITES_DIR, domain);
+    if (!existsSync(configPath)) {
+      return res.status(404).json({ success: false, error: `No Caddy config found for '${domain}'.` });
+    }
+
+    await unlink(configPath);
+
+    try {
+      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+    } catch (reloadError) {
+      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+    }
+
+    console.log(`[LXC] Removed service ${domain} for container ${name}`);
+    res.json({ success: true, message: `Service '${domain}' removed.` });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to remove service: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
+
 // POST /containers/:name/exec - Execute a command and return JSON result
 lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const { name } = req.params;

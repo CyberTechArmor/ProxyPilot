@@ -135,11 +135,35 @@ function ContainerTerminal({ containerName }) {
     }
   };
 
+  const handlePaste = (e) => {
+    const text = e.clipboardData?.getData('text') || '';
+    if (text.includes('\n')) {
+      e.preventDefault();
+      // Split lines, remove empty ones, trim, and join with &&
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length > 1) {
+        setCommand(prev => prev + lines.join(' && '));
+      } else {
+        setCommand(prev => prev + lines[0]);
+      }
+    }
+  };
+
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2 flex-1 min-h-0">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          Paste multi-line code to auto-join with &amp;&amp;
+        </span>
+        {history.length > 0 && (
+          <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
+            Clear
+          </Button>
+        )}
+      </div>
       <div
         ref={outputRef}
-        className="bg-black rounded-lg p-3 h-72 overflow-y-auto font-mono text-xs leading-relaxed"
+        className="bg-black rounded-lg p-3 flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-relaxed"
         onClick={() => inputRef.current?.focus()}
       >
         <div className="text-green-500 mb-2">Connected to {containerName}</div>
@@ -169,6 +193,7 @@ function ContainerTerminal({ containerName }) {
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder="Enter command..."
             disabled={running}
             className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"
@@ -310,7 +335,7 @@ function ContainerFiles({ containerName }) {
             Empty directory
           </div>
         ) : (
-          <div className="max-h-64 overflow-y-auto divide-y">
+          <div className="overflow-y-auto divide-y">
             {files
               .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
               .map((file) => (
@@ -1052,7 +1077,7 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -1063,7 +1088,7 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs defaultValue="details" className="w-full">
+            <Tabs defaultValue="details" className="w-full flex-1 flex flex-col min-h-0">
               <TabsList className="w-full grid grid-cols-3">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
@@ -1071,7 +1096,7 @@ export default function LxcContainers() {
               </TabsList>
 
               {/* Details Tab */}
-              <TabsContent value="details" className="space-y-4">
+              <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">Status</span>
@@ -1245,12 +1270,12 @@ export default function LxcContainers() {
               </TabsContent>
 
               {/* Terminal Tab */}
-              <TabsContent value="terminal">
+              <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0">
                 <ContainerTerminal containerName={selectedContainer.name} />
               </TabsContent>
 
               {/* Files Tab */}
-              <TabsContent value="files">
+              <TabsContent value="files" className="flex-1 flex flex-col min-h-0 overflow-y-auto">
                 <ContainerFiles containerName={selectedContainer.name} />
               </TabsContent>
             </Tabs>

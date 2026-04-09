@@ -92,6 +92,7 @@ export default function LxcContainers() {
   const PRESET_IMAGES = [
     { value: 'images:ubuntu/24.04', label: 'Ubuntu 24.04 LTS' },
     { value: 'images:ubuntu/22.04', label: 'Ubuntu 22.04 LTS' },
+    { value: 'images:debian/13', label: 'Debian 13 (Trixie)' },
     { value: 'images:debian/12', label: 'Debian 12 (Bookworm)' },
     { value: 'images:debian/11', label: 'Debian 11 (Bullseye)' },
     { value: 'images:alpine/3.20', label: 'Alpine 3.20' },

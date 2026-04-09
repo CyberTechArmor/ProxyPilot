@@ -69,6 +69,7 @@ export default function LxcContainers() {
   // Incus availability
   const [incusAvailable, setIncusAvailable] = useState(null);
   const [incusVersion, setIncusVersion] = useState('');
+  const [incusInitWarning, setIncusInitWarning] = useState(null);
 
   // Containers
   const [containers, setContainers] = useState([]);
@@ -122,6 +123,7 @@ export default function LxcContainers() {
       .then((res) => {
         setIncusAvailable(res.available);
         setIncusVersion(res.version || '');
+        if (res.initWarning) setIncusInitWarning(res.initWarning);
       })
       .catch(() => {
         setIncusAvailable(false);
@@ -368,6 +370,17 @@ export default function LxcContainers() {
           </Button>
         </div>
       </div>
+
+      {/* Init Warning */}
+      {incusInitWarning && (
+        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-2">
+          <AlertCircle className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-yellow-500">Incus not fully initialized</p>
+            <p className="text-xs text-muted-foreground mt-1">{incusInitWarning}</p>
+          </div>
+        </div>
+      )}
 
       {/* Container Grid */}
       {containers.length === 0 ? (

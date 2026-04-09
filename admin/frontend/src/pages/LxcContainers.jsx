@@ -573,6 +573,12 @@ export default function LxcContainers() {
   const [snapshotNotes, setSnapshotNotes] = useState({}); // { snapName: [notes] }
   const [expandedSnapshot, setExpandedSnapshot] = useState(null);
   const [newNoteText, setNewNoteText] = useState('');
+  const [containerServices, setContainerServices] = useState([]);
+  const [servicesLoading, setServicesLoading] = useState(false);
+  const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true });
+  const [addingService, setAddingService] = useState(false);
+  const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert } or null
+  const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true });
   const [exporting, setExporting] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
@@ -774,10 +780,25 @@ export default function LxcContainers() {
   };
 
   // Open info dialog
+  const fetchContainerServices = useCallback(async (containerName) => {
+    setServicesLoading(true);
+    try {
+      const res = await api.getLxcServices(containerName);
+      setContainerServices(res.services || []);
+    } catch {
+      setContainerServices([]);
+    } finally {
+      setServicesLoading(false);
+    }
+  }, []);
+
   const openInfo = async (container, tab = 'details') => {
     setSelectedContainer(container);
     setContainerState(null);
     setSnapshots([]);
+    setContainerServices([]);
+    setAddServiceForm({ domain: '', port: '', obtainCert: true });
+    setEditingService(null);
     setInfoDefaultTab(tab);
     setInfoOpen(true);
     try {
@@ -790,6 +811,8 @@ export default function LxcContainers() {
     } catch {
       // Silently fail for detail fetch
     }
+    // Fetch services separately (container may not have an IP yet)
+    fetchContainerServices(container.name);
   };
 
   // Delete container
@@ -828,6 +851,53 @@ export default function LxcContainers() {
       toast({ title: 'Resize failed', description: err.message, variant: 'destructive' });
     } finally {
       setResizing(false);
+    }
+  };
+
+  // Service management
+  const handleAddService = async () => {
+    if (!selectedContainer || !addServiceForm.domain.trim()) return;
+    setAddingService(true);
+    try {
+      await api.addLxcService(selectedContainer.name, {
+        domain: addServiceForm.domain.trim(),
+        port: parseInt(addServiceForm.port, 10) || 80,
+        obtainCert: addServiceForm.obtainCert,
+      });
+      toast({ title: 'Service added', description: `${addServiceForm.domain.trim()} configured.` });
+      setAddServiceForm({ domain: '', port: '', obtainCert: true });
+      fetchContainerServices(selectedContainer.name);
+    } catch (err) {
+      toast({ title: 'Failed to add service', description: err.message, variant: 'destructive' });
+    } finally {
+      setAddingService(false);
+    }
+  };
+
+  const handleUpdateService = async (oldDomain) => {
+    if (!selectedContainer || !editServiceForm.domain.trim()) return;
+    try {
+      await api.updateLxcService(selectedContainer.name, oldDomain, {
+        domain: editServiceForm.domain.trim(),
+        port: parseInt(editServiceForm.port, 10) || 80,
+        obtainCert: editServiceForm.obtainCert,
+      });
+      toast({ title: 'Service updated', description: `${editServiceForm.domain.trim()} updated.` });
+      setEditingService(null);
+      fetchContainerServices(selectedContainer.name);
+    } catch (err) {
+      toast({ title: 'Failed to update service', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteService = async (domain) => {
+    if (!selectedContainer) return;
+    try {
+      await api.deleteLxcService(selectedContainer.name, domain);
+      toast({ title: 'Service removed', description: `${domain} removed.` });
+      fetchContainerServices(selectedContainer.name);
+    } catch (err) {
+      toast({ title: 'Failed to remove service', description: err.message, variant: 'destructive' });
     }
   };
 
@@ -1591,6 +1661,147 @@ export default function LxcContainers() {
                     </div>
                   </div>
                 )}
+
+                {/* Services / Reverse Proxy */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-medium flex items-center gap-2">
+                      <Globe className="h-4 w-4" />
+                      Services
+                    </h4>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => fetchContainerServices(selectedContainer.name)}
+                      disabled={servicesLoading}
+                    >
+                      {servicesLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    </Button>
+                  </div>
+
+                  {/* Current services list */}
+                  {containerServices.length > 0 ? (
+                    <div className="space-y-1.5 mb-3">
+                      {containerServices.map((svc) => (
+                        <div key={svc.domain} className="flex items-center gap-2 p-2 rounded-lg border border-border/50 bg-muted/30 text-xs">
+                          {editingService === svc.domain ? (
+                            <>
+                              <div className="flex-1 grid grid-cols-2 gap-1.5">
+                                <Input
+                                  value={editServiceForm.domain}
+                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, domain: e.target.value }))}
+                                  className="h-7 text-xs"
+                                  placeholder="domain"
+                                />
+                                <Input
+                                  type="number"
+                                  value={editServiceForm.port}
+                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, port: e.target.value }))}
+                                  className="h-7 text-xs"
+                                  placeholder="port"
+                                />
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <Switch
+                                  checked={editServiceForm.obtainCert}
+                                  onCheckedChange={(checked) => setEditServiceForm((f) => ({ ...f, obtainCert: checked }))}
+                                  className="scale-[0.65]"
+                                />
+                                <Shield className={`h-3 w-3 ${editServiceForm.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-1.5 text-green-500 hover:text-green-400"
+                                onClick={() => handleUpdateService(svc.domain)}
+                              >
+                                <Check className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-1.5 text-muted-foreground"
+                                onClick={() => setEditingService(null)}
+                              >
+                                <X className="h-3 w-3" />
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              <Globe className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
+                              <span className="font-mono flex-1 truncate">{svc.domain}</span>
+                              <span className="text-muted-foreground">:{svc.port}</span>
+                              <Shield className={`h-3 w-3 ${svc.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-1.5 text-muted-foreground hover:text-cyan-500"
+                                onClick={() => {
+                                  setEditingService(svc.domain);
+                                  setEditServiceForm({ domain: svc.domain, port: String(svc.port || ''), obtainCert: svc.obtainCert });
+                                }}
+                              >
+                                <Settings className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-1.5 text-muted-foreground hover:text-red-500"
+                                onClick={() => handleDeleteService(svc.domain)}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground mb-3">
+                      {servicesLoading ? 'Loading services...' : 'No services configured. Add a domain to route traffic to this container.'}
+                    </p>
+                  )}
+
+                  {/* Add new service form */}
+                  <div className="flex items-center gap-2 p-2 rounded-lg border border-dashed border-border/50 bg-muted/20">
+                    <div className="flex-1 grid grid-cols-2 gap-1.5">
+                      <Input
+                        placeholder="domain.example.com"
+                        value={addServiceForm.domain}
+                        onChange={(e) => setAddServiceForm((f) => ({ ...f, domain: e.target.value }))}
+                        className="h-7 text-xs"
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
+                      />
+                      <Input
+                        type="number"
+                        placeholder="8080"
+                        value={addServiceForm.port}
+                        onChange={(e) => setAddServiceForm((f) => ({ ...f, port: e.target.value }))}
+                        className="h-7 text-xs"
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Switch
+                        checked={addServiceForm.obtainCert}
+                        onCheckedChange={(checked) => setAddServiceForm((f) => ({ ...f, obtainCert: checked }))}
+                        className="scale-[0.65]"
+                      />
+                      <Shield className={`h-3 w-3 ${addServiceForm.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={handleAddService}
+                      disabled={!addServiceForm.domain.trim() || addingService}
+                    >
+                      {addingService ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3 mr-1" />}
+                      Add
+                    </Button>
+                  </div>
+                </div>
 
                 {/* Export / Backup */}
                 <div>

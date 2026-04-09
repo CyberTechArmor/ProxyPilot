@@ -122,33 +122,51 @@ function ContainerTerminal({ containerName }) {
 
       // Read full response text and parse SSE events
       const text = await response.text();
-      const lines = text.split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
-        const jsonStr = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
-        if (!jsonStr.trim()) continue;
+      const outputEntries = [];
+      let exitCode = null;
+
+      // Parse SSE events - each event is "data: {json}\n\n"
+      const eventRegex = /data:\s*(.+)/g;
+      let match;
+      while ((match = eventRegex.exec(text)) !== null) {
         try {
-          const evt = JSON.parse(jsonStr.trim());
+          const evt = JSON.parse(match[1]);
           if (evt.type === 'stdout' && evt.text) {
-            setHistory(prev => [...prev, { type: 'stdout', text: evt.text }]);
+            outputEntries.push({ type: 'stdout', text: evt.text });
           } else if (evt.type === 'stderr' && evt.text) {
-            setHistory(prev => [...prev, { type: 'stderr', text: evt.text }]);
+            outputEntries.push({ type: 'stderr', text: evt.text });
           } else if (evt.type === 'exit') {
-            if (cdMatch && evt.code === 0) {
-              const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
-              if (target.startsWith('/')) {
-                setCwd(target);
-              } else if (target === '~' || target === '') {
-                setCwd('/root');
-              } else if (target === '..') {
-                setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
-              } else {
-                setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
-              }
-            }
+            exitCode = evt.code;
           }
-        } catch {}
+        } catch {
+          // If JSON parse fails, show raw data as output
+          outputEntries.push({ type: 'stderr', text: match[1] });
+        }
       }
+
+      // If no SSE events found but response has content, show it as raw output
+      if (outputEntries.length === 0 && text.trim()) {
+        outputEntries.push({ type: 'stdout', text: text.trim() });
+      }
+
+      if (outputEntries.length > 0) {
+        setHistory(prev => [...prev, ...outputEntries]);
+      }
+
+      // Update cwd if cd was successful
+      if (cdMatch && exitCode === 0) {
+        const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
+        if (target.startsWith('/')) {
+          setCwd(target);
+        } else if (target === '~' || target === '') {
+          setCwd('/root');
+        } else if (target === '..') {
+          setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
+        } else {
+          setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
+        }
+      }
+
       scrollToBottom();
     } catch (err) {
       setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);

@@ -116,7 +116,7 @@ function ContainerTerminal({ containerName }) {
   };
 
   const runCommand = async (directCmd) => {
-    const cmd = (directCmd || command).trim();
+    const cmd = (typeof directCmd === 'string' ? directCmd : command).trim();
     if (!cmd || running) return;
     setRunning(true);
     setCommand('');

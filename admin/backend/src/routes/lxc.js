@@ -491,7 +491,7 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
 });
 
 // POST /containers/:name/exec - Execute a command and return JSON result
-lxcRouter.post('/containers/:name/exec', async (req, res) => {
+lxcRouter.post('/containers/:name/exec', (req, res) => {
   const { name } = req.params;
   const { command, cwd } = req.body;
 
@@ -508,41 +508,25 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
   const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
 
-  const child = spawnOnHost(execCmd);
-  let stdout = '';
-  let stderr = '';
-  let stdoutDone = false;
-  let stderrDone = false;
-  let exitCode = null;
+  // Use exec (not spawn) - same as execOnHost which works for tab-complete
+  const hostCmd = isInDocker
+    ? `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(execCmd)}`
+    : execCmd;
+
   let finished = false;
 
-  const tryFinish = () => {
+  const child = exec(hostCmd, { timeout: 0, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (finished) return;
-    if (stdoutDone && stderrDone && exitCode !== null) {
-      finished = true;
-      res.json({ success: true, stdout, stderr, exitCode });
-    }
-  };
-
-  child.stdout.on('data', (data) => { stdout += data.toString(); });
-  child.stdout.on('end', () => { stdoutDone = true; tryFinish(); });
-
-  child.stderr.on('data', (data) => { stderr += data.toString(); });
-  child.stderr.on('end', () => { stderrDone = true; tryFinish(); });
-
-  child.on('close', (code) => {
-    exitCode = code ?? 0;
-    tryFinish();
+    finished = true;
+    res.json({
+      success: true,
+      stdout: stdout || '',
+      stderr: stderr || '',
+      exitCode: error ? (error.code || 1) : 0,
+    });
   });
 
-  child.on('error', (err) => {
-    if (!finished) {
-      finished = true;
-      res.json({ success: true, stdout, stderr: stderr + '\n' + err.message, exitCode: 1 });
-    }
-  });
-
-  // Client disconnect = cancel
+  // Client disconnect = cancel (Ctrl-C)
   req.on('close', () => {
     if (!finished) {
       finished = true;

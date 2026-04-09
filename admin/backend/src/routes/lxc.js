@@ -59,26 +59,36 @@ async function ensureDns(incusName) {
   } catch {}
 }
 
-// Ensure NAT is enabled on the bridge network used by a profile
+// Ensure NAT and IP forwarding are enabled so containers have internet
 async function ensureNetworkNat(profileName) {
   try {
-    const result = await execOnHost(
-      `incus profile show ${profileName || 'default'} --format json`,
+    // Enable IP forwarding on the host (required for NAT to work)
+    await execOnHost(
+      `sysctl -w net.ipv4.ip_forward=1 2>/dev/null; grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf`,
       { timeout: 10000 }
     );
-    const profileData = JSON.parse(result.stdout || '{}');
-    for (const dev of Object.values(profileData.devices || {})) {
-      if (dev.type === 'nic' && dev.network) {
-        await execOnHost(
-          `incus network set ${dev.network} ipv4.nat true`,
-          { timeout: 10000 }
-        );
-        console.log(`[LXC] Ensured ipv4.nat on network '${dev.network}'`);
-        break;
+  } catch {}
+
+  try {
+    // Enable NAT on all managed bridge networks
+    const result = await execOnHost(
+      `incus network list --format json 2>/dev/null`,
+      { timeout: 10000 }
+    );
+    const networks = JSON.parse(result.stdout || '[]');
+    for (const net of networks) {
+      if (net.type === 'bridge' && net.managed) {
+        if (!net.config || net.config['ipv4.nat'] !== 'true') {
+          await execOnHost(
+            `incus network set ${net.name} ipv4.nat true`,
+            { timeout: 10000 }
+          );
+          console.log(`[LXC] Enabled ipv4.nat on bridge '${net.name}'`);
+        }
       }
     }
   } catch (err) {
-    console.error(`[LXC] NAT setup skipped: ${err.message || 'unknown error'}`);
+    console.error(`[LXC] NAT setup failed: ${err.message || 'unknown error'}`);
   }
 }
 

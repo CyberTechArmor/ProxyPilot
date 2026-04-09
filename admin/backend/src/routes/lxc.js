@@ -59,6 +59,29 @@ async function ensureDns(incusName) {
   } catch {}
 }
 
+// Ensure NAT is enabled on the bridge network used by a profile
+async function ensureNetworkNat(profileName) {
+  try {
+    const result = await execOnHost(
+      `incus profile show ${profileName || 'default'} --format json`,
+      { timeout: 10000 }
+    );
+    const profileData = JSON.parse(result.stdout || '{}');
+    for (const dev of Object.values(profileData.devices || {})) {
+      if (dev.type === 'nic' && dev.network) {
+        await execOnHost(
+          `incus network set ${dev.network} ipv4.nat true`,
+          { timeout: 10000 }
+        );
+        console.log(`[LXC] Ensured ipv4.nat on network '${dev.network}'`);
+        break;
+      }
+    }
+  } catch (err) {
+    console.error(`[LXC] NAT setup skipped: ${err.message || 'unknown error'}`);
+  }
+}
+
 // Validate instance name to prevent command injection
 function validateName(name) {
   if (!name || typeof name !== 'string') {
@@ -360,6 +383,9 @@ lxcRouter.post('/containers', async (req, res) => {
     try {
       creation.phase = 'configuring';
       creation.message = 'Configuring container...';
+
+      // Ensure NAT is enabled on the bridge so containers have internet
+      await ensureNetworkNat(profile);
 
       // Set resource limits
       if (cpu) {
@@ -768,7 +794,8 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus start ${incusName} 2>&1`);
-    // Configure DNS after start (non-blocking)
+    // Ensure NAT and DNS after start (non-blocking)
+    ensureNetworkNat().catch(() => {});
     ensureDns(incusName).catch(() => {});
     res.json({ success: true, message: `Container '${name}' started.` });
   } catch (error) {
@@ -818,7 +845,8 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus restart ${incusName} --force 2>&1`);
-    // Configure DNS after restart (non-blocking)
+    // Ensure NAT and DNS after restart (non-blocking)
+    ensureNetworkNat().catch(() => {});
     ensureDns(incusName).catch(() => {});
     res.json({ success: true, message: `Container '${name}' restarted.` });
   } catch (error) {

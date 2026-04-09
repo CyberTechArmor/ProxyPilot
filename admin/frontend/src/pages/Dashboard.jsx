@@ -2712,7 +2712,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className={wizardStep === 0 ? "max-w-3xl" : "max-w-lg"}>
+            <DialogContent className={wizardStep === 0 ? "max-w-4xl" : "max-w-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>
@@ -2721,7 +2721,7 @@ volumes:
               </DialogHeader>
 
               {wizardStep === 0 ? (
-                <div className="grid grid-cols-3 gap-4 py-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-4">
                   <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('static')}>
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
@@ -2755,6 +2755,22 @@ volumes:
                     </CardHeader>
                     <CardContent>
                       <CardDescription className="text-center">Create a multi-container app with docker-compose.yml</CardDescription>
+                    </CardContent>
+                  </Card>
+                  <Card className="cursor-pointer hover:border-cyan-500 border-cyan-500/30 transition-colors" onClick={() => {
+                    setAddDialogOpen(false);
+                    setDashboardTab('lxc');
+                  }}>
+                    <CardHeader className="text-center pb-2">
+                      <svg className="h-12 w-12 mx-auto text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
+                      </svg>
+                      <CardTitle className="text-lg">LXC Container</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <CardDescription className="text-center">Launch a system container with Incus</CardDescription>
                     </CardContent>
                   </Card>
                 </div>

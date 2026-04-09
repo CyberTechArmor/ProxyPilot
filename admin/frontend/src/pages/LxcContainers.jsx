@@ -397,6 +397,7 @@ export default function LxcContainers() {
   // Dialogs
   const [createOpen, setCreateOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [infoDefaultTab, setInfoDefaultTab] = useState('details');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resizeOpen, setResizeOpen] = useState(false);
 
@@ -405,7 +406,9 @@ export default function LxcContainers() {
   const [containerState, setContainerState] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotName, setSnapshotName] = useState('');
+  const [snapshotNote, setSnapshotNote] = useState('');
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -579,10 +582,11 @@ export default function LxcContainers() {
   };
 
   // Open info dialog
-  const openInfo = async (container) => {
+  const openInfo = async (container, tab = 'details') => {
     setSelectedContainer(container);
     setContainerState(null);
     setSnapshots([]);
+    setInfoDefaultTab(tab);
     setInfoOpen(true);
     try {
       const [stateRes, snapRes] = await Promise.all([
@@ -636,13 +640,41 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
+  // Export container as tarball
+  const handleExport = async () => {
+    if (!selectedContainer) return;
+    setExporting(true);
+    toast({ title: 'Exporting...', description: `Exporting ${selectedContainer.name} — this may take a while.` });
+    try {
+      const url = `/api/lxc/containers/${selectedContainer.name}/export`;
+      const token = localStorage.getItem('token');
+      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Export failed');
+      }
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${selectedContainer.name}-backup.tar.gz`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded.` });
+    } catch (err) {
+      toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const handleCreateSnapshot = async () => {
     if (!selectedContainer || !snapshotName.trim()) return;
     setSnapshotLoading(true);
     try {
-      await api.createLxcSnapshot(selectedContainer.name, snapshotName.trim());
+      await api.createLxcSnapshot(selectedContainer.name, snapshotName.trim(), snapshotNote.trim());
       toast({ title: 'Snapshot created', description: `Snapshot "${snapshotName}" created.` });
       setSnapshotName('');
+      setSnapshotNote('');
       const snapRes = await api.getLxcSnapshots(selectedContainer.name);
       setSnapshots(snapRes.snapshots || []);
     } catch (err) {
@@ -771,19 +803,29 @@ export default function LxcContainers() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {containers.map((ct) => (
-            <Card key={ct.name} className="border-dashed border-cyan-500/30">
+            <Card
+              key={ct.name}
+              className="border-dashed border-cyan-500/30 cursor-pointer hover:border-cyan-500/60 transition-colors"
+              onClick={() => openInfo(ct)}
+            >
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <StatusBadge status={ct.status} />
-                    <CardTitle
-                      className="text-lg cursor-pointer hover:text-cyan-400 transition-colors"
-                      onClick={() => openInfo(ct)}
-                    >
-                      {ct.name}
-                    </CardTitle>
+                    <CardTitle className="text-lg">{ct.name}</CardTitle>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                    {ct.status?.toLowerCase() === 'running' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0 text-cyan-500 hover:text-cyan-600"
+                        onClick={() => openInfo(ct, 'terminal')}
+                        title="Terminal"
+                      >
+                        <Terminal className="h-4 w-4" />
+                      </Button>
+                    )}
                     {ct.status?.toLowerCase() === 'running' ? (
                       <Button
                         variant="ghost"
@@ -828,15 +870,6 @@ export default function LxcContainers() {
                       ) : (
                         <RefreshCw className="h-4 w-4" />
                       )}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                      onClick={() => openInfo(ct)}
-                      title="Info"
-                    >
-                      <Info className="h-4 w-4" />
                     </Button>
                     <Button
                       variant="ghost"
@@ -1088,7 +1121,7 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs defaultValue="details" className="w-full flex-1 flex flex-col min-h-0">
+            <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0">
               <TabsList className="w-full grid grid-cols-3">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
@@ -1199,6 +1232,29 @@ export default function LxcContainers() {
                   </div>
                 )}
 
+                {/* Export / Backup */}
+                <div>
+                  <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                    <Download className="h-4 w-4" />
+                    Backup
+                  </h4>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleExport}
+                    disabled={exporting}
+                  >
+                    {exporting ? (
+                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Exporting...</>
+                    ) : (
+                      <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
+                    )}
+                  </Button>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Downloads a full backup (.tar.gz) of this container including filesystem and config.
+                  </p>
+                </div>
+
                 {/* Snapshots */}
                 <div>
                   <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
@@ -1207,12 +1263,20 @@ export default function LxcContainers() {
                   </h4>
                   <div className="space-y-2">
                     <div className="flex gap-2">
-                      <Input
-                        placeholder="Snapshot name"
-                        value={snapshotName}
-                        onChange={(e) => setSnapshotName(e.target.value)}
-                        className="h-8 text-sm"
-                      />
+                      <div className="flex-1 space-y-1">
+                        <Input
+                          placeholder="Snapshot name"
+                          value={snapshotName}
+                          onChange={(e) => setSnapshotName(e.target.value)}
+                          className="h-8 text-sm"
+                        />
+                        <Input
+                          placeholder="Notes (optional)"
+                          value={snapshotNote}
+                          onChange={(e) => setSnapshotNote(e.target.value)}
+                          className="h-7 text-xs"
+                        />
+                      </div>
                       <Button
                         size="sm"
                         className="h-8 shrink-0"
@@ -1233,34 +1297,39 @@ export default function LxcContainers() {
                         {snapshots.map((snap) => (
                           <div
                             key={snap.name || snap}
-                            className="flex items-center justify-between border rounded-md p-2 text-xs"
+                            className="border rounded-md p-2 text-xs"
                           >
-                            <div>
-                              <span className="font-medium">{snap.name || snap}</span>
-                              {snap.created_at && (
-                                <span className="ml-2 text-muted-foreground">{formatDate(snap.created_at)}</span>
-                              )}
-                            </div>
-                            <div className="flex gap-1">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
-                                onClick={() => handleRestoreSnapshot(snap.name || snap)}
-                                disabled={snapshotLoading}
-                              >
-                                Restore
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
-                                onClick={() => handleDeleteSnapshot(snap.name || snap)}
-                                disabled={snapshotLoading}
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <span className="font-medium">{snap.name || snap}</span>
+                                {snap.created_at && (
+                                  <span className="ml-2 text-muted-foreground">{formatDate(snap.created_at)}</span>
+                                )}
+                              </div>
+                              <div className="flex gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
+                                  onClick={() => handleRestoreSnapshot(snap.name || snap)}
+                                  disabled={snapshotLoading}
+                                >
+                                  Restore
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
+                                  onClick={() => handleDeleteSnapshot(snap.name || snap)}
+                                  disabled={snapshotLoading}
                               >
                                 <Trash2 className="h-3 w-3" />
                               </Button>
+                              </div>
                             </div>
+                            {snap.description && (
+                              <p className="text-muted-foreground mt-1 italic">{snap.description}</p>
+                            )}
                           </div>
                         ))}
                       </div>

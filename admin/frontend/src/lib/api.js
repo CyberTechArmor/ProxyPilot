@@ -405,9 +405,9 @@ export const api = {
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
-  createLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot`, {
+  createLxcSnapshot: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot`, {
     method: 'POST',
-    body: JSON.stringify({ snapshotName }),
+    body: JSON.stringify({ snapshotName, note }),
   }),
 
   restoreLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/restore`, {

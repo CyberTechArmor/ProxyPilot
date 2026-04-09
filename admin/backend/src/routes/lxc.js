@@ -49,6 +49,16 @@ function spawnOnHost(command) {
   }
 }
 
+// Ensure container has public DNS configured
+async function ensureDns(incusName) {
+  try {
+    await execOnHost(
+      `incus exec ${incusName} -- sh -c 'grep -q "9.9.9.9" /etc/resolv.conf 2>/dev/null || (echo "nameserver 9.9.9.9" > /etc/resolv.conf && echo "nameserver 1.1.1.1" >> /etc/resolv.conf)'`,
+      { timeout: 10000 }
+    );
+  } catch {}
+}
+
 // Validate instance name to prevent command injection
 function validateName(name) {
   if (!name || typeof name !== 'string') {
@@ -378,9 +388,7 @@ lxcRouter.post('/containers', async (req, res) => {
       creation.ip = ip;
 
       // Configure DNS with public resolvers
-      try {
-        await execOnHost(`incus exec ${incusName} -- sh -c 'echo "nameserver 9.9.9.9" > /etc/resolv.conf && echo "nameserver 1.1.1.1" >> /etc/resolv.conf'`, { timeout: 10000 });
-      } catch {}
+      await ensureDns(incusName);
 
       // Configure Caddy reverse proxy
       if (domain && port && ip) {
@@ -760,6 +768,8 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus start ${incusName} 2>&1`);
+    // Configure DNS after start (non-blocking)
+    ensureDns(incusName).catch(() => {});
     res.json({ success: true, message: `Container '${name}' started.` });
   } catch (error) {
     res.status(500).json({
@@ -808,6 +818,8 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus restart ${incusName} --force 2>&1`);
+    // Configure DNS after restart (non-blocking)
+    ensureDns(incusName).catch(() => {});
     res.json({ success: true, message: `Container '${name}' restarted.` });
   } catch (error) {
     res.status(500).json({

@@ -116,12 +116,12 @@ function ContainerTerminal({ containerName }) {
   };
 
   const runCommand = async (directCmd) => {
-    const cmd = (directCmd || command).trim();
+    const cmd = (typeof directCmd === 'string' ? directCmd : command).trim();
     if (!cmd || running) return;
     setRunning(true);
     setCommand('');
     setElapsed(0);
-    if (!directCmd) {
+    if (typeof directCmd !== 'string') {
       setCmdHistory(prev => [cmd, ...prev]);
       setHistoryIdx(-1);
     }

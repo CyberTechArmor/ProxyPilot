@@ -346,7 +346,7 @@ function ContainerTerminal({ containerName }) {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => runCommand('export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3')}
+            onClick={() => runCommand('apt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3')}
             title="Install essential packages (git, sudo, curl, wget, nano, htop, build-essential, python3, etc.)"
             className="shrink-0 text-xs px-2"
           >

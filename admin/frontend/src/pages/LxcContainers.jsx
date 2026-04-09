@@ -151,6 +151,9 @@ function ContainerTerminal({ containerName }) {
       const outputEntries = [];
       if (result.stdout) outputEntries.push({ type: 'stdout', text: result.stdout });
       if (result.stderr) outputEntries.push({ type: 'stderr', text: result.stderr });
+      if (result.timedOut) {
+        outputEntries.push({ type: 'stderr', text: '--- Command timed out after 5 minutes (process was killed, not running in background) ---' });
+      }
 
       if (outputEntries.length > 0) {
         setHistory(prev => [...prev, ...outputEntries]);

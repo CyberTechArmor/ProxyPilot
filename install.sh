@@ -157,6 +157,79 @@ generate_totp_qr() {
     echo -e "${YELLOW}IMPORTANT: Save this secret key securely! You will need it to recover access.${NC}"
 }
 
+# Check and install Incus (LXC container manager)
+install_incus() {
+    log_info "Checking Incus installation..."
+
+    if command -v incus &> /dev/null; then
+        log_success "Incus is already installed ($(incus version 2>/dev/null || echo 'unknown'))"
+    else
+        log_info "Installing Incus..."
+
+        # Try installing from default repos first (Ubuntu 24.04+, Debian Trixie+)
+        apt-get update -y
+        if apt-get install -y incus 2>/dev/null; then
+            log_success "Incus installed from default repositories"
+        else
+            # Fall back to Zabbly repository (official recommended source for Incus)
+            log_info "Incus not in default repos, adding Zabbly repository..."
+
+            # Install prerequisites
+            apt-get install -y curl gpg
+
+            # Create keyrings directory
+            mkdir -p /etc/apt/keyrings/
+
+            # Add Zabbly GPG key
+            curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+
+            # Determine codename
+            local codename
+            codename=$(. /etc/os-release && echo "${VERSION_CODENAME}")
+
+            # Add Zabbly repository
+            cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources <<REPOEOF
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: ${codename}
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.gpg
+REPOEOF
+
+            apt-get update -y
+            apt-get install -y incus
+
+            log_success "Incus installed from Zabbly repository"
+        fi
+    fi
+
+    # Enable and start Incus daemon
+    systemctl enable incus 2>/dev/null || true
+    if ! systemctl is-active --quiet incus; then
+        log_info "Starting Incus daemon..."
+        systemctl start incus
+    fi
+
+    # Run minimal initialization if not already initialized
+    if ! incus storage list --format json 2>/dev/null | grep -q '"name"'; then
+        log_info "Initializing Incus with minimal configuration..."
+        incus admin init --minimal
+        log_success "Incus initialized"
+    else
+        log_success "Incus is already initialized"
+    fi
+
+    # Verify Incus is running
+    if incus version &> /dev/null; then
+        log_success "Incus is running ($(incus version))"
+    else
+        log_error "Incus installation succeeded but daemon is not responding"
+        log_error "Try: systemctl status incus"
+    fi
+}
+
 # Check and install Caddy
 install_caddy() {
     log_info "Checking Caddy installation..."
@@ -751,6 +824,7 @@ main() {
     install_caddy
     install_docker
     check_docker_compose
+    install_incus
     install_dependencies
 
     # Create installation directory

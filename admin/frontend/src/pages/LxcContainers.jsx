@@ -135,8 +135,32 @@ function ContainerTerminal({ containerName }) {
     }
   };
 
+  const handlePaste = (e) => {
+    const text = e.clipboardData?.getData('text') || '';
+    if (text.includes('\n')) {
+      e.preventDefault();
+      // Split lines, remove empty ones, trim, and join with &&
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length > 1) {
+        setCommand(prev => prev + lines.join(' && '));
+      } else {
+        setCommand(prev => prev + lines[0]);
+      }
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2 flex-1 min-h-0">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          Paste multi-line code to auto-join with &amp;&amp;
+        </span>
+        {history.length > 0 && (
+          <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
+            Clear
+          </Button>
+        )}
+      </div>
       <div
         ref={outputRef}
         className="bg-black rounded-lg p-3 flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-relaxed"
@@ -169,6 +193,7 @@ function ContainerTerminal({ containerName }) {
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder="Enter command..."
             disabled={running}
             className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"

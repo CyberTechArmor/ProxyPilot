@@ -276,7 +276,7 @@ else
         cd "$INSTALL_DIR"
 
         # Determine docker compose command
-        local DC_CMD="docker compose"
+        DC_CMD="docker compose"
         if ! docker compose version &>/dev/null; then
             DC_CMD="docker-compose"
         fi

@@ -92,7 +92,6 @@ import {
   Clock,
   Settings,
   Bell,
-  X,
 } from 'lucide-react';
 
 // Language detection based on file extension

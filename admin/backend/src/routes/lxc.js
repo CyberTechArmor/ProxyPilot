@@ -377,6 +377,11 @@ lxcRouter.post('/containers', async (req, res) => {
       }
       creation.ip = ip;
 
+      // Configure DNS with public resolvers
+      try {
+        await execOnHost(`incus exec ${incusName} -- sh -c 'echo "nameserver 9.9.9.9" > /etc/resolv.conf && echo "nameserver 1.1.1.1" >> /etc/resolv.conf'`, { timeout: 10000 });
+      } catch {}
+
       // Configure Caddy reverse proxy
       if (domain && port && ip) {
         creation.phase = 'caddy';
@@ -508,11 +513,10 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
   const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
 
-  // Use execOnHost directly - same function that works for file listing and tab-complete.
-  // Timeout is required because incus exec hangs waiting for stdin; output is collected
-  // before the timeout fires, so quick commands return their full output.
+  // Timeout is required: incus exec hangs after command finishes.
+  // 60s is enough for quick commands; use BG mode for longer operations.
   try {
-    const result = await execOnHost(execCmd, { timeout: 300000 });
+    const result = await execOnHost(execCmd, { timeout: 60000 });
     res.json({ success: true, stdout: result.stdout || '', stderr: result.stderr || '', exitCode: 0 });
   } catch (error) {
     // exec throws on non-zero exit OR timeout - both return collected output

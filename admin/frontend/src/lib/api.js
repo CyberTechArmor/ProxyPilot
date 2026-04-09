@@ -431,6 +431,25 @@ export const api = {
 
   getLxcImages: () => request('/lxc/images'),
 
+  // Incus Infrastructure Management
+  getIncusNetworks: () => request('/lxc/networks'),
+  getIncusNetwork: (name) => request(`/lxc/networks/${name}`),
+  updateIncusNetwork: (name, config) => request(`/lxc/networks/${name}`, {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  }),
+  unsetIncusNetworkKey: (name, key) => request(`/lxc/networks/${name}/unset`, {
+    method: 'POST',
+    body: JSON.stringify({ key }),
+  }),
+  getIncusStoragePools: () => request('/lxc/storage-pools'),
+  getIncusProfiles: () => request('/lxc/profiles'),
+  getIncusProfile: (name) => request(`/lxc/profiles/${name}`),
+  getIncusCachedImages: () => request('/lxc/cached-images'),
+  deleteIncusCachedImage: (fingerprint) => request(`/lxc/cached-images/${fingerprint}`, {
+    method: 'DELETE',
+  }),
+
   // Container exec and file management
   execInContainer: (name, command, cwd, signal) => {
     const token = localStorage.getItem('token');

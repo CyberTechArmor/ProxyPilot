@@ -4,6 +4,7 @@ import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import Profile from '@/pages/Profile';
 import Users from '@/pages/Users';
+import IncusManagement from '@/pages/IncusManagement';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -50,6 +51,7 @@ function App() {
         }
       >
         <Route index element={<Dashboard />} />
+        <Route path="incus" element={<IncusManagement />} />
         <Route path="users" element={<Users />} />
         <Route path="profile" element={<Profile />} />
       </Route>

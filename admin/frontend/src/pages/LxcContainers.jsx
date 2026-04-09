@@ -140,52 +140,24 @@ function ContainerTerminal({ containerName }) {
 
     try {
       const response = await api.execInContainer(containerName, cmd, cwd, controller.signal);
+      const result = await response.json();
 
-      if (!response.ok) {
-        let errMsg = `Command failed (HTTP ${response.status})`;
-        try {
-          const errData = await response.json();
-          if (errData.error) errMsg = errData.error;
-        } catch {}
-        setHistory(prev => [...prev, { type: 'stderr', text: errMsg }]);
+      if (!response.ok || !result.success) {
+        setHistory(prev => [...prev, { type: 'stderr', text: result.error || `Command failed (HTTP ${response.status})` }]);
         scrollToBottom();
         return;
       }
 
-      // Read full response text and parse SSE events
-      const text = await response.text();
       const outputEntries = [];
-      let exitCode = null;
-
-      // Parse SSE events - each event is "data: {json}\n\n"
-      const eventRegex = /data:\s*(.+)/g;
-      let match;
-      while ((match = eventRegex.exec(text)) !== null) {
-        try {
-          const evt = JSON.parse(match[1]);
-          if (evt.type === 'stdout' && evt.text) {
-            outputEntries.push({ type: 'stdout', text: evt.text });
-          } else if (evt.type === 'stderr' && evt.text) {
-            outputEntries.push({ type: 'stderr', text: evt.text });
-          } else if (evt.type === 'exit') {
-            exitCode = evt.code;
-          }
-        } catch {
-          outputEntries.push({ type: 'stderr', text: match[1] });
-        }
-      }
-
-      // If no SSE events found but response has content, show it raw
-      if (outputEntries.length === 0 && text.trim()) {
-        outputEntries.push({ type: 'stdout', text: text.trim() });
-      }
+      if (result.stdout) outputEntries.push({ type: 'stdout', text: result.stdout });
+      if (result.stderr) outputEntries.push({ type: 'stderr', text: result.stderr });
 
       if (outputEntries.length > 0) {
         setHistory(prev => [...prev, ...outputEntries]);
       }
 
       // Update cwd if cd was successful
-      if (cdMatch && exitCode === 0) {
+      if (cdMatch && result.exitCode === 0) {
         const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
         if (target.startsWith('/')) {
           setCwd(target);

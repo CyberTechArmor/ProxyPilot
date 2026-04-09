@@ -490,7 +490,7 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   });
 });
 
-// POST /containers/:name/exec - Execute a command with streaming output
+// POST /containers/:name/exec - Execute a command and return JSON result
 lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const { name } = req.params;
   const { command, cwd } = req.body;
@@ -508,46 +508,27 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
   const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
 
-  // Stream output via SSE
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-
   const child = spawnOnHost(execCmd);
+  let stdout = '';
+  let stderr = '';
   let stdoutDone = false;
   let stderrDone = false;
   let exitCode = null;
-  let ended = false;
+  let finished = false;
 
   const tryFinish = () => {
-    if (ended) return;
+    if (finished) return;
     if (stdoutDone && stderrDone && exitCode !== null) {
-      ended = true;
-      res.write(`data: ${JSON.stringify({ type: 'exit', code: exitCode })}\n\n`);
-      res.end();
+      finished = true;
+      res.json({ success: true, stdout, stderr, exitCode });
     }
   };
 
-  child.stdout.on('data', (data) => {
-    if (!ended) res.write(`data: ${JSON.stringify({ type: 'stdout', text: data.toString() })}\n\n`);
-  });
+  child.stdout.on('data', (data) => { stdout += data.toString(); });
+  child.stdout.on('end', () => { stdoutDone = true; tryFinish(); });
 
-  child.stdout.on('end', () => {
-    stdoutDone = true;
-    tryFinish();
-  });
-
-  child.stderr.on('data', (data) => {
-    if (!ended) res.write(`data: ${JSON.stringify({ type: 'stderr', text: data.toString() })}\n\n`);
-  });
-
-  child.stderr.on('end', () => {
-    stderrDone = true;
-    tryFinish();
-  });
+  child.stderr.on('data', (data) => { stderr += data.toString(); });
+  child.stderr.on('end', () => { stderrDone = true; tryFinish(); });
 
   child.on('close', (code) => {
     exitCode = code ?? 0;
@@ -555,30 +536,16 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   });
 
   child.on('error', (err) => {
-    if (!ended) {
-      ended = true;
-      res.write(`data: ${JSON.stringify({ type: 'stderr', text: err.message })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'exit', code: 1 })}\n\n`);
-      res.end();
+    if (!finished) {
+      finished = true;
+      res.json({ success: true, stdout, stderr: stderr + '\n' + err.message, exitCode: 1 });
     }
   });
 
-  // Timeout after 5 minutes
-  const timeout = setTimeout(() => {
-    if (!ended) {
-      child.kill('SIGKILL');
-      ended = true;
-      res.write(`data: ${JSON.stringify({ type: 'stderr', text: 'Command timed out after 5 minutes.' })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'exit', code: 124 })}\n\n`);
-      res.end();
-    }
-  }, 5 * 60 * 1000);
-
   // Client disconnect = cancel
   req.on('close', () => {
-    clearTimeout(timeout);
-    if (!ended) {
-      ended = true;
+    if (!finished) {
+      finished = true;
       child.kill('SIGKILL');
     }
   });

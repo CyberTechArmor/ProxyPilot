@@ -506,7 +506,8 @@ lxcRouter.post('/containers/:name/exec', (req, res) => {
   const incusName = `${INSTANCE_PREFIX}${name}`;
   // Wrap command to cd to cwd first if provided
   const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
-  const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
+  // -n disables stdin (reads /dev/null), --force-noninteractive disables PTY allocation
+  const execCmd = `incus exec -n --force-noninteractive ${incusName} -- bash -c ${JSON.stringify(fullCmd)}`;
 
   // Use exec (not spawn) - same as execOnHost which works for tab-complete
   const hostCmd = isInDocker

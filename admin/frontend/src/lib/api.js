@@ -421,10 +421,38 @@ export const api = {
   getLxcImages: () => request('/lxc/images'),
 
   // Container exec and file management
-  execInContainer: (name, command) => request(`/lxc/containers/${name}/exec`, {
+  execInContainer: (name, command, cwd) => {
+    // Returns an EventSource-like interface for streaming
+    const token = localStorage.getItem('token');
+    return fetch(`${API_BASE}/lxc/containers/${name}/exec`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ command, cwd }),
+    });
+  },
+
+  tabComplete: (name, partial, cwd) => request(`/lxc/containers/${name}/tab-complete`, {
     method: 'POST',
-    body: JSON.stringify({ command }),
+    body: JSON.stringify({ partial, cwd }),
   }),
+
+  importContainer: async (name, file) => {
+    const token = localStorage.getItem('token');
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('backup', file);
+    const response = await fetch(`${API_BASE}/lxc/containers/import`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new ApiError(data.error || 'Import failed', response.status, data);
+    return data;
+  },
 
   listContainerFiles: (name, path = '/root') => request(`/lxc/containers/${name}/files?path=${encodeURIComponent(path)}`),
 

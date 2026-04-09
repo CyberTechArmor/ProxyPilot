@@ -83,6 +83,7 @@ function ContainerTerminal({ containerName }) {
   const [cwd, setCwd] = useState('/root');
   const [elapsed, setElapsed] = useState(0);
   const [bgMode, setBgMode] = useState(false);
+  const [hasBgLog, setHasBgLog] = useState(false);
   const outputRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -139,11 +140,16 @@ function ContainerTerminal({ containerName }) {
     // Handle cd locally to track cwd
     const cdMatch = cmd.match(/^cd\s+(.*)/);
 
-    // Background mode: wrap with nohup, reset toggle after use
-    const execCmd = bgMode
-      ? `nohup sh -c ${JSON.stringify(cmd)} > /tmp/pp-bg-cmd.log 2>&1 & echo "Background PID: $!"`
-      : cmd;
-    if (bgMode) setBgMode(false);
+    // Background mode: wrap with nohup and a done marker, reset toggle after use
+    let wasBg = false;
+    let execCmd = cmd;
+    if (bgMode) {
+      wasBg = true;
+      // Use { } group so the done marker appends after the command finishes.
+      // Avoid $! and $? which get expanded by intermediate shells.
+      execCmd = `{ ${cmd}; echo "=== BG COMMAND FINISHED ==="; } > /tmp/pp-bg-cmd.log 2>&1 &`;
+      setBgMode(false);
+    }
 
     try {
       const response = await api.execInContainer(containerName, execCmd, cwd, controller.signal);
@@ -160,6 +166,11 @@ function ContainerTerminal({ containerName }) {
       if (result.stderr) outputEntries.push({ type: 'stderr', text: result.stderr });
       if (result.timedOut) {
         outputEntries.push({ type: 'stderr', text: '--- Command timed out after 5 minutes (process was killed, not running in background) ---' });
+      }
+      if (wasBg) {
+        setHasBgLog(true);
+        outputEntries.push({ type: 'stdout', text: 'Started in background. Use "View Log" button or run: tail -50 /tmp/pp-bg-cmd.log' });
+        outputEntries.push({ type: 'stdout', text: 'Look for "=== BG COMMAND FINISHED ===" at the end to confirm completion.' });
       }
 
       if (outputEntries.length > 0) {
@@ -313,11 +324,22 @@ function ContainerTerminal({ containerName }) {
           variant={bgMode ? 'default' : 'outline'}
           onClick={() => setBgMode(!bgMode)}
           disabled={running}
-          title="Run in background with nohup (output to /tmp/pp-bg-cmd.log)"
+          title="Run next command in background (output to /tmp/pp-bg-cmd.log)"
           className={`shrink-0 text-xs px-2 ${bgMode ? 'bg-blue-600 hover:bg-blue-700' : ''}`}
         >
           BG
         </Button>
+        {hasBgLog && !running && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { setCommand('tail -80 /tmp/pp-bg-cmd.log'); }}
+            title="View background command log (press Enter or Run to execute)"
+            className="shrink-0 text-xs px-2"
+          >
+            View Log
+          </Button>
+        )}
         {running ? (
           <Button size="sm" variant="destructive" onClick={cancelCommand} title="Cancel (Ctrl+C)">
             <Square className="h-3 w-3 mr-1" />Ctrl-C
@@ -328,7 +350,7 @@ function ContainerTerminal({ containerName }) {
           </Button>
         )}
       </div>
-      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history · BG: run with nohup (check /tmp/pp-bg-cmd.log)</p>
+      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history</p>
     </div>
   );
 }

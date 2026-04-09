@@ -848,10 +848,73 @@ lxcRouter.delete('/containers/:name', async (req, res) => {
   }
 });
 
+// GET /containers/:name/export - Export container as tarball backup
+lxcRouter.get('/containers/:name/export', async (req, res) => {
+  const { name } = req.params;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const fileName = `${name}-backup.tar.gz`;
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Type', 'application/gzip');
+
+    // Stop the container first if running (required for clean export)
+    let wasRunning = false;
+    try {
+      const stateResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+      const containers = JSON.parse(stateResult.stdout || '[]');
+      wasRunning = containers[0]?.status === 'Running';
+      if (wasRunning) {
+        console.log(`[LXC] Stopping ${incusName} for export...`);
+        await execOnHost(`incus stop ${incusName} --force`, { timeout: 30000 });
+      }
+    } catch {}
+
+    // Use incus export which creates a tarball to stdout
+    const exportCmd = `incus export ${incusName} -`;
+    const child = spawnOnHost(exportCmd);
+
+    child.stdout.pipe(res);
+
+    child.stderr.on('data', (data) => {
+      console.log(`[LXC] Export stderr: ${data.toString().trim()}`);
+    });
+
+    child.on('close', async (code) => {
+      // Restart container if it was running before
+      if (wasRunning) {
+        try {
+          await execOnHost(`incus start ${incusName}`, { timeout: 30000 });
+          console.log(`[LXC] Restarted ${incusName} after export`);
+        } catch (err) {
+          console.error(`[LXC] Failed to restart after export:`, err.message);
+        }
+      }
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).json({ success: false, error: 'Export failed' });
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+});
+
 // POST /containers/:name/snapshot - Create a snapshot
 lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   const { name } = req.params;
-  const { snapshotName } = req.body;
+  const { snapshotName, note } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -870,6 +933,10 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus snapshot create ${incusName} ${snapshotName} 2>&1`);
+    // Set description if note provided
+    if (note) {
+      await execOnHost(`incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`).catch(() => {});
+    }
     res.json({
       success: true,
       message: `Snapshot '${snapshotName}' created for container '${name}'.`,

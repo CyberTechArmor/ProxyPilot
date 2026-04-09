@@ -63,7 +63,24 @@ lxcRouter.use(requireAdmin);
 lxcRouter.get('/status', async (req, res) => {
   try {
     const { stdout } = await execOnHost('incus version 2>/dev/null');
-    res.json({ success: true, available: true, version: stdout.trim() });
+    const version = stdout.trim();
+
+    // Check if Incus has been initialized (has a storage pool)
+    let initialized = true;
+    let initWarning = null;
+    try {
+      const { stdout: poolsJson } = await execOnHost('incus storage list --format json 2>/dev/null');
+      const pools = JSON.parse(poolsJson || '[]');
+      if (pools.length === 0) {
+        initialized = false;
+        initWarning = 'Incus has no storage pools configured. Run: incus admin init --minimal';
+      }
+    } catch {
+      initialized = false;
+      initWarning = 'Could not query Incus storage pools. Run: incus admin init --minimal';
+    }
+
+    res.json({ success: true, available: true, version, initialized, initWarning });
   } catch {
     res.json({ success: true, available: false });
   }
@@ -321,10 +338,11 @@ lxcRouter.post('/containers', async (req, res) => {
     } catch {
       // Ignore cleanup errors
     }
+    const details = error.stderr || error.message || '';
     res.status(500).json({
       success: false,
-      error: 'Failed to create container',
-      details: error.stderr || error.message,
+      error: details ? `Failed to create container: ${details.trim()}` : 'Failed to create container',
+      details,
     });
   }
 });
@@ -347,7 +365,7 @@ lxcRouter.post('/containers/:name/start', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to start container '${name}'`,
+      error: `Failed to start container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -371,7 +389,7 @@ lxcRouter.post('/containers/:name/stop', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to stop container '${name}'`,
+      error: `Failed to stop container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -395,7 +413,7 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to restart container '${name}'`,
+      error: `Failed to restart container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -441,7 +459,7 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to resize container '${name}'`,
+      error: `Failed to resize container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -506,7 +524,7 @@ lxcRouter.delete('/containers/:name', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to delete container '${name}'`,
+      error: `Failed to delete container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -541,7 +559,7 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to create snapshot for container '${name}'`,
+      error: `Failed to create snapshot for container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -575,7 +593,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to restore snapshot for container '${name}'`,
+      error: `Failed to restore snapshot for container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }
@@ -609,7 +627,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to delete snapshot from container '${name}'`,
+      error: `Failed to delete snapshot from container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
   }

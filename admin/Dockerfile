@@ -25,6 +25,10 @@ RUN addgroup -S proxypilot && adduser -S proxypilot -G proxypilot
 # Copy pre-built frontend (built on host before docker build)
 COPY frontend/dist ./frontend/dist
 
+# Verify frontend was copied correctly
+RUN test -f ./frontend/dist/index.html || (echo "ERROR: frontend/dist/index.html not found in Docker build context" && exit 1)
+RUN ls -la ./frontend/dist/
+
 # Copy backend with dependencies
 COPY --from=backend-builder /app/backend/node_modules ./backend/node_modules
 COPY backend/src ./backend/src

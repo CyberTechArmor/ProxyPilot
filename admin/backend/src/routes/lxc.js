@@ -60,35 +60,40 @@ async function ensureDns(incusName) {
 }
 
 // Ensure NAT and IP forwarding are enabled so containers have internet
-async function ensureNetworkNat(profileName) {
+async function ensureNetworkNat() {
+  // Step 1: Enable IP forwarding on the host
   try {
-    // Enable IP forwarding on the host (required for NAT to work)
-    await execOnHost(
-      `sysctl -w net.ipv4.ip_forward=1 2>/dev/null; grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf`,
-      { timeout: 10000 }
-    );
-  } catch {}
+    await execOnHost('sysctl -w net.ipv4.ip_forward=1', { timeout: 5000 });
+    console.log('[LXC] IP forwarding enabled');
+  } catch (err) {
+    console.error('[LXC] Failed to enable IP forwarding:', err.message);
+  }
 
+  // Step 2: Enable NAT on all managed Incus bridge networks
   try {
-    // Enable NAT on all managed bridge networks
-    const result = await execOnHost(
-      `incus network list --format json 2>/dev/null`,
-      { timeout: 10000 }
-    );
+    const result = await execOnHost('incus network list --format json', { timeout: 10000 });
     const networks = JSON.parse(result.stdout || '[]');
     for (const net of networks) {
       if (net.type === 'bridge' && net.managed) {
-        if (!net.config || net.config['ipv4.nat'] !== 'true') {
-          await execOnHost(
-            `incus network set ${net.name} ipv4.nat true`,
-            { timeout: 10000 }
-          );
+        try {
+          await execOnHost(`incus network set ${net.name} ipv4.nat true`, { timeout: 10000 });
           console.log(`[LXC] Enabled ipv4.nat on bridge '${net.name}'`);
-        }
+        } catch {}
       }
     }
   } catch (err) {
-    console.error(`[LXC] NAT setup failed: ${err.message || 'unknown error'}`);
+    console.error('[LXC] incus network NAT setup failed:', err.message);
+  }
+
+  // Step 3: Fallback — add iptables MASQUERADE directly for container subnets
+  try {
+    await execOnHost(
+      'iptables -t nat -C POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE',
+      { timeout: 10000 }
+    );
+    console.log('[LXC] iptables MASQUERADE rule ensured');
+  } catch (err) {
+    console.error('[LXC] iptables MASQUERADE failed:', err.message);
   }
 }
 
@@ -395,7 +400,7 @@ lxcRouter.post('/containers', async (req, res) => {
       creation.message = 'Configuring container...';
 
       // Ensure NAT is enabled on the bridge so containers have internet
-      await ensureNetworkNat(profile);
+      await ensureNetworkNat();
 
       // Set resource limits
       if (cpu) {

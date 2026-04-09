@@ -14,6 +14,13 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle
@@ -81,7 +88,20 @@ export default function LxcContainers() {
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotLoading, setSnapshotLoading] = useState(false);
 
+  // Preset images for the dropdown
+  const PRESET_IMAGES = [
+    { value: 'images:ubuntu/24.04', label: 'Ubuntu 24.04 LTS' },
+    { value: 'images:ubuntu/22.04', label: 'Ubuntu 22.04 LTS' },
+    { value: 'images:debian/12', label: 'Debian 12 (Bookworm)' },
+    { value: 'images:debian/11', label: 'Debian 11 (Bullseye)' },
+    { value: 'images:alpine/3.20', label: 'Alpine 3.20' },
+    { value: 'images:centos/9-Stream', label: 'CentOS 9 Stream' },
+    { value: 'images:fedora/40', label: 'Fedora 40' },
+    { value: 'images:rockylinux/9', label: 'Rocky Linux 9' },
+  ];
+
   // Create form
+  const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
     name: '', image: '', domain: '', port: '', cpu: '', memory: '',
   });
@@ -175,6 +195,7 @@ export default function LxcContainers() {
       toast({ title: 'Container created', description: `${createForm.name} has been created successfully.` });
       setCreateOpen(false);
       setCreateForm({ name: '', image: '', domain: '', port: '', cpu: '', memory: '' });
+      setImageSelection('');
       await fetchContainers();
     } catch (err) {
       toast({ title: 'Creation failed', description: err.message, variant: 'destructive' });
@@ -504,15 +525,43 @@ export default function LxcContainers() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="ct-image">Image *</Label>
-              <Input
-                id="ct-image"
-                placeholder="images:debian/12"
-                value={createForm.image}
-                onChange={(e) => setCreateForm((f) => ({ ...f, image: e.target.value }))}
-              />
+              <Label>Image *</Label>
+              <Select
+                value={imageSelection}
+                onValueChange={(val) => {
+                  setImageSelection(val);
+                  if (val !== '__custom__') {
+                    setCreateForm((f) => ({ ...f, image: val }));
+                  } else {
+                    setCreateForm((f) => ({ ...f, image: '' }));
+                  }
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select an image..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {PRESET_IMAGES.map((img) => (
+                    <SelectItem key={img.value} value={img.value}>
+                      {img.label}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="__custom__">Custom image...</SelectItem>
+                </SelectContent>
+              </Select>
+              {imageSelection === '__custom__' && (
+                <Input
+                  placeholder="images:ubuntu/24.04 or ubuntu:24.04"
+                  value={createForm.image}
+                  onChange={(e) => setCreateForm((f) => ({ ...f, image: e.target.value }))}
+                />
+              )}
               <p className="text-xs text-muted-foreground">
-                e.g. "images:debian/12" or "images:ubuntu/24.04"
+                Images are pulled from the{' '}
+                <a href="https://images.linuxcontainers.org" target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:underline">
+                  linuxcontainers.org
+                </a>{' '}
+                image server.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-4">

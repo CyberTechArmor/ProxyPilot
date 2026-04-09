@@ -106,6 +106,20 @@ function ContainerTerminal({ containerName }) {
 
     try {
       const response = await api.execInContainer(containerName, cmd, cwd);
+
+      if (!response.ok) {
+        let errMsg = `Command failed (HTTP ${response.status})`;
+        try {
+          const errData = await response.json();
+          if (errData.error) errMsg = errData.error;
+        } catch {}
+        setHistory(prev => [...prev, { type: 'stderr', text: errMsg }]);
+        scrollToBottom();
+        setRunning(false);
+        inputRef.current?.focus();
+        return;
+      }
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -117,9 +131,12 @@ function ContainerTerminal({ containerName }) {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed.slice(5);
+          if (!jsonStr) continue;
           try {
-            const evt = JSON.parse(line.slice(6));
+            const evt = JSON.parse(jsonStr);
             if (evt.type === 'stdout' && evt.text) {
               setHistory(prev => [...prev, { type: 'stdout', text: evt.text }]);
               scrollToBottom();
@@ -203,7 +220,7 @@ function ContainerTerminal({ containerName }) {
   };
 
   return (
-    <div className="flex flex-col gap-2 flex-1 min-h-0">
+    <div className="flex flex-col gap-2 flex-1 min-h-0 h-full overflow-hidden">
       <div className="flex items-center justify-between shrink-0">
         <span className="text-xs text-muted-foreground font-mono">{cwd}</span>
         {history.length > 0 && (
@@ -243,7 +260,7 @@ function ContainerTerminal({ containerName }) {
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder="Enter command... (Tab to autocomplete)"
+            placeholder="Enter command..."
             disabled={running}
             className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"
             autoFocus
@@ -253,6 +270,7 @@ function ContainerTerminal({ containerName }) {
           {running ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
         </Button>
       </div>
+      <p className="text-[10px] text-muted-foreground shrink-0">Tab to autocomplete · Up/Down for history · Paste multi-line to auto-join with &amp;&amp;</p>
     </div>
   );
 }
@@ -1185,8 +1203,8 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] !overflow-hidden flex flex-col">
-          <DialogHeader>
+        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] overflow-hidden flex flex-col p-4 gap-2">
+          <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
               {selectedContainer?.name}
@@ -1196,15 +1214,15 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0">
-              <TabsList className="w-full grid grid-cols-3">
+            <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
+              <TabsList className="w-full grid grid-cols-3 shrink-0">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
               </TabsList>
 
               {/* Details Tab */}
-              <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto">
+              <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto min-h-0">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">Status</span>
@@ -1414,7 +1432,7 @@ export default function LxcContainers() {
               </TabsContent>
 
               {/* Terminal Tab */}
-              <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0">
+              <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <ContainerTerminal containerName={selectedContainer.name} />
               </TabsContent>
 

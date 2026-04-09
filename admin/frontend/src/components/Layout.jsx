@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/api';
+import { useToast, getNotificationHistory } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -23,12 +24,59 @@ import {
   CheckCircle,
   AlertCircle,
   RefreshCw,
+  Bell,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const { toasts } = useToast();
+
+  // Notification panel state
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const lastSeenRef = useRef(0);
+  const notifPanelRef = useRef(null);
+
+  // Track new notifications
+  useEffect(() => {
+    const history = getNotificationHistory();
+    setNotifications(history);
+    const newCount = history.filter((n) => n.timestamp > lastSeenRef.current).length;
+    setUnreadCount(newCount);
+  }, [toasts]);
+
+  // Close panel on outside click
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (notifPanelRef.current && !notifPanelRef.current.contains(e.target)) {
+        setNotifOpen(false);
+      }
+    };
+    if (notifOpen) document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [notifOpen]);
+
+  const openNotifications = () => {
+    setNotifOpen((prev) => !prev);
+    lastSeenRef.current = new Date();
+    setUnreadCount(0);
+  };
+
+  const formatNotifTime = (date) => {
+    if (!date) return '';
+    const d = new Date(date);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'Just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    return d.toLocaleDateString();
+  };
 
   // Version and update state
   const [version, setVersion] = useState('');
@@ -248,6 +296,68 @@ export default function Layout() {
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{user?.username}</p>
                 <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
+              </div>
+              <div className="relative" ref={notifPanelRef}>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={openNotifications}
+                  title="Notifications"
+                  className="relative"
+                >
+                  <Bell className="h-5 w-5" />
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 h-4 min-w-[16px] px-1 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center">
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </span>
+                  )}
+                </Button>
+
+                {/* Notification Panel */}
+                {notifOpen && (
+                  <div className="absolute bottom-full left-0 mb-2 w-80 max-h-96 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
+                    <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/50">
+                      <h3 className="text-sm font-semibold">Notifications</h3>
+                      <span className="text-xs text-muted-foreground">{notifications.length} total</span>
+                    </div>
+                    <div className="overflow-y-auto max-h-80">
+                      {notifications.length === 0 ? (
+                        <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                          No notifications yet
+                        </div>
+                      ) : (
+                        notifications.map((notif) => (
+                          <div
+                            key={notif.id}
+                            className={cn(
+                              'px-4 py-3 border-b last:border-0 hover:bg-muted/30 transition-colors',
+                              notif.variant === 'destructive' && 'border-l-2 border-l-red-500'
+                            )}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <p className={cn(
+                                  'text-sm font-medium truncate',
+                                  notif.variant === 'destructive' && 'text-red-500'
+                                )}>
+                                  {notif.title}
+                                </p>
+                                {notif.description && (
+                                  <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
+                                    {notif.description}
+                                  </p>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-muted-foreground whitespace-nowrap shrink-0">
+                                {formatNotifTime(notif.timestamp)}
+                              </span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
               <Button
                 variant="ghost"

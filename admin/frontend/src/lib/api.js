@@ -419,6 +419,30 @@ export const api = {
   }),
 
   getLxcImages: () => request('/lxc/images'),
+
+  // Container exec and file management
+  execInContainer: (name, command) => request(`/lxc/containers/${name}/exec`, {
+    method: 'POST',
+    body: JSON.stringify({ command }),
+  }),
+
+  listContainerFiles: (name, path = '/root') => request(`/lxc/containers/${name}/files?path=${encodeURIComponent(path)}`),
+
+  getContainerFileDownloadUrl: (name, path) => `${API_BASE}/lxc/containers/${name}/files/download?path=${encodeURIComponent(path)}`,
+
+  uploadFileToContainer: async (name, destPath, file) => {
+    const token = localStorage.getItem('token');
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${API_BASE}/lxc/containers/${name}/files/upload?path=${encodeURIComponent(destPath)}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
+    return data;
+  },
 };
 
 export { ApiError };

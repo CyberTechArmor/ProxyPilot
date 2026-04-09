@@ -4,9 +4,11 @@ import { promisify } from 'util';
 import { writeFile, readdir, readFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import multer from 'multer';
 import { requireAdmin } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB limit
 
 export const lxcRouter = Router();
 
@@ -484,6 +486,183 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
     message: 'No active creation found for this container.',
     elapsed: 0,
   });
+});
+
+// POST /containers/:name/exec - Execute a command inside a container
+lxcRouter.post('/containers/:name/exec', async (req, res) => {
+  const { name } = req.params;
+  const { command } = req.body;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  if (!command || typeof command !== 'string') {
+    return res.status(400).json({ success: false, error: 'Command is required.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const execCmd = `incus exec ${incusName} -- bash -c ${JSON.stringify(command)}`;
+    const result = await execOnHost(execCmd, { timeout: 30000 });
+    res.json({
+      success: true,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: 0,
+    });
+  } catch (error) {
+    // exec throws on non-zero exit codes, but we still want to return output
+    res.json({
+      success: true,
+      stdout: error.stdout || '',
+      stderr: error.stderr || error.message || '',
+      exitCode: error.code || 1,
+    });
+  }
+});
+
+// GET /containers/:name/files - List files in a directory
+lxcRouter.get('/containers/:name/files', async (req, res) => {
+  const { name } = req.params;
+  const dirPath = req.query.path || '/root';
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    // Use ls with machine-parseable output
+    const cmd = `incus exec ${incusName} -- ls -la --time-style=long-iso ${JSON.stringify(dirPath)}`;
+    const result = await execOnHost(cmd, { timeout: 10000 });
+    const lines = result.stdout.split('\n').filter(l => l.trim() && !l.startsWith('total'));
+    const files = lines.map(line => {
+      const parts = line.split(/\s+/);
+      if (parts.length < 8) return null;
+      const permissions = parts[0];
+      const isDir = permissions.startsWith('d');
+      const isLink = permissions.startsWith('l');
+      const owner = parts[2];
+      const group = parts[3];
+      const size = parseInt(parts[4], 10);
+      const date = parts[5];
+      const time = parts[6];
+      const fileName = parts.slice(7).join(' ').replace(/ -> .*$/, ''); // Remove symlink target
+      if (fileName === '.' || fileName === '..') return null;
+      return {
+        name: fileName,
+        permissions,
+        owner,
+        group,
+        size,
+        modified: `${date} ${time}`,
+        isDir,
+        isLink,
+        path: dirPath === '/' ? `/${fileName}` : `${dirPath}/${fileName}`,
+      };
+    }).filter(Boolean);
+    res.json({ success: true, path: dirPath, files });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to list files: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
+
+// GET /containers/:name/files/download - Download a file from the container
+lxcRouter.get('/containers/:name/files/download', async (req, res) => {
+  const { name } = req.params;
+  const filePath = req.query.path;
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  if (!filePath) {
+    return res.status(400).json({ success: false, error: 'File path is required.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const fileName = filePath.split('/').pop();
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+
+    const pullCmd = `incus file pull ${incusName}${filePath} -`;
+    const child = spawnOnHost(pullCmd);
+
+    child.stdout.pipe(res);
+
+    child.stderr.on('data', (data) => {
+      console.error(`[LXC] File download stderr: ${data.toString()}`);
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).json({ success: false, error: 'Failed to download file' });
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+});
+
+// POST /containers/:name/files/upload - Upload a file to the container
+lxcRouter.post('/containers/:name/files/upload', upload.single('file'), async (req, res) => {
+  const { name } = req.params;
+  const destPath = req.query.path || '/root/';
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file provided.' });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const fullDest = destPath.endsWith('/') ? `${destPath}${req.file.originalname}` : destPath;
+    const pushCmd = `incus file push - ${incusName}${fullDest}`;
+
+    await new Promise((resolve, reject) => {
+      const child = spawnOnHost(pushCmd);
+      let stderr = '';
+
+      child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      child.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `Push exited with code ${code}`));
+      });
+
+      child.on('error', reject);
+
+      child.stdin.write(req.file.buffer);
+      child.stdin.end();
+    });
+
+    res.json({
+      success: true,
+      message: `File uploaded to ${fullDest}`,
+      path: fullDest,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to upload file: ${error.message}`,
+    });
+  }
 });
 
 // POST /containers/:name/start - Start a container

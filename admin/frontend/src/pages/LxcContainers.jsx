@@ -20,10 +20,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
-  Box, AlertCircle, Check, Download, Settings, Wifi
+  Box, AlertCircle, Check, Download, Settings, Wifi,
+  Terminal, FolderOpen, File, Upload, ChevronRight, ArrowLeft, FolderUp
 } from 'lucide-react';
 
 const STATUS_COLORS = {
@@ -61,6 +63,297 @@ function formatDate(dateStr) {
   } catch {
     return dateStr;
   }
+}
+
+function formatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Terminal component for executing commands inside a container
+function ContainerTerminal({ containerName }) {
+  const [command, setCommand] = useState('');
+  const [history, setHistory] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [cmdHistory, setCmdHistory] = useState([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const outputRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const runCommand = async () => {
+    const cmd = command.trim();
+    if (!cmd || running) return;
+    setRunning(true);
+    setCommand('');
+    setCmdHistory(prev => [cmd, ...prev]);
+    setHistoryIdx(-1);
+
+    setHistory(prev => [...prev, { type: 'input', text: cmd }]);
+
+    try {
+      const result = await api.execInContainer(containerName, cmd);
+      if (result.stdout) {
+        setHistory(prev => [...prev, { type: 'stdout', text: result.stdout }]);
+      }
+      if (result.stderr) {
+        setHistory(prev => [...prev, { type: 'stderr', text: result.stderr }]);
+      }
+    } catch (err) {
+      setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
+    } finally {
+      setRunning(false);
+      setTimeout(() => {
+        outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
+        inputRef.current?.focus();
+      }, 50);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      runCommand();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (cmdHistory.length > 0) {
+        const newIdx = Math.min(historyIdx + 1, cmdHistory.length - 1);
+        setHistoryIdx(newIdx);
+        setCommand(cmdHistory[newIdx]);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIdx > 0) {
+        const newIdx = historyIdx - 1;
+        setHistoryIdx(newIdx);
+        setCommand(cmdHistory[newIdx]);
+      } else {
+        setHistoryIdx(-1);
+        setCommand('');
+      }
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div
+        ref={outputRef}
+        className="bg-black rounded-lg p-3 h-72 overflow-y-auto font-mono text-xs leading-relaxed"
+        onClick={() => inputRef.current?.focus()}
+      >
+        <div className="text-green-500 mb-2">Connected to {containerName}</div>
+        {history.map((entry, i) => (
+          <div key={i} className={`whitespace-pre-wrap break-all ${
+            entry.type === 'input' ? 'text-cyan-400' :
+            entry.type === 'stderr' ? 'text-red-400' :
+            'text-gray-300'
+          }`}>
+            {entry.type === 'input' && <span className="text-green-500">$ </span>}
+            {entry.text}
+          </div>
+        ))}
+        {running && (
+          <div className="flex items-center gap-1 text-yellow-500">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Running...
+          </div>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <div className="flex-1 flex items-center bg-black rounded-lg px-3 font-mono text-xs">
+          <span className="text-green-500 mr-1">$</span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Enter command..."
+            disabled={running}
+            className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"
+            autoFocus
+          />
+        </div>
+        <Button size="sm" onClick={runCommand} disabled={running || !command.trim()}>
+          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// File manager component for browsing, uploading, and downloading files
+function ContainerFiles({ containerName }) {
+  const { toast } = useToast();
+  const [currentPath, setCurrentPath] = useState('/root');
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const fetchFiles = useCallback(async (path) => {
+    setLoading(true);
+    try {
+      const res = await api.listContainerFiles(containerName, path);
+      setFiles(res.files || []);
+      setCurrentPath(path);
+    } catch (err) {
+      toast({ title: 'Error', description: `Failed to list files: ${err.message}`, variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  }, [containerName, toast]);
+
+  useEffect(() => {
+    fetchFiles('/root');
+  }, [fetchFiles]);
+
+  const navigateTo = (path) => {
+    fetchFiles(path);
+  };
+
+  const goUp = () => {
+    const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
+    fetchFiles(parent);
+  };
+
+  const handleDownload = (filePath) => {
+    const url = api.getContainerFileDownloadUrl(containerName, filePath);
+    const token = localStorage.getItem('token');
+    // Fetch with auth and trigger download
+    fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      .then(res => res.blob())
+      .then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filePath.split('/').pop();
+        a.click();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(err => toast({ title: 'Download failed', description: err.message, variant: 'destructive' }));
+  };
+
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await api.uploadFileToContainer(containerName, currentPath + '/', file);
+      toast({ title: 'Uploaded', description: `${file.name} uploaded to ${currentPath}` });
+      fetchFiles(currentPath);
+    } catch (err) {
+      toast({ title: 'Upload failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const breadcrumbs = currentPath.split('/').filter(Boolean);
+
+  return (
+    <div className="space-y-3">
+      {/* Breadcrumb navigation */}
+      <div className="flex items-center gap-1 text-xs flex-wrap">
+        <Button variant="ghost" size="sm" className="h-6 px-1" onClick={() => navigateTo('/')}>
+          /
+        </Button>
+        {breadcrumbs.map((part, i) => {
+          const path = '/' + breadcrumbs.slice(0, i + 1).join('/');
+          return (
+            <span key={path} className="flex items-center gap-1">
+              <ChevronRight className="h-3 w-3 text-muted-foreground" />
+              <Button variant="ghost" size="sm" className="h-6 px-1 text-xs" onClick={() => navigateTo(path)}>
+                {part}
+              </Button>
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex items-center gap-2">
+        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={goUp} disabled={currentPath === '/'}>
+          <ArrowLeft className="h-3 w-3 mr-1" />Up
+        </Button>
+        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => fetchFiles(currentPath)}>
+          <RefreshCw className="h-3 w-3 mr-1" />Refresh
+        </Button>
+        <div className="flex-1" />
+        <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" />
+        <Button
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          {uploading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Upload className="h-3 w-3 mr-1" />}
+          Upload
+        </Button>
+      </div>
+
+      {/* File list */}
+      <div className="border rounded-lg overflow-hidden">
+        <div className="grid grid-cols-[1fr_80px_120px_40px] gap-2 px-3 py-1.5 bg-muted text-xs font-medium text-muted-foreground">
+          <span>Name</span>
+          <span className="text-right">Size</span>
+          <span>Modified</span>
+          <span></span>
+        </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : files.length === 0 ? (
+          <div className="text-center py-8 text-xs text-muted-foreground">
+            Empty directory
+          </div>
+        ) : (
+          <div className="max-h-64 overflow-y-auto divide-y">
+            {files
+              .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
+              .map((file) => (
+                <div
+                  key={file.name}
+                  className={`grid grid-cols-[1fr_80px_120px_40px] gap-2 px-3 py-1.5 text-xs items-center hover:bg-muted/50 ${
+                    file.isDir ? 'cursor-pointer' : ''
+                  }`}
+                  onClick={() => file.isDir && navigateTo(file.path)}
+                >
+                  <span className="flex items-center gap-1.5 truncate">
+                    {file.isDir ? (
+                      <FolderOpen className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
+                    ) : (
+                      <File className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    )}
+                    <span className={`truncate ${file.isDir ? 'font-medium text-cyan-500' : ''}`}>
+                      {file.name}
+                    </span>
+                  </span>
+                  <span className="text-right text-muted-foreground">
+                    {file.isDir ? '-' : formatSize(file.size)}
+                  </span>
+                  <span className="text-muted-foreground truncate">{file.modified}</span>
+                  <span>
+                    {!file.isDir && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0"
+                        onClick={(e) => { e.stopPropagation(); handleDownload(file.path); }}
+                      >
+                        <Download className="h-3 w-3" />
+                      </Button>
+                    )}
+                  </span>
+                </div>
+              ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function LxcContainers() {
@@ -757,9 +1050,9 @@ export default function LxcContainers() {
         </DialogContent>
       </Dialog>
 
-      {/* Container Info Dialog */}
+      {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="sm:max-w-xl">
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -770,185 +1063,197 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <div className="space-y-4 py-2">
-              {/* Details */}
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div>
-                  <span className="text-muted-foreground">Status</span>
-                  <div className="mt-0.5"><StatusBadge status={selectedContainer.status} /></div>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Image</span>
-                  <div className="mt-0.5 font-mono text-xs">{selectedContainer.image || '-'}</div>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">IP Address</span>
-                  <div className="mt-0.5 font-mono text-xs">{selectedContainer.ipv4 || '-'}</div>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Created</span>
-                  <div className="mt-0.5 text-xs">{formatDate(selectedContainer.created)}</div>
-                </div>
-              </div>
+            <Tabs defaultValue="details" className="w-full">
+              <TabsList className="w-full grid grid-cols-3">
+                <TabsTrigger value="details">Details</TabsTrigger>
+                <TabsTrigger value="terminal">Terminal</TabsTrigger>
+                <TabsTrigger value="files">Files</TabsTrigger>
+              </TabsList>
 
-              {/* Resource Limits */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="text-sm font-medium">Resource Limits</h4>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={() => {
-                      setResizeForm({
-                        cpu: selectedContainer.config?.cpu || '',
-                        memory: selectedContainer.config?.memory?.replace(/[^0-9]/g, '') || '',
-                      });
-                      setResizeOpen(true);
-                    }}
-                  >
-                    Resize
-                  </Button>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <Card className="p-3">
-                    <div className="flex items-center gap-2">
-                      <Cpu className="h-4 w-4 text-blue-500" />
-                      <div>
-                        <div className="text-sm font-medium">{selectedContainer.config?.cpu || 'Unlimited'}</div>
-                        <div className="text-xs text-muted-foreground">CPU Cores</div>
-                      </div>
-                    </div>
-                  </Card>
-                  <Card className="p-3">
-                    <div className="flex items-center gap-2">
-                      <MemoryStick className="h-4 w-4 text-green-500" />
-                      <div>
-                        <div className="text-sm font-medium">{selectedContainer.config?.memory || 'Unlimited'}</div>
-                        <div className="text-xs text-muted-foreground">Memory</div>
-                      </div>
-                    </div>
-                  </Card>
-                </div>
-              </div>
-
-              {/* Live Resource Usage */}
-              {containerState && (
-                <div>
-                  <h4 className="text-sm font-medium mb-2">Live Usage</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    {containerState.cpu?.usage !== undefined && (
-                      <Card className="p-3">
-                        <div className="flex items-center gap-2">
-                          <Cpu className="h-4 w-4 text-blue-400" />
-                          <div>
-                            <div className="text-sm font-medium">
-                              {(containerState.cpu.usage / 1e9).toFixed(2)}s
-                            </div>
-                            <div className="text-xs text-muted-foreground">CPU Time</div>
-                          </div>
-                        </div>
-                      </Card>
-                    )}
-                    {containerState.memory?.usage !== undefined && (
-                      <Card className="p-3">
-                        <div className="flex items-center gap-2">
-                          <MemoryStick className="h-4 w-4 text-green-400" />
-                          <div>
-                            <div className="text-sm font-medium">
-                              {(containerState.memory.usage / 1024 / 1024).toFixed(0)} MB
-                            </div>
-                            <div className="text-xs text-muted-foreground">Memory Used</div>
-                          </div>
-                        </div>
-                      </Card>
-                    )}
-                    {containerState.disk?.root?.usage !== undefined && (
-                      <Card className="p-3">
-                        <div className="flex items-center gap-2">
-                          <HardDrive className="h-4 w-4 text-orange-400" />
-                          <div>
-                            <div className="text-sm font-medium">
-                              {(containerState.disk.root.usage / 1024 / 1024).toFixed(0)} MB
-                            </div>
-                            <div className="text-xs text-muted-foreground">Disk Used</div>
-                          </div>
-                        </div>
-                      </Card>
-                    )}
+              {/* Details Tab */}
+              <TabsContent value="details" className="space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <span className="text-muted-foreground">Status</span>
+                    <div className="mt-0.5"><StatusBadge status={selectedContainer.status} /></div>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">Image</span>
+                    <div className="mt-0.5 font-mono text-xs">{selectedContainer.image || '-'}</div>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">IP Address</span>
+                    <div className="mt-0.5 font-mono text-xs">{selectedContainer.ipv4 || '-'}</div>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">Created</span>
+                    <div className="mt-0.5 text-xs">{formatDate(selectedContainer.created)}</div>
                   </div>
                 </div>
-              )}
 
-              {/* Snapshots */}
-              <div>
-                <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
-                  <Camera className="h-4 w-4" />
-                  Snapshots
-                </h4>
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Input
-                      placeholder="Snapshot name"
-                      value={snapshotName}
-                      onChange={(e) => setSnapshotName(e.target.value)}
-                      className="h-8 text-sm"
-                    />
+                {/* Resource Limits */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-medium">Resource Limits</h4>
                     <Button
+                      variant="outline"
                       size="sm"
-                      className="h-8 shrink-0"
-                      onClick={handleCreateSnapshot}
-                      disabled={snapshotLoading || !snapshotName.trim()}
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setResizeForm({
+                          cpu: selectedContainer.config?.cpu || '',
+                          memory: selectedContainer.config?.memory?.replace(/[^0-9]/g, '') || '',
+                        });
+                        setResizeOpen(true);
+                      }}
                     >
-                      {snapshotLoading ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <><Camera className="h-3 w-3 mr-1" />Create</>
-                      )}
+                      Resize
                     </Button>
                   </div>
-                  {snapshots.length === 0 ? (
-                    <p className="text-xs text-muted-foreground py-2">No snapshots yet.</p>
-                  ) : (
-                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                      {snapshots.map((snap) => (
-                        <div
-                          key={snap.name || snap}
-                          className="flex items-center justify-between border rounded-md p-2 text-xs"
-                        >
-                          <div>
-                            <span className="font-medium">{snap.name || snap}</span>
-                            {snap.created_at && (
-                              <span className="ml-2 text-muted-foreground">{formatDate(snap.created_at)}</span>
-                            )}
-                          </div>
-                          <div className="flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
-                              onClick={() => handleRestoreSnapshot(snap.name || snap)}
-                              disabled={snapshotLoading}
-                            >
-                              Restore
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
-                              onClick={() => handleDeleteSnapshot(snap.name || snap)}
-                              disabled={snapshotLoading}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
-                          </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Card className="p-3">
+                      <div className="flex items-center gap-2">
+                        <Cpu className="h-4 w-4 text-blue-500" />
+                        <div>
+                          <div className="text-sm font-medium">{selectedContainer.config?.cpu || 'Unlimited'}</div>
+                          <div className="text-xs text-muted-foreground">CPU Cores</div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    </Card>
+                    <Card className="p-3">
+                      <div className="flex items-center gap-2">
+                        <MemoryStick className="h-4 w-4 text-green-500" />
+                        <div>
+                          <div className="text-sm font-medium">{selectedContainer.config?.memory || 'Unlimited'}</div>
+                          <div className="text-xs text-muted-foreground">Memory</div>
+                        </div>
+                      </div>
+                    </Card>
+                  </div>
                 </div>
-              </div>
-            </div>
+
+                {/* Live Resource Usage */}
+                {containerState && (
+                  <div>
+                    <h4 className="text-sm font-medium mb-2">Live Usage</h4>
+                    <div className="grid grid-cols-2 gap-3">
+                      {containerState.cpu?.usage !== undefined && (
+                        <Card className="p-3">
+                          <div className="flex items-center gap-2">
+                            <Cpu className="h-4 w-4 text-blue-400" />
+                            <div>
+                              <div className="text-sm font-medium">{(containerState.cpu.usage / 1e9).toFixed(2)}s</div>
+                              <div className="text-xs text-muted-foreground">CPU Time</div>
+                            </div>
+                          </div>
+                        </Card>
+                      )}
+                      {containerState.memory?.usage !== undefined && (
+                        <Card className="p-3">
+                          <div className="flex items-center gap-2">
+                            <MemoryStick className="h-4 w-4 text-green-400" />
+                            <div>
+                              <div className="text-sm font-medium">{(containerState.memory.usage / 1024 / 1024).toFixed(0)} MB</div>
+                              <div className="text-xs text-muted-foreground">Memory Used</div>
+                            </div>
+                          </div>
+                        </Card>
+                      )}
+                      {containerState.disk?.root?.usage !== undefined && (
+                        <Card className="p-3">
+                          <div className="flex items-center gap-2">
+                            <HardDrive className="h-4 w-4 text-orange-400" />
+                            <div>
+                              <div className="text-sm font-medium">{(containerState.disk.root.usage / 1024 / 1024).toFixed(0)} MB</div>
+                              <div className="text-xs text-muted-foreground">Disk Used</div>
+                            </div>
+                          </div>
+                        </Card>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Snapshots */}
+                <div>
+                  <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                    <Camera className="h-4 w-4" />
+                    Snapshots
+                  </h4>
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="Snapshot name"
+                        value={snapshotName}
+                        onChange={(e) => setSnapshotName(e.target.value)}
+                        className="h-8 text-sm"
+                      />
+                      <Button
+                        size="sm"
+                        className="h-8 shrink-0"
+                        onClick={handleCreateSnapshot}
+                        disabled={snapshotLoading || !snapshotName.trim()}
+                      >
+                        {snapshotLoading ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <><Camera className="h-3 w-3 mr-1" />Create</>
+                        )}
+                      </Button>
+                    </div>
+                    {snapshots.length === 0 ? (
+                      <p className="text-xs text-muted-foreground py-2">No snapshots yet.</p>
+                    ) : (
+                      <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                        {snapshots.map((snap) => (
+                          <div
+                            key={snap.name || snap}
+                            className="flex items-center justify-between border rounded-md p-2 text-xs"
+                          >
+                            <div>
+                              <span className="font-medium">{snap.name || snap}</span>
+                              {snap.created_at && (
+                                <span className="ml-2 text-muted-foreground">{formatDate(snap.created_at)}</span>
+                              )}
+                            </div>
+                            <div className="flex gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
+                                onClick={() => handleRestoreSnapshot(snap.name || snap)}
+                                disabled={snapshotLoading}
+                              >
+                                Restore
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
+                                onClick={() => handleDeleteSnapshot(snap.name || snap)}
+                                disabled={snapshotLoading}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </TabsContent>
+
+              {/* Terminal Tab */}
+              <TabsContent value="terminal">
+                <ContainerTerminal containerName={selectedContainer.name} />
+              </TabsContent>
+
+              {/* Files Tab */}
+              <TabsContent value="files">
+                <ContainerFiles containerName={selectedContainer.name} />
+              </TabsContent>
+            </Tabs>
           )}
         </DialogContent>
       </Dialog>

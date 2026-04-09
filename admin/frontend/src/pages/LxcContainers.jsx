@@ -82,6 +82,7 @@ function ContainerTerminal({ containerName }) {
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [cwd, setCwd] = useState('/root');
   const [elapsed, setElapsed] = useState(0);
+  const [bgMode, setBgMode] = useState(false);
   const outputRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -110,7 +111,7 @@ function ContainerTerminal({ containerName }) {
     setHistory(prev => [...prev, { type: 'stderr', text: '^C Cancelled' }]);
     setRunning(false);
     scrollToBottom();
-    inputRef.current?.focus();
+    setTimeout(() => inputRef.current?.focus(), 50);
   };
 
   const runCommand = async () => {
@@ -138,8 +139,14 @@ function ContainerTerminal({ containerName }) {
     // Handle cd locally to track cwd
     const cdMatch = cmd.match(/^cd\s+(.*)/);
 
+    // Background mode: wrap with nohup, reset toggle after use
+    const execCmd = bgMode
+      ? `nohup sh -c ${JSON.stringify(cmd)} > /tmp/pp-bg-cmd.log 2>&1 & echo "Background PID: $!"`
+      : cmd;
+    if (bgMode) setBgMode(false);
+
     try {
-      const response = await api.execInContainer(containerName, cmd, cwd, controller.signal);
+      const response = await api.execInContainer(containerName, execCmd, cwd, controller.signal);
       const result = await response.json();
 
       if (!response.ok || !result.success) {
@@ -151,6 +158,9 @@ function ContainerTerminal({ containerName }) {
       const outputEntries = [];
       if (result.stdout) outputEntries.push({ type: 'stdout', text: result.stdout });
       if (result.stderr) outputEntries.push({ type: 'stderr', text: result.stderr });
+      if (result.timedOut) {
+        outputEntries.push({ type: 'stderr', text: '--- Command timed out after 5 minutes (process was killed, not running in background) ---' });
+      }
 
       if (outputEntries.length > 0) {
         setHistory(prev => [...prev, ...outputEntries]);
@@ -183,7 +193,8 @@ function ContainerTerminal({ containerName }) {
       abortRef.current = null;
       setRunning(false);
       scrollToBottom();
-      inputRef.current?.focus();
+      // Delay focus until after React re-renders and removes disabled attr
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
@@ -297,6 +308,16 @@ function ContainerTerminal({ containerName }) {
             autoFocus
           />
         </div>
+        <Button
+          size="sm"
+          variant={bgMode ? 'default' : 'outline'}
+          onClick={() => setBgMode(!bgMode)}
+          disabled={running}
+          title="Run in background with nohup (output to /tmp/pp-bg-cmd.log)"
+          className={`shrink-0 text-xs px-2 ${bgMode ? 'bg-blue-600 hover:bg-blue-700' : ''}`}
+        >
+          BG
+        </Button>
         {running ? (
           <Button size="sm" variant="destructive" onClick={cancelCommand} title="Cancel (Ctrl+C)">
             <Square className="h-3 w-3 mr-1" />Ctrl-C
@@ -307,7 +328,7 @@ function ContainerTerminal({ containerName }) {
           </Button>
         )}
       </div>
-      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history</p>
+      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history · BG: run with nohup (check /tmp/pp-bg-cmd.log)</p>
     </div>
   );
 }

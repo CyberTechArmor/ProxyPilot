@@ -512,7 +512,7 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   // Timeout is required because incus exec hangs waiting for stdin; output is collected
   // before the timeout fires, so quick commands return their full output.
   try {
-    const result = await execOnHost(execCmd, { timeout: 30000 });
+    const result = await execOnHost(execCmd, { timeout: 300000 });
     res.json({ success: true, stdout: result.stdout || '', stderr: result.stderr || '', exitCode: 0 });
   } catch (error) {
     // exec throws on non-zero exit OR timeout - both return collected output
@@ -522,6 +522,7 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
       stdout: error.stdout || '',
       stderr: error.stderr || '',
       exitCode: error.killed ? 124 : (error.code || 1),
+      timedOut: !!error.killed,
     });
   }
 });

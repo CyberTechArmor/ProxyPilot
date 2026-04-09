@@ -262,6 +262,22 @@ export function initDatabase() {
     ON access_log(user_id, created_at DESC)
   `);
 
+  // Create snapshot notes table for multiple notes per snapshot
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS snapshot_notes (
+      id TEXT PRIMARY KEY,
+      container_name TEXT NOT NULL,
+      snapshot_name TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_snapshot_notes_lookup
+    ON snapshot_notes(container_name, snapshot_name, created_at DESC)
+  `);
+
   // Check if admin user exists, create if not
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
 

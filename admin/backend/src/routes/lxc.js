@@ -6,6 +6,8 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import multer from 'multer';
 import { requireAdmin } from '../middleware/auth.js';
+import { getDb } from '../db.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const execAsync = promisify(exec);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB limit
@@ -1094,6 +1096,11 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus snapshot delete ${incusName} ${snapshotName} 2>&1`);
+    // Clean up notes for deleted snapshot
+    try {
+      const db = getDb();
+      db.prepare('DELETE FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ?').run(name, snapshotName);
+    } catch {}
     res.json({
       success: true,
       message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
@@ -1104,5 +1111,66 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
       error: `Failed to delete snapshot from container '${name}': ${(error.stderr || error.message || '').trim()}`,
       details: error.stderr || error.message,
     });
+  }
+});
+
+// GET /containers/:name/snapshot/:snapshotName/notes - Get notes for a snapshot
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
+  const { name, snapshotName } = req.params;
+
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+
+  try {
+    const db = getDb();
+    const notes = db.prepare(
+      'SELECT id, note, created_at FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ? ORDER BY created_at DESC'
+    ).all(name, snapshotName);
+    res.json({ success: true, notes });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to get notes.' });
+  }
+});
+
+// POST /containers/:name/snapshot/:snapshotName/notes - Add a note to a snapshot
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/notes', (req, res) => {
+  const { name, snapshotName } = req.params;
+  const { note } = req.body;
+
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+
+  if (!note || typeof note !== 'string' || !note.trim()) {
+    return res.status(400).json({ success: false, error: 'Note text is required.' });
+  }
+
+  try {
+    const db = getDb();
+    const id = uuidv4();
+    db.prepare(
+      'INSERT INTO snapshot_notes (id, container_name, snapshot_name, note) VALUES (?, ?, ?, ?)'
+    ).run(id, name, snapshotName, note.trim());
+    res.json({ success: true, id, message: 'Note added.' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to add note.' });
+  }
+});
+
+// DELETE /containers/:name/snapshot/:snapshotName/notes/:noteId - Delete a note
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/notes/:noteId', (req, res) => {
+  const { name, snapshotName, noteId } = req.params;
+
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM snapshot_notes WHERE id = ? AND container_name = ? AND snapshot_name = ?').run(noteId, name, snapshotName);
+    res.json({ success: true, message: 'Note deleted.' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete note.' });
   }
 });

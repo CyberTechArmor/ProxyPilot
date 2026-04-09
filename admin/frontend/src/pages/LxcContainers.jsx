@@ -115,14 +115,16 @@ function ContainerTerminal({ containerName }) {
     setTimeout(() => inputRef.current?.focus(), 50);
   };
 
-  const runCommand = async () => {
-    const cmd = command.trim();
+  const runCommand = async (directCmd) => {
+    const cmd = (directCmd || command).trim();
     if (!cmd || running) return;
     setRunning(true);
     setCommand('');
     setElapsed(0);
-    setCmdHistory(prev => [cmd, ...prev]);
-    setHistoryIdx(-1);
+    if (!directCmd) {
+      setCmdHistory(prev => [cmd, ...prev]);
+      setHistoryIdx(-1);
+    }
 
     setHistory(prev => [...prev, { type: 'input', text: `${cwd}$ ${cmd}` }]);
     scrollToBottom();
@@ -333,8 +335,8 @@ function ContainerTerminal({ containerName }) {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => { setCommand('tail -80 /tmp/pp-bg-cmd.log'); }}
-            title="View background command log (press Enter or Run to execute)"
+            onClick={() => runCommand('tail -100 /tmp/pp-bg-cmd.log')}
+            title="View background command output log"
             className="shrink-0 text-xs px-2"
           >
             View Log

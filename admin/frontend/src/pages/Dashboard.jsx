@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import LxcContainers from './LxcContainers';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -74,6 +75,7 @@ import {
   RotateCw,
   Radar,
   Import,
+  Box,
   Boxes,
   LayoutGrid,
   List,
@@ -2859,6 +2861,15 @@ volumes:
             <Container className="h-4 w-4" />
             Compose
           </Button>
+          <Button
+            variant={dashboardTab === 'lxc' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setDashboardTab('lxc')}
+            className="gap-2"
+          >
+            <Box className="h-4 w-4" />
+            LXC
+          </Button>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Default view:</span>
@@ -2873,6 +2884,7 @@ volumes:
             <option value="resources">Resources</option>
             <option value="services">Services</option>
             <option value="compose">Compose</option>
+            <option value="lxc">LXC</option>
           </select>
         </div>
       </div>
@@ -3652,6 +3664,10 @@ volumes:
             </div>
           )}
         </div>
+      )}
+
+      {dashboardTab === 'lxc' && (
+        <LxcContainers />
       )}
 
       {/* Delete Confirmation Dialog */}

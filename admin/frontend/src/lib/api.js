@@ -365,6 +365,58 @@ export const api = {
   restartApplication: () => request('/user/version/restart', {
     method: 'POST',
   }),
+
+  // LXC Container Management
+  getLxcStatus: () => request('/lxc/status'),
+
+  getLxcContainers: () => request('/lxc/containers'),
+
+  getLxcContainer: (name) => request(`/lxc/containers/${name}`),
+
+  getLxcContainerState: (name) => request(`/lxc/containers/${name}/state`),
+
+  createLxcContainer: (data) => request('/lxc/containers', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  startLxcContainer: (name) => request(`/lxc/containers/${name}/start`, {
+    method: 'POST',
+  }),
+
+  stopLxcContainer: (name) => request(`/lxc/containers/${name}/stop`, {
+    method: 'POST',
+  }),
+
+  restartLxcContainer: (name) => request(`/lxc/containers/${name}/restart`, {
+    method: 'POST',
+  }),
+
+  deleteLxcContainer: (name) => request(`/lxc/containers/${name}`, {
+    method: 'DELETE',
+  }),
+
+  resizeLxcContainer: (name, limits) => request(`/lxc/containers/${name}/resize`, {
+    method: 'POST',
+    body: JSON.stringify(limits),
+  }),
+
+  getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
+
+  createLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot`, {
+    method: 'POST',
+    body: JSON.stringify({ snapshotName }),
+  }),
+
+  restoreLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/restore`, {
+    method: 'POST',
+  }),
+
+  deleteLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}`, {
+    method: 'DELETE',
+  }),
+
+  getLxcImages: () => request('/lxc/images'),
 };
 
 export { ApiError };

@@ -10,6 +10,7 @@ import { initDatabase } from './db.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
+import { lxcRouter } from './routes/lxc.js';
 import { authenticateToken } from './middleware/auth.js';
 
 // Load environment variables - check multiple paths for .env
@@ -98,6 +99,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/services', authenticateToken, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
+app.use('/api/lxc', authenticateToken, lxcRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

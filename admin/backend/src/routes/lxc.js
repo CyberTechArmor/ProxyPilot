@@ -600,7 +600,8 @@ lxcRouter.post('/containers/:name/exec', async (req, res) => {
   }
 
   const incusName = `${INSTANCE_PREFIX}${name}`;
-  const fullCmd = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : command;
+  const envSetup = 'export TERM=xterm DEBIAN_FRONTEND=noninteractive;';
+  const fullCmd = cwd ? `${envSetup} cd ${JSON.stringify(cwd)} 2>/dev/null; ${command}` : `${envSetup} ${command}`;
   const execCmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(fullCmd)}`;
 
   // Timeout is required: incus exec hangs after command finishes.

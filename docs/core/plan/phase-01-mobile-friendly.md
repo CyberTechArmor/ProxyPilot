@@ -90,7 +90,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 - [x] `Dashboard` page header row (admin/frontend/src/pages/Dashboard.jsx:2647)
       — header becomes `flex-col gap-3 sm:flex-row sm:items-center sm:justify-between`; action button row wraps (`flex-wrap`) so Reload/Regenerate/Export/Import/Discover/Terminal/One-Click/Kill Switch/Add Service do not cause horizontal scroll at 375px.
-- [ ] `Dashboard` header notification popover (admin/frontend/src/pages/Dashboard.jsx:2715)
+- [x] `Dashboard` header notification popover (admin/frontend/src/pages/Dashboard.jsx:2715)
       — popover width becomes `w-[min(20rem,calc(100vw-2rem))]`; `right-0` stays so it anchors to the bell and stays in the viewport at 360px.
 - [ ] `Dashboard` Add Service wizard dialog (admin/frontend/src/pages/Dashboard.jsx:2754)
       — `DialogContent` becomes `max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg` (step 0) and `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg` (step 1); completable on 375px end-to-end.

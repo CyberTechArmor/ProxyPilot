@@ -2712,7 +2712,7 @@ volumes:
               <Bell className="h-4 w-4" />
             </Button>
             {notifOpen && (
-              <div className="absolute right-0 top-10 z-50 w-80 max-h-96 overflow-y-auto border rounded-lg bg-background shadow-lg">
+              <div className="absolute right-0 top-10 z-50 w-[min(20rem,calc(100vw-2rem))] max-h-96 overflow-y-auto border rounded-lg bg-background shadow-lg">
                 <div className="flex items-center justify-between p-3 border-b">
                   <h4 className="text-sm font-medium">Notifications</h4>
                   <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setNotifOpen(false)}>

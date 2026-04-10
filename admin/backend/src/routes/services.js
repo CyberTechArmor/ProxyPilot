@@ -941,32 +941,109 @@ servicesRouter.post('/caddy/reload', async (req, res) => {
 });
 
 // Get all services
+// Phase 2b D.12: the list endpoint now nests a `routes` array under each
+// service. It also exposes the Phase 2b service-level fields (`kind`,
+// `runtime`, `targetIp`, `lxcContainerName`) and retains the legacy
+// top-level route-owned fields (`domain`, `pathPrefix`, `port`,
+// `sslEnabled`, `forceHttps`, `websocketEnabled`, `maxUploadSize`) for
+// backward compatibility with the pre-Section-H frontend. Pre-D.14 the
+// legacy fields are read from the services row directly; post-D.14 they
+// are synthesized from the primary route (earliest-created). Using
+// `SELECT *` + optional-chaining lets a single code path handle both
+// states without additional branching.
 servicesRouter.get('/', (req, res) => {
   try {
     const db = getDb();
-    const services = db.prepare(`
-      SELECT id, name, domain, path_prefix as pathPrefix, type, target, port,
-             root_dir as rootDir,
-             container_name as containerName, ssl_enabled as sslEnabled,
-             force_https as forceHttps, websocket_enabled as websocketEnabled,
-             max_upload_size as maxUploadSize, status, is_admin as isAdmin,
-             is_favorite as isFavorite, data_dir as dataDir,
-             created_at as createdAt, updated_at as updatedAt
-      FROM services
-      ORDER BY is_favorite DESC, created_at DESC
-    `).all();
 
-    // Convert integer booleans to actual booleans
-    // Caddy auto-manages certs, so sslCertificateExists matches sslEnabled
-    const formattedServices = services.map(s => ({
-      ...s,
-      sslEnabled: !!s.sslEnabled,
-      forceHttps: !!s.forceHttps,
-      websocketEnabled: !!s.websocketEnabled,
-      isAdmin: !!s.isAdmin,
-      isFavorite: !!s.isFavorite,
-      sslCertificateExists: !!s.sslEnabled,
-    }));
+    // Phase 2b-safe fetch: SELECT * so dropped columns simply become
+    // undefined on the row object post-D.14.
+    const servicesRows = db
+      .prepare(
+        `SELECT * FROM services ORDER BY is_favorite DESC, created_at DESC`
+      )
+      .all();
+
+    // Fetch all routes in one query and group by service_id. Order by
+    // created_at so routes[0] is always the "primary" (earliest-created)
+    // — this matches D.1's syncPrimaryRouteFromLegacy semantics.
+    const allRoutes = db
+      .prepare(
+        `SELECT id, service_id, domain, path_prefix, target_port,
+                websocket_enabled, ssl_enabled, force_https,
+                max_upload_size, created_at
+           FROM service_http_routes
+          ORDER BY created_at ASC, id ASC`
+      )
+      .all();
+
+    const routesByService = new Map();
+    for (const r of allRoutes) {
+      if (!routesByService.has(r.service_id)) {
+        routesByService.set(r.service_id, []);
+      }
+      routesByService.get(r.service_id).push({
+        id: r.id,
+        serviceId: r.service_id,
+        domain: r.domain,
+        pathPrefix: r.path_prefix,
+        targetPort: r.target_port,
+        websocketEnabled: !!r.websocket_enabled,
+        sslEnabled: !!r.ssl_enabled,
+        forceHttps: !!r.force_https,
+        maxUploadSize: r.max_upload_size,
+        createdAt: r.created_at,
+      });
+    }
+
+    const formattedServices = servicesRows.map((s) => {
+      const routes = routesByService.get(s.id) || [];
+      const primary = routes[0];
+
+      // Legacy top-level fields: prefer the stored legacy columns when
+      // present (pre-D.14), fall back to the primary route (post-D.14).
+      // Fresh-install tables still have the legacy columns, so during
+      // the D.4-D.13 transition both sources agree.
+      const topDomain = s.domain ?? primary?.domain ?? null;
+      const topPathPrefix = s.path_prefix ?? primary?.pathPrefix ?? '/';
+      const topPort = s.port ?? primary?.targetPort ?? null;
+      const topSsl = s.ssl_enabled ?? (primary ? (primary.sslEnabled ? 1 : 0) : 0);
+      const topForce = s.force_https ?? (primary ? (primary.forceHttps ? 1 : 0) : 0);
+      const topWs = s.websocket_enabled ?? (primary ? (primary.websocketEnabled ? 1 : 0) : 0);
+      const topMax = s.max_upload_size ?? primary?.maxUploadSize ?? '1G';
+
+      return {
+        id: s.id,
+        name: s.name,
+        // Phase 2b service-level fields
+        kind: s.kind,
+        runtime: s.runtime,
+        targetIp: s.target_ip ?? null,
+        lxcContainerName: s.lxc_container_name ?? null,
+        // Legacy service-level fields that are NOT route-owned
+        type: s.type,
+        target: s.target,
+        rootDir: s.root_dir,
+        containerName: s.container_name,
+        dataDir: s.data_dir,
+        status: s.status,
+        isAdmin: !!s.is_admin,
+        isFavorite: !!s.is_favorite,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+        // Legacy top-level route-owned fields (backward compat — Section
+        // H will update the frontend to read from the nested routes array)
+        domain: topDomain,
+        pathPrefix: topPathPrefix,
+        port: topPort,
+        sslEnabled: !!topSsl,
+        forceHttps: !!topForce,
+        websocketEnabled: !!topWs,
+        maxUploadSize: topMax,
+        sslCertificateExists: !!topSsl,
+        // Phase 2b nested routes
+        routes,
+      };
+    });
 
     res.json({ services: formattedServices });
   } catch (error) {

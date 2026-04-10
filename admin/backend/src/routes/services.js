@@ -3285,16 +3285,52 @@ function toCaddySize(size) {
   return size.toUpperCase().replace(/^(\d+)G$/i, '$1GB').replace(/^(\d+)M$/i, '$1MB');
 }
 
-// Emit the per-service handler body (the `reverse_proxy` / `root` + `file_server`
+// Emit the per-entry handler body (the `reverse_proxy` / `root` + `file_server`
 // lines) without any wrapping site block, `handle_path`, or `handle`. The caller
 // decides how to wrap these lines — single-service configs emit them bare inside
-// the site block, multi-service (merged) configs wrap each service's body in its
+// the site block, multi-service (merged) configs wrap each entry's body in its
 // own `handle_path ${prefix}*` or `handle` block.
 //
 // `indent` controls the leading whitespace so the caller can nest the body at the
 // appropriate depth (e.g. '    ' for site-level, '        ' for inside a handle).
-function generateServiceHandlerBody(service, indent = '    ') {
-  const { type, target, port, rootDir } = service;
+//
+// Phase 2b accepts two input shapes so callers during the Section D transition
+// can pass either:
+//
+//   Legacy (Phase 2) service row:
+//     { type: 'static' | 'docker' | 'proxy',
+//       target: '127.0.0.1', port: 3000,
+//       root_dir or rootDir: '/data/services/foo' }
+//
+//   Phase 2b joined (service, route) entry:
+//     { kind: 'static_site' | 'container_service',
+//       target_ip or targetIp: '10.0.0.5',
+//       target_port or targetPort: 8000,
+//       root_dir or rootDir: '/data/services/foo',
+//       type: retained for backward compatibility (optional) }
+//
+// The function normalizes both shapes into a canonical `{branch, target, port,
+// caddyRootDir}` tuple before emitting. `kind` takes precedence over `type` when
+// both are present — once D.14 drops the legacy columns, `type` will be gone
+// and `kind` will be the only decider.
+function generateServiceHandlerBody(entry, indent = '    ') {
+  // Field name normalization: accept DB snake_case, JS camelCase, and both
+  // Phase 2 legacy (`port`, `target`) and Phase 2b (`target_port`/`targetPort`,
+  // `target_ip`/`targetIp`) names.
+  const port =
+    entry.targetPort !== undefined
+      ? entry.targetPort
+      : entry.target_port !== undefined
+      ? entry.target_port
+      : entry.port;
+  const target =
+    entry.targetIp !== undefined && entry.targetIp !== null
+      ? entry.targetIp
+      : entry.target_ip !== undefined && entry.target_ip !== null
+      ? entry.target_ip
+      : entry.target;
+  const rootDir =
+    entry.rootDir !== undefined ? entry.rootDir : entry.root_dir;
 
   // Convert container path to host path for Caddy. If rootDir starts with
   // SERVICES_DATA_DIR, rewrite to CADDY_STATIC_ROOT (same translation the
@@ -3304,9 +3340,26 @@ function generateServiceHandlerBody(service, indent = '    ') {
     caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
 
+  // Branch selection: Phase 2b `kind` wins when present; otherwise fall back
+  // to legacy `type`. Map `type='static'` to the static-site branch and
+  // `type='docker'`/`type='proxy'` to the reverse-proxy branch.
+  let branch;
+  if (entry.kind === 'static_site') {
+    branch = 'static';
+  } else if (entry.kind === 'container_service') {
+    branch = 'proxy';
+  } else if (entry.type === 'static') {
+    branch = 'static';
+  } else if (entry.type === 'docker' || entry.type === 'proxy') {
+    branch = 'proxy';
+  } else {
+    // Unknown input: emit nothing rather than crash. The caller's outer
+    // validation should catch this before we get here.
+    branch = 'unknown';
+  }
+
   const lines = [];
-  switch (type) {
-    case 'docker':
+  switch (branch) {
     case 'proxy':
       // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For,
       // X-Forwarded-Proto, and WebSocket upgrades.

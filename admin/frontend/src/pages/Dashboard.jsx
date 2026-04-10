@@ -3919,7 +3919,7 @@ volumes:
 
       {/* Docker Compose Create Dialog */}
       <Dialog open={composeCreateOpen} onOpenChange={setComposeCreateOpen}>
-        <DialogContent className="max-w-4xl h-[90vh] flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-4xl sm:h-[90vh] sm:rounded-lg flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Boxes className="h-5 w-5 text-purple-500" />
@@ -3997,23 +3997,25 @@ volumes:
               {composeCreateForm.envVars.length > 0 && (
                 <div className="space-y-2 max-h-32 overflow-y-auto">
                   {composeCreateForm.envVars.map((env, index) => (
-                    <div key={index} className="flex gap-2 items-center">
+                    <div key={index} className="flex flex-col sm:flex-row gap-2 sm:items-center">
                       <Input
                         placeholder="KEY"
                         value={env.key}
                         onChange={(e) => updateEnvVar(index, 'key', e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'))}
-                        className="w-1/3 font-mono text-sm"
+                        className="w-full sm:w-1/3 font-mono text-sm"
                       />
-                      <span className="text-muted-foreground">=</span>
-                      <Input
-                        placeholder="value or {password}"
-                        value={env.value}
-                        onChange={(e) => updateEnvVar(index, 'value', e.target.value)}
-                        className="flex-1 font-mono text-sm"
-                      />
-                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500" onClick={() => removeEnvVar(index)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <span className="text-muted-foreground hidden sm:inline">=</span>
+                      <div className="flex gap-2 items-center">
+                        <Input
+                          placeholder="value or {password}"
+                          value={env.value}
+                          onChange={(e) => updateEnvVar(index, 'value', e.target.value)}
+                          className="flex-1 font-mono text-sm"
+                        />
+                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 shrink-0" onClick={() => removeEnvVar(index)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>

@@ -93,6 +93,7 @@ import {
   Settings,
   Bell,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 // Language detection based on file extension
 const getLanguageFromFile = (filename) => {

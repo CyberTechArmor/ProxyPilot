@@ -135,8 +135,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — on `<md`, render a centered "Open Terminal" button inside the dialog content (or early-return a compact "Terminal not available on small screens — tap to open fullscreen" card) so the terminal never traps the user; when opened, always uses `max-w-full h-full rounded-none` regardless of `terminalFullscreen`. *Implemented: the dialog is always full-screen on `<sm` (`max-w-full h-full rounded-none`) regardless of the `terminalFullscreen` toggle; close button stays reachable in the header; desktop behavior at `sm+` unchanged.*
 - [x] `Dashboard` terminal left panel responsiveness (admin/frontend/src/pages/Dashboard.jsx:4044)
       — `flex-col md:flex-row` is already there; file-browser panel now capped at `max-h-48 md:max-h-none` on mobile (both fullscreen and non-fullscreen) so the terminal output area is still reachable at 375px.
-- [ ] `Dashboard` file editor dialog (admin/frontend/src/pages/Dashboard.jsx:4475)
-      — `max-w-6xl h-[90vh]` → on `<md` always full-screen (`max-w-full h-full rounded-none`); `isFullscreen` toggle keeps its desktop behavior. File tree sidebar becomes a slide-over drawer on `<md` (`hidden md:flex` by default, toggled by a "Files" button in the toolbar).
+- [x] `Dashboard` file editor dialog (admin/frontend/src/pages/Dashboard.jsx:4475)
+      — `max-w-6xl h-[90vh]` → on `<sm` always full-screen (`max-w-full h-full rounded-none`); `isFullscreen` toggle keeps its desktop behavior. File tree sidebar becomes a slide-over drawer on `<md` (default hidden, toggled by a "Files" button in the toolbar) with a black/50 backdrop.
 - [ ] `Dashboard` file editor Path Picker row (admin/frontend/src/pages/Dashboard.jsx:4507)
       — row wraps (`flex-wrap`) so the Label/Input/Terminal button stack on 360px instead of pushing the input to zero width.
 - [ ] `Dashboard` file editor toolbar (admin/frontend/src/pages/Dashboard.jsx:4578)

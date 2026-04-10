@@ -205,6 +205,8 @@ export default function Dashboard() {
   // Full screen editor state
   const [editorOpen, setEditorOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Mobile-only file tree drawer toggle in the file editor
+  const [mobileFileTreeOpen, setMobileFileTreeOpen] = useState(false);
 
   // Add service wizard state
   const [wizardStep, setWizardStep] = useState(0);
@@ -4499,7 +4501,7 @@ volumes:
 
       {/* Full Screen File Editor */}
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
-        <DialogContent className={`${isFullscreen ? 'max-w-full h-full m-0 rounded-none' : 'max-w-6xl h-[90vh]'} flex flex-col`}>
+        <DialogContent className={`max-w-full h-full rounded-none ${isFullscreen ? 'sm:max-w-full sm:h-full sm:m-0 sm:rounded-none' : 'sm:max-w-6xl sm:h-[90vh] sm:rounded-lg'} flex flex-col`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>
@@ -4579,14 +4581,40 @@ volumes:
             </div>
           )}
 
-          <div className="flex gap-4 flex-1 min-h-0">
-            {/* File Tree */}
-            <div className="w-64 shrink-0 border rounded flex flex-col">
+          <div className="relative flex gap-4 flex-1 min-h-0">
+            {/* Mobile file tree backdrop */}
+            {mobileFileTreeOpen && (
+              <div
+                className="fixed inset-0 z-40 bg-black/50 md:hidden"
+                onClick={() => setMobileFileTreeOpen(false)}
+                aria-hidden="true"
+              />
+            )}
+            {/* File Tree (drawer on <md, static sidebar on md+) */}
+            <div
+              className={cn(
+                "border rounded flex flex-col bg-card",
+                "md:w-64 md:shrink-0 md:static md:translate-x-0",
+                "fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-out md:transform-none",
+                mobileFileTreeOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+              )}
+            >
               <div className="p-2 border-b bg-muted flex items-center justify-between shrink-0">
                 <span className="font-medium text-sm">Files</span>
-                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setShowNewFileInput(true)}>
-                  <FilePlus className="h-4 w-4" />
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setShowNewFileInput(true)}>
+                    <FilePlus className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 md:hidden"
+                    onClick={() => setMobileFileTreeOpen(false)}
+                    aria-label="Close file tree"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
               {showNewFileInput && (
                 <div className="p-2 border-b flex gap-2 shrink-0">
@@ -4602,8 +4630,18 @@ volumes:
 
             {/* Editor Area */}
             <div className="flex-1 flex flex-col border rounded min-w-0">
-              <div className="p-2 border-b bg-muted flex items-center gap-2 shrink-0">
-                <span className="font-medium text-sm truncate flex-1">
+              <div className="p-2 border-b bg-muted flex items-center gap-2 flex-wrap shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="md:hidden"
+                  onClick={() => setMobileFileTreeOpen(true)}
+                  aria-label="Show file tree"
+                >
+                  <FileText className="h-4 w-4 mr-1" />
+                  Files
+                </Button>
+                <span className="font-medium text-sm truncate flex-1 min-w-0">
                   {selectedFile ? selectedFile.path : 'Select a file to edit'}
                 </span>
                 {selectedFile && (

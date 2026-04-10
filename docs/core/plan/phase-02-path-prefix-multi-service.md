@@ -162,8 +162,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 
 ### F. Frontend — api.js audit
 
-- [ ] `admin/frontend/src/lib/api.js` per-domain caching audit
-      — Re-read the file end-to-end and confirm nothing keys a cache by `domain`: the only domain reference today is `checkSslStatus(domain)`, which is a fire-and-forget request with no cache. No code change needed — the audit completion is a one-line comment above the `getServices` function: `// Services are identified by (id, domain+pathPrefix); api.js holds no per-domain state.` This item exists so there is a traceable commit confirming the file was audited.
+- [x] `admin/frontend/src/lib/api.js` per-domain caching audit
+      — Re-read the file end-to-end and confirmed nothing keys a cache by `domain`: the only domain reference today is `checkSslStatus(domain)`, a fire-and-forget GET with no client-side cache. Added a four-line comment block above `getServices` that documents the audit: services are identified by `(id, domain+pathPrefix)`, multiple services can share a domain on different prefixes, and nothing in this client needs to know about the multiplicity. **Verified:** `npm run build` passes; the comment is the only change in the file.
 
 ### G. Verification (run in this order, one commit per fix if anything breaks)
 

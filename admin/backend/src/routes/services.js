@@ -3427,6 +3427,13 @@ servicesRouter.post('/:id/import-files', async (req, res) => {
 // ==================== EXPORT/IMPORT ====================
 
 // Export services
+// Phase 2b D.9: export now nests a `routes` array under each service
+// and bumps `version` to '2.0'. The legacy top-level route-owned fields
+// (`domain`, `pathPrefix`, `port`, `sslEnabled`, `forceHttps`,
+// `websocketEnabled`, `maxUploadSize`) are retained for backward
+// compatibility with Phase 2 importers, but new-shape importers should
+// use the nested `routes` array as the source of truth. D.10 accepts
+// both shapes.
 servicesRouter.post('/export', async (req, res) => {
   try {
     const { serviceIds, includeFiles } = req.body;
@@ -3443,21 +3450,54 @@ servicesRouter.post('/export', async (req, res) => {
     }
 
     const exportData = {
-      version: '1.0',
+      version: '2.0',
       exportedAt: new Date().toISOString(),
       services: [],
     };
 
+    const routesStmt = db.prepare(
+      `SELECT id, domain, path_prefix, target_port, websocket_enabled,
+              ssl_enabled, force_https, max_upload_size, created_at
+         FROM service_http_routes
+        WHERE service_id = ?
+        ORDER BY created_at ASC, id ASC`
+    );
+
     for (const service of services) {
+      const routeRows = routesStmt.all(service.id);
+      const routes = routeRows.map((r) => ({
+        id: r.id,
+        domain: r.domain,
+        pathPrefix: r.path_prefix,
+        targetPort: r.target_port,
+        websocketEnabled: !!r.websocket_enabled,
+        sslEnabled: !!r.ssl_enabled,
+        forceHttps: !!r.force_https,
+        maxUploadSize: r.max_upload_size,
+        createdAt: r.created_at,
+      }));
+
       const serviceExport = {
+        // Phase 2b service-level fields
         name: service.name,
-        domain: service.domain,
-        pathPrefix: service.path_prefix || '/',
+        kind: service.kind,
+        runtime: service.runtime,
+        targetIp: service.target_ip,
+        lxcContainerName: service.lxc_container_name,
+        // Legacy service-level fields that are NOT owned by routes
         type: service.type,
         target: service.target,
-        port: service.port,
         rootDir: service.root_dir,
         containerName: service.container_name,
+        dataDir: service.data_dir,
+        // Phase 2b nested routes — the post-D.14 source of truth
+        routes,
+        // Legacy top-level route-owned fields — retained for backward
+        // compatibility with Phase 2 importers. D.10 prefers `routes`
+        // when present.
+        domain: service.domain,
+        pathPrefix: service.path_prefix || '/',
+        port: service.port,
         sslEnabled: !!service.ssl_enabled,
         forceHttps: !!service.force_https,
         websocketEnabled: !!service.websocket_enabled,
@@ -3473,7 +3513,14 @@ servicesRouter.post('/export', async (req, res) => {
       exportData.services.push(serviceExport);
     }
 
-    logAudit(req.user.id, 'SERVICES_EXPORTED', 'system', null, { count: services.length }, req.ip);
+    logAudit(
+      req.user.id,
+      'SERVICES_EXPORTED',
+      'system',
+      null,
+      { count: services.length, version: exportData.version },
+      req.ip
+    );
 
     res.json(exportData);
   } catch (error) {

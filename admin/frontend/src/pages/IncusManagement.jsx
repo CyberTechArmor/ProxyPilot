@@ -120,21 +120,28 @@ function NetworksTab() {
           {managedNetworks.map((net) => (
             <Card key={net.name} className="overflow-hidden">
               <div
-                className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
+                className="flex items-center justify-between gap-2 px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors flex-wrap"
                 onClick={() => setExpandedNet(expandedNet === net.name ? null : net.name)}
               >
-                <div className="flex items-center gap-3">
-                  {expandedNet === net.name ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  <Network className="h-4 w-4 text-primary" />
-                  <div>
-                    <span className="font-medium text-sm">{net.name}</span>
-                    <span className="ml-2 text-xs text-muted-foreground">{net.type}</span>
-                    <span className="ml-2 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  {expandedNet === net.name ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                  <Network className="h-4 w-4 text-primary shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium text-sm truncate">{net.name}</span>
+                      <span className="text-xs text-muted-foreground">{net.type}</span>
+                      <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>
+                    </div>
+                    {net.config?.['ipv4.address'] && (
+                      <div className="text-xs font-mono text-muted-foreground truncate sm:hidden">
+                        {net.config['ipv4.address']}
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 shrink-0">
                   {net.config?.['ipv4.address'] && (
-                    <span className="text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
+                    <span className="hidden sm:inline text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
                   )}
                   <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <span className="text-xs text-muted-foreground">NAT</span>
@@ -167,9 +174,9 @@ function NetworksTab() {
                           return a.localeCompare(b);
                         })
                         .map(([key, value]) => (
-                          <div key={key} className="flex items-baseline gap-2 py-0.5">
-                            <span className={cn("text-xs font-mono", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
-                            <span className="text-xs font-mono text-primary">{value || '(empty)'}</span>
+                          <div key={key} className="flex items-baseline gap-2 py-0.5 min-w-0">
+                            <span className={cn("text-xs font-mono shrink-0", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
+                            <span className="text-xs font-mono text-primary break-all min-w-0">{value || '(empty)'}</span>
                           </div>
                         ))}
                     </div>

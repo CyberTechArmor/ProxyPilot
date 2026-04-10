@@ -1164,18 +1164,10 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Regenerate Caddy config with reverted settings
-    const caddyConfig = generateCaddyConfig(config);
-    const configPath = caddyFilePath(config.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate and reload Caddy
-    await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    await reloadCaddy();
-
-    // Update database. Older saved versions may not include pathPrefix —
-    // fall back to the normalized default so reverts from pre-wildcard
-    // history still succeed.
+    // Update database first so regenerateDomainCaddyConfig picks up the
+    // reverted row. Older saved versions may not include pathPrefix — fall
+    // back to the normalized default so reverts from pre-wildcard history
+    // still succeed.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
@@ -1190,6 +1182,14 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
       config.maxUploadSize, req.params.id
     );
+
+    // Regenerate the merged Caddy config for the reverted service's domain
+    // so sibling services on the same domain are preserved.
+    await regenerateDomainCaddyConfig(db, config.domain);
+
+    // Validate and reload Caddy
+    await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    await reloadCaddy();
 
     // Save as new version
     const lastVersion = db.prepare(`

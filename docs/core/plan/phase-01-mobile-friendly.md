@@ -110,7 +110,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 - [x] `Dashboard` search/filter/sort bar (admin/frontend/src/pages/Dashboard.jsx:3123)
       — already `flex-wrap`; fix fixed `w-[140px]` selects to `w-full sm:w-[140px]` so filter/sort controls are full-width on phone, then inline-sized at `sm+`. Search input stays `flex-1`.
-- [ ] `Dashboard` services + folder sidebar wrapper (admin/frontend/src/pages/Dashboard.jsx:3193)
+- [x] `Dashboard` services + folder sidebar wrapper (admin/frontend/src/pages/Dashboard.jsx:3193)
       — `flex gap-4` → `flex flex-col md:flex-row gap-4`; folder sidebar (`w-56 shrink-0`) becomes `w-full md:w-56` and collapses into an expandable "Folders" disclosure on `<md` so the service grid gets full width.
 - [ ] `Dashboard` services grid (admin/frontend/src/pages/Dashboard.jsx:3354)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; cards stack to one column on phones per spec.

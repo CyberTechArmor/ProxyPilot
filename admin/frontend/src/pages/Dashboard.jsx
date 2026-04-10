@@ -199,6 +199,9 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState('favorite');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
+  // Mobile-only collapse of the folder sidebar (closed by default at <md)
+  const [mobileFoldersOpen, setMobileFoldersOpen] = useState(false);
+
   // Full screen editor state
   const [editorOpen, setEditorOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -3190,19 +3193,35 @@ volumes:
       </div>
 
       {/* Main Content with Folder Sidebar */}
-      <div className="flex gap-4">
-        {/* Left Sidebar - Folder Navigation */}
-        <div className="w-56 shrink-0">
-          <div className="border rounded-lg sticky top-4">
+      <div className="flex flex-col md:flex-row gap-4">
+        {/* Left Sidebar - Folder Navigation (collapsible on mobile) */}
+        <div className="w-full md:w-56 md:shrink-0">
+          <div className="border rounded-lg md:sticky md:top-4">
             <div className="p-3 border-b bg-muted/50 flex items-center justify-between">
-              <span className="font-medium text-sm flex items-center gap-2">
-                <FolderTree className="h-4 w-4" />
-                Folders
-              </span>
+              <button
+                type="button"
+                className="flex-1 flex items-center justify-between gap-2 text-left md:cursor-default"
+                onClick={() => setMobileFoldersOpen((v) => !v)}
+                aria-expanded={mobileFoldersOpen}
+              >
+                <span className="font-medium text-sm flex items-center gap-2">
+                  <FolderTree className="h-4 w-4" />
+                  Folders
+                  <span className="md:hidden text-xs text-muted-foreground">
+                    ({services.length} total)
+                  </span>
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 md:hidden transition-transform shrink-0",
+                    mobileFoldersOpen ? "rotate-180" : "rotate-0"
+                  )}
+                />
+              </button>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-6 w-6 p-0"
+                className="h-6 w-6 p-0 ml-2 shrink-0"
                 onClick={() => {
                   setNewFolderName('');
                   setSelectedParentFolder(null);
@@ -3213,7 +3232,13 @@ volumes:
                 <FolderPlus className="h-4 w-4" />
               </Button>
             </div>
-            <div className="p-2 space-y-1">
+            <div
+              className={cn(
+                "p-2 space-y-1",
+                mobileFoldersOpen ? "block" : "hidden",
+                "md:block"
+              )}
+            >
               {/* All Services */}
               <div
                 className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${selectedFolderFilter === null ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}

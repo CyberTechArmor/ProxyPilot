@@ -107,12 +107,16 @@ export function initDatabase() {
   `);
 
   // Create services table
-  // Note: 'proxy' type is kept for the admin dashboard service but not available for new user services
+  // Note: 'proxy' type is kept for the admin dashboard service but not available for new user services.
+  // Phase 2: multiple services can share a domain on different path prefixes,
+  // so the UNIQUE constraint is on the (domain, path_prefix) tuple instead of
+  // domain alone. Existing installs that still have UNIQUE(domain) are rebuilt
+  // to this shape by migrateServicesUniqueConstraint() below.
   db.exec(`
     CREATE TABLE IF NOT EXISTS services (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      domain TEXT UNIQUE NOT NULL,
+      domain TEXT NOT NULL,
       type TEXT NOT NULL CHECK(type IN ('proxy', 'static', 'docker')),
       target TEXT,
       port INTEGER,
@@ -125,8 +129,10 @@ export function initDatabase() {
       data_dir TEXT,
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
       is_admin INTEGER DEFAULT 0,
+      path_prefix TEXT NOT NULL DEFAULT '/',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(domain, path_prefix)
     )
   `);
 

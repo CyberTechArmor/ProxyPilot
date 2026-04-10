@@ -73,7 +73,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `DialogContent` keeps `sm:max-w-lg` + `sm:rounded-lg` defaults but drops the unconditional `max-w-lg` so per-dialog `max-w-full h-full rounded-none` overrides actually take effect on `<sm`; desktop width/rounding at `sm+` stays identical.
 - [x] `Layout` sidebar drawer state (admin/frontend/src/components/Layout.jsx:32)
       — add `sidebarOpen` state + a `useEffect` that closes the drawer on `location.pathname` change, so the drawer never stays open across navigation on mobile.
-- [ ] `Layout` mobile top bar (admin/frontend/src/components/Layout.jsx:225)
+- [x] `Layout` mobile top bar (admin/frontend/src/components/Layout.jsx:225)
       — render a `md:hidden` top bar with hamburger (`Menu` icon, ≥44×44px) + ProxyPilot wordmark that toggles `sidebarOpen`; hidden at `md+`.
 - [ ] `Layout` sidebar container (admin/frontend/src/components/Layout.jsx:250)
       — sidebar becomes `fixed … -translate-x-full md:translate-x-0` + transition; open state slides in. Add a `md:hidden` backdrop (`fixed inset-0 bg-black/50 z-40`) that closes the drawer on click (outside-click close).

@@ -233,6 +233,23 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Mobile top bar (hidden on md+) */}
+      <header className="fixed top-0 inset-x-0 z-40 flex h-14 items-center gap-2 border-b bg-card px-4 md:hidden">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Open navigation menu"
+          className="h-11 w-11"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <div className="flex items-center gap-2">
+          <Rocket className="h-6 w-6 text-primary" />
+          <span className="text-lg font-bold">ProxyPilot</span>
+        </div>
+      </header>
+
       {/* Update Banner */}
       {showUpdateBanner && updateInfo?.updateAvailable && (
         <div className="fixed top-0 left-64 right-0 z-50 bg-primary text-primary-foreground px-4 py-2 flex items-center justify-between">

@@ -1684,6 +1684,310 @@ servicesRouter.post('/:id/routes', async (req, res) => {
   }
 });
 
+// Update a route. Handles:
+//   - partial payloads (any subset of domain/pathPrefix/targetPort/
+//     websocketEnabled/sslEnabled/forceHttps/maxUploadSize)
+//   - domain change: regenerates merged files for BOTH the old and
+//     the new domain so the old file shrinks/unlinks and the new
+//     file picks up the moved route
+//   - uniqueness + SSL consistency re-validation against the new tuple
+//   - dual-layer rollback (DB row + both merged files) on any failure
+servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot modify routes on admin service' });
+    }
+
+    const route = db
+      .prepare(
+        `SELECT * FROM service_http_routes WHERE id = ? AND service_id = ?`
+      )
+      .get(req.params.routeId, req.params.id);
+    if (!route) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+
+    const data = createRouteSchema.partial().parse(req.body);
+    if (data.pathPrefix !== undefined) {
+      data.pathPrefix = normalizePathPrefix(data.pathPrefix);
+    }
+
+    // Merge partial payload onto the current row.
+    const updated = {
+      domain: data.domain !== undefined ? data.domain : route.domain,
+      pathPrefix:
+        data.pathPrefix !== undefined
+          ? data.pathPrefix
+          : normalizePathPrefix(route.path_prefix),
+      targetPort:
+        data.targetPort !== undefined ? data.targetPort : route.target_port,
+      websocketEnabled:
+        data.websocketEnabled !== undefined
+          ? data.websocketEnabled
+          : !!route.websocket_enabled,
+      sslEnabled:
+        data.sslEnabled !== undefined ? data.sslEnabled : !!route.ssl_enabled,
+      forceHttps:
+        data.forceHttps !== undefined
+          ? data.forceHttps
+          : !!route.force_https,
+      maxUploadSize:
+        data.maxUploadSize !== undefined
+          ? data.maxUploadSize
+          : route.max_upload_size,
+    };
+
+    const oldDomain = route.domain;
+    const oldPathPrefix = normalizePathPrefix(route.path_prefix);
+    const domainChanged = updated.domain !== oldDomain;
+    const prefixChanged = updated.pathPrefix !== oldPathPrefix;
+
+    // (1) Uniqueness check — only re-run when the tuple actually changed,
+    // so an update that keeps (domain, path_prefix) the same does not
+    // false-positive against its own row.
+    if (domainChanged || prefixChanged) {
+      const existingRoute = db
+        .prepare(
+          `SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ? AND id != ?`
+        )
+        .get(updated.domain, updated.pathPrefix, req.params.routeId);
+      if (existingRoute) {
+        return res
+          .status(400)
+          .json({ error: 'Domain + path prefix combination already exists' });
+      }
+      let legacyCollision = null;
+      try {
+        legacyCollision = db
+          .prepare(
+            `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND is_admin = 0`
+          )
+          .get(updated.domain, updated.pathPrefix);
+      } catch (e) {
+        legacyCollision = null;
+      }
+      if (legacyCollision) {
+        return res
+          .status(400)
+          .json({ error: 'Domain + path prefix combination already exists' });
+      }
+    }
+
+    // (2) SSL stance consistency against siblings on the target domain.
+    // excludeRouteId prevents the check from false-positiving against
+    // the row we are updating in-place.
+    try {
+      assertRoutesShareSslStance(
+        db,
+        updated.domain,
+        {
+          sslEnabled: updated.sslEnabled,
+          forceHttps: updated.forceHttps,
+        },
+        req.params.routeId
+      );
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
+      }
+      throw e;
+    }
+
+    // (3) Backup merged files for both the new and (if it changed) the
+    // old domain so rollback can restore whichever failed.
+    await ensureCaddyStructure();
+    const newConfigPath = caddyFilePath(updated.domain);
+    const oldConfigPath = caddyFilePath(oldDomain);
+
+    let backupNew = null;
+    let backupNewExisted = false;
+    try {
+      if (existsSync(newConfigPath)) {
+        backupNew = await readFile(newConfigPath, 'utf-8');
+        backupNewExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup.
+    }
+
+    let backupOld = null;
+    let backupOldExisted = false;
+    if (domainChanged) {
+      try {
+        if (existsSync(oldConfigPath)) {
+          backupOld = await readFile(oldConfigPath, 'utf-8');
+          backupOldExisted = true;
+        }
+      } catch (e) {
+        // Continue without a backup.
+      }
+    }
+
+    // Snapshot the pre-update row for rollback.
+    const preUpdateRow = { ...route };
+
+    // (4) UPDATE the row.
+    db.prepare(
+      `UPDATE service_http_routes SET
+         domain = ?,
+         path_prefix = ?,
+         target_port = ?,
+         websocket_enabled = ?,
+         ssl_enabled = ?,
+         force_https = ?,
+         max_upload_size = ?
+       WHERE id = ?`
+    ).run(
+      updated.domain,
+      updated.pathPrefix,
+      updated.targetPort || null,
+      updated.websocketEnabled ? 1 : 0,
+      updated.sslEnabled ? 1 : 0,
+      updated.forceHttps ? 1 : 0,
+      updated.maxUploadSize,
+      req.params.routeId
+    );
+
+    const rollbackRouteUpdate = async () => {
+      try {
+        db.prepare(
+          `UPDATE service_http_routes SET
+             domain = ?,
+             path_prefix = ?,
+             target_port = ?,
+             websocket_enabled = ?,
+             ssl_enabled = ?,
+             force_https = ?,
+             max_upload_size = ?
+           WHERE id = ?`
+        ).run(
+          preUpdateRow.domain,
+          preUpdateRow.path_prefix,
+          preUpdateRow.target_port,
+          preUpdateRow.websocket_enabled,
+          preUpdateRow.ssl_enabled,
+          preUpdateRow.force_https,
+          preUpdateRow.max_upload_size,
+          req.params.routeId
+        );
+      } catch (e) {
+        console.error('Rollback: failed to revert route row', e);
+      }
+      try {
+        if (backupNewExisted && backupNew !== null) {
+          await writeCaddyConfig(newConfigPath, backupNew);
+        } else {
+          await unlink(newConfigPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore new-domain merged file', e);
+      }
+      if (domainChanged) {
+        try {
+          if (backupOldExisted && backupOld !== null) {
+            await writeCaddyConfig(oldConfigPath, backupOld);
+          } else {
+            await unlink(oldConfigPath).catch(() => {});
+          }
+        } catch (e) {
+          console.error('Rollback: failed to restore old-domain merged file', e);
+        }
+      }
+    };
+
+    // (5) Regenerate merged files. New domain always needs a rewrite.
+    // Old domain also needs a rewrite when the domain changed — its
+    // merged file shrinks if siblings remain, or unlinks otherwise.
+    try {
+      await regenerateDomainCaddyConfig(db, updated.domain);
+      if (domainChanged) {
+        await regenerateDomainCaddyConfig(db, oldDomain);
+      }
+    } catch (genErr) {
+      await rollbackRouteUpdate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (6) Validate Caddy config.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteUpdate();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration generated: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    // (7) Reload Caddy.
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteUpdate();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route update rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_UPDATED',
+      'route',
+      req.params.routeId,
+      {
+        service_id: req.params.id,
+        before: {
+          domain: preUpdateRow.domain,
+          pathPrefix: normalizePathPrefix(preUpdateRow.path_prefix),
+          targetPort: preUpdateRow.target_port,
+        },
+        after: {
+          domain: updated.domain,
+          pathPrefix: updated.pathPrefix,
+          targetPort: updated.targetPort,
+        },
+      },
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      route: {
+        id: req.params.routeId,
+        serviceId: req.params.id,
+        domain: updated.domain,
+        pathPrefix: updated.pathPrefix,
+        targetPort: updated.targetPort,
+        websocketEnabled: updated.websocketEnabled,
+        sslEnabled: updated.sslEnabled,
+        forceHttps: updated.forceHttps,
+        maxUploadSize: updated.maxUploadSize,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error updating route:', error);
+    res.status(500).json({ error: 'Failed to update route' });
+  }
+});
+
 // Delete service (requires TOTP)
 servicesRouter.delete('/:id', async (req, res) => {
   try {

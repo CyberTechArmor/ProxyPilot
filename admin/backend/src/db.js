@@ -158,6 +158,12 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Phase 2 migration: rebuild the services table so UNIQUE(domain) becomes
+  // UNIQUE(domain, path_prefix). Idempotent — skipped on fresh installs (the
+  // CREATE TABLE above already carries the new constraint) and on already-
+  // migrated existing installs.
+  migrateServicesUniqueConstraint(db);
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

@@ -114,6 +114,16 @@ const getLanguageFromFile = (filename) => {
 // Default docker-compose template
 const DEFAULT_COMPOSE_CONTENT = "version: '3.8'\nservices:\n  app:\n    image: nginx:alpine\n    ports:\n      - \"8080:80\"\n    restart: unless-stopped\n";
 
+// Phase 2b H.3: per-row React keys for the wizard routes builder. Not a
+// crypto-strong UID — just needs to be unique within a single wizard
+// session so adding/removing rows keeps input focus + does not confuse
+// React's reconciler into reusing a stale input node.
+let _pp2bRouteUidCounter = 0;
+function pp2bRouteUid() {
+  _pp2bRouteUidCounter += 1;
+  return `wiz-route-${Date.now().toString(36)}-${_pp2bRouteUidCounter}`;
+}
+
 // Syntax highlighting colors by language
 const getLanguageColor = (lang) => {
   const colors = {
@@ -221,6 +231,18 @@ export default function Dashboard() {
   const [lxcWizardError, setLxcWizardError] = useState('');
   const [formData, setFormData] = useState({
     name: '',
+    // Phase 2b H.3: the primary source of truth for per-route fields is
+    // now the `routes` array. Each entry is
+    // `{id, domain, pathPrefix, targetPort, sslEnabled}`. The legacy
+    // top-level mirror fields (domain, pathPrefix, port, sslEnabled)
+    // stay in sync with routes[0] so the Phase 2 flat POST payload in
+    // `handleAddService` keeps validating until H.6 swaps in the
+    // nested-routes payload. `pp2bRouteUid()` generates stable row keys
+    // so React does not lose focus when the routes list mutates.
+    routes: [
+      { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+    ],
+    rootDir: '',
     domain: '',
     pathPrefix: '/',
     // Phase 2b H.1: the Add Service wizard now branches on `kind`
@@ -848,6 +870,67 @@ export default function Dashboard() {
     }));
   };
 
+  // Phase 2b H.3: append a fresh empty route row to the wizard routes
+  // array. The row is initialized with the conventional defaults
+  // (pathPrefix='/', sslEnabled=true) and a stable React key.
+  const addWizardRoute = () => {
+    setFormData((f) => ({
+      ...f,
+      routes: [
+        ...f.routes,
+        { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+      ],
+    }));
+  };
+
+  // Phase 2b H.3: remove the route at index `i`. No-ops when only one
+  // row remains (the trash icon is also disabled on the last row so
+  // this is defense-in-depth). When the first row is removed the
+  // legacy mirror fields (domain, pathPrefix, port, sslEnabled) are
+  // resynced from the new routes[0] so the Phase 2 flat POST body
+  // still carries the primary route values through the H.3 → H.6
+  // intermediate window.
+  const removeWizardRoute = (i) => {
+    setFormData((f) => {
+      if (f.routes.length <= 1) return f;
+      const newRoutes = f.routes.filter((_, idx) => idx !== i);
+      if (i === 0) {
+        const primary = newRoutes[0];
+        return {
+          ...f,
+          routes: newRoutes,
+          domain: primary.domain,
+          pathPrefix: primary.pathPrefix,
+          port: primary.targetPort,
+          sslEnabled: primary.sslEnabled,
+        };
+      }
+      return { ...f, routes: newRoutes };
+    });
+  };
+
+  // Phase 2b H.3: patch a single route row. When the primary route
+  // (index 0) changes, mirror its fields onto the legacy top-level
+  // formData keys so `handleAddService` (still on the Phase 2 flat
+  // payload until H.6) keeps receiving the correct values.
+  const updateWizardRoute = (i, patch) => {
+    setFormData((f) => {
+      const newRoutes = f.routes.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+      if (i === 0) {
+        const primary = newRoutes[0];
+        return {
+          ...f,
+          routes: newRoutes,
+          domain: primary.domain,
+          pathPrefix: primary.pathPrefix,
+          port: primary.targetPort,
+          sslEnabled: primary.sslEnabled,
+        };
+      }
+      return { ...f, routes: newRoutes };
+    });
+  };
+
   // Phase 2b H.2: allow the operator to back out of the runtime pick
   // without bailing to Step 0. Clears runtime + LXC picker state so the
   // sub-step renders fresh tiles again.
@@ -1237,6 +1320,10 @@ export default function Dashboard() {
   const resetForm = () => {
     setFormData({
       name: '',
+      routes: [
+        { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+      ],
+      rootDir: '',
       domain: '',
       pathPrefix: '/',
       kind: '',
@@ -1729,9 +1816,27 @@ export default function Dashboard() {
 
         const exposedPorts = portsResult.output?.trim().split('\n').filter(Boolean) || [];
 
-        // Pre-fill the proxy container form
+        // Pre-fill the proxy container form. Phase 2b H.3: seed a
+        // single-route array keyed on the first exposed port so the new
+        // routes builder lands ready-to-submit. The legacy top-level
+        // (domain, pathPrefix, port, sslEnabled) mirror fields stay in
+        // sync with routes[0] for the Phase 2 flat POST payload.
         setFormData({
           name: composeCreateForm.serviceName,
+          kind: 'container_service',
+          runtime: 'docker',
+          lxcContainerName: '',
+          targetIp: '127.0.0.1',
+          routes: [
+            {
+              id: pp2bRouteUid(),
+              domain: '',
+              pathPrefix: '/',
+              targetPort: exposedPorts[0] || '',
+              sslEnabled: true,
+            },
+          ],
+          rootDir: '',
           domain: '',
           pathPrefix: '/',
           type: 'docker',
@@ -3312,45 +3417,6 @@ volumes:
                     <Label htmlFor="name">Service Name</Label>
                     <Input id="name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="My Application" required />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="domain">Domain</Label>
-                    <Input
-                      id="domain"
-                      value={formData.domain}
-                      onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
-                      placeholder="app.example.com or *.example.com"
-                      required
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Use a plain hostname (app.example.com) or a wildcard (*.example.com).
-                      Wildcards require a DNS-01 solver in Caddy for TLS.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="pathPrefix">Path Prefix</Label>
-                    <Input
-                      id="pathPrefix"
-                      value={formData.pathPrefix}
-                      onChange={(e) => setFormData({ ...formData, pathPrefix: e.target.value })}
-                      placeholder="/"
-                      pattern="^/(?:[a-zA-Z0-9._~\-]+(?:/[a-zA-Z0-9._~\-]+)*/?)?$"
-                      title="Must start with / and contain only URL-safe characters"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Default <code>/</code> matches all paths. Set <code>/api</code> to scope this
-                      service to <code>/api/*</code> (Caddy strips the prefix before proxying).
-                    </p>
-                    {existingPrefixesForDomain.length > 0 && (
-                      <div
-                        data-testid="existing-prefixes-banner"
-                        className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-600 dark:text-blue-300"
-                      >
-                        Domain already in use. Existing path prefixes:{' '}
-                        <code className="font-mono">{existingPrefixesForDomain.join(', ')}</code>.
-                        Choose a different prefix to add a second service to this domain.
-                      </div>
-                    )}
-                  </div>
                   {formData.kind === 'container_service' && formData.runtime === 'docker' && (
                     <>
                       <div className="space-y-2">
@@ -3369,34 +3435,140 @@ volumes:
                         />
                         <p className="text-xs text-muted-foreground">Default: localhost (127.0.0.1)</p>
                       </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="port">Port</Label>
-                        <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
-                      </div>
                     </>
                   )}
-                  {formData.kind === 'container_service' && formData.runtime === 'lxc' && formData.lxcContainerName && (
+                  {formData.kind === 'static_site' && (
                     <div className="space-y-2">
-                      <Label htmlFor="port">Port</Label>
-                      <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
+                      <Label htmlFor="rootDir">Root Directory</Label>
+                      <Input
+                        id="rootDir"
+                        value={formData.rootDir}
+                        onChange={(e) => setFormData({ ...formData, rootDir: e.target.value })}
+                        placeholder="/var/www/mysite (leave empty to auto-create)"
+                      />
                       <p className="text-xs text-muted-foreground">
-                        Port on the LXC container to reverse-proxy to. Multi-route support lands in H.3.
+                        Directory containing the site files. Leave blank and ProxyPilot will
+                        create one under <code>/data/services</code>.
                       </p>
                     </div>
                   )}
+
+                  {/*
+                   * Phase 2b H.3: routes builder. Each row carries its own
+                   * (domain, pathPrefix, targetPort, sslEnabled) tuple. The
+                   * trash icon removes the row — disabled on the last
+                   * remaining row so the form always has at least one
+                   * route. The Add Route button appends a new empty row.
+                   * Layout stacks at <sm via flex-col and inlines at sm+
+                   * per MOBILE_FIRST.md §4. Trash + add buttons hit the
+                   * 44x44 touch target on mobile per MOBILE_FIRST.md §5.
+                   * Static Site skips the Port column since routes just
+                   * point at the service's rootDir, not a port.
+                   */}
+                  <div className="space-y-3" data-testid="wizard-routes-builder">
+                    <div className="flex items-center justify-between">
+                      <Label>HTTP Routes</Label>
+                      <span className="text-xs text-muted-foreground">
+                        {formData.routes.length} route{formData.routes.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    {formData.routes.map((route, i) => (
+                      <div
+                        key={route.id}
+                        data-testid={`wizard-route-row-${i}`}
+                        className="rounded-md border p-3 space-y-3"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <Label htmlFor={`route-domain-${i}`} className="text-xs">Domain</Label>
+                            <Input
+                              id={`route-domain-${i}`}
+                              data-testid={`wizard-route-domain-${i}`}
+                              value={route.domain}
+                              onChange={(e) => updateWizardRoute(i, { domain: e.target.value })}
+                              placeholder="app.example.com"
+                              required
+                            />
+                          </div>
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <Label htmlFor={`route-prefix-${i}`} className="text-xs">Path Prefix</Label>
+                            <Input
+                              id={`route-prefix-${i}`}
+                              data-testid={`wizard-route-prefix-${i}`}
+                              value={route.pathPrefix}
+                              onChange={(e) => updateWizardRoute(i, { pathPrefix: e.target.value })}
+                              placeholder="/"
+                              pattern="^/(?:[a-zA-Z0-9._~\-]+(?:/[a-zA-Z0-9._~\-]+)*/?)?$"
+                              title="Must start with / and contain only URL-safe characters"
+                            />
+                          </div>
+                          {formData.kind === 'container_service' && (
+                            <div className="w-full sm:w-28 space-y-1">
+                              <Label htmlFor={`route-port-${i}`} className="text-xs">Port</Label>
+                              <Input
+                                id={`route-port-${i}`}
+                                data-testid={`wizard-route-port-${i}`}
+                                type="number"
+                                value={route.targetPort}
+                                onChange={(e) => updateWizardRoute(i, { targetPort: e.target.value })}
+                                placeholder="3000"
+                                min="1"
+                                max="65535"
+                                required
+                              />
+                            </div>
+                          )}
+                          <div className="flex items-center justify-end sm:self-end gap-1 shrink-0">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-11 w-11 sm:h-10 sm:w-10 text-red-500 hover:text-red-600"
+                              data-testid={`wizard-route-remove-${i}`}
+                              onClick={() => removeWizardRoute(i)}
+                              disabled={formData.routes.length <= 1}
+                              title={formData.routes.length <= 1 ? 'At least one route is required' : 'Remove route'}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <Label htmlFor={`route-ssl-${i}`} className="text-xs">SSL enabled</Label>
+                            <p className="text-xs text-muted-foreground">HTTPS with an auto-obtained certificate.</p>
+                          </div>
+                          <Switch
+                            id={`route-ssl-${i}`}
+                            data-testid={`wizard-route-ssl-${i}`}
+                            checked={!!route.sslEnabled}
+                            onCheckedChange={(checked) => updateWizardRoute(i, { sslEnabled: checked })}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="wizard-route-add"
+                      onClick={addWizardRoute}
+                      className="h-11 sm:h-10"
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Add route
+                    </Button>
+                  </div>
                   <div className="space-y-2">
                     <Label htmlFor="maxUploadSize">Max Upload Size</Label>
                     <Input id="maxUploadSize" value={formData.maxUploadSize} onChange={(e) => setFormData({ ...formData, maxUploadSize: e.target.value })} placeholder="1G" />
+                    <p className="text-xs text-muted-foreground">Applied to every route on this service.</p>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="sslEnabled">SSL Enabled</Label>
-                    <Switch id="sslEnabled" checked={formData.sslEnabled} onCheckedChange={(checked) => setFormData({ ...formData, sslEnabled: checked })} />
-                  </div>
-                  {formData.sslEnabled && (
+                  {formData.routes.some((r) => r.sslEnabled) && (
                     <div className="flex items-center justify-between pl-4 border-l-2 border-primary/20">
                       <div>
                         <Label htmlFor="obtainCertificate">Auto-obtain Certificate</Label>
-                        <p className="text-xs text-muted-foreground">Caddy will auto-obtain a certificate via ACME</p>
+                        <p className="text-xs text-muted-foreground">Caddy will auto-obtain a certificate via ACME for every SSL-enabled route.</p>
                       </div>
                       <Switch id="obtainCertificate" checked={formData.obtainCertificate} onCheckedChange={(checked) => setFormData({ ...formData, obtainCertificate: checked })} />
                     </div>
@@ -4139,8 +4311,26 @@ volumes:
                               variant="outline"
                               className="w-full h-7 text-xs"
                               onClick={() => {
+                                // Phase 2b H.3: seed a single-row routes
+                                // array alongside the legacy mirror
+                                // fields so the wizard lands ready-to-
+                                // submit under the new shape.
                                 setFormData({
                                   name: svc.serviceName || svc.containerName,
+                                  kind: 'container_service',
+                                  runtime: 'docker',
+                                  lxcContainerName: '',
+                                  targetIp: '127.0.0.1',
+                                  routes: [
+                                    {
+                                      id: pp2bRouteUid(),
+                                      domain: '',
+                                      pathPrefix: '/',
+                                      targetPort: svc.exposedPort.toString(),
+                                      sslEnabled: true,
+                                    },
+                                  ],
+                                  rootDir: '',
                                   domain: '',
                                   pathPrefix: '/',
                                   type: 'docker',

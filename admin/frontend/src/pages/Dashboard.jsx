@@ -572,17 +572,48 @@ export default function Dashboard() {
     return result;
   }, [services, searchQuery, filterType, sortBy, showFavoritesOnly, selectedFolderFilter, serviceFolders]);
 
-  // Phase 2: list every existing path prefix for the domain the operator is
-  // currently typing into the Add Service wizard. Used by the info banner
-  // (so the operator can see "/, /api are taken") and by the client-side
-  // collision guard in handleAddService.
+  // Phase 2b H.4: the wizard now renders one banner per in-progress
+  // route, so the memo returns a `Map<domain, prefixList>` keyed on
+  // every route across every service instead of filtering by a single
+  // form-scoped domain. Services pre-Phase 2b still expose a legacy
+  // top-level `domain`/`pathPrefix` fallback alongside the nested
+  // `routes` array, so the flattener falls back on the legacy pair
+  // when `routes` is missing — that keeps old installs rendering
+  // during the phase-2b rollout. The lowercase-normalized domain is
+  // the map key; prefix strings are stored as-given (normalization
+  // for the collision check lives in H.5's handleAddService).
+  const existingPrefixesByDomain = useMemo(() => {
+    const map = new Map();
+    const push = (rawDomain, rawPrefix) => {
+      const d = (rawDomain || '').toLowerCase().trim();
+      if (!d) return;
+      const prefix = rawPrefix || '/';
+      const list = map.get(d) || [];
+      list.push(prefix);
+      map.set(d, list);
+    };
+    for (const svc of services) {
+      if (Array.isArray(svc.routes) && svc.routes.length > 0) {
+        for (const r of svc.routes) {
+          push(r.domain, r.pathPrefix);
+        }
+      } else if (svc.domain) {
+        // Fallback: legacy Phase 2 shape with a single top-level route.
+        push(svc.domain, svc.pathPrefix);
+      }
+    }
+    return map;
+  }, [services]);
+
+  // Phase 2b H.4: backward-compat shim for any code paths still
+  // reading the single-domain list (notably the H.5-pending client
+  // collision guard in handleAddService). Returns the flattened
+  // prefix list for the wizard's primary-row domain. Replaced in H.5.
   const existingPrefixesForDomain = useMemo(() => {
     const d = (formData.domain || '').toLowerCase().trim();
     if (!d) return [];
-    return services
-      .filter((s) => s.domain && s.domain.toLowerCase() === d)
-      .map((s) => s.pathPrefix || '/');
-  }, [services, formData.domain]);
+    return existingPrefixesByDomain.get(d) || [];
+  }, [existingPrefixesByDomain, formData.domain]);
 
   // Group compose services by project with search/filter/sort
   const groupedComposeProjects = useMemo(() => {
@@ -3545,6 +3576,32 @@ volumes:
                             onCheckedChange={(checked) => updateWizardRoute(i, { sslEnabled: checked })}
                           />
                         </div>
+                        {/*
+                         * Phase 2b H.4: per-row "existing prefixes" banner.
+                         * Looks up the lowercase-normalized domain the
+                         * operator typed against the global
+                         * existingPrefixesByDomain map (flattened from
+                         * every service's routes). Surfaces immediately
+                         * when the domain has any existing prefix across
+                         * any service so the operator sees the conflict
+                         * before they click Create.
+                         */}
+                        {(() => {
+                          const key = (route.domain || '').toLowerCase().trim();
+                          if (!key) return null;
+                          const existing = existingPrefixesByDomain.get(key);
+                          if (!existing || existing.length === 0) return null;
+                          return (
+                            <div
+                              data-testid={`wizard-existing-prefixes-${i}`}
+                              className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-blue-600 dark:text-blue-300"
+                            >
+                              Domain already in use. Existing path prefixes:{' '}
+                              <code className="font-mono">{existing.join(', ')}</code>.
+                              Choose a different prefix to add another route on this domain.
+                            </div>
+                          );
+                        })()}
                       </div>
                     ))}
                     <Button

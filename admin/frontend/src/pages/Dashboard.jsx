@@ -322,8 +322,12 @@ export default function Dashboard() {
     dbPort: '7001',
   });
 
-  // Terminal tab state (terminal vs editor)
-  const [terminalActiveTab, setTerminalActiveTab] = useState('terminal'); // 'terminal' or 'editor'
+  // Terminal tab state: 'terminal' | 'editor' (+ 'files' on mobile only).
+  // On desktop both file browser and terminal/editor show side-by-side and this
+  // value only picks between Terminal and Editor in the right-hand tab strip.
+  // On mobile the dialog becomes single-pane and this value also drives which
+  // of the three (Files, Terminal, Editor) is visible via a bottom tab bar.
+  const [terminalActiveTab, setTerminalActiveTab] = useState('terminal');
   const [editorFilePath, setEditorFilePath] = useState('');
   const [editorContent, setEditorContent] = useState('');
   const [editorOriginalContent, setEditorOriginalContent] = useState('');
@@ -4072,8 +4076,22 @@ volumes:
           </DialogHeader>
 
           <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0 overflow-hidden`}>
-            {/* Left Panel: File Browser + Docker Containers */}
-            <div className={`${terminalFullscreen ? 'w-full md:w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 max-h-48 md:max-h-none`}>
+            {/* Left Panel: File Browser + Docker Containers
+                Desktop: always visible as a sidebar (w-64 / w-72 when fullscreen).
+                Mobile: full-width, and only visible when the bottom tab bar has
+                'files' selected — otherwise hidden so Terminal/Editor get the
+                entire dialog real estate. */}
+            <div
+              className={cn(
+                // Width: full on mobile, fixed sidebar on desktop
+                terminalFullscreen ? 'w-full md:w-72' : 'w-full md:w-64',
+                'flex-col gap-2 min-h-0',
+                // Mobile: take the full available vertical space when active
+                terminalActiveTab === 'files' ? 'flex flex-1' : 'hidden',
+                // Desktop: always visible, don't grow/shrink
+                'md:flex md:flex-none'
+              )}
+            >
               {/* Current View - File Browser */}
               <div className="border rounded flex flex-col flex-1 min-h-0">
                 <div className="p-2 border-b bg-muted shrink-0 flex items-center justify-between">
@@ -4194,10 +4212,19 @@ volumes:
               </div>
             </div>
 
-            {/* Terminal/Editor Tabbed Panel */}
-            <div className="flex-1 flex flex-col border rounded min-h-0">
-              {/* Tab Bar */}
-              <div className="flex border-b bg-muted shrink-0">
+            {/* Terminal/Editor Tabbed Panel
+                Desktop: always visible; mobile: hidden when 'files' tab is
+                selected so the file browser takes the full dialog. */}
+            <div
+              className={cn(
+                'flex-1 flex-col border rounded min-h-0',
+                terminalActiveTab === 'files' ? 'hidden' : 'flex',
+                'md:flex'
+              )}
+            >
+              {/* Tab Bar (hidden on mobile — the bottom tab bar below handles
+                  switching between Files / Terminal / Editor). */}
+              <div className="hidden md:flex border-b bg-muted shrink-0">
                 <button
                   className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                     terminalActiveTab === 'terminal'
@@ -4487,6 +4514,54 @@ volumes:
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Mobile-only bottom tab bar — switches between Files, Terminal,
+              and Editor so each takes the full dialog real estate.
+              Hidden on md+ where the side-by-side layout is used. */}
+          <div className="md:hidden flex border-t bg-muted shrink-0">
+            <button
+              type="button"
+              className={`flex-1 flex items-center justify-center gap-2 px-3 py-3 text-sm font-medium border-t-2 transition-colors ${
+                terminalActiveTab === 'files'
+                  ? 'border-primary text-primary bg-background'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setTerminalActiveTab('files')}
+              aria-pressed={terminalActiveTab === 'files'}
+            >
+              <FolderTree className="h-4 w-4" />
+              Files
+            </button>
+            <button
+              type="button"
+              className={`flex-1 flex items-center justify-center gap-2 px-3 py-3 text-sm font-medium border-t-2 transition-colors ${
+                terminalActiveTab === 'terminal'
+                  ? 'border-primary text-primary bg-background'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setTerminalActiveTab('terminal')}
+              aria-pressed={terminalActiveTab === 'terminal'}
+            >
+              <Terminal className="h-4 w-4" />
+              Terminal
+            </button>
+            <button
+              type="button"
+              className={`flex-1 flex items-center justify-center gap-2 px-3 py-3 text-sm font-medium border-t-2 transition-colors ${
+                terminalActiveTab === 'editor'
+                  ? 'border-primary text-primary bg-background'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setTerminalActiveTab('editor')}
+              aria-pressed={terminalActiveTab === 'editor'}
+            >
+              <Code className="h-4 w-4" />
+              Editor
+              {editorFilePath && editorContent !== editorOriginalContent && (
+                <span className="text-yellow-500">●</span>
+              )}
+            </button>
           </div>
 
           <DialogFooter className="shrink-0">

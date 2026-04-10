@@ -295,9 +295,9 @@ export default function UsersPage() {
           ) : (
             <div className="space-y-2">
               {users.map((user) => (
-                <div key={user.id} className="flex items-center justify-between p-4 border rounded-lg">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
+                <div key={user.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 border rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-lg">{user.username}</span>
                       {user.displayName && (
                         <span className="text-sm text-muted-foreground">({user.displayName})</span>

@@ -193,8 +193,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### H. Users page
 
-- [ ] `Users` user list row (admin/frontend/src/pages/Users.jsx:298)
-      — `flex items-center justify-between p-4 border rounded-lg` → `flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 border rounded-lg`; username/role/meta block stays first, action button row wraps below on phone.
+- [x] `Users` user list row (admin/frontend/src/pages/Users.jsx:298)
+      — row now stacks vertically on `<sm` (`flex-col sm:flex-row sm:items-center sm:justify-between gap-3`); username/role badge block is first, actions below on phone.
 - [ ] `Users` user meta line (admin/frontend/src/pages/Users.jsx:311)
       — `flex items-center gap-4` → `flex flex-wrap items-center gap-x-4 gap-y-1`; TOTP/password/created badges wrap instead of overflowing.
 - [ ] `Users` primary action buttons (admin/frontend/src/pages/Users.jsx:321)

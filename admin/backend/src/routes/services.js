@@ -248,30 +248,182 @@ async function isCaddyInstalled() {
 }
 
 // Enable SSL for a service (Caddy auto-obtains certificates via ACME)
+//
+// Phase 2b D.4: SSL flags now live on routes. This endpoint flips
+// `ssl_enabled=1, force_https=1` on every child `service_http_routes` row
+// owned by this service AND the legacy services columns in lockstep,
+// collects every distinct domain across those routes (plus the legacy
+// `services.domain` fallback for the dual-source transitional state),
+// regenerates the merged Caddy config once per affected domain, and
+// validates + reloads. Before the flip is committed to the DB, the handler
+// calls `assertSiblingsMatchStance` per affected domain to catch any
+// sibling route (not owned by this service) that would disagree with the
+// target stance. On any downstream failure (config gen / adapt / reload),
+// both tables AND every affected merged file are rolled back to the
+// pre-POST state.
 servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
   try {
     const db = getDb();
-    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    const serviceId = req.params.id;
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(serviceId);
 
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Enable SSL in database
-    db.prepare('UPDATE services SET ssl_enabled = 1, force_https = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+    // Snapshot pre-flip state of both tables so the rollback closure can
+    // revert every row to its exact previous value (not just zero them).
+    const preRoutes = db
+      .prepare(
+        `SELECT id, domain, ssl_enabled, force_https
+           FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(serviceId);
+    const preServiceSsl = {
+      ssl_enabled: service.ssl_enabled,
+      force_https: service.force_https,
+    };
 
-    // Regenerate the merged Caddy config for the whole domain so sibling
-    // services on the same domain keep sharing a single site block.
-    await regenerateDomainCaddyConfig(db, service.domain);
+    // Collect every affected domain from BOTH sources — route rows and
+    // the legacy services.domain fallback. During the D.1–D.13 dual-write
+    // phase both sources may carry a row for this service.
+    const affectedDomains = new Set();
+    for (const r of preRoutes) affectedDomains.add(r.domain);
+    if (service.domain) affectedDomains.add(service.domain);
 
-    // Reload Caddy - it will automatically obtain the certificate
+    // (1) Validate SSL stance against EXTERNAL sibling routes on every
+    // affected domain BEFORE any mutation. `assertSiblingsMatchStance`
+    // excludes every row owned by this service across both sources so
+    // the pre-flip state of our own routes does not false-conflict
+    // against the target.
+    for (const domain of affectedDomains) {
+      try {
+        assertSiblingsMatchStance(db, domain, serviceId, true, true);
+      } catch (e) {
+        if (e.code === 'ROUTE_SSL_CONFLICT') {
+          return res.status(400).json({ error: e.message });
+        }
+        throw e;
+      }
+    }
+
+    // (2) Flip both tables in lockstep. Legacy columns stay in sync with
+    // the route rows until D.14 drops them.
+    db.prepare(
+      `UPDATE services SET ssl_enabled = 1, force_https = 1,
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).run(serviceId);
+    db.prepare(
+      `UPDATE service_http_routes SET ssl_enabled = 1, force_https = 1
+         WHERE service_id = ?`
+    ).run(serviceId);
+
+    // (3) Backup the merged file for every affected domain so the rollback
+    // closure can restore each one byte-for-byte.
+    await ensureCaddyStructure();
+    const backups = {}; // domain -> { existed, content, path }
+    for (const domain of affectedDomains) {
+      const configPath = caddyFilePath(domain);
+      let content = null;
+      let existed = false;
+      if (existsSync(configPath)) {
+        try {
+          content = await readFile(configPath, 'utf-8');
+          existed = true;
+        } catch (e) {
+          // Continue without a backup; rollback will unlink on failure.
+        }
+      }
+      backups[domain] = { existed, content, path: configPath };
+    }
+
+    const rollback = async () => {
+      try {
+        db.prepare(
+          `UPDATE services SET ssl_enabled = ?, force_https = ?
+             WHERE id = ?`
+        ).run(preServiceSsl.ssl_enabled, preServiceSsl.force_https, serviceId);
+      } catch (e) {
+        console.error('Rollback: failed to revert services row', e);
+      }
+      for (const pr of preRoutes) {
+        try {
+          db.prepare(
+            `UPDATE service_http_routes SET ssl_enabled = ?, force_https = ?
+               WHERE id = ?`
+          ).run(pr.ssl_enabled, pr.force_https, pr.id);
+        } catch (e) {
+          console.error('Rollback: failed to revert route row', e);
+        }
+      }
+      for (const [domain, b] of Object.entries(backups)) {
+        try {
+          if (b.existed && b.content !== null) {
+            await writeCaddyConfig(b.path, b.content);
+          } else {
+            await unlink(b.path).catch(() => {});
+          }
+        } catch (e) {
+          console.error(
+            `Rollback: failed to restore merged file for ${domain}`,
+            e
+          );
+        }
+      }
+    };
+
+    // (4) Regenerate the merged Caddy config for every affected domain.
+    try {
+      for (const domain of affectedDomains) {
+        await regenerateDomainCaddyConfig(db, domain);
+      }
+    } catch (genErr) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (5) Validate via caddy adapt before reloading.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testError) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Caddy config validation failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // (6) Reload Caddy. It will pick up the new auto-TLS site addresses
+    // and start obtaining certificates via ACME.
     const reloadResult = await reloadCaddy();
+    if (!reloadResult.success) {
+      await rollback();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - reverted to previous config',
+        details: reloadResult.error,
+      });
+    }
 
-    logAudit(req.user.id, 'SSL_ENABLED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(
+      req.user.id,
+      'SSL_ENABLED',
+      'service',
+      serviceId,
+      { service_id: serviceId, domains: [...affectedDomains] },
+      req.ip
+    );
 
     res.json({
       success: true,
-      message: 'SSL enabled - Caddy will automatically obtain a certificate',
+      message: 'SSL enabled - Caddy will automatically obtain certificates',
+      domains: [...affectedDomains],
       caddyReloaded: reloadResult.success,
       caddyError: reloadResult.error,
     });
@@ -4777,6 +4929,104 @@ export function assertRoutesShareSslStance(
           WHERE domain = ? AND is_admin = 0`
       )
       .all(domain);
+  } catch (e) {
+    // Post-D.14 — legacy columns dropped → routes-only path.
+    legacySiblings = [];
+  }
+
+  for (const sib of legacySiblings) {
+    const tuple = `${sib.service_id}|${normalizePathPrefix(sib.path_prefix)}`;
+    if (coveredTuples.has(tuple)) continue;
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" (legacy path ${sib.path_prefix})`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
+}
+
+// Phase 2b D.4/D.5 helper: `assertSiblingsMatchStance(db, domain, serviceId,
+// targetSsl, targetForce)`
+//
+// When an entire service's routes flip SSL on or off at once (the
+// obtain-certificate and delete-certificate endpoints), every sibling route
+// on the affected domain NOT owned by this service must already match the
+// target stance. Unlike `assertRoutesShareSslStance` which excludes a
+// single route id, this helper excludes every row owned by `serviceId`
+// across both the routes table AND the legacy services table so the
+// pre-flip state of the service's own rows never false-conflicts against
+// the target. The dual-source scan + (service_id, path_prefix) dedupe
+// mirrors `assertRoutesShareSslStance` so post-D.14 (legacy columns gone)
+// the legacy query throws and the helper collapses to a routes-only scan.
+export function assertSiblingsMatchStance(
+  db,
+  domain,
+  serviceId,
+  targetSsl,
+  targetForce
+) {
+  const wantSsl = !!targetSsl;
+  const wantForce = !!targetForce;
+
+  const conflict = (siblingLabel, siblingSsl, siblingForce) => {
+    const err = new Error(
+      `SSL settings on domain ${domain} must match all sibling routes. ` +
+        `Sibling ${siblingLabel} has sslEnabled=${!!siblingSsl}, ` +
+        `forceHttps=${!!siblingForce}; target is sslEnabled=${wantSsl}, ` +
+        `forceHttps=${wantForce}.`
+    );
+    err.code = 'ROUTE_SSL_CONFLICT';
+    return err;
+  };
+
+  // (1) Phase 2b sibling routes owned by OTHER services on this domain.
+  const routeSiblings = db
+    .prepare(
+      `SELECT r.id           AS route_id,
+              r.service_id   AS service_id,
+              r.path_prefix  AS path_prefix,
+              r.ssl_enabled  AS ssl_enabled,
+              r.force_https  AS force_https,
+              s.name         AS service_name
+         FROM service_http_routes r
+         INNER JOIN services s ON s.id = r.service_id
+        WHERE r.domain = ? AND s.is_admin = 0 AND r.service_id != ?`
+    )
+    .all(domain, serviceId);
+
+  for (const sib of routeSiblings) {
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" route ${sib.path_prefix}`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
+
+  // (2) Legacy siblings from services table, dedupe against routes-side
+  // entries by (service_id, path_prefix) and exclude our own row by id.
+  const coveredTuples = new Set(
+    routeSiblings.map(
+      (s) => `${s.service_id}|${normalizePathPrefix(s.path_prefix)}`
+    )
+  );
+
+  let legacySiblings = [];
+  try {
+    legacySiblings = db
+      .prepare(
+        `SELECT id            AS service_id,
+                name          AS service_name,
+                path_prefix,
+                ssl_enabled,
+                force_https
+           FROM services
+          WHERE domain = ? AND is_admin = 0 AND id != ?`
+      )
+      .all(domain, serviceId);
   } catch (e) {
     // Post-D.14 — legacy columns dropped → routes-only path.
     legacySiblings = [];

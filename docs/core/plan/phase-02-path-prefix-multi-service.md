@@ -68,8 +68,134 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 
 ---
 
-## Function-by-Function Checklist (to be populated)
+## Function-by-Function Checklist
 
-> This section is a placeholder. The next planning session will decompose the phase deliverables into a per-function checklist: one function → implement → test → check off → move on. Each function gets its own line with a checkbox, the file it lives in, and a one-line success criterion. Do not populate this now — leave the placeholder in place.
+> Ordered backend-first: schema migration → Caddy generator refactor → call-site substitutions → uniqueness validation → frontend polish → mobile verification. One checkbox = one commit. Each item must be verified in `npm run dev` and a real browser (for frontend items) or via a backend smoke test (for backend items) before it is ticked off.
 
-- [ ] _pending_
+### A. Backend — Schema migration (runs first; unblocks everything else)
+
+- [ ] `initDatabase` services CREATE TABLE (admin/backend/src/db.js:111)
+      — Update the fresh-install `CREATE TABLE IF NOT EXISTS services` definition so that `domain` is `TEXT NOT NULL` (not `UNIQUE`) and the table ends with `UNIQUE(domain, path_prefix)`. Leave `path_prefix TEXT NOT NULL DEFAULT '/'` in place. Existing installs still need the rebuild migration below; this change only covers clean databases.
+
+- [ ] `migrateServicesUniqueConstraint(db)` helper (admin/backend/src/db.js, new export)
+      — Inspect `SELECT sql FROM sqlite_master WHERE type='table' AND name='services'`. If the string contains `UNIQUE(domain, path_prefix)`, return early (idempotent no-op). Otherwise run a table-rebuild inside `db.transaction`: `CREATE TABLE services_new (...)` mirroring all current columns + `UNIQUE(domain, path_prefix)`, `INSERT INTO services_new SELECT id, name, domain, type, target, port, root_dir, container_name, ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status, is_admin, created_at, updated_at, is_favorite, COALESCE(path_prefix, '/') FROM services`, `DROP TABLE services`, `ALTER TABLE services_new RENAME TO services`, then `CREATE UNIQUE INDEX IF NOT EXISTS idx_services_domain_path ON services(domain, path_prefix)` so lookups on the new tuple stay fast. Logs `console.log('Migrated services table: UNIQUE(domain) → UNIQUE(domain, path_prefix)')`.
+
+- [ ] Wire `migrateServicesUniqueConstraint(db)` into `initDatabase()` (admin/backend/src/db.js:154)
+      — Call the helper immediately after the existing `ALTER TABLE services ADD COLUMN path_prefix` try/catch block so the column exists before the rebuild references it. Success criterion: fresh install leaves the table with `UNIQUE(domain, path_prefix)`; an existing install with pre-Phase-2 `UNIQUE(domain)` is rebuilt preserving every row; running `initDatabase()` a second time is a no-op.
+
+### B. Backend — Per-domain Caddy generator
+
+- [ ] Extract `generateServiceHandlerLines(service, siteSslEnabled)` helper (admin/backend/src/routes/services.js, new function next to `generateCaddyConfig`)
+      — Pure function that returns only the per-service handler lines (the `handle_path ${prefix}* { ... }` block for prefixed services or the bare `reverse_proxy`/`root`+`file_server`+`try_files` lines for root-scoped services). Takes the site-level SSL decision as an arg so wildcard + http:// fallback stays consistent across all services on the domain. Does not emit the site address, request_body, log, or security headers — those are site-level.
+
+- [ ] `buildDomainCaddyConfig(servicesList, domain)` helper (admin/backend/src/routes/services.js, new function)
+      — Pure function: given a list of service rows for one domain (already in the wanted post-operation state) plus the domain, returns the full merged Caddy config string. Internally sorts by `length(path_prefix) DESC` then `path_prefix DESC` so more-specific prefixes emit first. Computes site-level decisions: siteAddress is `http://${domain}` when the domain is a wildcard OR no service has `sslEnabled`, otherwise plain `${domain}` for Caddy auto-TLS. `request_body max_size` takes the max of all services' `maxUploadSize` (via existing `toCaddySize`). Emits one `handle_path` per prefixed service in sorted order, then one unprefixed `handle { ... }` (or bare body) for the root-scoped service if present. Emits the common security headers and single `log { output file /var/log/caddy/${caddyFileName(domain)}.log }` once. Refuses to emit (throws `Error('Duplicate (domain, path_prefix) tuple detected for ...')`) when two services on the list share the same normalized prefix — defense-in-depth against a DB unique-constraint bypass.
+
+- [ ] `regenerateDomainCaddyConfig(db, domain)` helper (admin/backend/src/routes/services.js, new function)
+      — Async wrapper that queries `SELECT * FROM services WHERE domain = ?`, normalizes each row into the shape `buildDomainCaddyConfig` expects, calls `buildDomainCaddyConfig`, then either `writeCaddyConfig(caddyFilePath(domain), merged)` or — when the list is empty — `unlink(caddyFilePath(domain)).catch(() => {})`. Used by call sites where the DB is already in the desired state (ssl enable/disable, revert, regenerate-all, import, discover, delete). Success criterion: invoking the helper after a DB mutation reconciles the merged site file to match DB state.
+
+- [ ] Call site 1: `POST /:id/obtain-certificate` (admin/backend/src/routes/services.js:277)
+      — After the `UPDATE services SET ssl_enabled = 1 ...` runs, replace the `generateCaddyConfig(serviceConfig)` + `writeCaddyConfig(configPath, caddyConfig)` pair with a single `await regenerateDomainCaddyConfig(db, service.domain)`. Keep the subsequent `reloadCaddy()` call. Remove the now-unused local `serviceConfig` object.
+
+- [ ] Call site 2: `DELETE /:id/certificate` (admin/backend/src/routes/services.js:344)
+      — Same substitution as call site 1, after the `UPDATE services SET ssl_enabled = 0 ...` statement.
+
+- [ ] Call site 3: `POST /:id/regenerate-config` (admin/backend/src/routes/services.js:439)
+      — Replace the `generateCaddyConfig(serviceConfig)` + write with `await regenerateDomainCaddyConfig(db, service.domain)`.
+
+- [ ] Call site 4: `POST /caddy/regenerate-all` loop (admin/backend/src/routes/services.js:519)
+      — Replace the per-service Caddy write inside `for (const service of services) { ... }` with a dedupe pass: collect `uniqueDomains = new Set(services.filter(s => !s.is_admin).map(s => s.domain))`, then `for (const domain of uniqueDomains) await regenerateDomainCaddyConfig(db, domain)`. Keep the backup/revert logic unchanged (it already keys on filenames, which still line up with domains). Update `results.success` to record each domain once instead of each service.
+
+- [ ] Call site 5: `POST /` create (admin/backend/src/routes/services.js:709)
+      — Reorder so the DB insert happens *before* the Caddy write: after validating uniqueness and building `data`, INSERT the row, then call `await regenerateDomainCaddyConfig(db, data.domain)`, then `caddy adapt` validation, then `reloadCaddy()`. On adapt/reload failure: `DELETE FROM services WHERE id = ?` to roll back the insert, call `regenerateDomainCaddyConfig(db, data.domain)` again to rewrite the file without the failed row (or `unlink` if it was the only service), and return the error. Keep the data-directory + initial file creation as-is.
+
+- [ ] Call site 6: `PUT /:id` update (admin/backend/src/routes/services.js:894)
+      — Backup the current merged file, update the DB row, call `await regenerateDomainCaddyConfig(db, updatedData.domain)`, run `caddy adapt` validation, reload. If the domain changed, *also* call `regenerateDomainCaddyConfig(db, service.domain)` for the old domain (to shrink or delete its merged file). On failure at any step: revert the DB row (`UPDATE services SET ... WHERE id = ?` with the pre-update values), restore the backup merged file, reload, return the error. Remove the now-dead `unlink(caddyFilePath(service.domain))` — the regenerate call handles it.
+
+- [ ] Call site 7: `POST /:id/revert-config/:versionId` (admin/backend/src/routes/services.js:1094)
+      — After the `UPDATE services SET ...` that applies the reverted row, replace the `generateCaddyConfig(config)` + write with `await regenerateDomainCaddyConfig(db, config.domain)`. Keep the `caddy adapt` + `reloadCaddy()` sequence.
+
+- [ ] Call site 8: `POST /import` loop (admin/backend/src/routes/services.js:1937)
+      — Inside the per-service loop, after `db.prepare(INSERT INTO services ...)`, call `await regenerateDomainCaddyConfig(db, serviceData.domain)` instead of `generateCaddyConfig(configData)` + write. Drop the `unlink(caddyFilePath(serviceData.domain))` on the overwrite branch — the regeneration rewrites the file correctly after the old row is deleted. Loop-level `reloadCaddy()` at the end stays unchanged.
+
+- [ ] Call site 9: `POST /discover/import` (admin/backend/src/routes/services.js:2952)
+      — After the `INSERT INTO services` for the discovered site, replace `generateCaddyConfig(serviceConfig)` + write with `await regenerateDomainCaddyConfig(db, domain)`. Keep the surrounding try/catch and `reloadCaddy()`.
+
+- [ ] `DELETE /:id` endpoint (admin/backend/src/routes/services.js:1253)
+      — After `DELETE FROM services WHERE id = ?` runs (and after TOTP verification), replace the `unlink(caddyFilePath(service.domain))` with `await regenerateDomainCaddyConfig(db, service.domain)` so that sibling services on the same domain survive and only the last service on a domain unlinks the file. Keep the `reloadCaddy()` call after the regenerate. Success criterion: deleting a `/api` service on a domain with a `/` sibling leaves the frontend reachable; deleting the final service on a domain unlinks the file.
+
+- [ ] Retire `generateCaddyConfig(service)` (admin/backend/src/routes/services.js:3127)
+      — Once all nine call sites have been flipped, delete the old single-service function definition. `grep generateCaddyConfig admin/backend/src/routes/services.js` returns zero matches. `generateServiceHandlerLines` + `buildDomainCaddyConfig` are the only path.
+
+### C. Backend — Uniqueness validation
+
+- [ ] Create endpoint uniqueness check (admin/backend/src/routes/services.js:718)
+      — Replace `SELECT id FROM services WHERE domain = ?` with `SELECT id FROM services WHERE domain = ? AND path_prefix = ?`, binding the normalized `data.pathPrefix`. Error message becomes `'Domain + path prefix combination already exists'`. Normalization already happens on line 714 via `normalizePathPrefix`.
+
+- [ ] Update endpoint uniqueness check (admin/backend/src/routes/services.js:909)
+      — The existing check only fires when `data.domain !== service.domain`. Broaden it so the check also fires when `data.pathPrefix !== service.path_prefix`. Replace the `SELECT id FROM services WHERE domain = ? AND id != ?` query with `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?`, binding the final normalized `updatedData.domain` and `updatedData.pathPrefix`. Same error message. Success criterion: editing the `/api` service to use prefix `/` on the same domain fails when a `/` sibling already exists.
+
+### D. Backend — Audit log disambiguation
+
+- [ ] `SERVICE_DELETED` audit detail payload (admin/backend/src/routes/services.js:1303)
+      — Change `{ domain: service.domain }` to `{ domain: service.domain, pathPrefix: service.path_prefix }`. `SERVICE_CREATED` already passes the full `data` object (includes `pathPrefix`); `SERVICE_UPDATED` already passes `updatedData` (includes `pathPrefix`). Verify both by re-reading the log after one create + one update in dev.
+
+### E. Frontend — Dashboard wizard UX (mobile-first)
+
+- [ ] `existingPrefixesForDomain` memo in Dashboard (admin/frontend/src/pages/Dashboard.jsx, near line 470 with the other memos)
+      — Add `const existingPrefixesForDomain = useMemo(() => { const d = (formData.domain || '').toLowerCase().trim(); if (!d) return []; return services.filter(s => s.domain.toLowerCase() === d).map(s => s.pathPrefix || '/'); }, [services, formData.domain]);`. Used by the info banner and the submit validation below.
+
+- [ ] Info banner in Add Service wizard (admin/frontend/src/pages/Dashboard.jsx:2865, directly under the Path Prefix Input)
+      — When `existingPrefixesForDomain.length > 0`, render a mobile-friendly banner: `<div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-600 dark:text-blue-300">Domain already in use. Existing path prefixes: <code className="font-mono">{existingPrefixesForDomain.join(', ')}</code>. Choose a different prefix to add a second service to this domain.</div>`. Full width, wraps cleanly at 360px. No fixed width.
+
+- [ ] Client-side collision guard in `handleAddService` (admin/frontend/src/pages/Dashboard.jsx:767)
+      — Before the `api.createService(submitData)` call, compute `const normalized = (formData.pathPrefix || '/').trim().replace(/\/+$/, '') || '/';` (mirrors backend `normalizePathPrefix`) and if `existingPrefixesForDomain.map(p => p.trim().replace(/\/+$/, '') || '/').includes(normalized)`, toast an error matching the backend message and bail. Keeps the UI honest if the user types a colliding prefix without leaving the field.
+
+- [ ] Domain-grouped header row in the services grid (admin/frontend/src/pages/Dashboard.jsx:3386)
+      — When `sortBy === 'favorite'` (the default), pre-compute `const serviceGroups = useMemo(...)` that groups `filteredServices` by `domain`, preserving the inherited favorite/newest ordering inside each group. Render the grid as a flat list but inject a mobile-first header row above each group with 2+ services: `<div className="col-span-1 sm:col-span-2 lg:col-span-3 text-xs font-medium text-muted-foreground flex items-center gap-2 mt-2 first:mt-0"><Globe className="h-3 w-3" />{group.length} services on <span className="font-mono">{group.domain}</span></div>`. Single-service domains render with no header. Must pass the 360px horizontal-scroll audit.
+
+- [ ] Delete confirmation sibling warning (admin/frontend/src/pages/Dashboard.jsx:3790)
+      — In the Delete Service `DialogDescription`, compute `const siblingsCount = serviceToDelete ? services.filter(s => s.domain === serviceToDelete.domain && s.id !== serviceToDelete.id).length : 0;` and when `> 0`, append `This will leave {siblingsCount} other service{siblingsCount === 1 ? '' : 's'} running on <code>{serviceToDelete.domain}</code>.` on a new line inside the description. Must render inside the mobile full-screen dialog without overflow.
+
+### F. Frontend — api.js audit
+
+- [ ] `admin/frontend/src/lib/api.js` per-domain caching audit
+      — Re-read the file end-to-end and confirm nothing keys a cache by `domain`: the only domain reference today is `checkSslStatus(domain)`, which is a fire-and-forget request with no cache. No code change needed — the audit completion is a one-line comment above the `getServices` function: `// Services are identified by (id, domain+pathPrefix); api.js holds no per-domain state.` This item exists so there is a traceable commit confirming the file was audited.
+
+### G. Verification (run in this order, one commit per fix if anything breaks)
+
+- [ ] Fresh-install migration smoke test — delete the dev DB, run `npm run dev` on `admin/backend`, inspect `sqlite_master.sql` for `UNIQUE(domain, path_prefix)`; confirm no `UNIQUE(domain)`.
+
+- [ ] Existing-install migration smoke test — seed a dev DB with the old schema and two rows (path_prefix NULL + '/'), run `initDatabase()`, confirm both rows survive with `path_prefix = '/'` and the new UNIQUE constraint is in place.
+
+- [ ] Create two services on one domain — `POST /api/services` with `example.com` `/`, then with `example.com` `/api`. Both succeed. Inspect `/etc/caddy/sites/example.com`: contains `handle_path /api*` first, then the root handler, inside one site block.
+
+- [ ] Routing check — `curl -s http://example.com/` hits the frontend handler; `curl -s http://example.com/api/users` hits the `/api` handler with the prefix stripped; `curl -s -o /dev/null -w "%{http_code}" http://example.com/unknown` returns 404.
+
+- [ ] Duplicate rejection — attempt a second `example.com` `/` POST, confirm 400 with `"Domain + path prefix combination already exists"`.
+
+- [ ] Prefix specificity — with `/api` in place, POST `/api/v2`, confirm `curl http://example.com/api/v2/foo` hits the `/api/v2` service. Inspect the merged config; `handle_path /api/v2*` comes before `handle_path /api*`.
+
+- [ ] Sibling delete — delete the `/api` service, confirm the merged file rewrites to only `/` + `/api/v2`, both still reachable.
+
+- [ ] Last-service delete — delete the remaining two, confirm `/etc/caddy/sites/example.com` is unlinked.
+
+- [ ] Export/import round-trip — create two services on one domain, export, delete both, import, confirm both restore at their original prefixes and the merged Caddy file is regenerated.
+
+- [ ] Wildcard regression — create a `*.example.com` service and a sibling on plain `example.com`. Confirm both files exist, the wildcard uses `http://` fallback, and the plain domain's merged file includes its services normally.
+
+- [ ] Audit log payload — after one create, one update, one delete, inspect the audit table: `pathPrefix` is present in all three `details` JSON payloads.
+
+- [ ] Caddy adapt validation — `caddy adapt --config /etc/caddy/Caddyfile` exits 0 with no syntax errors against every generated merged file. No duplicate site addresses.
+
+- [ ] **Mobile: 360px horizontal-scroll audit on `/` (Dashboard)** — Chrome DevTools → 360×640, open the Add Service wizard, type an existing domain, confirm the blue info banner wraps cleanly and `document.documentElement.scrollWidth === document.documentElement.clientWidth`. Confirm the grouped-domain header row spans the full grid width without overflow.
+
+- [ ] **Mobile: 360px Add Service wizard end-to-end** — at 360px, type a new domain, tap every field, submit via the footer Create button. The form must submit without the create button clipping, and the dialog must be closeable via the header X.
+
+- [ ] **Mobile: 360px Delete Service confirmation** — open the delete dialog on a service whose domain has a sibling; confirm the `"This will leave N other services running on ..."` text wraps cleanly.
+
+- [ ] **Mobile: 1280px desktop regression** — re-run the create/list/delete flow at 1280px, confirm the grouped-domain headers align with the grid, the info banner sits inside the dialog, and the Phase 1 baseline layout is unchanged (no new horizontal scroll, no squished cards).
+
+- [ ] Mark Phase 2 ✅ in `docs/core/plan/README.md` Status section. Commit with `phase-02: mark phase complete`. Push.
+
+- [ ] Update `docs/core/plan/NEXT-SESSION-PROMPT.md` to point at Phase 3 (Foundation — SQLite schema, config loader, systemd generator). Commit. Push. Stop.

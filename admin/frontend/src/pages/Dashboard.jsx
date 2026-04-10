@@ -3573,7 +3573,7 @@ volumes:
               />
             </div>
             <Select value={composeStatusFilter} onValueChange={setComposeStatusFilter}>
-              <SelectTrigger className="w-[130px]">
+              <SelectTrigger className="w-full sm:w-[130px]">
                 <Filter className="h-4 w-4 mr-2" />
                 <SelectValue />
               </SelectTrigger>
@@ -3584,7 +3584,7 @@ volumes:
               </SelectContent>
             </Select>
             <Select value={composeSortBy} onValueChange={setComposeSortBy}>
-              <SelectTrigger className="w-[140px]">
+              <SelectTrigger className="w-full sm:w-[140px]">
                 <SortAsc className="h-4 w-4 mr-2" />
                 <SelectValue />
               </SelectTrigger>

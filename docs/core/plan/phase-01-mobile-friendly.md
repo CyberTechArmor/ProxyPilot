@@ -116,7 +116,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; cards stack to one column on phones per spec.
 - [x] `Dashboard` service card header actions (admin/frontend/src/pages/Dashboard.jsx:3368)
       — action button row wraps (`flex-wrap justify-end`) so Favorite/Folder/Settings/Files/Terminal/Delete never overflow the card title on narrow cards; icon buttons remain 44px-compliant via existing `size="icon"` default.
-- [ ] `Dashboard` compose search/filter/sort bar (admin/frontend/src/pages/Dashboard.jsx:3540)
+- [x] `Dashboard` compose search/filter/sort bar (admin/frontend/src/pages/Dashboard.jsx:3540)
       — same treatment as the services filter bar: `w-[130px]`/`w-[140px]` selects become `w-full sm:w-[130px]` / `sm:w-[140px]`.
 - [ ] `Dashboard` compose project grid (admin/frontend/src/pages/Dashboard.jsx:3577)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; compose cards stack vertically on mobile.

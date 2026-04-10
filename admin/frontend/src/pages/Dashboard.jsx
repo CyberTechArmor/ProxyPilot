@@ -2912,13 +2912,13 @@ volumes:
       </div>
 
       {/* Dashboard Tabs */}
-      <div className="flex items-center gap-2 border-b pb-2">
-        <div className="flex gap-1 p-1 bg-muted rounded-lg">
+      <div className="flex flex-col gap-2 border-b pb-2 sm:flex-row sm:items-center">
+        <div className="flex gap-1 p-1 bg-muted rounded-lg flex-nowrap overflow-x-auto max-w-full">
           <Button
             variant={dashboardTab === 'resources' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('resources')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Activity className="h-4 w-4" />
             Resources
@@ -2927,7 +2927,7 @@ volumes:
             variant={dashboardTab === 'services' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('services')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <LayoutGrid className="h-4 w-4" />
             Services
@@ -2936,7 +2936,7 @@ volumes:
             variant={dashboardTab === 'compose' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('compose')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Container className="h-4 w-4" />
             Compose
@@ -2945,13 +2945,13 @@ volumes:
             variant={dashboardTab === 'lxc' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('lxc')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Box className="h-4 w-4" />
             LXC
           </Button>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="sm:ml-auto flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Default view:</span>
           <select
             className="text-xs border rounded px-2 py-1 bg-background"

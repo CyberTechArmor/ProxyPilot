@@ -96,7 +96,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `DialogContent` becomes `max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg` (step 0) and `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg` (step 1); completable on 375px end-to-end.
 - [x] `Dashboard` wizard type picker grid (admin/frontend/src/pages/Dashboard.jsx:2763)
       — `grid-cols-2 md:grid-cols-4` → `grid-cols-1 sm:grid-cols-2 lg:grid-cols-4`; 4 type cards stack on phones without squishing icons.
-- [ ] `Dashboard` dashboard tabs bar (admin/frontend/src/pages/Dashboard.jsx:2915)
+- [x] `Dashboard` dashboard tabs bar (admin/frontend/src/pages/Dashboard.jsx:2915)
       — Resources/Services/Compose/LXC tab bar gets `overflow-x-auto` + `flex-nowrap` so the tab strip scrolls horizontally at 360px instead of overflowing the page.
 
 ### C. Dashboard page — Resources tab

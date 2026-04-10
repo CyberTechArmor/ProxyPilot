@@ -2164,21 +2164,45 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
+    // Phase 2b: a service can span multiple domains via its routes
+    // (one service, many `service_http_routes` rows). Collect EVERY
+    // domain the service touches BEFORE the delete so we can regenerate
+    // each affected merged file afterwards. Sources:
+    //   1. The legacy `services.domain` column (still populated during
+    //      the Section D transition window)
+    //   2. The distinct set of route domains owned by this service
+    const routeRows = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(req.params.id);
+    const affectedDomains = new Set();
+    if (service.domain) affectedDomains.add(service.domain);
+    for (const r of routeRows) affectedDomains.add(r.domain);
+
     // Delete from database first so regenerateDomainCaddyConfig picks up
     // the remaining siblings (or an empty list if this was the last one).
+    // The ON DELETE CASCADE FK on service_http_routes.service_id wipes
+    // every child route row in the same statement — better-sqlite3 9.x
+    // enforces foreign_keys=ON by default.
     db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
 
-    // Regenerate the merged Caddy config for the domain. If this was the
-    // last service on the domain, regenerateDomainCaddyConfig unlinks the
-    // file. Otherwise it rewrites it without the deleted row so siblings
-    // stay reachable.
-    try {
-      await regenerateDomainCaddyConfig(db, service.domain);
-    } catch (e) {
-      console.error('Error regenerating merged Caddy config after delete:', e);
+    // Regenerate the merged Caddy config for every domain the service
+    // touched. A domain whose last remaining entry was owned by this
+    // service gets its merged file unlinked; a domain that still has
+    // sibling entries gets its file rewritten without the deleted rows.
+    for (const domain of affectedDomains) {
+      try {
+        await regenerateDomainCaddyConfig(db, domain);
+      } catch (e) {
+        console.error(
+          `Error regenerating merged Caddy config for ${domain} after delete:`,
+          e
+        );
+      }
     }
 
-    // Reload Caddy
+    // Reload Caddy once at the end so N domain rewrites share one reload.
     await reloadCaddy().catch((e) => {
       console.error('Error reloading Caddy after delete:', e);
     });
@@ -2186,7 +2210,28 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
 
-    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain, pathPrefix: service.path_prefix }, req.ip);
+    // Phase 2b: audit payload nests every route that was cascaded so a
+    // post-hoc audit can replay the full delete without needing the
+    // routes table (which may have shrunk by the time the audit is
+    // reviewed). Legacy `{domain, pathPrefix}` tuple is still included
+    // so the Phase 2 audit format stays backward-compatible.
+    logAudit(
+      req.user.id,
+      'SERVICE_DELETED',
+      'service',
+      req.params.id,
+      {
+        domain: service.domain,
+        pathPrefix: service.path_prefix,
+        routes: routeRows.map((r) => ({
+          id: r.id,
+          domain: r.domain,
+          pathPrefix: normalizePathPrefix(r.path_prefix),
+          targetPort: r.target_port,
+        })),
+      },
+      req.ip
+    );
 
     res.json({ success: true });
   } catch (error) {

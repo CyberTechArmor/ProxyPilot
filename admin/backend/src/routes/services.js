@@ -1689,14 +1689,26 @@ servicesRouter.get('/:id/config-versions', async (req, res) => {
 });
 
 // Revert service config to a previous version
+// Phase 2b D.8: revert a service to a saved config snapshot.
+//
+// The stored snapshot is still in the legacy flat shape (D.2/D.3 save the
+// legacy fields into `service_config_versions.config_json`). The revert
+// handler applies the legacy fields back to `services`, then calls
+// `syncPrimaryRouteFromLegacy` so the primary route row mirrors the
+// reverted state. If the reverted `(domain, pathPrefix)` collides with
+// an existing row in either table, the services UPDATE is rolled back
+// and the handler returns 400. If the domain changed, both the old and
+// new domain's merged files are regenerated so the stale domain shrinks
+// or unlinks and the reverted domain is rewritten.
 servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
   try {
     const db = getDb();
+    const serviceId = req.params.id;
 
     const version = db.prepare(`
       SELECT * FROM service_config_versions
       WHERE id = ? AND service_id = ?
-    `).get(req.params.versionId, req.params.id);
+    `).get(req.params.versionId, serviceId);
 
     if (!version) {
       return res.status(404).json({ error: 'Config version not found' });
@@ -1704,8 +1716,9 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
 
     const config = JSON.parse(version.config_json);
 
-    // Apply the old config
-    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(serviceId);
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
@@ -1714,52 +1727,120 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Update database first so regenerateDomainCaddyConfig picks up the
-    // reverted row. Older saved versions may not include pathPrefix — fall
-    // back to the normalized default so reverts from pre-wildcard history
-    // still succeed.
-    db.prepare(`
-      UPDATE services SET
-        name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-        root_dir = ?, container_name = ?, ssl_enabled = ?,
-        force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(
-      config.name, config.domain, normalizePathPrefix(config.pathPrefix), config.type,
-      config.target, config.port, config.rootDir,
-      config.containerName, config.sslEnabled ? 1 : 0,
-      config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
-      config.maxUploadSize, req.params.id
-    );
+    // Snapshot pre-revert row so rollback reverts on UNIQUE violation.
+    const preRevertRow = { ...service };
 
-    // Regenerate the merged Caddy config for the reverted service's domain
-    // so sibling services on the same domain are preserved.
-    await regenerateDomainCaddyConfig(db, config.domain);
+    // Apply the legacy fields from the saved snapshot. Older saved
+    // versions may not include pathPrefix / target_ip — fall back to
+    // sensible defaults. The legacy services table still has a
+    // UNIQUE(domain, path_prefix) constraint from Phase 2, so the UPDATE
+    // itself can throw on collision — wrap it so we can surface a
+    // 400 instead of a 500.
+    const revertedPathPrefix = normalizePathPrefix(config.pathPrefix);
+    const revertedTargetIp =
+      config.type === 'static' ? null : config.target || null;
+    try {
+      db.prepare(`
+        UPDATE services SET
+          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+          root_dir = ?, container_name = ?, ssl_enabled = ?,
+          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+          target_ip = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        config.name, config.domain, revertedPathPrefix, config.type,
+        config.target, config.port, config.rootDir,
+        config.containerName, config.sslEnabled ? 1 : 0,
+        config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
+        config.maxUploadSize, revertedTargetIp, serviceId
+      );
+    } catch (updateErr) {
+      return res.status(400).json({
+        error: 'Failed to revert services row: ' + updateErr.message,
+      });
+    }
+
+    // Phase 2b D.8: propagate the revert into the primary route so the
+    // dual-sourced regenerateDomainCaddyConfig picks up the reverted
+    // values from the routes side. If this fails (typically a UNIQUE
+    // violation because the reverted tuple collides with another row),
+    // revert the services UPDATE and return 400.
+    try {
+      syncPrimaryRouteFromLegacy(db, serviceId, {
+        domain: config.domain,
+        pathPrefix: revertedPathPrefix,
+        targetPort: config.port,
+        sslEnabled: config.sslEnabled,
+        forceHttps: config.forceHttps,
+        websocketEnabled: config.websocketEnabled,
+        maxUploadSize: config.maxUploadSize,
+      });
+    } catch (routeErr) {
+      db.prepare(`
+        UPDATE services SET
+          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+          root_dir = ?, container_name = ?, ssl_enabled = ?,
+          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+          target_ip = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        preRevertRow.name, preRevertRow.domain, preRevertRow.path_prefix,
+        preRevertRow.type, preRevertRow.target, preRevertRow.port,
+        preRevertRow.root_dir, preRevertRow.container_name,
+        preRevertRow.ssl_enabled, preRevertRow.force_https,
+        preRevertRow.websocket_enabled, preRevertRow.max_upload_size,
+        preRevertRow.target_ip, preRevertRow.updated_at, serviceId
+      );
+      return res.status(400).json({
+        error: 'Failed to sync primary route: ' + routeErr.message,
+      });
+    }
+
+    // Regenerate merged files for the reverted domain AND, if the domain
+    // changed, the previous domain so its merged file shrinks or unlinks.
+    const domainChanged =
+      config.domain !== preRevertRow.domain && !!preRevertRow.domain;
+    try {
+      await regenerateDomainCaddyConfig(db, config.domain);
+      if (domainChanged) {
+        await regenerateDomainCaddyConfig(db, preRevertRow.domain);
+      }
+    } catch (genErr) {
+      console.error('Revert: failed to regenerate merged Caddy config', genErr);
+      // Continue — the legacy implementation swallowed gen errors too.
+    }
 
     // Validate and reload Caddy
-    await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    try {
+      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    } catch (e) {
+      console.error('Revert: caddy adapt failed', e);
+    }
     await reloadCaddy();
 
     // Save as new version
     const lastVersion = db.prepare(`
       SELECT MAX(version) as maxVersion FROM service_config_versions WHERE service_id = ?
-    `).get(req.params.id);
+    `).get(serviceId);
 
     db.prepare(`
       INSERT INTO service_config_versions (id, service_id, config_json, version, notes, created_by)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       uuidv4(),
-      req.params.id,
+      serviceId,
       JSON.stringify(config),
       (lastVersion?.maxVersion || 0) + 1,
       `Reverted to version ${version.version}`,
       req.user.id
     );
 
-    logAudit(req.user.id, 'SERVICE_CONFIG_REVERTED', 'service', req.params.id, {
+    logAudit(req.user.id, 'SERVICE_CONFIG_REVERTED', 'service', serviceId, {
+      service_id: serviceId,
       revertedToVersion: version.version,
+      domain: config.domain,
     }, req.ip);
 
     res.json({ success: true, message: `Reverted to version ${version.version}` });

@@ -434,18 +434,32 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 });
 
 // Disable SSL for a service (requires TOTP)
+//
+// Phase 2b D.5: mirror of D.4 — flips `ssl_enabled=0, force_https=0` on
+// both the legacy `services` columns AND every child `service_http_routes`
+// row owned by this service, in lockstep. Collects every affected domain
+// from both sources, validates that no sibling route disagrees with the
+// off stance via `assertSiblingsMatchStance` before any mutation,
+// regenerates the merged Caddy config for every affected domain, and
+// rolls back both tables + every affected merged file on any downstream
+// failure. TOTP check remains as the destructive-action guard.
 servicesRouter.delete('/:id/certificate', async (req, res) => {
   try {
     const { totpCode } = deleteServiceSchema.parse(req.body);
     const db = getDb();
+    const serviceId = req.params.id;
 
-    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(serviceId);
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
 
     // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
+    const user = db
+      .prepare('SELECT totp_secret FROM users WHERE id = ?')
+      .get(req.user.id);
     if (user && user.totp_secret) {
       const totp = new OTPAuth.TOTP({
         issuer: 'ProxyPilot',
@@ -462,21 +476,149 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       }
     }
 
-    // Disable SSL in database
-    db.prepare('UPDATE services SET ssl_enabled = 0, force_https = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+    // Snapshot pre-flip state so rollback reverts row-by-row.
+    const preRoutes = db
+      .prepare(
+        `SELECT id, domain, ssl_enabled, force_https
+           FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(serviceId);
+    const preServiceSsl = {
+      ssl_enabled: service.ssl_enabled,
+      force_https: service.force_https,
+    };
 
-    // Regenerate the merged Caddy config for the whole domain so sibling
-    // services on the same domain keep sharing a single site block.
-    await regenerateDomainCaddyConfig(db, service.domain);
+    const affectedDomains = new Set();
+    for (const r of preRoutes) affectedDomains.add(r.domain);
+    if (service.domain) affectedDomains.add(service.domain);
 
-    // Reload Caddy
+    // (1) Pre-mutation stance check: every external sibling must already
+    // be (ssl=0, force=0) for the flip to be valid. `assertSiblingsMatchStance`
+    // excludes every row owned by this service so the pre-flip state of our
+    // own routes doesn't false-conflict against the target.
+    for (const domain of affectedDomains) {
+      try {
+        assertSiblingsMatchStance(db, domain, serviceId, false, false);
+      } catch (e) {
+        if (e.code === 'ROUTE_SSL_CONFLICT') {
+          return res.status(400).json({ error: e.message });
+        }
+        throw e;
+      }
+    }
+
+    // (2) Flip both tables in lockstep.
+    db.prepare(
+      `UPDATE services SET ssl_enabled = 0, force_https = 0,
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).run(serviceId);
+    db.prepare(
+      `UPDATE service_http_routes SET ssl_enabled = 0, force_https = 0
+         WHERE service_id = ?`
+    ).run(serviceId);
+
+    // (3) Backup every affected merged file.
+    await ensureCaddyStructure();
+    const backups = {};
+    for (const domain of affectedDomains) {
+      const configPath = caddyFilePath(domain);
+      let content = null;
+      let existed = false;
+      if (existsSync(configPath)) {
+        try {
+          content = await readFile(configPath, 'utf-8');
+          existed = true;
+        } catch (e) {
+          // Continue without backup; rollback will unlink on failure.
+        }
+      }
+      backups[domain] = { existed, content, path: configPath };
+    }
+
+    const rollback = async () => {
+      try {
+        db.prepare(
+          `UPDATE services SET ssl_enabled = ?, force_https = ?
+             WHERE id = ?`
+        ).run(preServiceSsl.ssl_enabled, preServiceSsl.force_https, serviceId);
+      } catch (e) {
+        console.error('Rollback: failed to revert services row', e);
+      }
+      for (const pr of preRoutes) {
+        try {
+          db.prepare(
+            `UPDATE service_http_routes SET ssl_enabled = ?, force_https = ?
+               WHERE id = ?`
+          ).run(pr.ssl_enabled, pr.force_https, pr.id);
+        } catch (e) {
+          console.error('Rollback: failed to revert route row', e);
+        }
+      }
+      for (const [domain, b] of Object.entries(backups)) {
+        try {
+          if (b.existed && b.content !== null) {
+            await writeCaddyConfig(b.path, b.content);
+          } else {
+            await unlink(b.path).catch(() => {});
+          }
+        } catch (e) {
+          console.error(
+            `Rollback: failed to restore merged file for ${domain}`,
+            e
+          );
+        }
+      }
+    };
+
+    // (4) Regenerate every affected merged file.
+    try {
+      for (const domain of affectedDomains) {
+        await regenerateDomainCaddyConfig(db, domain);
+      }
+    } catch (genErr) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (5) Validate via caddy adapt.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testError) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Caddy config validation failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // (6) Reload Caddy.
     const reloadResult = await reloadCaddy();
+    if (!reloadResult.success) {
+      await rollback();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - reverted to previous config',
+        details: reloadResult.error,
+      });
+    }
 
-    logAudit(req.user.id, 'SSL_DISABLED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(
+      req.user.id,
+      'SSL_DISABLED',
+      'service',
+      serviceId,
+      { service_id: serviceId, domains: [...affectedDomains] },
+      req.ip
+    );
 
     res.json({
       success: true,
       message: 'SSL disabled and Caddy reconfigured',
+      domains: [...affectedDomains],
       caddyReloaded: reloadResult.success,
       caddyError: reloadResult.error,
     });

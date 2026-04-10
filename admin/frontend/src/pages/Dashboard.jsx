@@ -215,6 +215,15 @@ export default function Dashboard() {
     name: '',
     domain: '',
     pathPrefix: '/',
+    // Phase 2b H.1: the Add Service wizard now branches on `kind`
+    // (static_site | container_service) at Step 0. `runtime` is the
+    // container_service sub-choice filled in at H.2 (Step 1 picker).
+    // `type` is the legacy Phase 2 field kept in sync for backend D.2
+    // which still accepts a flat payload — H.6 will sort out the map.
+    kind: '',
+    runtime: null,
+    targetIp: '',
+    lxcContainerName: '',
     type: '',
     target: '127.0.0.1',
     port: '',
@@ -776,6 +785,39 @@ export default function Dashboard() {
     setWizardStep(1);
   };
 
+  // Phase 2b H.1: handler for the new two-tile kind picker at Step 0.
+  // static_site → kind='static_site' + type='static' (backend D.2 still
+  // reads `type`, so both fields stay in sync during the transitional
+  // period until D.2 is refactored to accept nested routes).
+  // container_service → kind='container_service' + runtime=null (runtime
+  // is filled in at Step 1 by the H.2 picker). `type` is temporarily set
+  // to 'docker' so the existing Step 1 form renders its container inputs
+  // until H.2/H.3 land. Both `lxcContainerName` and `targetIp` reset so a
+  // second run through the wizard does not leak state from a previous
+  // container_service pick.
+  const handleKindSelect = (kind) => {
+    if (kind === 'static_site') {
+      setFormData({
+        ...formData,
+        kind: 'static_site',
+        type: 'static',
+        runtime: null,
+        lxcContainerName: '',
+        targetIp: '',
+      });
+    } else {
+      setFormData({
+        ...formData,
+        kind: 'container_service',
+        type: 'docker',
+        runtime: null,
+        lxcContainerName: '',
+        targetIp: formData.target || '127.0.0.1',
+      });
+    }
+    setWizardStep(1);
+  };
+
   // Phase 2: extracted from the inline `.map` in the services grid so the
   // grouped renderer can call it. The card body is byte-for-byte identical
   // to the pre-Phase-2 inline version — only the surrounding control flow
@@ -1111,6 +1153,10 @@ export default function Dashboard() {
       name: '',
       domain: '',
       pathPrefix: '/',
+      kind: '',
+      runtime: null,
+      targetIp: '',
+      lxcContainerName: '',
       type: '',
       target: '127.0.0.1',
       port: '',
@@ -2953,7 +2999,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
+            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>
@@ -2962,64 +3008,60 @@ volumes:
               </DialogHeader>
 
               {wizardStep === 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 py-4">
-                  <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('static')}>
+                /*
+                 * Phase 2b H.1: the picker collapses from four tiles (Static
+                 * Site / Proxy Container / Docker Compose / LXC Container) to
+                 * two top-level kinds. Runtime (LXC vs Docker) becomes a
+                 * sub-choice inside Container Service, handled in Step 1 by
+                 * H.2. The Docker Compose and LXC-container-creation entry
+                 * points live on the dedicated Compose and LXC tabs in the
+                 * dashboard — the Add Service dialog is now exclusively for
+                 * creating HTTP-reverse-proxy services backed by a container
+                 * or a local static directory.
+                 */
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-4">
+                  <Card
+                    data-testid="wizard-kind-static-site"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleKindSelect('static_site')}
+                  >
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
                       <CardTitle className="text-lg">Static Site</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <CardDescription className="text-center">Serve static HTML, CSS, and JavaScript files</CardDescription>
+                      <CardDescription className="text-center">
+                        Serve static HTML, CSS, and JavaScript from a local directory.
+                      </CardDescription>
                     </CardContent>
                   </Card>
-                  <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('docker')}>
+                  <Card
+                    data-testid="wizard-kind-container-service"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleKindSelect('container_service')}
+                  >
                     <CardHeader className="text-center pb-2">
                       <Container className="h-12 w-12 mx-auto text-primary" />
-                      <CardTitle className="text-lg">Proxy Container</CardTitle>
+                      <CardTitle className="text-lg">Container Service</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <CardDescription className="text-center">Proxy to a Docker container running on a port</CardDescription>
-                    </CardContent>
-                  </Card>
-                  <Card className="cursor-pointer hover:border-purple-500 border-purple-500/30 transition-colors" onClick={() => {
-                    setAddDialogOpen(false);
-                    setComposeCreateOpen(true);
-                    setComposeCreateForm({
-                      serviceName: '',
-                      composeContent: DEFAULT_COMPOSE_CONTENT,
-                      envVars: [],
-                    });
-                  }}>
-                    <CardHeader className="text-center pb-2">
-                      <Boxes className="h-12 w-12 mx-auto text-purple-500" />
-                      <CardTitle className="text-lg">Docker Compose</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <CardDescription className="text-center">Create a multi-container app with docker-compose.yml</CardDescription>
-                    </CardContent>
-                  </Card>
-                  <Card className="cursor-pointer hover:border-cyan-500 border-cyan-500/30 transition-colors" onClick={() => {
-                    setAddDialogOpen(false);
-                    setDashboardTab('lxc');
-                  }}>
-                    <CardHeader className="text-center pb-2">
-                      <svg className="h-12 w-12 mx-auto text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                        <line x1="12" y1="22.08" x2="12" y2="12"/>
-                      </svg>
-                      <CardTitle className="text-lg">LXC Container</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <CardDescription className="text-center">Launch a system container with Incus</CardDescription>
+                      <CardDescription className="text-center">
+                        Reverse-proxy HTTP routes to a Docker or LXC container. Pick the runtime next.
+                      </CardDescription>
                     </CardContent>
                   </Card>
                 </div>
               ) : (
                 <form onSubmit={handleAddService} className="space-y-4">
                   <div className="flex items-center gap-2 p-2 bg-muted rounded mb-4">
-                    {formData.type === 'static' ? <FolderOpen className="h-5 w-5 text-primary" /> : <Container className="h-5 w-5 text-primary" />}
-                    <span className="font-medium capitalize">{formData.type} Site</span>
+                    {formData.kind === 'static_site' ? (
+                      <FolderOpen className="h-5 w-5 text-primary" />
+                    ) : (
+                      <Container className="h-5 w-5 text-primary" />
+                    )}
+                    <span className="font-medium">
+                      {formData.kind === 'static_site' ? 'Static Site' : 'Container Service'}
+                    </span>
                     <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => setWizardStep(0)}>Change</Button>
                   </div>
                   <div className="space-y-2">

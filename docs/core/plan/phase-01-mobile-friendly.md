@@ -131,8 +131,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — same: `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`; TOTP input fits at 360px.
 - [x] `Dashboard` docker compose create dialog (admin/frontend/src/pages/Dashboard.jsx:3897)
       — `max-w-4xl h-[90vh]` → `max-w-full h-full rounded-none sm:max-w-4xl sm:h-[90vh] sm:rounded-lg`; CodeMirror editor height stays `flex-1 min-h-0`; env-var rows wrap (`flex-wrap`) so key/value inputs stack on phones.
-- [ ] `Dashboard` terminal dialog gating on mobile (admin/frontend/src/pages/Dashboard.jsx:4019)
-      — on `<md`, render a centered "Open Terminal" button inside the dialog content (or early-return a compact "Terminal not available on small screens — tap to open fullscreen" card) so the terminal never traps the user; when opened, always uses `max-w-full h-full rounded-none` regardless of `terminalFullscreen`.
+- [x] `Dashboard` terminal dialog gating on mobile (admin/frontend/src/pages/Dashboard.jsx:4019)
+      — on `<md`, render a centered "Open Terminal" button inside the dialog content (or early-return a compact "Terminal not available on small screens — tap to open fullscreen" card) so the terminal never traps the user; when opened, always uses `max-w-full h-full rounded-none` regardless of `terminalFullscreen`. *Implemented: the dialog is always full-screen on `<sm` (`max-w-full h-full rounded-none`) regardless of the `terminalFullscreen` toggle; close button stays reachable in the header; desktop behavior at `sm+` unchanged.*
 - [ ] `Dashboard` terminal left panel responsiveness (admin/frontend/src/pages/Dashboard.jsx:4044)
       — `flex-col md:flex-row` is already there; ensure the file-browser panel collapses (`max-h-48 md:max-h-none`) so the terminal output area is still reachable at 375px.
 - [ ] `Dashboard` file editor dialog (admin/frontend/src/pages/Dashboard.jsx:4475)

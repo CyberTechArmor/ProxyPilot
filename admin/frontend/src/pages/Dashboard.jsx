@@ -4043,7 +4043,7 @@ volumes:
 
       {/* Terminal Dialog */}
       <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
-        <DialogContent className={`${terminalFullscreen ? 'max-w-[100vw] w-screen h-screen max-h-screen m-0 rounded-none' : 'max-w-5xl h-[85vh]'} flex flex-col overflow-hidden`}>
+        <DialogContent className={`max-w-full h-full rounded-none ${terminalFullscreen ? 'sm:max-w-[100vw] sm:w-screen sm:h-screen sm:max-h-screen sm:m-0 sm:rounded-none' : 'sm:max-w-5xl sm:h-[85vh] sm:rounded-lg'} flex flex-col overflow-hidden`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>

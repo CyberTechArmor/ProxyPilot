@@ -165,7 +165,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; verifies "card stack on <md" requirement.
 - [x] `LxcContainers` card header action buttons (admin/frontend/src/pages/LxcContainers.jsx:1141)
       — Terminal/Start/Stop/Restart/Delete buttons were `h-7 w-7`; now `h-9 w-9 sm:h-7 sm:w-7` so they hit a 36px touch target on mobile while staying compact on desktop. Row also wraps (`flex-wrap justify-end`) so cards at 360px don't overflow.
-- [ ] `LxcContainers` create container dialog (admin/frontend/src/pages/LxcContainers.jsx:1249)
+- [x] `LxcContainers` create container dialog (admin/frontend/src/pages/LxcContainers.jsx:1249)
       — `sm:max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
 - [ ] `LxcContainers` create form paired grids (admin/frontend/src/pages/LxcContainers.jsx:1392, 1449, 1690, 1768)
       — every inner `grid grid-cols-2` becomes `grid grid-cols-1 sm:grid-cols-2` so name/value input pairs stack on phones.

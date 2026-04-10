@@ -1246,7 +1246,7 @@ export default function LxcContainers() {
 
       {/* Create Container Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
-        <DialogContent className="sm:max-w-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="h-5 w-5 text-cyan-500" />

@@ -196,6 +196,16 @@ export default function Dashboard() {
   });
   const [settingsTab, setSettingsTab] = useState('settings'); // 'settings', 'history', or 'caddy'
   const [savingSettings, setSavingSettings] = useState(false);
+  // Phase 2b I.1: Routes card state for the settings dialog's Settings
+  // tab. `settingsRoutes` mirrors the service's routes as loaded from
+  // `api.getServiceRoutes`. `editingRouteId` is either a route id (edit
+  // mode), the sentinel string `'new'` (add mode), or `null` (no form).
+  // `editingRouteDraft` holds the inline form's current values.
+  const [settingsRoutes, setSettingsRoutes] = useState([]);
+  const [settingsRoutesLoading, setSettingsRoutesLoading] = useState(false);
+  const [editingRouteId, setEditingRouteId] = useState(null);
+  const [editingRouteDraft, setEditingRouteDraft] = useState(null);
+  const [savingRoute, setSavingRoute] = useState(false);
   const [configVersions, setConfigVersions] = useState([]);
   const [caddyConfig, setCaddyConfig] = useState('');
   const [caddyConfigOriginal, setCaddyConfigOriginal] = useState('');
@@ -2683,6 +2693,121 @@ volumes:
     }
   };
 
+  // Phase 2b I.1: routes card loaders + mutation handlers.
+  const loadSettingsRoutes = async (serviceId) => {
+    setSettingsRoutesLoading(true);
+    try {
+      const { routes } = await api.getServiceRoutes(serviceId);
+      setSettingsRoutes(routes || []);
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to load routes',
+        description: err.message,
+      });
+      setSettingsRoutes([]);
+    } finally {
+      setSettingsRoutesLoading(false);
+    }
+  };
+
+  // Begin inline edit on an existing route row. Seeds the draft form
+  // with the row's current values.
+  const beginEditSettingsRoute = (route) => {
+    setEditingRouteId(route.id);
+    setEditingRouteDraft({
+      domain: route.domain || '',
+      pathPrefix: route.pathPrefix || '/',
+      targetPort: route.targetPort != null ? String(route.targetPort) : '',
+      sslEnabled: route.sslEnabled !== false,
+      forceHttps: route.forceHttps !== false,
+      websocketEnabled: !!route.websocketEnabled,
+      maxUploadSize: route.maxUploadSize || '1G',
+    });
+  };
+
+  // Begin inline add — uses the sentinel 'new' so the form lives
+  // under the last row instead of replacing one of them.
+  const beginAddSettingsRoute = () => {
+    setEditingRouteId('new');
+    setEditingRouteDraft({
+      domain: '',
+      pathPrefix: '/',
+      targetPort: '',
+      sslEnabled: true,
+      forceHttps: true,
+      websocketEnabled: false,
+      maxUploadSize: '1G',
+    });
+  };
+
+  const cancelEditSettingsRoute = () => {
+    setEditingRouteId(null);
+    setEditingRouteDraft(null);
+  };
+
+  // Save either a new or edited route. On success reload the routes
+  // list so the card reflects the canonical backend state.
+  const saveEditSettingsRoute = async () => {
+    if (!settingsService || !editingRouteDraft) return;
+    setSavingRoute(true);
+    try {
+      const body = {
+        domain: editingRouteDraft.domain,
+        pathPrefix: editingRouteDraft.pathPrefix,
+        targetPort: editingRouteDraft.targetPort
+          ? parseInt(editingRouteDraft.targetPort, 10)
+          : undefined,
+        sslEnabled: !!editingRouteDraft.sslEnabled,
+        forceHttps: !!editingRouteDraft.forceHttps,
+        websocketEnabled: !!editingRouteDraft.websocketEnabled,
+        maxUploadSize: editingRouteDraft.maxUploadSize || '1G',
+      };
+      if (editingRouteId === 'new') {
+        await api.createRoute(settingsService.id, body);
+        toast({ title: 'Route added' });
+      } else {
+        await api.updateRoute(settingsService.id, editingRouteId, body);
+        toast({ title: 'Route updated' });
+      }
+      await loadSettingsRoutes(settingsService.id);
+      // Also refresh the top-level services list so the grid card
+      // mirrors the new state and the sibling warnings in I.3 are
+      // computed off the latest routes.
+      fetchServices();
+      cancelEditSettingsRoute();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to save route',
+        description: err.message,
+      });
+    } finally {
+      setSavingRoute(false);
+    }
+  };
+
+  // Delete a route inline from the card. No TOTP dialog — routes are
+  // sub-objects and removing one does not destroy the parent service.
+  const deleteSettingsRoute = async (route) => {
+    if (!settingsService) return;
+    setSavingRoute(true);
+    try {
+      await api.deleteRoute(settingsService.id, route.id);
+      toast({ title: 'Route removed' });
+      await loadSettingsRoutes(settingsService.id);
+      fetchServices();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to delete route',
+        description: err.message,
+      });
+    } finally {
+      setSavingRoute(false);
+    }
+  };
+
   // Service Settings Functions
   const openSettings = async (service) => {
     setSettingsDialogOpen(true);
@@ -2690,6 +2815,10 @@ volumes:
     setConfigVersions([]);
     setCaddyConfig('');
     setCaddyConfigOriginal('');
+    // Phase 2b I.1: reset any leftover inline-edit state from a
+    // previous settings-dialog open.
+    cancelEditSettingsRoute();
+    setSettingsRoutes([]);
 
     try {
       // Fetch fresh service data to ensure we have the latest settings
@@ -2705,6 +2834,10 @@ volumes:
         rootDir: freshService.rootDir || '',
         dataDir: freshService.dataDir || '',
       });
+      // Phase 2b I.1: eagerly load the nested routes alongside the
+      // service so the Routes card in the Settings tab renders as
+      // soon as the dialog opens.
+      loadSettingsRoutes(freshService.id);
     } catch (error) {
       // Fallback to passed service if fetch fails
       setSettingsService(service);
@@ -2718,6 +2851,7 @@ volumes:
         rootDir: service.rootDir || '',
         dataDir: service.dataDir || '',
       });
+      loadSettingsRoutes(service.id);
     }
   };
 
@@ -5742,6 +5876,251 @@ volumes:
             <div className="p-3 bg-muted rounded-lg space-y-1">
               <p className="text-sm"><span className="text-muted-foreground">Domain:</span> {settingsService?.domain}</p>
               <p className="text-sm"><span className="text-muted-foreground">Type:</span> <span className="capitalize">{settingsService?.type}</span></p>
+            </div>
+
+            {/*
+             * Phase 2b I.1: HTTP Routes card. Lists every route
+             * owned by settingsService, with inline edit + delete per
+             * row and an "Add route" inline form keyed on the
+             * editingRouteId === 'new' sentinel. Mobile layout stacks
+             * each row via flex flex-col + inlines at sm+.
+             */}
+            <div
+              className="space-y-3 border rounded-lg p-3"
+              data-testid="settings-routes-card"
+            >
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium text-sm">HTTP Routes</h4>
+                <span className="text-xs text-muted-foreground">
+                  {settingsRoutesLoading
+                    ? 'Loading…'
+                    : `${settingsRoutes.length} route${settingsRoutes.length === 1 ? '' : 's'}`}
+                </span>
+              </div>
+
+              {settingsRoutes.map((route) => (
+                <div
+                  key={route.id}
+                  data-testid={`settings-route-row-${route.id}`}
+                  className="rounded-md border"
+                >
+                  {editingRouteId === route.id ? (
+                    // ---- Inline edit form ----
+                    <div className="p-3 bg-muted/30 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-domain-${route.id}`} className="text-xs">Domain</Label>
+                          <Input
+                            id={`sr-domain-${route.id}`}
+                            data-testid={`settings-route-domain-${route.id}`}
+                            value={editingRouteDraft.domain}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, domain: e.target.value })
+                            }
+                            placeholder="app.example.com"
+                            required
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-prefix-${route.id}`} className="text-xs">Path prefix</Label>
+                          <Input
+                            id={`sr-prefix-${route.id}`}
+                            data-testid={`settings-route-prefix-${route.id}`}
+                            value={editingRouteDraft.pathPrefix}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, pathPrefix: e.target.value })
+                            }
+                            placeholder="/"
+                          />
+                        </div>
+                      </div>
+                      {settingsService?.kind === 'container_service' && (
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-port-${route.id}`} className="text-xs">Target port</Label>
+                          <Input
+                            id={`sr-port-${route.id}`}
+                            data-testid={`settings-route-port-${route.id}`}
+                            type="number"
+                            value={editingRouteDraft.targetPort}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, targetPort: e.target.value })
+                            }
+                            placeholder="3000"
+                            min="1"
+                            max="65535"
+                          />
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs">SSL enabled</Label>
+                        <Switch
+                          checked={!!editingRouteDraft.sslEnabled}
+                          onCheckedChange={(checked) =>
+                            setEditingRouteDraft({ ...editingRouteDraft, sslEnabled: checked })
+                          }
+                        />
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-11 sm:h-9"
+                          onClick={cancelEditSettingsRoute}
+                          disabled={savingRoute}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-11 sm:h-9"
+                          data-testid={`settings-route-save-${route.id}`}
+                          onClick={saveEditSettingsRoute}
+                          disabled={savingRoute}
+                        >
+                          {savingRoute ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    // ---- Display row ----
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3">
+                      <div className="min-w-0 flex-1">
+                        <code className="font-mono text-sm break-all">
+                          {route.domain}
+                          {route.pathPrefix}
+                        </code>
+                        {route.targetPort != null && (
+                          <span className="text-sm text-muted-foreground ml-2">
+                            → :{route.targetPort}
+                          </span>
+                        )}
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {route.sslEnabled === false ? 'HTTP only' : 'HTTPS'}
+                        </div>
+                      </div>
+                      <div className="flex gap-1 shrink-0 justify-end">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 sm:h-10 sm:w-10"
+                          data-testid={`settings-route-edit-${route.id}`}
+                          onClick={() => beginEditSettingsRoute(route)}
+                          title="Edit route"
+                        >
+                          <Edit3 className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 sm:h-10 sm:w-10 text-red-500 hover:text-red-600"
+                          data-testid={`settings-route-delete-${route.id}`}
+                          onClick={() => deleteSettingsRoute(route)}
+                          title="Delete route"
+                          disabled={savingRoute}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {editingRouteId === 'new' ? (
+                <div className="rounded-md border p-3 bg-muted/30 space-y-3" data-testid="settings-route-new-form">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-domain" className="text-xs">Domain</Label>
+                      <Input
+                        id="sr-new-domain"
+                        data-testid="settings-route-new-domain"
+                        value={editingRouteDraft.domain}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, domain: e.target.value })
+                        }
+                        placeholder="app.example.com"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-prefix" className="text-xs">Path prefix</Label>
+                      <Input
+                        id="sr-new-prefix"
+                        data-testid="settings-route-new-prefix"
+                        value={editingRouteDraft.pathPrefix}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, pathPrefix: e.target.value })
+                        }
+                        placeholder="/"
+                      />
+                    </div>
+                  </div>
+                  {settingsService?.kind === 'container_service' && (
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-port" className="text-xs">Target port</Label>
+                      <Input
+                        id="sr-new-port"
+                        data-testid="settings-route-new-port"
+                        type="number"
+                        value={editingRouteDraft.targetPort}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, targetPort: e.target.value })
+                        }
+                        placeholder="3000"
+                        min="1"
+                        max="65535"
+                      />
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs">SSL enabled</Label>
+                    <Switch
+                      checked={!!editingRouteDraft.sslEnabled}
+                      onCheckedChange={(checked) =>
+                        setEditingRouteDraft({ ...editingRouteDraft, sslEnabled: checked })
+                      }
+                    />
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-11 sm:h-9"
+                      onClick={cancelEditSettingsRoute}
+                      disabled={savingRoute}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-11 sm:h-9"
+                      data-testid="settings-route-new-save"
+                      onClick={saveEditSettingsRoute}
+                      disabled={savingRoute}
+                    >
+                      {savingRoute ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add route'}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-11 sm:h-10 w-full sm:w-auto"
+                  data-testid="settings-route-add-button"
+                  onClick={beginAddSettingsRoute}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add route
+                </Button>
+              )}
             </div>
 
             {/* File Path Settings (for static sites) */}

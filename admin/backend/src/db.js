@@ -216,6 +216,47 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Phase 2b: sibling table that carries one row per HTTP route exposed by
+  // a service. A single service (one workload / container) can expose many
+  // routes at once — e.g. example.com/ and example.com/api pointing at
+  // different ports of the same container. The Phase 2 (domain, path_prefix)
+  // uniqueness constraint migrates from `services` to this table, which is
+  // the only place that carries the tuple after D.14 drops the legacy
+  // columns from `services`.
+  //
+  // Populated by A.3's migrateServicesToRoutes() backfill on installs that
+  // already have Phase 2 services rows. Fresh installs start empty and the
+  // create/update endpoints (section D) will insert rows as the operator
+  // adds routes.
+  //
+  // FK to services(id) is declared but not enforced at the SQLite level —
+  // this app does not `PRAGMA foreign_keys = ON`. The service-level DELETE
+  // handler (C.5) walks child rows explicitly before deleting the parent.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS service_http_routes (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      path_prefix TEXT NOT NULL DEFAULT '/',
+      target_port INTEGER,
+      websocket_enabled INTEGER DEFAULT 0,
+      ssl_enabled INTEGER DEFAULT 1,
+      force_https INTEGER DEFAULT 1,
+      max_upload_size TEXT DEFAULT '1G',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+      UNIQUE(domain, path_prefix)
+    )
+  `);
+
+  // Index on service_id so the routes-for-a-service lookup (used by the
+  // list + service-detail endpoints in section D and by the per-service
+  // routes CRUD in section C) stays O(log n).
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_routes_service
+    ON service_http_routes(service_id)
+  `);
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

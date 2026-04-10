@@ -75,7 +75,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — add `sidebarOpen` state + a `useEffect` that closes the drawer on `location.pathname` change, so the drawer never stays open across navigation on mobile.
 - [x] `Layout` mobile top bar (admin/frontend/src/components/Layout.jsx:225)
       — render a `md:hidden` top bar with hamburger (`Menu` icon, ≥44×44px) + ProxyPilot wordmark that toggles `sidebarOpen`; hidden at `md+`.
-- [ ] `Layout` sidebar container (admin/frontend/src/components/Layout.jsx:250)
+- [x] `Layout` sidebar container (admin/frontend/src/components/Layout.jsx:250)
       — sidebar becomes `fixed … -translate-x-full md:translate-x-0` + transition; open state slides in. Add a `md:hidden` backdrop (`fixed inset-0 bg-black/50 z-40`) that closes the drawer on click (outside-click close).
 - [ ] `Layout` main content padding (admin/frontend/src/components/Layout.jsx:378)
       — replace `pl-64` with `pl-0 md:pl-64`; add `pt-14 md:pt-0` when mobile top bar is visible so content is not under the bar. Inner wrapper becomes `p-4 md:p-8` so pages breathe on 360px without wasting space.

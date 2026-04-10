@@ -272,8 +272,23 @@ export default function Layout() {
         </div>
       )}
 
+      {/* Mobile sidebar backdrop (click to close) */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r">
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 w-64 bg-card border-r transform transition-transform duration-200 ease-out",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full",
+          "md:translate-x-0"
+        )}
+      >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
           <div className="flex flex-col px-6 py-4 border-b">

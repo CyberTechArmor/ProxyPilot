@@ -161,7 +161,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### F. LxcContainers page
 
-- [ ] `LxcContainers` container grid (admin/frontend/src/pages/LxcContainers.jsx:1128)
+- [x] `LxcContainers` container grid (admin/frontend/src/pages/LxcContainers.jsx:1128)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; verifies "card stack on <md" requirement.
 - [ ] `LxcContainers` card header action buttons (admin/frontend/src/pages/LxcContainers.jsx:1141)
       — Terminal/Start/Stop/Restart/Delete buttons are `h-7 w-7`; become `h-9 w-9 sm:h-7 sm:w-7` (still secondary actions in a dense list but meet the 36px minimum; if the verification audit flags these as primary, bump to `h-11 w-11`).

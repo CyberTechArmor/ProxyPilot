@@ -69,7 +69,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### A. Responsive shell (unblocks every page — do first)
 
-- [ ] `Dialog` base primitive (admin/frontend/src/components/ui/dialog.jsx:23)
+- [x] `Dialog` base primitive (admin/frontend/src/components/ui/dialog.jsx:23)
       — `DialogContent` keeps `sm:max-w-lg` + `sm:rounded-lg` defaults but drops the unconditional `max-w-lg` so per-dialog `max-w-full h-full rounded-none` overrides actually take effect on `<sm`; desktop width/rounding at `sm+` stays identical.
 - [ ] `Layout` sidebar drawer state (admin/frontend/src/components/Layout.jsx:32)
       — add `sidebarOpen` state + a `useEffect` that closes the drawer on `location.pathname` change, so the drawer never stays open across navigation on mobile.

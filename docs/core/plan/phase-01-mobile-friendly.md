@@ -216,7 +216,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — device rows now stack on `<sm`; IP/last-used meta wraps via `flex-wrap gap-x-4`. Revoke icon button bumped to `h-11 w-11 sm:h-9 sm:w-9` to meet 44px touch target on mobile.
 - [x] `Profile` revoke-device dialog (admin/frontend/src/pages/Profile.jsx:852)
       — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
-- [ ] `Profile` revoke-all-devices dialog (admin/frontend/src/pages/Profile.jsx:889)
+- [x] `Profile` revoke-all-devices dialog (admin/frontend/src/pages/Profile.jsx:889)
       — same full-screen-on-sm treatment.
 
 ### J. Login page

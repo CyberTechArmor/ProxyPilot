@@ -1406,6 +1406,37 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 // against legacy columns on `services` until Section D refactors them
 // to read and write through this CRUD surface.
 
+// Zod schema for the Phase 2b route CRUD endpoints. `maxUploadSize`
+// matches the same regex the legacy createServiceSchema uses so the
+// merged request_body max_size directive stays well-formed.
+const createRouteSchema = z.object({
+  domain: z
+    .string()
+    .regex(DOMAIN_REGEX, 'Invalid domain (use example.com or *.example.com)'),
+  pathPrefix: z
+    .string()
+    .regex(
+      PATH_PREFIX_REGEX,
+      'Path prefix must start with / and contain only URL-safe characters'
+    )
+    .default('/'),
+  targetPort: z
+    .union([z.number().int().min(1).max(65535), z.string(), z.null()])
+    .optional()
+    .transform((val) => {
+      if (val === null || val === undefined || val === '') return undefined;
+      const num = typeof val === 'string' ? parseInt(val, 10) : val;
+      return isNaN(num) ? undefined : num;
+    }),
+  websocketEnabled: z.boolean().default(false),
+  sslEnabled: z.boolean().default(true),
+  forceHttps: z.boolean().default(true),
+  maxUploadSize: z
+    .string()
+    .regex(/^[1-9][0-9]*[MG]$/i)
+    .default('1G'),
+});
+
 // List routes for a service.
 // Returns `{routes: [...]}` ordered by length(path_prefix) DESC so the
 // more-specific prefixes appear first (matching Caddy's source-order
@@ -1448,6 +1479,208 @@ servicesRouter.get('/:id/routes', (req, res) => {
   } catch (error) {
     console.error('Error listing routes:', error);
     res.status(500).json({ error: 'Failed to list routes' });
+  }
+});
+
+// Create a route for a service.
+// Validates (domain, path_prefix) uniqueness across BOTH service_http_routes
+// AND the legacy services table (dual-source during the Section D transition),
+// validates SSL stance consistency against siblings on the same domain via
+// assertRoutesShareSslStance, backs up the merged file for the affected
+// domain, INSERTs the route, regenerates the merged config, runs caddy adapt,
+// and reloads. On any downstream failure, rolls back both the DB row and
+// the merged file to pre-POST state.
+servicesRouter.post('/:id/routes', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot add routes to admin service' });
+    }
+
+    const data = createRouteSchema.parse(req.body);
+    data.pathPrefix = normalizePathPrefix(data.pathPrefix);
+
+    // (1) Uniqueness check against service_http_routes. The DB UNIQUE
+    // constraint is the primary guard; this query surfaces a better
+    // error message before we hit it.
+    const existingRoute = db
+      .prepare(
+        `SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ?`
+      )
+      .get(data.domain, data.pathPrefix);
+    if (existingRoute) {
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
+    }
+
+    // (2) Uniqueness check against legacy services rows on the same
+    // (domain, path_prefix) tuple so Section D can ship incrementally
+    // without risking double-registration.
+    let legacyCollision = null;
+    try {
+      legacyCollision = db
+        .prepare(
+          `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND is_admin = 0`
+        )
+        .get(data.domain, data.pathPrefix);
+    } catch (e) {
+      // Post-D.14 — legacy columns dropped. Nothing to check.
+      legacyCollision = null;
+    }
+    if (legacyCollision) {
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
+    }
+
+    // (3) SSL stance consistency against all siblings on the domain.
+    try {
+      assertRoutesShareSslStance(db, data.domain, {
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+      });
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
+      }
+      throw e;
+    }
+
+    // (4) Backup the merged file for the affected domain so we can
+    // restore it on any downstream failure.
+    await ensureCaddyStructure();
+    const configPath = caddyFilePath(data.domain);
+    let backupMergedConfig = null;
+    let backupExisted = false;
+    try {
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup; rollback will unlink on failure.
+    }
+
+    // (5) INSERT the route row.
+    const routeId = uuidv4();
+    db.prepare(
+      `INSERT INTO service_http_routes (
+         id, service_id, domain, path_prefix, target_port,
+         websocket_enabled, ssl_enabled, force_https, max_upload_size
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      routeId,
+      req.params.id,
+      data.domain,
+      data.pathPrefix,
+      data.targetPort || null,
+      data.websocketEnabled ? 1 : 0,
+      data.sslEnabled ? 1 : 0,
+      data.forceHttps ? 1 : 0,
+      data.maxUploadSize
+    );
+
+    // Rollback helper: delete the inserted row + restore the merged file.
+    const rollbackRouteCreate = async () => {
+      try {
+        db.prepare('DELETE FROM service_http_routes WHERE id = ?').run(
+          routeId
+        );
+      } catch (e) {
+        console.error('Rollback: failed to delete inserted route', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore merged Caddy config', e);
+      }
+    };
+
+    // (6) Regenerate the merged file for the affected domain.
+    try {
+      await regenerateDomainCaddyConfig(db, data.domain);
+    } catch (genErr) {
+      await rollbackRouteCreate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (7) Validate Caddy config.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteCreate();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration generated: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    // (8) Reload Caddy.
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteCreate();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route create rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_CREATED',
+      'route',
+      routeId,
+      {
+        service_id: req.params.id,
+        route: {
+          id: routeId,
+          domain: data.domain,
+          pathPrefix: data.pathPrefix,
+          targetPort: data.targetPort,
+        },
+      },
+      req.ip
+    );
+
+    res.status(201).json({
+      success: true,
+      route: {
+        id: routeId,
+        serviceId: req.params.id,
+        domain: data.domain,
+        pathPrefix: data.pathPrefix,
+        targetPort: data.targetPort,
+        websocketEnabled: data.websocketEnabled,
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+        maxUploadSize: data.maxUploadSize,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error creating route:', error);
+    res.status(500).json({ error: 'Failed to create route' });
   }
 });
 

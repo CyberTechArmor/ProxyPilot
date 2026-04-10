@@ -139,8 +139,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `max-w-6xl h-[90vh]` → on `<sm` always full-screen (`max-w-full h-full rounded-none`); `isFullscreen` toggle keeps its desktop behavior. File tree sidebar becomes a slide-over drawer on `<md` (default hidden, toggled by a "Files" button in the toolbar) with a black/50 backdrop.
 - [x] `Dashboard` file editor Path Picker row (admin/frontend/src/pages/Dashboard.jsx:4507)
       — row wraps (`flex-wrap`) so the Label/Input/Terminal button stack on 360px instead of pushing the input to zero width; Input gets `min-w-[150px]` so it stays usable when wrapped.
-- [ ] `Dashboard` file editor toolbar (admin/frontend/src/pages/Dashboard.jsx:4578)
-      — language select, history button, save-notes input, and Save button wrap (`flex-wrap gap-2`); save-notes `w-40` → `w-full sm:w-40`.
+- [x] `Dashboard` file editor toolbar (admin/frontend/src/pages/Dashboard.jsx:4578)
+      — language select, history button, save-notes input, and Save button wrap (`flex-wrap gap-2` — already applied with the Files button earlier); save-notes `w-40` → `w-full sm:w-40`.
 - [ ] `Dashboard` service settings dialog (admin/frontend/src/pages/Dashboard.jsx:4743)
       — `max-w-5xl h-[90vh]` (caddy tab) and `max-w-lg` (settings tab) both gain `max-w-full h-full rounded-none sm:*` prefix so the dialog is full-screen on phones.
 - [ ] `Dashboard` service settings two-column form grid (admin/frontend/src/pages/Dashboard.jsx:4822)

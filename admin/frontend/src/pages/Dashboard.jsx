@@ -4674,7 +4674,7 @@ volumes:
                     </Button>
                     {hasUnsavedChanges && (
                       <Input
-                        className="w-40 h-7 text-xs"
+                        className="w-full sm:w-40 h-7 text-xs"
                         placeholder="Version notes..."
                         value={saveNotes}
                         onChange={(e) => setSaveNotes(e.target.value)}

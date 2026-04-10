@@ -1383,7 +1383,44 @@ services:
       });
     }
 
-    logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
+    // Phase 2b F.1: audit payload nests a snapshot of the service-level
+    // fields AND the primary route that was just created via
+    // syncPrimaryRouteFromLegacy. The legacy flat `data` object is kept
+    // under `legacy` for backward compatibility with replay tools.
+    const createdRoute = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port
+           FROM service_http_routes WHERE service_id = ? ORDER BY created_at ASC, id ASC LIMIT 1`
+      )
+      .get(id);
+    logAudit(
+      req.user.id,
+      'SERVICE_CREATED',
+      'service',
+      id,
+      {
+        service: {
+          id,
+          name: data.name,
+          kind: inferredKind,
+          runtime: inferredRuntime,
+          target_ip: data.type !== 'static' ? data.target || null : null,
+          lxc_container_name: null,
+        },
+        routes: createdRoute
+          ? [
+              {
+                id: createdRoute.id,
+                domain: createdRoute.domain,
+                pathPrefix: createdRoute.path_prefix,
+                targetPort: createdRoute.target_port,
+              },
+            ]
+          : [],
+        legacy: data,
+      },
+      req.ip
+    );
 
     // Save initial files as version 1 for version control
     if (data.type === 'static') {
@@ -1741,7 +1778,40 @@ servicesRouter.put('/:id', async (req, res) => {
       // Non-critical, don't fail the update
     }
 
-    logAudit(req.user.id, 'SERVICE_UPDATED', 'service', req.params.id, updatedData, req.ip);
+    // Phase 2b F.1: audit payload nests the current service-level fields
+    // AND every route the service touches (including the updated primary).
+    // Legacy flat `updatedData` kept under `legacy` for backward compat.
+    const updatedRoutes = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port
+           FROM service_http_routes WHERE service_id = ?
+           ORDER BY created_at ASC, id ASC`
+      )
+      .all(req.params.id);
+    logAudit(
+      req.user.id,
+      'SERVICE_UPDATED',
+      'service',
+      req.params.id,
+      {
+        service: {
+          id: req.params.id,
+          name: updatedData.name,
+          kind: service.kind,
+          runtime: service.runtime,
+          target_ip: updatedTargetIp,
+          lxc_container_name: service.lxc_container_name,
+        },
+        routes: updatedRoutes.map((r) => ({
+          id: r.id,
+          domain: r.domain,
+          pathPrefix: r.path_prefix,
+          targetPort: r.target_port,
+        })),
+        legacy: updatedData,
+      },
+      req.ip
+    );
 
     res.json({ success: true, service: { id: req.params.id, ...updatedData } });
   } catch (error) {
@@ -3168,12 +3238,12 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
 
-    // Phase 2b: audit payload nests every route that was cascaded so a
-    // post-hoc audit can replay the full delete without needing the
-    // routes table (which may have shrunk by the time the audit is
-    // reviewed). Legacy `{domain, pathPrefix}` tuple is synthesized from
-    // the first route (primary) for backward compatibility with the
-    // pre-Phase-2b audit format.
+    // Phase 2b F.1: audit payload nests the service-level snapshot AND
+    // every route that was cascaded so a post-hoc audit can replay the
+    // full delete without needing the routes table (which may have
+    // shrunk by the time the audit is reviewed). Legacy `{domain,
+    // pathPrefix}` tuple is synthesized from the first route (primary)
+    // for backward compatibility with the pre-Phase-2b audit format.
     const primaryForAudit = routeRows[0] || null;
     logAudit(
       req.user.id,
@@ -3181,14 +3251,23 @@ servicesRouter.delete('/:id', async (req, res) => {
       'service',
       req.params.id,
       {
-        domain: primaryForAudit?.domain || null,
-        pathPrefix: primaryForAudit ? normalizePathPrefix(primaryForAudit.path_prefix) : null,
+        service: {
+          id: req.params.id,
+          name: service.name,
+          kind: service.kind,
+          runtime: service.runtime,
+          target_ip: service.target_ip,
+          lxc_container_name: service.lxc_container_name,
+        },
         routes: routeRows.map((r) => ({
           id: r.id,
           domain: r.domain,
           pathPrefix: normalizePathPrefix(r.path_prefix),
           targetPort: r.target_port,
         })),
+        // Legacy flat fields for backward compat with pre-Phase-2b audit format
+        domain: primaryForAudit?.domain || null,
+        pathPrefix: primaryForAudit ? normalizePathPrefix(primaryForAudit.path_prefix) : null,
       },
       req.ip
     );

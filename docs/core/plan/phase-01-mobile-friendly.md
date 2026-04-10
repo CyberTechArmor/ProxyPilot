@@ -101,10 +101,10 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### C. Dashboard page — Resources tab
 
-- [ ] `Dashboard` system stats cards grid (admin/frontend/src/pages/Dashboard.jsx:2988)
-      — already `grid-cols-1 md:grid-cols-2 lg:grid-cols-4`; verify no fixed widths inside CPU/Memory/Disk cards trigger overflow at 360px and tighten number text if needed.
-- [ ] `Dashboard` quick stats grid (admin/frontend/src/pages/Dashboard.jsx:3064)
-      — `grid-cols-2 md:grid-cols-4` → `grid-cols-2 md:grid-cols-4` confirmed; no change unless the card number/label pair overflows at 360px (then reduce `text-2xl` to `text-xl sm:text-2xl`).
+- [x] `Dashboard` system stats cards grid (admin/frontend/src/pages/Dashboard.jsx:2988)
+      — already `grid-cols-1 md:grid-cols-2 lg:grid-cols-4`; verify no fixed widths inside CPU/Memory/Disk cards trigger overflow at 360px and tighten number text if needed. *Verified: cards stack to 1-col on <md, inner content (`text-3xl` % + thin progress bar + load line) has no fixed widths, no changes required.*
+- [x] `Dashboard` quick stats grid (admin/frontend/src/pages/Dashboard.jsx:3064)
+      — `grid-cols-2 md:grid-cols-4` → `grid-cols-2 md:grid-cols-4` confirmed; no change unless the card number/label pair overflows at 360px (then reduce `text-2xl` to `text-xl sm:text-2xl`). *Verified: at 360px each card is ~160px wide with 16px padding — `text-2xl` single/double digit numbers + short labels (`Services`, `Folders`, `Compose Stacks`, `Favorites`) all fit without overflow.*
 
 ### D. Dashboard page — Services tab body
 

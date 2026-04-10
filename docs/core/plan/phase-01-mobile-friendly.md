@@ -199,7 +199,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `flex items-center gap-4` → `flex flex-wrap items-center gap-x-4 gap-y-1`; TOTP/password/created badges wrap instead of overflowing.
 - [x] `Users` primary action buttons (admin/frontend/src/pages/Users.jsx:321)
       — Manage-access / Reset-password / Delete icon buttons now `h-11 w-11 sm:h-9 sm:w-9 p-0` so they hit the 44px touch target on phones while staying compact on desktop.
-- [ ] `Users` create-user dialog (admin/frontend/src/pages/Users.jsx:363)
+- [x] `Users` create-user dialog (admin/frontend/src/pages/Users.jsx:363)
       — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
 - [ ] `Users` delete-user dialog (admin/frontend/src/pages/Users.jsx:458)
       — same full-screen-on-sm treatment.

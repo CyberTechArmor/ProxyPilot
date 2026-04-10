@@ -1560,7 +1560,7 @@ export default function LxcContainers() {
 
               {/* Details Tab */}
               <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto min-h-0">
-                <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">Status</span>
                     <div className="mt-0.5"><StatusBadge status={selectedContainer.status} /></div>
@@ -1598,7 +1598,7 @@ export default function LxcContainers() {
                       Resize
                     </Button>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Card className="p-3">
                       <div className="flex items-center gap-2">
                         <Cpu className="h-4 w-4 text-blue-500" />
@@ -1624,7 +1624,7 @@ export default function LxcContainers() {
                 {containerState && (
                   <div>
                     <h4 className="text-sm font-medium mb-2">Live Usage</h4>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {containerState.cpu?.usage !== undefined && (
                         <Card className="p-3">
                           <div className="flex items-center gap-2">

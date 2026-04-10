@@ -171,8 +171,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — create-form `grid grid-cols-2` entries (service domain/port row, CPU/memory row) now `grid grid-cols-1 sm:grid-cols-2` so input pairs stack on phones. *Lines 1690/1768 belong to the info/detail dialog image-picker and are handled in the info-dialog item below.*
 - [x] `LxcContainers` info/detail dialog (admin/frontend/src/pages/LxcContainers.jsx:1538)
       — on `<sm`, `max-w-full h-full rounded-none`; on `sm+`, `w-[95vw] max-w-[95vw] h-[90vh]` keeps the existing viewport-hugging behavior with `rounded-lg`. Tabs list (`grid grid-cols-4`) becomes `grid grid-cols-2 sm:grid-cols-4 h-auto` so tab labels wrap to two rows at 360px instead of truncating.
-- [ ] `LxcContainers` detail-tab inner grids (admin/frontend/src/pages/LxcContainers.jsx:1563, 1601, 1627)
-      — `grid-cols-2` → `grid-cols-1 sm:grid-cols-2` for the Info tab key/value readouts.
+- [x] `LxcContainers` detail-tab inner grids (admin/frontend/src/pages/LxcContainers.jsx:1563, 1601, 1627)
+      — `grid-cols-2` → `grid-cols-1 sm:grid-cols-2` for the Info tab key/value readouts, resource-limit cards, and live-usage cards.
 - [ ] `LxcContainers` image-picker stats grid (admin/frontend/src/pages/LxcContainers.jsx:1993)
       — `grid grid-cols-2` stats row becomes `grid grid-cols-1 sm:grid-cols-2`.
 - [ ] `LxcContainers` delete / confirm dialogs (admin/frontend/src/pages/LxcContainers.jsx:2029, 2077, 2110)

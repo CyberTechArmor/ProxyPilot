@@ -206,6 +206,8 @@ export default function Dashboard() {
   const [editingRouteId, setEditingRouteId] = useState(null);
   const [editingRouteDraft, setEditingRouteDraft] = useState(null);
   const [savingRoute, setSavingRoute] = useState(false);
+  // Phase 2b I.2: LXC IP refresh state for the settings dialog.
+  const [refreshingLxcIp, setRefreshingLxcIp] = useState(false);
   const [configVersions, setConfigVersions] = useState([]);
   const [caddyConfig, setCaddyConfig] = useState('');
   const [caddyConfigOriginal, setCaddyConfigOriginal] = useState('');
@@ -2805,6 +2807,35 @@ volumes:
       });
     } finally {
       setSavingRoute(false);
+    }
+  };
+
+  // Phase 2b I.2: refresh the cached LXC IP for an LXC-runtime
+  // service. Backend E.2 re-queries Incus and regenerates every
+  // affected merged Caddy config.
+  const handleRefreshLxcIp = async () => {
+    if (!settingsService) return;
+    setRefreshingLxcIp(true);
+    try {
+      const res = await api.refreshLxcIp(settingsService.id);
+      const oldIp = res?.oldIp ?? settingsService.targetIp ?? '(unknown)';
+      const newIp = res?.newIp ?? res?.targetIp ?? '(unchanged)';
+      toast({
+        title: 'LXC IP refreshed',
+        description: `${oldIp} → ${newIp}`,
+      });
+      // Re-fetch the service so the card reflects the updated IP.
+      const { service: fresh } = await api.getService(settingsService.id);
+      setSettingsService(fresh);
+      fetchServices();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Refresh IP failed',
+        description: err.message,
+      });
+    } finally {
+      setRefreshingLxcIp(false);
     }
   };
 
@@ -5876,6 +5907,54 @@ volumes:
             <div className="p-3 bg-muted rounded-lg space-y-1">
               <p className="text-sm"><span className="text-muted-foreground">Domain:</span> {settingsService?.domain}</p>
               <p className="text-sm"><span className="text-muted-foreground">Type:</span> <span className="capitalize">{settingsService?.type}</span></p>
+              {/*
+               * Phase 2b I.2: Refresh IP button + container summary row
+               * for LXC container_services. Only renders when the
+               * service was created with runtime='lxc' and a cached
+               * container name. The button calls api.refreshLxcIp which
+               * re-queries Incus and rewrites every affected domain's
+               * merged Caddy config; on success a toast shows the
+               * old→new IP and the displayed targetIp is updated from
+               * the re-fetched service payload.
+               */}
+              {settingsService?.kind === 'container_service'
+                && settingsService?.runtime === 'lxc'
+                && settingsService?.lxcContainerName && (
+                <div
+                  data-testid="settings-lxc-refresh-ip"
+                  className="pt-2 mt-2 border-t border-border/50 space-y-2"
+                >
+                  <p className="text-sm">
+                    <span className="text-muted-foreground">Container:</span>{' '}
+                    <code className="font-mono">{settingsService.lxcContainerName}</code>
+                  </p>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <p className="text-sm">
+                      <span className="text-muted-foreground">Target IP:</span>{' '}
+                      <code className="font-mono" data-testid="settings-lxc-target-ip">{settingsService.targetIp || settingsService.target || '(unknown)'}</code>
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="settings-lxc-refresh-ip-button"
+                      className="h-11 sm:h-10 gap-2"
+                      onClick={handleRefreshLxcIp}
+                      disabled={refreshingLxcIp}
+                    >
+                      {refreshingLxcIp ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCcw className="h-4 w-4" />
+                      )}
+                      Refresh IP
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Tip: assign a static IP via an Incus profile to avoid needing this after each container restart.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/*

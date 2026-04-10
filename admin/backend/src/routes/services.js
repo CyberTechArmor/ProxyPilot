@@ -260,23 +260,9 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
     // Enable SSL in database
     db.prepare('UPDATE services SET ssl_enabled = 1, force_https = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-    // Regenerate Caddy config with SSL enabled
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: true,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: true,
-    };
-
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain keep sharing a single site block.
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy - it will automatically obtain the certificate
     const reloadResult = await reloadCaddy();

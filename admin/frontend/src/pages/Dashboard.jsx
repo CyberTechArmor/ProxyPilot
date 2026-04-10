@@ -211,6 +211,14 @@ export default function Dashboard() {
 
   // Add service wizard state
   const [wizardStep, setWizardStep] = useState(0);
+  // Phase 2b H.2: LXC container picker state shared between the runtime
+  // sub-step and the container dropdown it renders. Populated on demand
+  // via api.getLxcContainersWithIp() when the operator clicks the LXC
+  // runtime tile so we do not pay the Incus round-trip on every wizard
+  // open. Cleared alongside the rest of the wizard state in resetForm().
+  const [lxcWizardContainers, setLxcWizardContainers] = useState([]);
+  const [lxcWizardLoading, setLxcWizardLoading] = useState(false);
+  const [lxcWizardError, setLxcWizardError] = useState('');
   const [formData, setFormData] = useState({
     name: '',
     domain: '',
@@ -785,6 +793,75 @@ export default function Dashboard() {
     setWizardStep(1);
   };
 
+  // Phase 2b H.2: pick the container runtime (lxc or docker) inside
+  // the Step 1 sub-step that only shows for kind='container_service'.
+  // For LXC we eagerly fetch the compact container-with-ip listing so
+  // the dropdown can render immediately; failures surface inline via
+  // lxcWizardError rather than a toast (the dialog is the only focus).
+  const handleRuntimeSelect = async (runtime) => {
+    setFormData((f) => ({
+      ...f,
+      runtime,
+      // Both LXC and Docker runtimes reverse-proxy to a container IP,
+      // and D.2's Phase 2 schema only accepts `type: 'static'|'docker'`.
+      // Map both container runtimes onto the legacy 'docker' type so the
+      // existing POST payload keeps validating until H.6 swaps in the
+      // full nested-routes payload.
+      type: 'docker',
+      // Reset any half-filled state from a previous runtime pick.
+      lxcContainerName: '',
+      targetIp: runtime === 'docker' ? (f.target || '127.0.0.1') : '',
+      containerName: runtime === 'docker' ? f.containerName : '',
+    }));
+    if (runtime === 'lxc') {
+      setLxcWizardLoading(true);
+      setLxcWizardError('');
+      try {
+        const { containers } = await api.getLxcContainersWithIp();
+        setLxcWizardContainers(containers || []);
+      } catch (err) {
+        setLxcWizardError(err.message || 'Failed to load LXC containers');
+        setLxcWizardContainers([]);
+      } finally {
+        setLxcWizardLoading(false);
+      }
+    }
+  };
+
+  // Phase 2b H.2: the operator picked a specific LXC container from the
+  // dropdown. Stamp the (name, ipv4) pair onto formData and expose it
+  // read-only downstream — the wizard uses the cached IP, not a live
+  // re-resolution (see the spec's "LXC IP refresh" note + E.2).
+  const handleLxcContainerSelect = (containerName) => {
+    const container = lxcWizardContainers.find((c) => c.name === containerName);
+    if (!container) return;
+    const ipv4 = container.ipv4 || '';
+    setFormData((f) => ({
+      ...f,
+      lxcContainerName: container.name,
+      targetIp: ipv4,
+      // Keep legacy `target` in sync so the pre-H.6 POST payload still
+      // carries the right IP — D.2 reads `target` to populate
+      // services.target_ip.
+      target: ipv4 || f.target,
+      containerName: container.name,
+    }));
+  };
+
+  // Phase 2b H.2: allow the operator to back out of the runtime pick
+  // without bailing to Step 0. Clears runtime + LXC picker state so the
+  // sub-step renders fresh tiles again.
+  const handleRuntimeChange = () => {
+    setFormData((f) => ({
+      ...f,
+      runtime: null,
+      lxcContainerName: '',
+      targetIp: '',
+    }));
+    setLxcWizardContainers([]);
+    setLxcWizardError('');
+  };
+
   // Phase 2b H.1: handler for the new two-tile kind picker at Step 0.
   // static_site → kind='static_site' + type='static' (backend D.2 still
   // reads `type`, so both fields stay in sync during the transitional
@@ -806,14 +883,23 @@ export default function Dashboard() {
         targetIp: '',
       });
     } else {
+      // container_service: runtime starts null so the H.2 Step 1
+      // sub-step renders its "Pick runtime" tiles. `type` stays blank
+      // until handleRuntimeSelect maps it onto the legacy field (lxc +
+      // docker both become type='docker' since D.2 only knows about
+      // the 'static' and 'docker' enum values).
       setFormData({
         ...formData,
         kind: 'container_service',
-        type: 'docker',
+        type: '',
         runtime: null,
         lxcContainerName: '',
-        targetIp: formData.target || '127.0.0.1',
+        targetIp: '',
+        containerName: '',
       });
+      // Clear any leftover LXC picker state from a previous open.
+      setLxcWizardContainers([]);
+      setLxcWizardError('');
     }
     setWizardStep(1);
   };
@@ -1168,6 +1254,9 @@ export default function Dashboard() {
       obtainCertificate: true,
     });
     setWizardStep(0);
+    setLxcWizardContainers([]);
+    setLxcWizardLoading(false);
+    setLxcWizardError('');
   };
 
   const openDeleteDialog = (service) => {
@@ -3064,6 +3153,161 @@ volumes:
                     </span>
                     <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => setWizardStep(0)}>Change</Button>
                   </div>
+
+                  {/*
+                   * Phase 2b H.2: runtime + LXC-container sub-step. Only
+                   * renders for `kind='container_service'`. Static sites
+                   * skip this entirely and fall through to the form tail.
+                   * Until a runtime is picked (and — for LXC — a container
+                   * is chosen) the rest of the form is hidden via the
+                   * `formReady` gate below.
+                   */}
+                  {formData.kind === 'container_service' && (
+                    <>
+                      {formData.runtime === null ? (
+                        <div className="space-y-2">
+                          <Label>Runtime</Label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-2">
+                            <Card
+                              data-testid="wizard-runtime-lxc"
+                              className="cursor-pointer hover:border-primary transition-colors"
+                              onClick={() => handleRuntimeSelect('lxc')}
+                            >
+                              <CardHeader className="text-center pb-2">
+                                <svg className="h-10 w-10 mx-auto text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                  <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                                  <line x1="12" y1="22.08" x2="12" y2="12"/>
+                                </svg>
+                                <CardTitle className="text-base">LXC Container</CardTitle>
+                              </CardHeader>
+                              <CardContent className="pb-3">
+                                <CardDescription className="text-center text-xs">
+                                  Proxy to an Incus-managed system container.
+                                </CardDescription>
+                              </CardContent>
+                            </Card>
+                            <Card
+                              data-testid="wizard-runtime-docker"
+                              className="cursor-pointer hover:border-primary transition-colors"
+                              onClick={() => handleRuntimeSelect('docker')}
+                            >
+                              <CardHeader className="text-center pb-2">
+                                <Container className="h-10 w-10 mx-auto text-primary" />
+                                <CardTitle className="text-base">Docker Container</CardTitle>
+                              </CardHeader>
+                              <CardContent className="pb-3">
+                                <CardDescription className="text-center text-xs">
+                                  Proxy to an existing Docker container by name + port.
+                                </CardDescription>
+                              </CardContent>
+                            </Card>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 p-2 bg-muted/50 rounded">
+                          <span className="text-xs text-muted-foreground">Runtime:</span>
+                          <span className="font-medium text-sm uppercase">{formData.runtime}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="ml-auto"
+                            data-testid="wizard-runtime-change"
+                            onClick={handleRuntimeChange}
+                          >
+                            Change
+                          </Button>
+                        </div>
+                      )}
+
+                      {formData.runtime === 'lxc' && !formData.lxcContainerName && (
+                        <div data-testid="wizard-lxc-container-picker" className="space-y-2">
+                          <Label htmlFor="lxcContainerPicker">LXC Container</Label>
+                          {lxcWizardLoading ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground p-3 bg-muted/50 rounded">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Loading containers…
+                            </div>
+                          ) : lxcWizardError ? (
+                            <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
+                              Failed to load LXC containers: {lxcWizardError}
+                            </div>
+                          ) : lxcWizardContainers.length === 0 ? (
+                            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-600 dark:text-amber-300">
+                              No LXC containers found. Create one from the LXC tab first.
+                            </div>
+                          ) : (
+                            <Select onValueChange={handleLxcContainerSelect}>
+                              <SelectTrigger id="lxcContainerPicker">
+                                <SelectValue placeholder="Pick a container…" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {lxcWizardContainers.map((c) => (
+                                  <SelectItem key={c.name} value={c.name}>
+                                    {c.name}
+                                    {c.ipv4 ? ` — ${c.ipv4}` : ' (no IPv4)'}
+                                    {c.status ? ` (${c.status.toLowerCase()})` : ''}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
+                          <p className="text-xs text-muted-foreground">
+                            The container's cached IPv4 address is stored on the service.
+                            Use Refresh IP on the service detail page if the container IP changes.
+                          </p>
+                        </div>
+                      )}
+
+                      {formData.runtime === 'lxc' && formData.lxcContainerName && (
+                        <div data-testid="wizard-lxc-container-summary" className="p-3 bg-muted/50 rounded space-y-1 text-sm">
+                          <p>
+                            <span className="text-muted-foreground">Container:</span>{' '}
+                            <code className="font-mono">{formData.lxcContainerName}</code>
+                          </p>
+                          <p>
+                            <span className="text-muted-foreground">Target IP:</span>{' '}
+                            <code className="font-mono">{formData.targetIp || '(not set)'}</code>
+                          </p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs"
+                            onClick={() =>
+                              setFormData((f) => ({
+                                ...f,
+                                lxcContainerName: '',
+                                targetIp: '',
+                                target: '127.0.0.1',
+                                containerName: '',
+                              }))
+                            }
+                          >
+                            Change container
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/*
+                   * Phase 2b H.2: form tail gate. `formReady` is true for
+                   * static sites unconditionally, for container_service +
+                   * docker runtime as soon as the runtime tile is tapped
+                   * (containerName/target/port are collected below), and
+                   * for container_service + lxc runtime once the operator
+                   * has picked a container from the dropdown. The gate
+                   * hides the tail plus the Create button so the wizard
+                   * cannot be submitted with an incomplete runtime pick.
+                   */}
+                  {(
+                    formData.kind === 'static_site' ||
+                    (formData.kind === 'container_service' && formData.runtime === 'docker') ||
+                    (formData.kind === 'container_service' && formData.runtime === 'lxc' && !!formData.lxcContainerName)
+                  ) && (
+                  <>
                   <div className="space-y-2">
                     <Label htmlFor="name">Service Name</Label>
                     <Input id="name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="My Application" required />
@@ -3107,7 +3351,7 @@ volumes:
                       </div>
                     )}
                   </div>
-                  {formData.type === 'docker' && (
+                  {formData.kind === 'container_service' && formData.runtime === 'docker' && (
                     <>
                       <div className="space-y-2">
                         <Label htmlFor="containerName">Container Name</Label>
@@ -3130,6 +3374,15 @@ volumes:
                         <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
                       </div>
                     </>
+                  )}
+                  {formData.kind === 'container_service' && formData.runtime === 'lxc' && formData.lxcContainerName && (
+                    <div className="space-y-2">
+                      <Label htmlFor="port">Port</Label>
+                      <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
+                      <p className="text-xs text-muted-foreground">
+                        Port on the LXC container to reverse-proxy to. Multi-route support lands in H.3.
+                      </p>
+                    </div>
                   )}
                   <div className="space-y-2">
                     <Label htmlFor="maxUploadSize">Max Upload Size</Label>
@@ -3158,6 +3411,21 @@ volumes:
                       {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</> : 'Create Service'}
                     </Button>
                   </DialogFooter>
+                  </>
+                  )}
+                  {/* Phase 2b H.2: Cancel button still reachable even when
+                      the form tail is gated off, so an operator who
+                      accidentally opened the wizard can close it without
+                      completing the runtime pick. */}
+                  {!(
+                    formData.kind === 'static_site' ||
+                    (formData.kind === 'container_service' && formData.runtime === 'docker') ||
+                    (formData.kind === 'container_service' && formData.runtime === 'lxc' && !!formData.lxcContainerName)
+                  ) && (
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={() => setAddDialogOpen(false)}>Cancel</Button>
+                    </DialogFooter>
+                  )}
                 </form>
               )}
             </DialogContent>

@@ -571,12 +571,12 @@ function ImagesTab() {
           {images.map((img) => (
             <Card key={img.fingerprint}>
               <CardContent className="py-3 px-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Image className="h-4 w-4 text-primary shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{getImageLabel(img)}</p>
-                      <div className="flex items-center gap-3 mt-0.5">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <Image className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium break-words">{getImageLabel(img)}</p>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">
                         <span className="text-xs text-muted-foreground font-mono">{img.fingerprint?.substring(0, 12)}</span>
                         <span className="text-xs text-muted-foreground">{formatBytes(img.size)}</span>
                         <span className="text-xs text-muted-foreground">{img.type || 'container'}</span>
@@ -584,18 +584,18 @@ function ImagesTab() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <div className="text-right">
+                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <div className="text-left sm:text-right">
                       <p className="text-xs text-muted-foreground">Uploaded</p>
                       <p className="text-xs">{formatDate(img.uploaded_at)}</p>
                     </div>
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-red-500 hover:text-red-600 hover:bg-red-500/10 h-8 w-8 p-0"
+                      className="text-red-500 hover:text-red-600 hover:bg-red-500/10 h-11 w-11 sm:h-8 sm:w-8 p-0"
                       onClick={() => setDeleteTarget(img)}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
                     </Button>
                   </div>
                 </div>

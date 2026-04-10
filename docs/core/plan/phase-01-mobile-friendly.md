@@ -208,10 +208,10 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### I. Profile page
 
-- [ ] `Profile` root container width (admin/frontend/src/pages/Profile.jsx:563)
-      — `space-y-6 max-w-2xl` stays; no change needed (Layout wrapper handles padding), but confirm `max-w-2xl` does not force horizontal scroll at 360px (it should not — `max-w-2xl` is a max, not a min).
-- [ ] `Profile` TOTP QR code image (admin/frontend/src/pages/Profile.jsx:717)
-      — `w-48 h-48` → `w-48 h-48 max-w-full` (plus `h-auto` on very narrow viewports); wrapping `flex justify-center` stays so the QR centers and never overflows.
+- [x] `Profile` root container width (admin/frontend/src/pages/Profile.jsx:563)
+      — `space-y-6 max-w-2xl` stays. *Verified: `max-w-2xl` is a max-width cap; on a 360px viewport the container takes 360px minus Layout padding (now `p-4 md:p-8`). No horizontal scroll.*
+- [x] `Profile` TOTP QR code image (admin/frontend/src/pages/Profile.jsx:717)
+      — `w-48 h-48` → `w-48 max-w-full h-auto`; keeps the 192px preferred size on desktop but shrinks to the parent width (with aspect ratio preserved) on sub-192px containers. Flex center wrapper unchanged.
 - [ ] `Profile` device list rows (admin/frontend/src/pages/Profile.jsx:820)
       — `flex items-center justify-between p-3 border rounded-lg` → `flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 border rounded-lg`; IP/last-used meta wraps (`flex-wrap gap-x-4`).
 - [ ] `Profile` revoke-device dialog (admin/frontend/src/pages/Profile.jsx:852)

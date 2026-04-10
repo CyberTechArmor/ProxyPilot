@@ -717,7 +717,7 @@ export default function Profile() {
                 <img
                   src={qrCodeUrl}
                   alt="TOTP QR Code"
-                  className="w-48 h-48 bg-white p-2 rounded-lg"
+                  className="w-48 h-48 max-w-full h-auto bg-white p-2 rounded-lg"
                 />
               </div>
 

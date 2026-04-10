@@ -1535,7 +1535,7 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] overflow-hidden flex flex-col p-4 gap-2">
+        <DialogContent className="max-w-full h-full rounded-none sm:w-[95vw] sm:max-w-[95vw] sm:h-[90vh] sm:max-h-[90vh] sm:rounded-lg overflow-hidden flex flex-col p-4 gap-2">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -1547,7 +1547,7 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-4 shrink-0">
+              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
                 <TabsTrigger value="terminal-beta" className="flex items-center gap-1">

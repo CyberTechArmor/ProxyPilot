@@ -169,8 +169,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `sm:max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
 - [x] `LxcContainers` create form paired grids (admin/frontend/src/pages/LxcContainers.jsx:1392, 1449)
       — create-form `grid grid-cols-2` entries (service domain/port row, CPU/memory row) now `grid grid-cols-1 sm:grid-cols-2` so input pairs stack on phones. *Lines 1690/1768 belong to the info/detail dialog image-picker and are handled in the info-dialog item below.*
-- [ ] `LxcContainers` info/detail dialog (admin/frontend/src/pages/LxcContainers.jsx:1538)
-      — `w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh]` is already viewport-hugging; add `rounded-none` at `<sm` and `sm:rounded-lg` at `sm+`. Tabs list (`grid grid-cols-4` at 1550) becomes `grid-cols-2 sm:grid-cols-4` so tab labels do not truncate at 360px.
+- [x] `LxcContainers` info/detail dialog (admin/frontend/src/pages/LxcContainers.jsx:1538)
+      — on `<sm`, `max-w-full h-full rounded-none`; on `sm+`, `w-[95vw] max-w-[95vw] h-[90vh]` keeps the existing viewport-hugging behavior with `rounded-lg`. Tabs list (`grid grid-cols-4`) becomes `grid grid-cols-2 sm:grid-cols-4 h-auto` so tab labels wrap to two rows at 360px instead of truncating.
 - [ ] `LxcContainers` detail-tab inner grids (admin/frontend/src/pages/LxcContainers.jsx:1563, 1601, 1627)
       — `grid-cols-2` → `grid-cols-1 sm:grid-cols-2` for the Info tab key/value readouts.
 - [ ] `LxcContainers` image-picker stats grid (admin/frontend/src/pages/LxcContainers.jsx:1993)

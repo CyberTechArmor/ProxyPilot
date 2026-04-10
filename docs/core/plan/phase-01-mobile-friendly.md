@@ -141,7 +141,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — row wraps (`flex-wrap`) so the Label/Input/Terminal button stack on 360px instead of pushing the input to zero width; Input gets `min-w-[150px]` so it stays usable when wrapped.
 - [x] `Dashboard` file editor toolbar (admin/frontend/src/pages/Dashboard.jsx:4578)
       — language select, history button, save-notes input, and Save button wrap (`flex-wrap gap-2` — already applied with the Files button earlier); save-notes `w-40` → `w-full sm:w-40`.
-- [ ] `Dashboard` service settings dialog (admin/frontend/src/pages/Dashboard.jsx:4743)
+- [x] `Dashboard` service settings dialog (admin/frontend/src/pages/Dashboard.jsx:4743)
       — `max-w-5xl h-[90vh]` (caddy tab) and `max-w-lg` (settings tab) both gain `max-w-full h-full rounded-none sm:*` prefix so the dialog is full-screen on phones.
 - [ ] `Dashboard` service settings two-column form grid (admin/frontend/src/pages/Dashboard.jsx:4822)
       — `grid grid-cols-2` → `grid grid-cols-1 sm:grid-cols-2`.

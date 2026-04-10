@@ -120,7 +120,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — same treatment as the services filter bar: `w-[130px]`/`w-[140px]` selects become `w-full sm:w-[130px]` / `sm:w-[140px]`.
 - [x] `Dashboard` compose project grid (admin/frontend/src/pages/Dashboard.jsx:3577)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; compose cards stack vertically on mobile.
-- [ ] `Dashboard` compose card header action row (admin/frontend/src/pages/Dashboard.jsx:3588)
+- [x] `Dashboard` compose card header action row (admin/frontend/src/pages/Dashboard.jsx:3588)
       — action buttons bump from `h-7 w-7` to `h-9 w-9 sm:h-7 sm:w-7` (primary project actions) and the row gets `flex-wrap` so Start/Stop/Restart/Destroy/Terminal/Expand fit on a 360px card.
 
 ### E. Dashboard page — Dialogs

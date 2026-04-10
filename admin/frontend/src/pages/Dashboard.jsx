@@ -3603,20 +3603,20 @@ volumes:
             {groupedComposeProjects.map((project) => (
               <Card key={project.projectName} className="border-dashed border-purple-500/30">
                 <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-3 h-3 rounded-full ${project.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                      <Boxes className="h-4 w-4 text-purple-500" />
-                      <CardTitle className="text-lg">{project.projectName}</CardTitle>
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className={`w-3 h-3 rounded-full shrink-0 ${project.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                      <Boxes className="h-4 w-4 text-purple-500 shrink-0" />
+                      <CardTitle className="text-lg truncate">{project.projectName}</CardTitle>
                     </div>
                     {/* Hot command buttons */}
-                    <div className="flex gap-1">
+                    <div className="flex gap-1 flex-wrap justify-end">
                       {/* Start/Stop button */}
                       {project.isRunning ? (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0 text-yellow-500 hover:text-yellow-600"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-yellow-500 hover:text-yellow-600"
                           onClick={() => handleComposeAction('stop', project)}
                           disabled={composeActionLoading[`${project.projectName}-stop`]}
                           title="Stop"
@@ -3631,7 +3631,7 @@ volumes:
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0 text-green-500 hover:text-green-600"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-green-500 hover:text-green-600"
                           onClick={() => handleComposeAction('start', project)}
                           disabled={composeActionLoading[`${project.projectName}-start`]}
                           title="Start"
@@ -3647,7 +3647,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-blue-500 hover:text-blue-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-blue-500 hover:text-blue-600"
                         onClick={() => handleComposeAction('restart', project)}
                         disabled={composeActionLoading[`${project.projectName}-restart`]}
                         title="Restart"
@@ -3662,7 +3662,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-red-500 hover:text-red-600"
                         onClick={() => openDestroyDialog(project)}
                         title="Destroy"
                       >
@@ -3673,7 +3673,7 @@ volumes:
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0"
                           onClick={() => {
                             const firstService = project.services[0];
                             const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
@@ -3688,7 +3688,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0"
                         onClick={() => setExpandedProjects(prev => ({ ...prev, [project.projectName]: !prev[project.projectName] }))}
                       >
                         {expandedProjects[project.projectName] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}

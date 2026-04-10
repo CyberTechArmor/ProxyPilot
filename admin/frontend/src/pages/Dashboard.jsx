@@ -2751,7 +2751,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className={wizardStep === 0 ? "max-w-4xl" : "max-w-lg"}>
+            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>

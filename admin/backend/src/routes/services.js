@@ -3412,17 +3412,48 @@ function parseUploadSizeMB(size) {
 // and update endpoints. This function uses the first service's SSL flag to
 // pick the site address (http:// fallback for wildcards or when SSL is off).
 //
-// Throws when two services in the list share the same normalized path_prefix
+// Throws when two entries in the list share the same normalized path_prefix
 // — defense-in-depth against a UNIQUE-constraint bypass.
-function buildDomainCaddyConfig(servicesList, domain) {
-  if (!servicesList || servicesList.length === 0) return null;
+//
+// Phase 2b: accepts both the legacy Phase 2 service-row shape (where domain/
+// path_prefix/port/ssl_* live on the services row) AND the Phase 2b joined
+// `(service, route)` entry shape (where those fields live on the route row
+// and target_ip lives on the service). The normalize step below reads from
+// either field convention. See `generateServiceHandlerBody` for the same
+// dual-shape handling at the body-line level.
+function buildDomainCaddyConfig(entriesList, domain) {
+  if (!entriesList || entriesList.length === 0) return null;
 
-  // Normalize each service into a consistent shape (handles DB rows that use
-  // snake_case as well as JS objects that use camelCase).
-  const normalized = servicesList.map((s) => ({
+  // Normalize each entry into a consistent shape. Handles:
+  //   - DB rows using snake_case (root_dir, max_upload_size, ssl_enabled,
+  //     path_prefix, target_ip, target_port)
+  //   - JS objects using camelCase (rootDir, maxUploadSize, sslEnabled,
+  //     pathPrefix, targetIp, targetPort)
+  //   - Legacy Phase 2 rows where target/port live on the service directly
+  //     and kind is absent (inferred from type)
+  //   - Phase 2b joined rows where target/port come from target_ip/
+  //     target_port and kind comes from the service side of the join
+  const normalized = entriesList.map((s) => ({
+    // Branch selector for generateServiceHandlerBody. kind wins over type
+    // when both are set (the A.3 backfill state: legacy rows carry both).
+    kind: s.kind,
     type: s.type,
-    target: s.target,
-    port: s.port,
+    // Reverse-proxy target: Phase 2b target_ip / targetIp first, then the
+    // legacy target field.
+    target:
+      s.targetIp !== undefined && s.targetIp !== null
+        ? s.targetIp
+        : s.target_ip !== undefined && s.target_ip !== null
+        ? s.target_ip
+        : s.target,
+    // Reverse-proxy port: Phase 2b target_port / targetPort first, then the
+    // legacy port field.
+    port:
+      s.targetPort !== undefined && s.targetPort !== null
+        ? s.targetPort
+        : s.target_port !== undefined && s.target_port !== null
+        ? s.target_port
+        : s.port,
     rootDir: s.rootDir !== undefined ? s.rootDir : s.root_dir,
     maxUploadSize:
       s.maxUploadSize !== undefined ? s.maxUploadSize : s.max_upload_size,
@@ -3481,12 +3512,18 @@ function buildDomainCaddyConfig(servicesList, domain) {
     }
   }
 
+  // Friendly label for the header comment. Phase 2b entries carry `kind`
+  // (static_site/container_service); legacy Phase 2 entries carry `type`
+  // (static/docker/proxy). Prefer the Phase 2b label when available so
+  // the comment stays informative once legacy `type` is gone (D.14).
+  const entryLabel = (s) => s.kind || s.type || 'unknown';
+
   const lines = [];
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
   lines.push(
     `# Services: ${normalized
-      .map((s) => `${s.pathPrefix} (${s.type})`)
+      .map((s) => `${s.pathPrefix} (${entryLabel(s)})`)
       .join(', ')}`
   );
   lines.push(`# Generated: ${new Date().toISOString()}`);

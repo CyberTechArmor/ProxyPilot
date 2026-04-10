@@ -912,15 +912,6 @@ servicesRouter.put('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // If domain changed, check for conflicts
-    if (data.domain && data.domain !== service.domain) {
-      const existing = db.prepare('SELECT id FROM services WHERE domain = ? AND id != ?')
-        .get(data.domain, req.params.id);
-      if (existing) {
-        return res.status(400).json({ error: 'Domain already exists' });
-      }
-    }
-
     // Merge with existing data
     const updatedData = {
       name: data.name || service.name,
@@ -937,6 +928,26 @@ servicesRouter.put('/:id', async (req, res) => {
       websocketEnabled: data.websocketEnabled !== undefined ? data.websocketEnabled : !!service.websocket_enabled,
       maxUploadSize: data.maxUploadSize || service.max_upload_size,
     };
+
+    // Phase 2: a service's (domain, path_prefix) tuple must be unique. Only
+    // re-check when the tuple actually changes — if neither domain nor path
+    // prefix was touched, the DB's existing row is the sole match and the
+    // check would false-positive.
+    const domainChangedForCheck = updatedData.domain !== service.domain;
+    const prefixChangedForCheck =
+      updatedData.pathPrefix !== normalizePathPrefix(service.path_prefix);
+    if (domainChangedForCheck || prefixChangedForCheck) {
+      const existing = db
+        .prepare(
+          'SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?'
+        )
+        .get(updatedData.domain, updatedData.pathPrefix, req.params.id);
+      if (existing) {
+        return res.status(400).json({
+          error: 'Domain + path prefix combination already exists',
+        });
+      }
+    }
 
     // Phase 2: the merged per-domain config reflects DB state, so we must
     // update the DB row before regenerating. Flow:

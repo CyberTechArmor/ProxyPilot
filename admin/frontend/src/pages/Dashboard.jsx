@@ -4534,14 +4534,14 @@ volumes:
           {/* Path Picker for Static Sites */}
           {selectedService?.type === 'static' && (
             <div className="p-3 bg-muted/50 rounded-lg border mb-2 shrink-0">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Label htmlFor="editorPath" className="text-sm font-medium whitespace-nowrap">Site Path:</Label>
                 <Input
                   id="editorPath"
                   defaultValue={selectedService?.dataDir || selectedService?.rootDir || ''}
                   key={selectedService?.id}
                   placeholder="/var/www/mysite"
-                  className="flex-1 h-8 text-sm font-mono"
+                  className="flex-1 min-w-[150px] h-8 text-sm font-mono"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.target.blur();

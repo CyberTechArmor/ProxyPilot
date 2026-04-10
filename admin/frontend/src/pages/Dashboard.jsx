@@ -4754,15 +4754,70 @@ volumes:
                   Are you sure you want to delete &quot;{serviceToDelete?.name}&quot;? Enter your TOTP code to confirm.
                 </p>
                 {(() => {
+                  // Phase 2b I.3: generalize the sibling-warning to
+                  // count every route across every service that lives
+                  // on any domain the service-to-delete owns a route
+                  // on, minus routes owned by the service-to-delete
+                  // itself. A single service can now touch multiple
+                  // domains, so the warning may name multiple domains
+                  // — each domain appears once regardless of how many
+                  // sibling routes exist on it, and its sibling count
+                  // is shown in parentheses after the domain.
                   if (!serviceToDelete) return null;
-                  const siblingsCount = services.filter(
-                    (s) => s.domain === serviceToDelete.domain && s.id !== serviceToDelete.id
-                  ).length;
-                  if (siblingsCount === 0) return null;
+
+                  const normalize = (d) => (d || '').toLowerCase().trim();
+
+                  // Collect the set of domains this service-to-delete
+                  // owns a route on, using the nested routes array
+                  // first and the legacy top-level domain as fallback
+                  // for pre-Phase-2b installs that have not been
+                  // migrated yet.
+                  const ownDomains = new Set();
+                  if (Array.isArray(serviceToDelete.routes) && serviceToDelete.routes.length > 0) {
+                    for (const r of serviceToDelete.routes) {
+                      const d = normalize(r.domain);
+                      if (d) ownDomains.add(d);
+                    }
+                  } else if (serviceToDelete.domain) {
+                    ownDomains.add(normalize(serviceToDelete.domain));
+                  }
+                  if (ownDomains.size === 0) return null;
+
+                  // For each of the service-to-delete's domains, count
+                  // the surviving sibling routes (every route on that
+                  // domain across every OTHER service).
+                  const siblingByDomain = new Map();
+                  for (const svc of services) {
+                    if (svc.id === serviceToDelete.id) continue;
+                    const svcRoutes = Array.isArray(svc.routes) && svc.routes.length > 0
+                      ? svc.routes.map((r) => ({ domain: normalize(r.domain) }))
+                      : svc.domain
+                      ? [{ domain: normalize(svc.domain) }]
+                      : [];
+                    for (const r of svcRoutes) {
+                      if (!ownDomains.has(r.domain)) continue;
+                      siblingByDomain.set(r.domain, (siblingByDomain.get(r.domain) || 0) + 1);
+                    }
+                  }
+
+                  // If no sibling routes exist on any affected domain,
+                  // suppress the warning entirely.
+                  if (siblingByDomain.size === 0) return null;
+
+                  const totalSiblings = [...siblingByDomain.values()].reduce(
+                    (a, b) => a + b,
+                    0
+                  );
+                  const domainSummary = [...siblingByDomain.entries()]
+                    .map(([domain, count]) => `${domain} (${count})`)
+                    .join(', ');
+
                   return (
                     <p data-testid="delete-sibling-warning" className="text-amber-600 dark:text-amber-400">
-                      This will leave {siblingsCount} other service{siblingsCount === 1 ? '' : 's'}{' '}
-                      running on <code className="font-mono">{serviceToDelete.domain}</code>.
+                      This will leave {totalSiblings} other route{totalSiblings === 1 ? '' : 's'}{' '}
+                      on{' '}
+                      <code className="font-mono">{domainSummary}</code>
+                      .
                     </p>
                   );
                 })()}

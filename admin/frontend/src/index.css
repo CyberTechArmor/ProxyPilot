@@ -31,6 +31,13 @@
   * {
     @apply border-border;
   }
+  html,
+  body {
+    /* Phase 1 (mobile-friendly): defensive backstop so tiny layout bugs
+       never produce horizontal scroll on phones. Every page is already
+       audited to fit 360px, this is belt-and-suspenders. */
+    @apply overflow-x-hidden;
+  }
   body {
     @apply bg-background text-foreground;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;

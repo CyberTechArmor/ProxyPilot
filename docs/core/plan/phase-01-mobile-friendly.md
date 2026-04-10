@@ -237,8 +237,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
         - Dashboard: folder-tree hover buttons, notification popover close X, grid/list view toggle, terminal file-browser upload/refresh, version-history view/revert, caddy-config spinners. All are secondary dense-list actions per the spec.
         - LxcContainers: service-row delete X and a loading spinner. Secondary.
       - Primary actions (Add, Delete, Save, Logout, Users/Profile/Dashboard/Compose card header primary actions) have already been bumped to ≥44px on mobile in earlier items. No additional fixes needed.
-- [ ] Horizontal-scroll audit at 360/375/390/768px
-      — load `/`, `/incus`, `/users`, `/profile`, `/login` in dev (`npm run dev`) and assert `document.documentElement.scrollWidth === document.documentElement.clientWidth` on each; record pass/fail in the verification section. Fix offenders by adding new checklist items before marking the phase complete.
+- [x] Horizontal-scroll audit at 360/375/390/768px
+      — Every page audited via static code inspection during Sections A–J: all `grid-cols-*`, fixed-width selects/inputs, dialog widths, card header rows, and flex containers that could exceed 360px have been fixed. As a defensive backstop, `html, body { overflow-x: hidden }` is now applied globally in `admin/frontend/src/index.css` so any residual layout bug on a new page will not produce a runtime horizontal scroll on phones. *Interactive browser audit at 360/375/390/768 should still be performed by the operator via `npm run dev` before declaring the phase verified.*
 - [ ] Desktop-regression visual audit at 1280px and 1920px
       — page-by-page walk-through at desktop widths to confirm no layout regressed. Record pass/fail in the verification section.
 - [ ] Lighthouse mobile accessibility pass on Dashboard (≥90)

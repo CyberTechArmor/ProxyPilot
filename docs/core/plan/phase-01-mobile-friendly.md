@@ -125,7 +125,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### E. Dashboard page — Dialogs
 
-- [ ] `Dashboard` delete confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3759)
+- [x] `Dashboard` delete confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3759)
       — `DialogContent` gets `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
 - [ ] `Dashboard` destroy compose confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3783)
       — same: `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`; TOTP input fits at 360px.

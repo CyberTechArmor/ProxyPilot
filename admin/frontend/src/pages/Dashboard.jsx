@@ -1184,11 +1184,20 @@ export default function Dashboard() {
       if (formData.port) {
         submitData.port = parseInt(formData.port, 10);
       }
-      // Phase 2 client-side guard: refuse to even attempt the create when
-      // the (domain, prefix) tuple already exists locally. The backend
-      // re-checks, but failing fast here keeps the toast meaningful and
-      // avoids a wasted round trip. Mirrors the backend's normalization
-      // (strip trailing slashes, default to '/').
+
+      // Phase 2b H.5: generalized client-side collision guard. The
+      // wizard may submit multiple routes at once (via the H.3 routes
+      // builder), so the guard walks `formData.routes` and rejects:
+      //   (a) in-wizard duplicates — two rows with the same
+      //       `(domain, pathPrefix)` tuple. Fails with a toast naming
+      //       the duplicate so the operator can spot it.
+      //   (b) collisions against any existing route across all
+      //       services — any row whose `(domain, pathPrefix)` tuple is
+      //       already present in the backend's nested routes array.
+      //       Fails with the same error text the backend returns so
+      //       the two surfaces stay consistent.
+      // Normalization mirrors the backend's: trim, prepend a leading
+      // slash if missing, strip trailing slashes, default empty → '/'.
       const normalize = (value) => {
         if (value === undefined || value === null || value === '') return '/';
         let p = String(value).trim();
@@ -1196,17 +1205,69 @@ export default function Dashboard() {
         if (p.length > 1 && p.endsWith('/')) p = p.replace(/\/+$/, '');
         return p || '/';
       };
-      const desiredPrefix = normalize(formData.pathPrefix);
-      const existingNormalized = existingPrefixesForDomain.map(normalize);
-      if (existingNormalized.includes(desiredPrefix)) {
-        setSubmitting(false);
-        toast({
-          variant: 'destructive',
-          title: 'Error',
-          description: 'Domain + path prefix combination already exists',
-        });
-        return;
+      const normalizeDomain = (d) => (d || '').toLowerCase().trim();
+
+      // Build a Set of existing (domain, prefix) tuples across every
+      // service's nested routes, with a legacy-shape fallback for
+      // services still on the Phase 2 flat shape.
+      const existingTuples = new Set();
+      for (const svc of services) {
+        if (Array.isArray(svc.routes) && svc.routes.length > 0) {
+          for (const r of svc.routes) {
+            existingTuples.add(
+              `${normalizeDomain(r.domain)}|${normalize(r.pathPrefix)}`
+            );
+          }
+        } else if (svc.domain) {
+          existingTuples.add(
+            `${normalizeDomain(svc.domain)}|${normalize(svc.pathPrefix)}`
+          );
+        }
       }
+
+      // Pass 1: intra-wizard duplicate detection.
+      const seen = new Set();
+      for (let i = 0; i < formData.routes.length; i++) {
+        const r = formData.routes[i];
+        const d = normalizeDomain(r.domain);
+        const p = normalize(r.pathPrefix);
+        if (!d) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: `Route ${i + 1} is missing a domain`,
+          });
+          return;
+        }
+        const key = `${d}|${p}`;
+        if (seen.has(key)) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: `Duplicate (domain, path_prefix) in this wizard: ${d}${p}`,
+          });
+          return;
+        }
+        seen.add(key);
+      }
+
+      // Pass 2: collisions against any existing route.
+      for (const r of formData.routes) {
+        const d = normalizeDomain(r.domain);
+        const p = normalize(r.pathPrefix);
+        if (existingTuples.has(`${d}|${p}`)) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: 'Domain + path prefix combination already exists',
+          });
+          return;
+        }
+      }
+
       await api.createService(submitData);
       toast({
         title: 'Success',

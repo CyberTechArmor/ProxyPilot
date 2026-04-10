@@ -3559,6 +3559,29 @@ async function exportFilesRecursive(dir, baseDir) {
 }
 
 // Import services
+// Phase 2b D.10: import accepts BOTH the new nested-`routes` export shape
+// (from D.9 `version=2.0`) AND the legacy Phase 2 flat shape (one route
+// per service synthesized from the top-level `domain`/`pathPrefix`/`port`/
+// ssl flags). For each entry:
+//   1. Normalize to `{service fields, routes: [...]}` — if `routes` is
+//      present use it directly, otherwise synthesize a single-element
+//      array from the legacy top-level fields.
+//   2. Derive Phase 2b service-level fields from legacy `type` when the
+//      import didn't supply them (type='static' → kind='static_site',
+//      type='docker' → kind='container_service' + runtime='docker',
+//      type='proxy' → kind='container_service' + runtime=NULL).
+//   3. Pre-check every route's (domain, path_prefix) tuple against both
+//      `service_http_routes` and the legacy `services` table; on any
+//      collision the entire entry is either skipped or — in overwrite
+//      mode — the conflicting existing services are deleted (cascade
+//      wipes their routes via FK).
+//   4. INSERT the services row with legacy route-owned columns populated
+//      from the PRIMARY route (first element of the routes array) so the
+//      pre-D.14 dual-source state stays consistent.
+//   5. Call `syncPrimaryRouteFromLegacy` to mirror the primary route into
+//      `service_http_routes`, then INSERT each secondary route directly.
+//   6. After the loop, regenerate every touched domain's merged file
+//      once and reload Caddy.
 servicesRouter.post('/import', async (req, res) => {
   try {
     const { services: importServices, overwrite } = req.body;
@@ -3569,64 +3592,143 @@ servicesRouter.post('/import', async (req, res) => {
 
     const db = getDb();
     const results = { imported: [], skipped: [], errors: [] };
-
-    // Collect every domain we touch so we can regenerate each merged file
-    // once after the whole batch is applied, rather than once per row.
     const touchedDomains = new Set();
+
+    // Infer (kind, runtime) from a legacy `type` value when the import
+    // payload didn't supply the Phase 2b fields directly.
+    const inferKind = (type) => (type === 'static' ? 'static_site' : 'container_service');
+    const inferRuntime = (type) => (type === 'docker' ? 'docker' : null);
 
     for (const serviceData of importServices) {
       try {
-        // Exports created before wildcard routing have no pathPrefix —
-        // default to '/' so the rest of the pipeline treats them as root
-        // services.
-        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
+        // (1) Normalize to {service fields, routes}. Nested shape takes
+        // precedence; legacy flat shape synthesizes a single-element
+        // array from the top-level fields.
+        const hasNestedRoutes =
+          Array.isArray(serviceData.routes) && serviceData.routes.length > 0;
+        const routes = hasNestedRoutes
+          ? serviceData.routes.map((r) => ({
+              domain: r.domain,
+              pathPrefix: normalizePathPrefix(r.pathPrefix),
+              targetPort: r.targetPort ?? null,
+              sslEnabled: !!r.sslEnabled,
+              forceHttps: !!r.forceHttps,
+              websocketEnabled: !!r.websocketEnabled,
+              maxUploadSize: r.maxUploadSize || '1G',
+            }))
+          : [
+              {
+                domain: serviceData.domain,
+                pathPrefix: normalizePathPrefix(serviceData.pathPrefix),
+                targetPort: serviceData.port ?? null,
+                sslEnabled: !!serviceData.sslEnabled,
+                forceHttps: !!serviceData.forceHttps,
+                websocketEnabled: !!serviceData.websocketEnabled,
+                maxUploadSize: serviceData.maxUploadSize || '1G',
+              },
+            ];
 
-        // Phase 2: multiple services can share a domain on different path
-        // prefixes, so the existence check must match on the full
-        // (domain, path_prefix) tuple instead of just domain.
-        const existing = db
-          .prepare(
-            'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
-          )
-          .get(serviceData.domain, importPathPrefix);
+        // Primary route (first element) supplies the legacy services
+        // columns during the pre-D.14 dual-source transition.
+        const primaryRoute = routes[0];
 
-        if (existing && !overwrite) {
+        // (2) Pre-check every route's (domain, path_prefix) against both
+        // sources. Collect collisions so overwrite mode can wipe them
+        // atomically before the INSERT.
+        const collidingServiceIds = new Set();
+        let collisionLabel = null;
+        for (const r of routes) {
+          // Routes-side collision via service_http_routes.
+          const routeHit = db
+            .prepare(
+              `SELECT r.id, r.service_id
+                 FROM service_http_routes r
+                WHERE r.domain = ? AND r.path_prefix = ?`
+            )
+            .get(r.domain, r.pathPrefix);
+          if (routeHit) {
+            collidingServiceIds.add(routeHit.service_id);
+            collisionLabel = `${r.domain}${r.pathPrefix}`;
+          }
+          // Legacy-side collision (try/catch for post-D.14).
+          try {
+            const legacyHit = db
+              .prepare(
+                `SELECT id FROM services WHERE domain = ? AND path_prefix = ?`
+              )
+              .get(r.domain, r.pathPrefix);
+            if (legacyHit) {
+              collidingServiceIds.add(legacyHit.id);
+              collisionLabel = `${r.domain}${r.pathPrefix}`;
+            }
+          } catch (e) {
+            // Post-D.14 — legacy columns gone.
+          }
+        }
+
+        if (collidingServiceIds.size > 0 && !overwrite) {
           results.skipped.push({
             name: serviceData.name,
-            reason: 'Domain + path prefix combination already exists',
+            reason: `Route collision at ${collisionLabel}`,
           });
           continue;
         }
 
-        if (existing && overwrite) {
-          // Delete only the matching (domain, prefix) row so any sibling
-          // services on the same domain survive the import. The merged
-          // Caddy file is regenerated after the insert, which rewrites it
-          // with the new row and the remaining siblings.
-          db.prepare('DELETE FROM services WHERE id = ?').run(existing.id);
+        if (collidingServiceIds.size > 0 && overwrite) {
+          // Collect every domain the soon-to-be-deleted services touch
+          // so we can regenerate their merged files after the loop.
+          for (const sid of collidingServiceIds) {
+            try {
+              const oldRouteDomains = db
+                .prepare(
+                  `SELECT DISTINCT domain FROM service_http_routes WHERE service_id = ?`
+                )
+                .all(sid)
+                .map((row) => row.domain);
+              for (const d of oldRouteDomains) touchedDomains.add(d);
+            } catch (e) {
+              // Ignore — best-effort cleanup.
+            }
+            try {
+              const legacyRow = db
+                .prepare('SELECT domain FROM services WHERE id = ?')
+                .get(sid);
+              if (legacyRow && legacyRow.domain) touchedDomains.add(legacyRow.domain);
+            } catch (e) {
+              // Ignore.
+            }
+            db.prepare('DELETE FROM services WHERE id = ?').run(sid);
+          }
         }
 
-        // Create the service
+        // (3) Derive Phase 2b service-level fields.
+        const svcKind = serviceData.kind || inferKind(serviceData.type);
+        const svcRuntime =
+          serviceData.runtime !== undefined
+            ? serviceData.runtime
+            : inferRuntime(serviceData.type);
+        const svcTargetIp =
+          serviceData.targetIp !== undefined
+            ? serviceData.targetIp
+            : svcKind === 'static_site'
+              ? null
+              : serviceData.target || null;
+        const svcLxcName = serviceData.lxcContainerName || null;
+
+        // (4) Prepare data_dir + root_dir (existing static-site logic).
         const id = uuidv4();
         let dataDir;
         let rootDir = serviceData.rootDir;
-
-        // Determine dataDir based on service type and whether rootDir is provided
         if (serviceData.type === 'static' && serviceData.rootDir && !serviceData.files?.length) {
-          // Static site with existing rootDir and no files to import - use original location
           dataDir = serviceData.rootDir;
           rootDir = serviceData.rootDir;
-          // Ensure the directory exists
           if (!existsSync(dataDir)) {
             await mkdir(dataDir, { recursive: true });
           }
         } else {
-          // Create a new data directory for this service
           const safeDir = toSafeDirectoryName(serviceData.name);
           dataDir = join(SERVICES_DATA_DIR, safeDir);
           await mkdir(dataDir, { recursive: true });
-
-          // Import files if provided
           if (serviceData.files && serviceData.files.length > 0) {
             for (const file of serviceData.files) {
               const filePath = join(dataDir, file.path);
@@ -3635,31 +3737,62 @@ servicesRouter.post('/import', async (req, res) => {
               await writeFile(filePath, file.content);
             }
           }
-
-          // Set rootDir for static sites (when files are imported to dataDir)
           if (serviceData.type === 'static') {
             rootDir = dataDir;
           }
         }
 
-        // Insert into database first — the merged Caddy config is written
-        // once per domain after the loop so siblings are included.
+        // (5) INSERT the services row with legacy columns populated from
+        // the primary route AND with the Phase 2b service-level fields.
         db.prepare(`
           INSERT INTO services (
-            id, name, domain, path_prefix, type, target, port, root_dir, container_name,
-            ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            id, name, kind, runtime, type, target, target_ip, lxc_container_name,
+            domain, path_prefix, port, root_dir, container_name,
+            ssl_enabled, force_https, websocket_enabled, max_upload_size,
+            data_dir, status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         `).run(
-          id, serviceData.name, serviceData.domain, importPathPrefix, serviceData.type,
-          serviceData.target || null, serviceData.port || null,
+          id, serviceData.name, svcKind, svcRuntime,
+          serviceData.type || null, serviceData.target || null,
+          svcTargetIp, svcLxcName,
+          primaryRoute.domain, primaryRoute.pathPrefix, primaryRoute.targetPort,
           rootDir || null, serviceData.containerName || null,
-          serviceData.sslEnabled ? 1 : 0, serviceData.forceHttps ? 1 : 0,
-          serviceData.websocketEnabled ? 1 : 0, serviceData.maxUploadSize || '1G',
+          primaryRoute.sslEnabled ? 1 : 0,
+          primaryRoute.forceHttps ? 1 : 0,
+          primaryRoute.websocketEnabled ? 1 : 0,
+          primaryRoute.maxUploadSize,
           dataDir
         );
 
-        touchedDomains.add(serviceData.domain);
-        results.imported.push({ name: serviceData.name, id });
+        // (6) Mirror the primary route into service_http_routes.
+        syncPrimaryRouteFromLegacy(db, id, primaryRoute);
+
+        // (7) INSERT any secondary routes directly.
+        for (let i = 1; i < routes.length; i++) {
+          const r = routes[i];
+          db.prepare(
+            `INSERT INTO service_http_routes (
+               id, service_id, domain, path_prefix, target_port,
+               websocket_enabled, ssl_enabled, force_https, max_upload_size
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).run(
+            uuidv4(), id, r.domain, r.pathPrefix, r.targetPort,
+            r.websocketEnabled ? 1 : 0,
+            r.sslEnabled ? 1 : 0,
+            r.forceHttps ? 1 : 0,
+            r.maxUploadSize
+          );
+        }
+
+        // Collect every domain this entry touched for the post-loop
+        // merged-file regeneration.
+        for (const r of routes) touchedDomains.add(r.domain);
+
+        results.imported.push({
+          name: serviceData.name,
+          id,
+          routeCount: routes.length,
+        });
       } catch (err) {
         results.errors.push({ name: serviceData.name, error: err.message });
       }

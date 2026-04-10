@@ -4884,7 +4884,7 @@ volumes:
             {/* Proxy Settings (for docker/proxy types) */}
             {(settingsService?.type === 'docker' || settingsService?.type === 'proxy') && (
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label htmlFor="target">Target IP/Host</Label>
                     <Input

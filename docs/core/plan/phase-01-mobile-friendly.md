@@ -143,7 +143,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — language select, history button, save-notes input, and Save button wrap (`flex-wrap gap-2` — already applied with the Files button earlier); save-notes `w-40` → `w-full sm:w-40`.
 - [x] `Dashboard` service settings dialog (admin/frontend/src/pages/Dashboard.jsx:4743)
       — `max-w-5xl h-[90vh]` (caddy tab) and `max-w-lg` (settings tab) both gain `max-w-full h-full rounded-none sm:*` prefix so the dialog is full-screen on phones.
-- [ ] `Dashboard` service settings two-column form grid (admin/frontend/src/pages/Dashboard.jsx:4822)
+- [x] `Dashboard` service settings two-column form grid (admin/frontend/src/pages/Dashboard.jsx:4822)
       — `grid grid-cols-2` → `grid grid-cols-1 sm:grid-cols-2`.
 - [ ] `Dashboard` remove-cert / regenerate / misc simple confirm dialogs (admin/frontend/src/pages/Dashboard.jsx:5011, 5048, 5078)
       — every bare `<DialogContent>` without `className` in this range gets `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.

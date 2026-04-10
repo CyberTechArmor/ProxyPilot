@@ -376,6 +376,7 @@ export default function Login() {
                 <Input
                   id="setup-totp"
                   type="text"
+                  inputMode="numeric"
                   value={totpCode}
                   onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   placeholder="Enter 6-digit code"
@@ -384,6 +385,7 @@ export default function Login() {
                   pattern="[0-9]{6}"
                   autoComplete="one-time-code"
                   autoFocus
+                  className="h-12 text-center tracking-[0.5em] text-lg"
                 />
                 <p className="text-xs text-muted-foreground">
                   Enter the code from your authenticator app to complete setup
@@ -518,6 +520,7 @@ export default function Login() {
                   <Input
                     id="totp"
                     type="text"
+                    inputMode="numeric"
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     placeholder="Enter 6-digit code"
@@ -526,6 +529,7 @@ export default function Login() {
                     pattern="[0-9]{6}"
                     autoComplete="one-time-code"
                     autoFocus
+                    className="h-12 text-center tracking-[0.5em] text-lg"
                   />
                   <p className="text-xs text-muted-foreground">
                     Enter the code from your authenticator app to complete setup
@@ -545,6 +549,7 @@ export default function Login() {
                   <Input
                     id="totp"
                     type="text"
+                    inputMode="numeric"
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     placeholder="Enter 6-digit code"
@@ -553,6 +558,7 @@ export default function Login() {
                     pattern="[0-9]{6}"
                     autoComplete="one-time-code"
                     autoFocus
+                    className="h-12 text-center tracking-[0.5em] text-lg"
                   />
                   <p className="text-xs text-muted-foreground">
                     Enter the code from your authenticator app

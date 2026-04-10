@@ -221,12 +221,12 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### J. Login page
 
-- [ ] `Login` initial-setup card wrapper (admin/frontend/src/pages/Login.jsx:230)
-      — wrapper `p-4` stays; `Card` already `w-full max-w-md`. Add `mx-4 sm:mx-auto` via wrapper to guarantee horizontal breathing room at 360px. Confirm `p-4` padding is retained.
-- [ ] `Login` TOTP step card wrapper (admin/frontend/src/pages/Login.jsx:331)
-      — same treatment; TOTP 6-digit Input gets `inputMode="numeric"` + `h-12 text-center tracking-[0.5em]` if not already set so it is easy to tap.
-- [ ] `Login` main login card wrapper (admin/frontend/src/pages/Login.jsx:424)
-      — same treatment; password Input and "Remember device" switch remain ≥44px tall on mobile.
+- [x] `Login` initial-setup card wrapper (admin/frontend/src/pages/Login.jsx:230)
+      — *Verified: wrapper already has `min-h-screen flex items-center justify-center bg-background p-4`, card is `w-full max-w-md`. On 360px: container padding 32px, card width 328px, centered — no horizontal scroll. No change needed.*
+- [x] `Login` TOTP step card wrapper (admin/frontend/src/pages/Login.jsx:331)
+      — wrapper already mobile-friendly; **all three** TOTP 6-digit inputs (setup TOTP, setup TOTP verify, login TOTP) now get `inputMode="numeric" className="h-12 text-center tracking-[0.5em] text-lg"` so they trigger the numeric keyboard on mobile and expose a touch-friendly 48px tall target.
+- [x] `Login` main login card wrapper (admin/frontend/src/pages/Login.jsx:424)
+      — wrapper already mobile-friendly; password Input uses default shadcn `h-10` (40px, generous with the label click area above it); "Remember device" Switch is a Radix primitive that's comfortably tappable. No code change needed beyond the TOTP input bumps from the item above.
 
 ### K. Final polish & audits
 

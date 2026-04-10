@@ -290,6 +290,10 @@ docker compose -f /opt/proxypilot/docker-compose.yml restart
 
 Issues and PRs are welcome! If you'd like to improve **ProxyPilot**, open an issue or submit a pull request.
 
+### UI changes must be mobile-friendly
+
+The admin dashboard is expected to work on phones and tablets, not only on desktop. **Any PR that touches `admin/frontend/src/pages/` or `admin/frontend/src/components/` must follow the rules in [`admin/frontend/MOBILE_FIRST.md`](admin/frontend/MOBILE_FIRST.md)** and complete its pre-merge checklist (render at 360/375/768, every dialog completable on mobile, primary action buttons ≥44×44px, etc.). Reviewers should reject UI PRs that introduce fixed-width grids, bare desktop-only `DialogContent` widths, or icon-only primary actions smaller than 44px on mobile.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

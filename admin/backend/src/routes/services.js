@@ -3579,35 +3579,124 @@ function buildDomainCaddyConfig(entriesList, domain) {
   return lines.join('\n');
 }
 
-// Read every service for a domain from the DB, build the merged Caddy site
-// config, and write it to disk (or unlink the file when no services remain).
+// Read every entry for a domain from the DB, build the merged Caddy site
+// config, and write it to disk (or unlink the file when no entries remain).
 // Callers use this after they have already mutated the DB — the helper is a
 // reconciliation step that makes the on-disk Caddy config match DB state.
 //
 // Admin services are skipped (their config is owned by the installer) so
 // running this on the admin domain never clobbers the Caddyfile the operator
 // maintains by hand.
+//
+// Phase 2b dual-source read: walks BOTH the legacy `services` table AND the
+// new `service_http_routes` JOIN for this domain, then dedupes by
+// `(service_id, path_prefix)` preferring the routes row when both sources
+// carry the same tuple.
+//
+// Why dual-source: during the Section D transition window, some endpoints
+// have been refactored to write to `service_http_routes` and others still
+// write to the legacy services columns only. Reading from just one source
+// would miss data the other source owns. The dedupe rule ensures the
+// A.3 backfill state (where every non-admin service has a matching route
+// row AND still carries its legacy columns) does not produce duplicated
+// handlers in the merged Caddyfile — the routes row wins because it is
+// the post-D.14 source of truth.
+//
+// Post-D.14 the legacy query will return zero rows (columns dropped), so
+// this helper collapses cleanly to a single routes-only read path at that
+// point without any further code change.
 async function regenerateDomainCaddyConfig(db, domain) {
-  const rows = db
+  // (1) Phase 2b routes path — join service_http_routes to services so the
+  // emitted entries carry both the route-owned fields (path_prefix,
+  // target_port, ssl_enabled, force_https, websocket_enabled, max_upload_size)
+  // and the service-owned fields (kind, runtime, type, target_ip, root_dir).
+  const routeRows = db
     .prepare(
-      `SELECT id, name, domain, type, target, port, root_dir, container_name,
-              ssl_enabled, force_https, websocket_enabled, max_upload_size,
-              data_dir, is_admin, path_prefix
-         FROM services
-        WHERE domain = ? AND is_admin = 0`
+      `SELECT r.id           AS route_id,
+              r.service_id   AS service_id,
+              r.domain       AS domain,
+              r.path_prefix  AS path_prefix,
+              r.target_port  AS target_port,
+              r.websocket_enabled,
+              r.ssl_enabled,
+              r.force_https,
+              r.max_upload_size,
+              s.name         AS name,
+              s.kind         AS kind,
+              s.runtime      AS runtime,
+              s.type         AS type,
+              s.target_ip    AS target_ip,
+              s.root_dir     AS root_dir,
+              s.container_name,
+              s.data_dir,
+              s.is_admin
+         FROM service_http_routes r
+         INNER JOIN services s ON s.id = r.service_id
+        WHERE r.domain = ? AND s.is_admin = 0`
     )
     .all(domain);
 
+  // (2) Legacy Phase 2 services path — unchanged from pre-B.3. We wrap the
+  // query in a try/catch so the helper survives post-D.14 installs where
+  // the legacy columns no longer exist (the SELECT would throw
+  // `no such column` and we want to fall through cleanly).
+  let legacyRows = [];
+  try {
+    legacyRows = db
+      .prepare(
+        `SELECT id           AS service_id,
+                name,
+                domain,
+                type,
+                target,
+                port,
+                root_dir,
+                container_name,
+                ssl_enabled,
+                force_https,
+                websocket_enabled,
+                max_upload_size,
+                data_dir,
+                is_admin,
+                path_prefix,
+                kind,
+                target_ip
+           FROM services
+          WHERE domain = ? AND is_admin = 0`
+      )
+      .all(domain);
+  } catch (e) {
+    // Post-D.14: legacy columns dropped → routes-only path.
+    legacyRows = [];
+  }
+
+  // (3) Dedupe: if `(service_id, path_prefix)` already exists in routeRows,
+  // drop the matching legacy row. Routes are the post-D.14 source of truth,
+  // so they win in the mixed A.3-backfill state where both sources describe
+  // the same tuple.
+  const routeTuples = new Set(
+    routeRows.map((r) => `${r.service_id}|${normalizePathPrefix(r.path_prefix)}`)
+  );
+  const legacyOnly = legacyRows.filter((l) => {
+    const tuple = `${l.service_id}|${normalizePathPrefix(l.path_prefix)}`;
+    return !routeTuples.has(tuple);
+  });
+
+  const allRows = [...routeRows, ...legacyOnly];
+
   const configPath = caddyFilePath(domain);
 
-  // No managed services left on this domain — remove the merged file so
+  // No managed entries left on this domain — remove the merged file so
   // Caddy stops serving it. Swallow ENOENT; nothing to clean up is fine.
-  if (!rows || rows.length === 0) {
+  if (!allRows || allRows.length === 0) {
     await unlink(configPath).catch(() => {});
     return;
   }
 
-  const merged = buildDomainCaddyConfig(rows, domain);
+  // buildDomainCaddyConfig accepts both legacy and Phase 2b shapes (B.2),
+  // so the mixed array flows through its normalize step without any
+  // per-row branching here.
+  const merged = buildDomainCaddyConfig(allRows, domain);
   if (merged === null) {
     await unlink(configPath).catch(() => {});
     return;

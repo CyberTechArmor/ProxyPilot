@@ -215,7 +215,7 @@ function NetworksTab() {
 
       {/* Edit Network Dialog */}
       <Dialog open={!!editingNet} onOpenChange={(open) => !open && setEditingNet(null)}>
-        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[80vh] sm:rounded-lg overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Network: {editingNet?.name}</DialogTitle>
             <DialogDescription>Modify configuration key-value pairs.</DialogDescription>
@@ -231,8 +231,8 @@ function NetworksTab() {
                 return a.localeCompare(b);
               })
               .map(([key, value]) => (
-                <div key={key} className="flex items-center gap-2">
-                  <label className="text-xs font-mono w-44 shrink-0 truncate" title={key}>{key}</label>
+                <div key={key} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                  <label className="text-xs font-mono w-full sm:w-44 sm:shrink-0 truncate" title={key}>{key}</label>
                   <Input
                     value={value}
                     onChange={(e) => setEditConfig(prev => ({ ...prev, [key]: e.target.value }))}
@@ -600,7 +600,7 @@ function ImagesTab() {
 
       {/* Delete Confirmation */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Delete Cached Image</DialogTitle>
             <DialogDescription>
@@ -631,11 +631,11 @@ export default function IncusManagement() {
       </div>
 
       <Tabs defaultValue="networks">
-        <TabsList className="w-full justify-start">
-          <TabsTrigger value="networks" className="gap-1.5"><Network className="h-3.5 w-3.5" />Networks</TabsTrigger>
-          <TabsTrigger value="storage" className="gap-1.5"><HardDrive className="h-3.5 w-3.5" />Storage</TabsTrigger>
-          <TabsTrigger value="profiles" className="gap-1.5"><UserCog className="h-3.5 w-3.5" />Profiles</TabsTrigger>
-          <TabsTrigger value="images" className="gap-1.5"><Image className="h-3.5 w-3.5" />Images</TabsTrigger>
+        <TabsList className="w-full justify-start overflow-x-auto flex-nowrap">
+          <TabsTrigger value="networks" className="gap-1.5 shrink-0"><Network className="h-3.5 w-3.5" />Networks</TabsTrigger>
+          <TabsTrigger value="storage" className="gap-1.5 shrink-0"><HardDrive className="h-3.5 w-3.5" />Storage</TabsTrigger>
+          <TabsTrigger value="profiles" className="gap-1.5 shrink-0"><UserCog className="h-3.5 w-3.5" />Profiles</TabsTrigger>
+          <TabsTrigger value="images" className="gap-1.5 shrink-0"><Image className="h-3.5 w-3.5" />Images</TabsTrigger>
         </TabsList>
 
         <TabsContent value="networks"><NetworksTab /></TabsContent>

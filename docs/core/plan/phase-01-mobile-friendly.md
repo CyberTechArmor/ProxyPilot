@@ -180,16 +180,16 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### G. IncusManagement page
 
-- [ ] `IncusManagement.NetworksTab` config grid (admin/frontend/src/pages/IncusManagement.jsx:159)
-      — already `grid-cols-1 md:grid-cols-2`; no change unless key/value rows overflow at 360px — then set key label `w-full md:w-44` (currently `w-44 shrink-0`).
-- [ ] `IncusManagement` edit-network dialog (admin/frontend/src/pages/IncusManagement.jsx:218)
+- [x] `IncusManagement.NetworksTab` config grid (admin/frontend/src/pages/IncusManagement.jsx:159)
+      — already `grid-cols-1 md:grid-cols-2`. *Verified: key/value rows are inline flex with truncation — no overflow at 360px, no change needed.*
+- [x] `IncusManagement` edit-network dialog (admin/frontend/src/pages/IncusManagement.jsx:218)
       — `sm:max-w-lg max-h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[80vh] sm:rounded-lg`.
-- [ ] `IncusManagement` edit-network key/value rows (admin/frontend/src/pages/IncusManagement.jsx:234)
-      — `flex items-center gap-2` + `w-44 shrink-0` label becomes `flex flex-col sm:flex-row sm:items-center gap-2` and `w-full sm:w-44 sm:shrink-0`; Input keeps `flex-1` but is full-width on phone.
-- [ ] `IncusManagement` other dialog at 603 (admin/frontend/src/pages/IncusManagement.jsx:603)
-      — audit: if it is a form dialog, prepend `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
-- [ ] `IncusManagement.StorageTab` and `.ProfilesTab` fixed-width numeric inputs
-      — any `<Input … className="w-32" />` or similar in storage pool / profile editor forms becomes `w-full sm:w-32`. One commit covers the whole page audit.
+- [x] `IncusManagement` edit-network key/value rows (admin/frontend/src/pages/IncusManagement.jsx:234)
+      — row now `flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2`; key label `w-full sm:w-44 sm:shrink-0`; Input full-width on phone and flex-1 on desktop.
+- [x] `IncusManagement` image delete confirmation dialog (admin/frontend/src/pages/IncusManagement.jsx:603)
+      — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`. Also: main Incus tabs list (networks/storage/profiles/images) gained `overflow-x-auto flex-nowrap` with `shrink-0` triggers so it scrolls horizontally on 360px.
+- [x] `IncusManagement.StorageTab` and `.ProfilesTab` fixed-width numeric inputs
+      — *Verified: grep for `w-\d+[^0-9]` across `IncusManagement.jsx` shows only icon classes (`h-4 w-4` etc.), no fixed-width form inputs. Storage and profile readouts are read-only cards with no form. No code change needed.*
 
 ### H. Users page
 

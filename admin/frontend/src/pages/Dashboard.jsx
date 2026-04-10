@@ -3599,7 +3599,7 @@ volumes:
             </span>
           </div>
           {groupedComposeProjects.length > 0 && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
             {groupedComposeProjects.map((project) => (
               <Card key={project.projectName} className="border-dashed border-purple-500/30">
                 <CardHeader className="pb-2">

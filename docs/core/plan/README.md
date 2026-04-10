@@ -39,6 +39,8 @@ next — potentially across multiple Claude Code sessions per phase.
 |---|---|---|---|
 | 01 | ✅ [`phase-01-mobile-friendly.md`](phase-01-mobile-friendly.md) | existing ProxyPilot | Responsive admin dashboard for phones and tablets |
 | 02 | ✅ [`phase-02-path-prefix-multi-service.md`](phase-02-path-prefix-multi-service.md) | existing ProxyPilot | Multiple services per domain via merged `handle_path` |
+| 02b | [`phase-02b-container-service-model.md`](phase-02b-container-service-model.md) | 02 | Container-as-service data model + multiple HTTP routes per service |
+| 02c | [`phase-02c-layer4-port-forwards.md`](phase-02c-layer4-port-forwards.md) | 02b | TCP / UDP / TLS-SNI port forwards via `caddy-l4` plugin |
 | 03 | [`phase-03-foundation.md`](phase-03-foundation.md) | existing ProxyPilot | SQLite schema, config loader, systemd generator |
 | 04 | [`phase-04-postgres-pgbouncer.md`](phase-04-postgres-pgbouncer.md) | 03 | Core database + connection pool |
 | 05 | [`phase-05-valkey.md`](phase-05-valkey.md) | 03 | Cache service for Infisical |
@@ -63,6 +65,8 @@ next — potentially across multiple Claude Code sessions per phase.
 
 - After **Phase 1**: the dashboard is usable on phones and tablets
 - After **Phase 2**: multiple services can share a domain on different paths
+- After **Phase 2b**: a single LXC container can expose multiple HTTP routes through one ProxyPilot service (the container is the unit of management)
+- After **Phase 2c**: services can also expose TCP/UDP/TLS-SNI ports through Caddy's `layer4` module, with host-port conflict detection
 - After **Phase 8**: core services running, secrets managed, backups active
 - After **Phase 10**: `proxypilot db create` works, full workload lifecycle
 - After **Phase 15**: Hardened profile fully functional
@@ -92,5 +96,23 @@ next — potentially across multiple Claude Code sessions per phase.
   puppeteer at 360px and 1280px and via Express integration tests for
   every endpoint. Live `caddy adapt` against a real Caddy install still
   to be confirmed by the operator via `npm run dev`.
+- **Phase 2b** — 📝 Spec drafted, awaiting operator review. Reshapes the
+  Phase 2 schema so a service represents one logical workload (typically
+  an LXC container) with one or more `service_http_routes` rows. Adds an
+  LXC container picker to the wizard with `target_ip` cached at create
+  time + a manual Refresh IP action. Idempotent migration from Phase 2.
+  No new system dependencies. See `phase-02b-container-service-model.md`.
+- **Phase 2c** — 📝 Spec drafted, awaiting operator review. Adds
+  TCP / UDP / TLS-SNI port forwards via the `caddy-l4` plugin so a single
+  service can expose non-HTTP entry points alongside its HTTP routes.
+  Introduces a runtime preflight that detects whether the plugin is
+  installed, host-port conflict detection against both ProxyPilot rows
+  and system-bound listeners, and a Network Map dashboard page +
+  `/api/services/network-map` JSON endpoint. **Requires `caddy-l4`**;
+  documents the `xcaddy build` install path. No nftables, no host
+  firewall mutation. See `phase-02c-layer4-port-forwards.md`.
 - **Phases 3–21** — Not started. The docs exist so that later sessions
   can craft the function-level checklists and execute phase by phase.
+  Phase 10 (Database Management) still owns the future nftables-based
+  port-forward engine that may eventually become an alternative backend
+  for the Phase 2c `service_port_forwards` rows.

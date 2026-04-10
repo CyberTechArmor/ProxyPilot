@@ -38,7 +38,7 @@ next — potentially across multiple Claude Code sessions per phase.
 | Phase | File | Depends on | Delivers |
 |---|---|---|---|
 | 01 | ✅ [`phase-01-mobile-friendly.md`](phase-01-mobile-friendly.md) | existing ProxyPilot | Responsive admin dashboard for phones and tablets |
-| 02 | [`phase-02-path-prefix-multi-service.md`](phase-02-path-prefix-multi-service.md) | existing ProxyPilot | Multiple services per domain via merged `handle_path` |
+| 02 | ✅ [`phase-02-path-prefix-multi-service.md`](phase-02-path-prefix-multi-service.md) | existing ProxyPilot | Multiple services per domain via merged `handle_path` |
 | 03 | [`phase-03-foundation.md`](phase-03-foundation.md) | existing ProxyPilot | SQLite schema, config loader, systemd generator |
 | 04 | [`phase-04-postgres-pgbouncer.md`](phase-04-postgres-pgbouncer.md) | 03 | Core database + connection pool |
 | 05 | [`phase-05-valkey.md`](phase-05-valkey.md) | 03 | Cache service for Infisical |
@@ -77,5 +77,20 @@ next — potentially across multiple Claude Code sessions per phase.
   and Lighthouse ≥90 still to be confirmed by the operator via
   `npm run dev`. Future UI changes must follow
   [`admin/frontend/MOBILE_FIRST.md`](../../../admin/frontend/MOBILE_FIRST.md).
-- **Phases 2–21** — Not started. The docs exist so that later sessions
+- **Phase 2** — ✅ Complete (multi-service path-prefix routing). See
+  `phase-02-path-prefix-multi-service.md` for the function-by-function
+  checklist and verification notes. Schema migration is idempotent (fresh
+  installs use the new `UNIQUE(domain, path_prefix)` constraint directly,
+  existing installs are rebuilt on first boot). All nine `generateCaddyConfig`
+  call sites now go through `regenerateDomainCaddyConfig`, which writes a
+  single merged site block per domain with `handle_path /prefix*` blocks
+  emitted in length-DESC specificity order. Per design decision, SSL is
+  enforced as all-or-nothing per domain. Frontend wizard shows existing
+  prefixes when the operator types an in-use domain, the services grid
+  groups multi-service domains under a header row, and the delete dialog
+  warns when siblings will be left behind. Verified end-to-end via
+  puppeteer at 360px and 1280px and via Express integration tests for
+  every endpoint. Live `caddy adapt` against a real Caddy install still
+  to be confirmed by the operator via `npm run dev`.
+- **Phases 3–21** — Not started. The docs exist so that later sessions
   can craft the function-level checklists and execute phase by phase.

@@ -70,7 +70,11 @@ export const api = {
 
   logout: () => request('/auth/logout', { method: 'POST' }),
 
-  // Services
+  // Services. Phase 2 audit: api.js holds no per-domain state — services are
+  // identified by (id, domain+pathPrefix) and the only domain reference in
+  // this file is `checkSslStatus(domain)` (a fire-and-forget GET, no cache).
+  // Multiple services can share a domain on different prefixes; nothing in
+  // this client needs to know about the multiplicity.
   getServices: () => request('/services'),
 
   getService: (id) => request(`/services/${id}`),

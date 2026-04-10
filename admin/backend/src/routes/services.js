@@ -260,23 +260,9 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
     // Enable SSL in database
     db.prepare('UPDATE services SET ssl_enabled = 1, force_https = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-    // Regenerate Caddy config with SSL enabled
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: true,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: true,
-    };
-
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain keep sharing a single site block.
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy - it will automatically obtain the certificate
     const reloadResult = await reloadCaddy();
@@ -327,23 +313,9 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     // Disable SSL in database
     db.prepare('UPDATE services SET ssl_enabled = 0, force_https = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-    // Regenerate Caddy config without HTTPS
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: false,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: false,
-    };
-
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain keep sharing a single site block.
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy
     const reloadResult = await reloadCaddy();
@@ -421,24 +393,9 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Build service config object
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: !!service.force_https,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: !!service.ssl_enabled,
-    };
-
-    // Generate and write new Caddy config
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain are picked up too (not just this service).
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy
     const reloadResult = await reloadCaddy();
@@ -493,39 +450,30 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
       console.error('Error backing up configs:', e);
     }
 
-    // Generate and write new configs for services in database
-    for (const service of services) {
-      // Skip admin service - its config is managed by the installer
-      if (service.is_admin) {
-        console.log(`Skipping admin service: ${service.domain}`);
-        results.success.push(`${service.domain} (skipped - admin)`);
-        continue;
-      }
+    // With merged per-domain configs, we regenerate once per *distinct*
+    // domain — not once per service — so two sibling services on the same
+    // domain don't cause two overlapping writes. Admin service domains are
+    // skipped outright so the installer-owned Caddyfile never gets clobbered.
+    const uniqueDomains = [
+      ...new Set(
+        services.filter((s) => !s.is_admin).map((s) => s.domain)
+      ),
+    ];
+    const adminDomains = services
+      .filter((s) => s.is_admin)
+      .map((s) => s.domain);
+    for (const adminDomain of new Set(adminDomains)) {
+      console.log(`Skipping admin domain: ${adminDomain}`);
+      results.success.push(`${adminDomain} (skipped - admin)`);
+    }
 
+    for (const domain of uniqueDomains) {
       try {
-        const serviceConfig = {
-          domain: service.domain,
-          pathPrefix: service.path_prefix,
-          type: service.type,
-          target: service.target,
-          port: service.port,
-          rootDir: service.root_dir,
-          websocketEnabled: !!service.websocket_enabled,
-          forceHttps: !!service.force_https,
-          maxUploadSize: service.max_upload_size,
-          sslEnabled: !!service.ssl_enabled,
-        };
-
-        const caddyConfig = generateCaddyConfig(serviceConfig);
-        const configPath = caddyFilePath(service.domain);
-
-        // Write config
-        await writeCaddyConfig(configPath, caddyConfig);
-
-        results.success.push(service.domain);
+        await regenerateDomainCaddyConfig(db, domain);
+        results.success.push(domain);
       } catch (err) {
-        console.error(`Failed to regenerate config for ${service.domain}:`, err);
-        results.failed.push({ domain: service.domain, error: err.message });
+        console.error(`Failed to regenerate merged config for ${domain}:`, err);
+        results.failed.push({ domain, error: err.message });
       }
     }
 
@@ -714,10 +662,42 @@ servicesRouter.post('/', async (req, res) => {
     data.pathPrefix = normalizePathPrefix(data.pathPrefix);
     const db = getDb();
 
-    // Check if domain already exists
-    const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(data.domain);
+    // Phase 2: multiple services can share a domain on different path
+    // prefixes. Reject only when the full (domain, path_prefix) tuple is
+    // already taken, not just the domain.
+    const existing = db
+      .prepare(
+        'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
+      )
+      .get(data.domain, data.pathPrefix);
     if (existing) {
-      return res.status(400).json({ error: 'Domain already exists' });
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
+    }
+
+    // Phase 2 design decision: SSL is all-or-nothing per domain. The merged
+    // Caddy site block has one site address (`example.com` for auto-TLS or
+    // `http://example.com` for the no-SSL/wildcard fallback) and one
+    // forceHttps stance, so every sibling service on a domain must agree.
+    // If a sibling already exists, the new service must use matching
+    // sslEnabled + forceHttps values.
+    const sibling = db
+      .prepare(
+        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? LIMIT 1'
+      )
+      .get(data.domain);
+    if (sibling) {
+      const siblingSsl = !!sibling.ssl_enabled;
+      const siblingForce = !!sibling.force_https;
+      if (siblingSsl !== !!data.sslEnabled || siblingForce !== !!data.forceHttps) {
+        return res.status(400).json({
+          error:
+            `All services on this domain must share the same SSL settings ` +
+            `(sslEnabled, forceHttps). Existing siblings use ` +
+            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
+        });
+      }
     }
 
     // Validate type-specific requirements
@@ -795,27 +775,29 @@ services:
       data.target = data.target || '127.0.0.1';
     }
 
-    // Generate Caddy config
-    const caddyConfig = generateCaddyConfig(data);
-
-    // Write Caddy site config file
+    // Phase 2: with merged per-domain configs, the new service must be in
+    // the DB before we regenerate the merged file for the domain — otherwise
+    // the file would be rewritten without the new row. Flow:
+    //   1. Backup the current merged file for the domain (may not exist).
+    //   2. Insert the row into the DB.
+    //   3. Call regenerateDomainCaddyConfig to write the merged file.
+    //   4. caddy adapt + reload; on any failure, roll back both the DB row
+    //      and the on-disk file to the pre-create state.
     await ensureCaddyStructure();
     const configPath = caddyFilePath(data.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate Caddy config
+    let backupMergedConfig = null;
+    let backupExisted = false;
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    } catch (testErr) {
-      // Rollback
-      await unlink(configPath).catch(() => {});
-      return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // If reading the backup fails, continue without one — the rollback
+      // will just unlink the file.
     }
 
-    // Reload Caddy
-    const caddyResult = await reloadCaddy();
-
-    // Insert into database
+    // Insert into database first so the merged config includes the new row.
     db.prepare(`
       INSERT INTO services (
         id, name, domain, path_prefix, type, target, port, root_dir, container_name,
@@ -827,6 +809,55 @@ services:
       data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
       data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir
     );
+
+    // Helper to undo the create on a downstream failure.
+    const rollbackCreate = async () => {
+      try {
+        db.prepare('DELETE FROM services WHERE id = ?').run(id);
+      } catch (e) {
+        console.error('Rollback: failed to delete service row', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore Caddy config', e);
+      }
+    };
+
+    // Write the merged Caddy config for the whole domain (now including the
+    // newly inserted row).
+    try {
+      await regenerateDomainCaddyConfig(db, data.domain);
+    } catch (genErr) {
+      await rollbackCreate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // Validate Caddy config
+    try {
+      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    } catch (testErr) {
+      await rollbackCreate();
+      return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
+    }
+
+    // Reload Caddy
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackCreate();
+      // Best-effort reload to bring Caddy back to the pre-create state.
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - create rolled back',
+        details: caddyResult.error,
+      });
+    }
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 
@@ -905,15 +936,6 @@ servicesRouter.put('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // If domain changed, check for conflicts
-    if (data.domain && data.domain !== service.domain) {
-      const existing = db.prepare('SELECT id FROM services WHERE domain = ? AND id != ?')
-        .get(data.domain, req.params.id);
-      if (existing) {
-        return res.status(400).json({ error: 'Domain already exists' });
-      }
-    }
-
     // Merge with existing data
     const updatedData = {
       name: data.name || service.name,
@@ -931,56 +953,95 @@ servicesRouter.put('/:id', async (req, res) => {
       maxUploadSize: data.maxUploadSize || service.max_upload_size,
     };
 
-    // Remove old Caddy config if domain changed
-    if (data.domain && data.domain !== service.domain) {
-      await unlink(caddyFilePath(service.domain)).catch(() => {});
+    // Phase 2: a service's (domain, path_prefix) tuple must be unique. Only
+    // re-check when the tuple actually changes — if neither domain nor path
+    // prefix was touched, the DB's existing row is the sole match and the
+    // check would false-positive.
+    const domainChangedForCheck = updatedData.domain !== service.domain;
+    const prefixChangedForCheck =
+      updatedData.pathPrefix !== normalizePathPrefix(service.path_prefix);
+    if (domainChangedForCheck || prefixChangedForCheck) {
+      const existing = db
+        .prepare(
+          'SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?'
+        )
+        .get(updatedData.domain, updatedData.pathPrefix, req.params.id);
+      if (existing) {
+        return res.status(400).json({
+          error: 'Domain + path prefix combination already exists',
+        });
+      }
     }
 
-    // Backup existing Caddy config before changes
-    const configPath = caddyFilePath(updatedData.domain);
-    let backupConfig = null;
+    // Phase 2 design decision: SSL is all-or-nothing per domain. After the
+    // update, every sibling service on `updatedData.domain` (excluding this
+    // row) must share the new sslEnabled + forceHttps values. If the SSL
+    // settings differ from any sibling, reject the update.
+    const sslSibling = db
+      .prepare(
+        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? AND id != ? LIMIT 1'
+      )
+      .get(updatedData.domain, req.params.id);
+    if (sslSibling) {
+      const siblingSsl = !!sslSibling.ssl_enabled;
+      const siblingForce = !!sslSibling.force_https;
+      if (
+        siblingSsl !== !!updatedData.sslEnabled ||
+        siblingForce !== !!updatedData.forceHttps
+      ) {
+        return res.status(400).json({
+          error:
+            `All services on this domain must share the same SSL settings ` +
+            `(sslEnabled, forceHttps). Existing siblings use ` +
+            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
+        });
+      }
+    }
+
+    // Phase 2: the merged per-domain config reflects DB state, so we must
+    // update the DB row before regenerating. Flow:
+    //   1. Snapshot the pre-update DB row (for rollback).
+    //   2. Backup the merged file for the new domain.
+    //   3. If the domain changed, also backup the merged file for the old
+    //      domain (so we can restore it if the update fails).
+    //   4. Update the DB row.
+    //   5. Regenerate merged config for the new domain (and the old domain,
+    //      if it changed — that rewrite shrinks or unlinks the old file).
+    //   6. caddy adapt + reload; on any failure, roll back everything.
+    await ensureCaddyStructure();
+    const newConfigPath = caddyFilePath(updatedData.domain);
+    const oldConfigPath = caddyFilePath(service.domain);
+    const domainChanged =
+      data.domain && data.domain !== service.domain;
+
+    let backupNew = null;
+    let backupNewExisted = false;
     try {
-      if (existsSync(configPath)) {
-        backupConfig = await readFile(configPath, 'utf-8');
+      if (existsSync(newConfigPath)) {
+        backupNew = await readFile(newConfigPath, 'utf-8');
+        backupNewExisted = true;
       }
     } catch (e) {
-      // No backup available
+      // Continue without a backup — rollback will unlink instead.
     }
 
-    // Generate and write new Caddy config
-    const caddyConfig = generateCaddyConfig(updatedData);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate Caddy config before reload
-    try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    } catch (testError) {
-      // Config validation failed - revert to backup
-      if (backupConfig) {
-        await writeCaddyConfig(configPath, backupConfig);
+    let backupOld = null;
+    let backupOldExisted = false;
+    if (domainChanged) {
+      try {
+        if (existsSync(oldConfigPath)) {
+          backupOld = await readFile(oldConfigPath, 'utf-8');
+          backupOldExisted = true;
+        }
+      } catch (e) {
+        // Continue without a backup.
       }
-      return res.status(400).json({
-        error: 'Caddy config validation failed - reverted to previous config',
-        details: testError.stderr || testError.message,
-      });
     }
 
-    // Reload Caddy with failsafe
-    try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
-    } catch (reloadError) {
-      // Reload failed - revert to backup
-      if (backupConfig) {
-        await writeCaddyConfig(configPath, backupConfig);
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
-      }
-      return res.status(400).json({
-        error: 'Caddy reload failed - reverted to previous config',
-        details: reloadError.stderr || reloadError.message,
-      });
-    }
+    // Snapshot the current row so we can revert on failure.
+    const preUpdateRow = { ...service };
 
-    // Update database
+    // Update DB row first so regenerateDomainCaddyConfig picks it up.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
@@ -995,6 +1056,87 @@ servicesRouter.put('/:id', async (req, res) => {
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
       updatedData.maxUploadSize, req.params.id
     );
+
+    const rollbackUpdate = async () => {
+      try {
+        db.prepare(`
+          UPDATE services SET
+            name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+            root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
+            force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(
+          preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
+          preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
+          preUpdateRow.root_dir, preUpdateRow.data_dir,
+          preUpdateRow.container_name, preUpdateRow.ssl_enabled,
+          preUpdateRow.force_https, preUpdateRow.websocket_enabled,
+          preUpdateRow.max_upload_size, preUpdateRow.updated_at, req.params.id
+        );
+      } catch (e) {
+        console.error('Rollback: failed to revert service row', e);
+      }
+      try {
+        if (backupNewExisted && backupNew !== null) {
+          await writeCaddyConfig(newConfigPath, backupNew);
+        } else {
+          await unlink(newConfigPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore new-domain Caddy config', e);
+      }
+      if (domainChanged) {
+        try {
+          if (backupOldExisted && backupOld !== null) {
+            await writeCaddyConfig(oldConfigPath, backupOld);
+          } else {
+            await unlink(oldConfigPath).catch(() => {});
+          }
+        } catch (e) {
+          console.error('Rollback: failed to restore old-domain Caddy config', e);
+        }
+      }
+    };
+
+    // Regenerate merged configs. The new-domain config always needs a
+    // rewrite; if the domain changed, the old-domain config also needs a
+    // rewrite so it either shrinks (leaving remaining siblings) or unlinks
+    // (if the moved service was the last one on the old domain).
+    try {
+      await regenerateDomainCaddyConfig(db, updatedData.domain);
+      if (domainChanged) {
+        await regenerateDomainCaddyConfig(db, service.domain);
+      }
+    } catch (genErr) {
+      await rollbackUpdate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // Validate Caddy config before reload
+    try {
+      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    } catch (testError) {
+      await rollbackUpdate();
+      return res.status(400).json({
+        error: 'Caddy config validation failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // Reload Caddy with failsafe
+    try {
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
+    } catch (reloadError) {
+      await rollbackUpdate();
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - reverted to previous config',
+        details: reloadError.stderr || reloadError.message,
+      });
+    }
 
     // Save config version for history
     try {
@@ -1090,18 +1232,10 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Regenerate Caddy config with reverted settings
-    const caddyConfig = generateCaddyConfig(config);
-    const configPath = caddyFilePath(config.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate and reload Caddy
-    await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    await reloadCaddy();
-
-    // Update database. Older saved versions may not include pathPrefix —
-    // fall back to the normalized default so reverts from pre-wildcard
-    // history still succeed.
+    // Update database first so regenerateDomainCaddyConfig picks up the
+    // reverted row. Older saved versions may not include pathPrefix — fall
+    // back to the normalized default so reverts from pre-wildcard history
+    // still succeed.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
@@ -1116,6 +1250,14 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
       config.maxUploadSize, req.params.id
     );
+
+    // Regenerate the merged Caddy config for the reverted service's domain
+    // so sibling services on the same domain are preserved.
+    await regenerateDomainCaddyConfig(db, config.domain);
+
+    // Validate and reload Caddy
+    await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    await reloadCaddy();
 
     // Save as new version
     const lastVersion = db.prepare(`
@@ -1282,11 +1424,18 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
-    // Remove Caddy site config
+    // Delete from database first so regenerateDomainCaddyConfig picks up
+    // the remaining siblings (or an empty list if this was the last one).
+    db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
+
+    // Regenerate the merged Caddy config for the domain. If this was the
+    // last service on the domain, regenerateDomainCaddyConfig unlinks the
+    // file. Otherwise it rewrites it without the deleted row so siblings
+    // stay reachable.
     try {
-      await unlink(caddyFilePath(service.domain)).catch(() => {});
+      await regenerateDomainCaddyConfig(db, service.domain);
     } catch (e) {
-      console.error('Error removing Caddy config file:', e);
+      console.error('Error regenerating merged Caddy config after delete:', e);
     }
 
     // Reload Caddy
@@ -1297,10 +1446,7 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
 
-    // Delete from database
-    db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
-
-    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain, pathPrefix: service.path_prefix }, req.ip);
 
     res.json({ success: true });
   } catch (error) {
@@ -1945,19 +2091,39 @@ servicesRouter.post('/import', async (req, res) => {
     const db = getDb();
     const results = { imported: [], skipped: [], errors: [] };
 
+    // Collect every domain we touch so we can regenerate each merged file
+    // once after the whole batch is applied, rather than once per row.
+    const touchedDomains = new Set();
+
     for (const serviceData of importServices) {
       try {
-        // Check if domain exists
-        const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(serviceData.domain);
+        // Exports created before wildcard routing have no pathPrefix —
+        // default to '/' so the rest of the pipeline treats them as root
+        // services.
+        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
+
+        // Phase 2: multiple services can share a domain on different path
+        // prefixes, so the existence check must match on the full
+        // (domain, path_prefix) tuple instead of just domain.
+        const existing = db
+          .prepare(
+            'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
+          )
+          .get(serviceData.domain, importPathPrefix);
 
         if (existing && !overwrite) {
-          results.skipped.push({ name: serviceData.name, reason: 'Domain already exists' });
+          results.skipped.push({
+            name: serviceData.name,
+            reason: 'Domain + path prefix combination already exists',
+          });
           continue;
         }
 
         if (existing && overwrite) {
-          // Delete existing service first
-          await unlink(caddyFilePath(serviceData.domain)).catch(() => {});
+          // Delete only the matching (domain, prefix) row so any sibling
+          // services on the same domain survive the import. The merged
+          // Caddy file is regenerated after the insert, which rewrites it
+          // with the new row and the remaining siblings.
           db.prepare('DELETE FROM services WHERE id = ?').run(existing.id);
         }
 
@@ -1997,15 +2163,8 @@ servicesRouter.post('/import', async (req, res) => {
           }
         }
 
-        // Generate Caddy config. Exports created before wildcard routing
-        // support have no pathPrefix — default to '/' to preserve behavior.
-        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
-        const configData = { ...serviceData, rootDir, pathPrefix: importPathPrefix };
-        const caddyConfig = generateCaddyConfig(configData);
-        const configPath = caddyFilePath(serviceData.domain);
-        await writeCaddyConfig(configPath, caddyConfig);
-
-        // Insert into database
+        // Insert into database first — the merged Caddy config is written
+        // once per domain after the loop so siblings are included.
         db.prepare(`
           INSERT INTO services (
             id, name, domain, path_prefix, type, target, port, root_dir, container_name,
@@ -2020,9 +2179,23 @@ servicesRouter.post('/import', async (req, res) => {
           dataDir
         );
 
+        touchedDomains.add(serviceData.domain);
         results.imported.push({ name: serviceData.name, id });
       } catch (err) {
         results.errors.push({ name: serviceData.name, error: err.message });
+      }
+    }
+
+    // Regenerate merged configs for every domain the import touched. One
+    // write per domain is enough even if the import contributed multiple
+    // rows to that domain — regenerateDomainCaddyConfig reads all current
+    // rows from the DB.
+    for (const domain of touchedDomains) {
+      try {
+        await regenerateDomainCaddyConfig(db, domain);
+      } catch (err) {
+        console.error(`Failed to regenerate merged config for ${domain} during import:`, err);
+        results.errors.push({ name: domain, error: err.message });
       }
     }
 
@@ -2934,24 +3107,13 @@ servicesRouter.post('/discover/import', async (req, res) => {
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
 
-    // Generate Caddy config for the imported site
+    // Regenerate the merged Caddy config for the imported domain. The DB
+    // row was inserted just above, so regenerateDomainCaddyConfig reads it
+    // plus any sibling services on the same domain and writes a single
+    // merged site block.
     try {
-      const serviceConfig = {
-        domain,
-        type,
-        target: target || '127.0.0.1',
-        port: port || null,
-        rootDir: actualRootDir,
-        websocketEnabled: !!websocketEnabled,
-        forceHttps: !!sslEnabled,
-        maxUploadSize: '1G',
-        sslEnabled: !!sslEnabled,
-      };
-
       await ensureCaddyStructure();
-      const caddyConfig = generateCaddyConfig(serviceConfig);
-      const configPath = caddyFilePath(domain);
-      await writeCaddyConfig(configPath, caddyConfig);
+      await regenerateDomainCaddyConfig(db, domain);
 
       // Validate and reload Caddy
       await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
@@ -3123,93 +3285,200 @@ function toCaddySize(size) {
   return size.toUpperCase().replace(/^(\d+)G$/i, '$1GB').replace(/^(\d+)M$/i, '$1MB');
 }
 
-// Generate Caddy site config based on service type
-function generateCaddyConfig(service) {
-  const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
-  const pathPrefix = normalizePathPrefix(service.pathPrefix || service.path_prefix);
-  const hasPathPrefix = pathPrefix !== '/';
-  const isWildcardDomain = typeof domain === 'string' && domain.startsWith('*.');
+// Emit the per-service handler body (the `reverse_proxy` / `root` + `file_server`
+// lines) without any wrapping site block, `handle_path`, or `handle`. The caller
+// decides how to wrap these lines — single-service configs emit them bare inside
+// the site block, multi-service (merged) configs wrap each service's body in its
+// own `handle_path ${prefix}*` or `handle` block.
+//
+// `indent` controls the leading whitespace so the caller can nest the body at the
+// appropriate depth (e.g. '    ' for site-level, '        ' for inside a handle).
+function generateServiceHandlerBody(service, indent = '    ') {
+  const { type, target, port, rootDir } = service;
 
-  // Convert container path to host path for Caddy
-  // If rootDir starts with SERVICES_DATA_DIR, replace with CADDY_STATIC_ROOT
+  // Convert container path to host path for Caddy. If rootDir starts with
+  // SERVICES_DATA_DIR, rewrite to CADDY_STATIC_ROOT (same translation the
+  // single-service path has always done).
   let caddyRootDir = rootDir;
   if (rootDir && rootDir.startsWith(SERVICES_DATA_DIR)) {
     caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
 
-  // Caddy auto-handles TLS when domain is used without http:// prefix.
-  // Wildcard domains require a wildcard certificate, which Caddy can obtain
-  // only via a DNS-01 challenge (needs a DNS provider plugin). Fall back to
-  // http:// for wildcards so the admin can still serve traffic without TLS
-  // until a DNS-01 solver is configured. The operator can enable TLS for
-  // wildcards manually by editing the Caddyfile for that domain.
-  let siteAddress;
-  if (!sslEnabled || isWildcardDomain) {
-    siteAddress = `http://${domain}`;
-  } else {
-    siteAddress = domain;
+  const lines = [];
+  switch (type) {
+    case 'docker':
+    case 'proxy':
+      // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For,
+      // X-Forwarded-Proto, and WebSocket upgrades.
+      lines.push(`${indent}reverse_proxy ${target || '127.0.0.1'}:${port}`);
+      break;
+
+    case 'static':
+      lines.push(`${indent}root * ${caddyRootDir}`);
+      lines.push(`${indent}file_server`);
+      lines.push(`${indent}try_files {path} {path}/ /index.html`);
+      break;
+  }
+  return lines;
+}
+
+// Parse a max_upload_size string ("1G" / "500M") into an integer count of
+// megabytes so we can take a max across all services on a domain. Returns 0
+// for unknown formats so the comparison still works.
+function parseUploadSizeMB(size) {
+  if (!size) return 0;
+  const m = String(size).trim().match(/^(\d+)([MG])$/i);
+  if (!m) return 0;
+  const n = parseInt(m[1], 10);
+  if (isNaN(n)) return 0;
+  return m[2].toUpperCase() === 'G' ? n * 1024 : n;
+}
+
+// Build the merged Caddy site config for every service on a single domain.
+//
+// `servicesList` must be the complete set of services that should live on
+// the given domain *after* the pending mutation — the caller is responsible
+// for adding/removing/replacing rows before handing them to this function.
+// `domain` is the site address (may include a wildcard).
+//
+// Returns the full Caddy config string, or `null` when the services list is
+// empty (caller should unlink the on-disk file in that case).
+//
+// Layout of the emitted config:
+//   1. A single site block keyed on the domain.
+//   2. Site-level `request_body max_size` taking the max of all services.
+//   3. `handle_path ${prefix}*` blocks for prefixed services, emitted in
+//      more-specific-first order (length DESC, tie-broken by lexical DESC).
+//   4. A single bare handler body for the root-scoped (`/`) service, if any,
+//      which Caddy treats as the fallthrough for requests that did not match
+//      any handle_path block.
+//   5. Site-level security headers and a single log file keyed on the domain.
+//
+// Per design decision, all services on a domain must share the same
+// sslEnabled and forceHttps values — that's enforced upstream in the create
+// and update endpoints. This function uses the first service's SSL flag to
+// pick the site address (http:// fallback for wildcards or when SSL is off).
+//
+// Throws when two services in the list share the same normalized path_prefix
+// — defense-in-depth against a UNIQUE-constraint bypass.
+function buildDomainCaddyConfig(servicesList, domain) {
+  if (!servicesList || servicesList.length === 0) return null;
+
+  // Normalize each service into a consistent shape (handles DB rows that use
+  // snake_case as well as JS objects that use camelCase).
+  const normalized = servicesList.map((s) => ({
+    type: s.type,
+    target: s.target,
+    port: s.port,
+    rootDir: s.rootDir !== undefined ? s.rootDir : s.root_dir,
+    maxUploadSize:
+      s.maxUploadSize !== undefined ? s.maxUploadSize : s.max_upload_size,
+    sslEnabled:
+      s.sslEnabled !== undefined ? !!s.sslEnabled : !!s.ssl_enabled,
+    pathPrefix: normalizePathPrefix(
+      s.pathPrefix !== undefined ? s.pathPrefix : s.path_prefix
+    ),
+  }));
+
+  // Defense-in-depth: reject duplicate tuples instead of silently emitting a
+  // bad Caddyfile. The UNIQUE constraint on the DB is the primary defense;
+  // this is a belt-and-braces check that also guards in-memory simulated
+  // lists built by the create/update endpoints.
+  const seen = new Set();
+  for (const s of normalized) {
+    if (seen.has(s.pathPrefix)) {
+      throw new Error(
+        `Duplicate (domain, path_prefix) tuple detected for ${domain} ${s.pathPrefix}`
+      );
+    }
+    seen.add(s.pathPrefix);
   }
 
-  // Indent helper so the per-service body can live either at the top level
-  // of a site block (no path prefix) or inside a `handle_path` block
-  // (with path prefix) without repeating the config twice.
-  const baseIndent = hasPathPrefix ? '        ' : '    ';
+  // Sort more-specific paths first so Caddy's source-order matching routes
+  // /api/v2/* to its own service before falling through to /api/*.
+  normalized.sort((a, b) => {
+    if (b.pathPrefix.length !== a.pathPrefix.length) {
+      return b.pathPrefix.length - a.pathPrefix.length;
+    }
+    return b.pathPrefix.localeCompare(a.pathPrefix);
+  });
 
-  let lines = [];
+  const prefixedServices = normalized.filter((s) => s.pathPrefix !== '/');
+  const rootService = normalized.find((s) => s.pathPrefix === '/') || null;
+
+  // Site address + SSL decision. All services on a domain share the same SSL
+  // stance (enforced upstream), so the first normalized row is authoritative.
+  const isWildcardDomain =
+    typeof domain === 'string' && domain.startsWith('*.');
+  const siteSslEnabled = normalized[0].sslEnabled;
+  const siteAddress =
+    !siteSslEnabled || isWildcardDomain ? `http://${domain}` : domain;
+
+  // Merged request_body max_size: take the max across every service on the
+  // domain so the most-permissive service's upload cap is honored for every
+  // matching route (the setting is site-level in Caddy, so the cap can't be
+  // per-service).
+  let maxSizeMB = 0;
+  let maxSizeString = null;
+  for (const s of normalized) {
+    const mb = parseUploadSizeMB(s.maxUploadSize);
+    if (mb > maxSizeMB) {
+      maxSizeMB = mb;
+      maxSizeString = s.maxUploadSize;
+    }
+  }
+
+  const lines = [];
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
-  lines.push(`# Path prefix: ${pathPrefix}`);
-  lines.push(`# Type: ${type}`);
+  lines.push(
+    `# Services: ${normalized
+      .map((s) => `${s.pathPrefix} (${s.type})`)
+      .join(', ')}`
+  );
   lines.push(`# Generated: ${new Date().toISOString()}`);
   lines.push(``);
   lines.push(`${siteAddress} {`);
 
-  // Request body size limit (site-level — applies to all matchers below)
-  if (maxUploadSize) {
+  if (maxSizeString) {
     lines.push(`    request_body {`);
-    lines.push(`        max_size ${toCaddySize(maxUploadSize)}`);
+    lines.push(`        max_size ${toCaddySize(maxSizeString)}`);
     lines.push(`    }`);
     lines.push(``);
   }
 
-  // When a path prefix is set, all of this service's handling is wrapped in
-  // a `handle_path` block so Caddy strips the prefix before proxying. Any
-  // request that does not match the prefix falls through to Caddy's default
-  // 404 — the operator can add more services on the same domain later.
-  if (hasPathPrefix) {
-    lines.push(`    handle_path ${pathPrefix}* {`);
-  }
-
-  switch (type) {
-    case 'docker':
-    case 'proxy':
-      // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, and WebSocket
-      lines.push(`${baseIndent}reverse_proxy ${target || '127.0.0.1'}:${port}`);
-      break;
-
-    case 'static':
-      lines.push(`${baseIndent}root * ${caddyRootDir}`);
-      lines.push(`${baseIndent}file_server`);
-      lines.push(`${baseIndent}try_files {path} {path}/ /index.html`);
-      break;
-  }
-
-  if (hasPathPrefix) {
+  // Emit each prefixed service in its own handle_path block. The * suffix on
+  // handle_path matches any path that starts with the prefix and Caddy strips
+  // the prefix before invoking the body.
+  for (const s of prefixedServices) {
+    lines.push(`    handle_path ${s.pathPrefix}* {`);
+    lines.push(...generateServiceHandlerBody(s, '        '));
     lines.push(`    }`);
+    lines.push(``);
   }
 
-  // Security headers (site-level so they apply even on 404s)
-  lines.push(``);
+  // Root handler (if any). Wrap it in a handle block so it is an explicit
+  // fallthrough rather than site-level bare statements mixed in with the
+  // handle_path blocks — this keeps Caddy's matching deterministic when
+  // multiple services coexist.
+  if (rootService) {
+    lines.push(`    handle {`);
+    lines.push(...generateServiceHandlerBody(rootService, '        '));
+    lines.push(`    }`);
+    lines.push(``);
+  }
+
+  // Site-level security headers (apply to 404s too).
   lines.push(`    header {`);
   lines.push(`        X-Frame-Options "SAMEORIGIN"`);
   lines.push(`        X-Content-Type-Options "nosniff"`);
   lines.push(`        X-XSS-Protection "1; mode=block"`);
   lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
   lines.push(`    }`);
-
-  // Logging — sanitize the domain so wildcard `*` does not leak into the
-  // log filename. Uses the same sanitizer as the Caddy site config filename.
   lines.push(``);
+
+  // Single log file keyed on the sanitized domain so wildcard * does not
+  // leak into the filename.
   lines.push(`    log {`);
   lines.push(`        output file /var/log/caddy/${caddyFileName(domain)}.log`);
   lines.push(`    }`);
@@ -3219,3 +3488,53 @@ function generateCaddyConfig(service) {
 
   return lines.join('\n');
 }
+
+// Read every service for a domain from the DB, build the merged Caddy site
+// config, and write it to disk (or unlink the file when no services remain).
+// Callers use this after they have already mutated the DB — the helper is a
+// reconciliation step that makes the on-disk Caddy config match DB state.
+//
+// Admin services are skipped (their config is owned by the installer) so
+// running this on the admin domain never clobbers the Caddyfile the operator
+// maintains by hand.
+async function regenerateDomainCaddyConfig(db, domain) {
+  const rows = db
+    .prepare(
+      `SELECT id, name, domain, type, target, port, root_dir, container_name,
+              ssl_enabled, force_https, websocket_enabled, max_upload_size,
+              data_dir, is_admin, path_prefix
+         FROM services
+        WHERE domain = ? AND is_admin = 0`
+    )
+    .all(domain);
+
+  const configPath = caddyFilePath(domain);
+
+  // No managed services left on this domain — remove the merged file so
+  // Caddy stops serving it. Swallow ENOENT; nothing to clean up is fine.
+  if (!rows || rows.length === 0) {
+    await unlink(configPath).catch(() => {});
+    return;
+  }
+
+  const merged = buildDomainCaddyConfig(rows, domain);
+  if (merged === null) {
+    await unlink(configPath).catch(() => {});
+    return;
+  }
+
+  await ensureCaddyStructure();
+  await writeCaddyConfig(configPath, merged);
+}
+
+// Phase 2 note: the single-service `generateCaddyConfig` function was
+// retired — all nine previous call sites now use `regenerateDomainCaddyConfig`
+// (DB reconciliation) or `buildDomainCaddyConfig` (pure in-memory builder).
+// A single domain can host multiple services on distinct path prefixes, so
+// every Caddy write now goes through the merged-config path.
+
+// Named exports for the Phase 2 Caddy helpers. These are kept internal to
+// this module at the call-site level but exported so integration tests and
+// the Phase 2 verification pass can invoke them directly without spinning
+// up the full HTTP router.
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody };

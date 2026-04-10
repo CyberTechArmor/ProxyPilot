@@ -3160,6 +3160,173 @@ function generateServiceHandlerBody(service, indent = '    ') {
   return lines;
 }
 
+// Parse a max_upload_size string ("1G" / "500M") into an integer count of
+// megabytes so we can take a max across all services on a domain. Returns 0
+// for unknown formats so the comparison still works.
+function parseUploadSizeMB(size) {
+  if (!size) return 0;
+  const m = String(size).trim().match(/^(\d+)([MG])$/i);
+  if (!m) return 0;
+  const n = parseInt(m[1], 10);
+  if (isNaN(n)) return 0;
+  return m[2].toUpperCase() === 'G' ? n * 1024 : n;
+}
+
+// Build the merged Caddy site config for every service on a single domain.
+//
+// `servicesList` must be the complete set of services that should live on
+// the given domain *after* the pending mutation — the caller is responsible
+// for adding/removing/replacing rows before handing them to this function.
+// `domain` is the site address (may include a wildcard).
+//
+// Returns the full Caddy config string, or `null` when the services list is
+// empty (caller should unlink the on-disk file in that case).
+//
+// Layout of the emitted config:
+//   1. A single site block keyed on the domain.
+//   2. Site-level `request_body max_size` taking the max of all services.
+//   3. `handle_path ${prefix}*` blocks for prefixed services, emitted in
+//      more-specific-first order (length DESC, tie-broken by lexical DESC).
+//   4. A single bare handler body for the root-scoped (`/`) service, if any,
+//      which Caddy treats as the fallthrough for requests that did not match
+//      any handle_path block.
+//   5. Site-level security headers and a single log file keyed on the domain.
+//
+// Per design decision, all services on a domain must share the same
+// sslEnabled and forceHttps values — that's enforced upstream in the create
+// and update endpoints. This function uses the first service's SSL flag to
+// pick the site address (http:// fallback for wildcards or when SSL is off).
+//
+// Throws when two services in the list share the same normalized path_prefix
+// — defense-in-depth against a UNIQUE-constraint bypass.
+function buildDomainCaddyConfig(servicesList, domain) {
+  if (!servicesList || servicesList.length === 0) return null;
+
+  // Normalize each service into a consistent shape (handles DB rows that use
+  // snake_case as well as JS objects that use camelCase).
+  const normalized = servicesList.map((s) => ({
+    type: s.type,
+    target: s.target,
+    port: s.port,
+    rootDir: s.rootDir !== undefined ? s.rootDir : s.root_dir,
+    maxUploadSize:
+      s.maxUploadSize !== undefined ? s.maxUploadSize : s.max_upload_size,
+    sslEnabled:
+      s.sslEnabled !== undefined ? !!s.sslEnabled : !!s.ssl_enabled,
+    pathPrefix: normalizePathPrefix(
+      s.pathPrefix !== undefined ? s.pathPrefix : s.path_prefix
+    ),
+  }));
+
+  // Defense-in-depth: reject duplicate tuples instead of silently emitting a
+  // bad Caddyfile. The UNIQUE constraint on the DB is the primary defense;
+  // this is a belt-and-braces check that also guards in-memory simulated
+  // lists built by the create/update endpoints.
+  const seen = new Set();
+  for (const s of normalized) {
+    if (seen.has(s.pathPrefix)) {
+      throw new Error(
+        `Duplicate (domain, path_prefix) tuple detected for ${domain} ${s.pathPrefix}`
+      );
+    }
+    seen.add(s.pathPrefix);
+  }
+
+  // Sort more-specific paths first so Caddy's source-order matching routes
+  // /api/v2/* to its own service before falling through to /api/*.
+  normalized.sort((a, b) => {
+    if (b.pathPrefix.length !== a.pathPrefix.length) {
+      return b.pathPrefix.length - a.pathPrefix.length;
+    }
+    return b.pathPrefix.localeCompare(a.pathPrefix);
+  });
+
+  const prefixedServices = normalized.filter((s) => s.pathPrefix !== '/');
+  const rootService = normalized.find((s) => s.pathPrefix === '/') || null;
+
+  // Site address + SSL decision. All services on a domain share the same SSL
+  // stance (enforced upstream), so the first normalized row is authoritative.
+  const isWildcardDomain =
+    typeof domain === 'string' && domain.startsWith('*.');
+  const siteSslEnabled = normalized[0].sslEnabled;
+  const siteAddress =
+    !siteSslEnabled || isWildcardDomain ? `http://${domain}` : domain;
+
+  // Merged request_body max_size: take the max across every service on the
+  // domain so the most-permissive service's upload cap is honored for every
+  // matching route (the setting is site-level in Caddy, so the cap can't be
+  // per-service).
+  let maxSizeMB = 0;
+  let maxSizeString = null;
+  for (const s of normalized) {
+    const mb = parseUploadSizeMB(s.maxUploadSize);
+    if (mb > maxSizeMB) {
+      maxSizeMB = mb;
+      maxSizeString = s.maxUploadSize;
+    }
+  }
+
+  const lines = [];
+  lines.push(`# ProxyPilot Managed Configuration`);
+  lines.push(`# Domain: ${domain}`);
+  lines.push(
+    `# Services: ${normalized
+      .map((s) => `${s.pathPrefix} (${s.type})`)
+      .join(', ')}`
+  );
+  lines.push(`# Generated: ${new Date().toISOString()}`);
+  lines.push(``);
+  lines.push(`${siteAddress} {`);
+
+  if (maxSizeString) {
+    lines.push(`    request_body {`);
+    lines.push(`        max_size ${toCaddySize(maxSizeString)}`);
+    lines.push(`    }`);
+    lines.push(``);
+  }
+
+  // Emit each prefixed service in its own handle_path block. The * suffix on
+  // handle_path matches any path that starts with the prefix and Caddy strips
+  // the prefix before invoking the body.
+  for (const s of prefixedServices) {
+    lines.push(`    handle_path ${s.pathPrefix}* {`);
+    lines.push(...generateServiceHandlerBody(s, '        '));
+    lines.push(`    }`);
+    lines.push(``);
+  }
+
+  // Root handler (if any). Wrap it in a handle block so it is an explicit
+  // fallthrough rather than site-level bare statements mixed in with the
+  // handle_path blocks — this keeps Caddy's matching deterministic when
+  // multiple services coexist.
+  if (rootService) {
+    lines.push(`    handle {`);
+    lines.push(...generateServiceHandlerBody(rootService, '        '));
+    lines.push(`    }`);
+    lines.push(``);
+  }
+
+  // Site-level security headers (apply to 404s too).
+  lines.push(`    header {`);
+  lines.push(`        X-Frame-Options "SAMEORIGIN"`);
+  lines.push(`        X-Content-Type-Options "nosniff"`);
+  lines.push(`        X-XSS-Protection "1; mode=block"`);
+  lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
+  lines.push(`    }`);
+  lines.push(``);
+
+  // Single log file keyed on the sanitized domain so wildcard * does not
+  // leak into the filename.
+  lines.push(`    log {`);
+  lines.push(`        output file /var/log/caddy/${caddyFileName(domain)}.log`);
+  lines.push(`    }`);
+
+  lines.push(`}`);
+  lines.push(``);
+
+  return lines.join('\n');
+}
+
 // Generate Caddy site config based on service type
 function generateCaddyConfig(service) {
   const { domain, type, maxUploadSize, sslEnabled } = service;

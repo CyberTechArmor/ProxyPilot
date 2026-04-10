@@ -1133,17 +1133,17 @@ export default function LxcContainers() {
               onClick={() => openInfo(ct)}
             >
               <CardHeader className="pb-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-start justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
                     <StatusBadge status={ct.status} />
-                    <CardTitle className="text-lg">{ct.name}</CardTitle>
+                    <CardTitle className="text-lg truncate">{ct.name}</CardTitle>
                   </div>
-                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex gap-1 flex-wrap justify-end" onClick={(e) => e.stopPropagation()}>
                     {ct.status?.toLowerCase() === 'running' && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-cyan-500 hover:text-cyan-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-cyan-500 hover:text-cyan-600"
                         onClick={() => openInfo(ct, 'terminal')}
                         title="Terminal"
                       >
@@ -1154,7 +1154,7 @@ export default function LxcContainers() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-yellow-500 hover:text-yellow-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-yellow-500 hover:text-yellow-600"
                         onClick={() => handleAction('stop', ct.name)}
                         disabled={actionLoading[`${ct.name}-stop`]}
                         title="Stop"
@@ -1169,7 +1169,7 @@ export default function LxcContainers() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-green-500 hover:text-green-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-green-500 hover:text-green-600"
                         onClick={() => handleAction('start', ct.name)}
                         disabled={actionLoading[`${ct.name}-start`]}
                         title="Start"
@@ -1184,7 +1184,7 @@ export default function LxcContainers() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 w-7 p-0 text-blue-500 hover:text-blue-600"
+                      className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-blue-500 hover:text-blue-600"
                       onClick={() => handleAction('restart', ct.name)}
                       disabled={actionLoading[`${ct.name}-restart`]}
                       title="Restart"
@@ -1198,7 +1198,7 @@ export default function LxcContainers() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                      className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-red-500 hover:text-red-600"
                       onClick={() => { setDeleteTarget(ct.name); setDeleteOpen(true); }}
                       title="Delete"
                     >

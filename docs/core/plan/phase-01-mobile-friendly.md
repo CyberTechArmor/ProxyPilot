@@ -163,8 +163,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 - [x] `LxcContainers` container grid (admin/frontend/src/pages/LxcContainers.jsx:1128)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; verifies "card stack on <md" requirement.
-- [ ] `LxcContainers` card header action buttons (admin/frontend/src/pages/LxcContainers.jsx:1141)
-      — Terminal/Start/Stop/Restart/Delete buttons are `h-7 w-7`; become `h-9 w-9 sm:h-7 sm:w-7` (still secondary actions in a dense list but meet the 36px minimum; if the verification audit flags these as primary, bump to `h-11 w-11`).
+- [x] `LxcContainers` card header action buttons (admin/frontend/src/pages/LxcContainers.jsx:1141)
+      — Terminal/Start/Stop/Restart/Delete buttons were `h-7 w-7`; now `h-9 w-9 sm:h-7 sm:w-7` so they hit a 36px touch target on mobile while staying compact on desktop. Row also wraps (`flex-wrap justify-end`) so cards at 360px don't overflow.
 - [ ] `LxcContainers` create container dialog (admin/frontend/src/pages/LxcContainers.jsx:1249)
       — `sm:max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
 - [ ] `LxcContainers` create form paired grids (admin/frontend/src/pages/LxcContainers.jsx:1392, 1449, 1690, 1768)

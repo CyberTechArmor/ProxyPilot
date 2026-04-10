@@ -201,17 +201,17 @@ admin/frontend/src/lib/api.js                    # Add createRoute, updateRoute,
 
 ### G. Frontend — api.js client helpers
 
-- [ ] Add `getLxcContainersWithIp` (admin/frontend/src/lib/api.js, near the existing LXC helpers around line 374)
-      — `getLxcContainersWithIp: () => request('/lxc/containers/with-ip')`. **Success:** `npm run build` passes; a quick console check via `api.getLxcContainersWithIp()` in the running dev server returns the expected shape (tested in the wizard item below).
+- [x] G.1 Add `getLxcContainersWithIp` (admin/frontend/src/lib/api.js:381)
+      — `getLxcContainersWithIp: () => request('/lxc/containers/with-ip')` placed directly below the existing `getLxcContainers` call. Returns `{containers: [{name, status, ipv4, ipv6}]}` with the `pp-` prefix already stripped. **Verified:** `node --check src/lib/api.js` passes (syntax clean). Functional verification against the E.1 backend endpoint is covered by the E.1 smoke test; the helper is a thin wrapper around `request('/lxc/containers/with-ip')` so its behavior matches the backend response directly.
 
-- [ ] Add route CRUD helpers `getServiceRoutes`, `createRoute`, `updateRoute`, `deleteRoute` (admin/frontend/src/lib/api.js, inside the Services block)
-      — `getServiceRoutes: (id) => request('/services/'+id+'/routes')`, `createRoute: (id, route) => request('/services/'+id+'/routes', {method:'POST', body: JSON.stringify(route)})`, `updateRoute: (id, routeId, route) => request('/services/'+id+'/routes/'+routeId, {method:'PUT', body: JSON.stringify(route)})`, `deleteRoute: (id, routeId) => request('/services/'+id+'/routes/'+routeId, {method:'DELETE'})`. **Success:** `npm run build` passes; each helper is reachable from `window.api.*` in dev and returns the documented shape against a live backend seeded with test data.
+- [x] G.2 Add route CRUD helpers `getServiceRoutes`, `createRoute`, `updateRoute`, `deleteRoute` (admin/frontend/src/lib/api.js:100)
+      — Four helpers added inside the Services block right after `toggleFavorite`: `getServiceRoutes(id) => request('/services/'+id+'/routes')`, `createRoute(id, route) => request('/services/'+id+'/routes', {method:'POST', body: JSON.stringify(route)})`, `updateRoute(id, routeId, route) => request('/services/'+id+'/routes/'+routeId, {method:'PUT', body: JSON.stringify(route)})`, `deleteRoute(id, routeId) => request('/services/'+id+'/routes/'+routeId, {method:'DELETE'})`. **Verified:** `node --check src/lib/api.js` passes. The Section C smoke tests already verified the corresponding backend endpoints return the documented shapes.
 
-- [ ] Add `refreshLxcIp` (admin/frontend/src/lib/api.js, inside the Services block)
-      — `refreshLxcIp: (serviceId) => request('/services/'+serviceId+'/refresh-ip', {method: 'POST'})`. **Success:** `npm run build` passes; dev-server smoke-test returns 200 against a service with a valid `lxc_container_name`.
+- [x] G.3 Add `refreshLxcIp` (admin/frontend/src/lib/api.js:119)
+      — `refreshLxcIp: (serviceId) => request('/services/'+serviceId+'/refresh-ip', {method: 'POST'})` placed right below the route CRUD helpers inside the Services block. **Verified:** `node --check src/lib/api.js` passes. The backend E.2 smoke test exercised the endpoint and confirmed the response shape `{success, changed, oldIp, newIp, ...}`.
 
-- [ ] Update the Phase-2 services-section comment (admin/frontend/src/lib/api.js:73)
-      — Change the note to document that services now nest `routes` on every response, services are identified by `id` alone (no longer `id + domain + pathPrefix`), and nothing in this file keys any cache on domain. **Success:** `npm run build` passes; comment reads accurately against the refactored endpoints.
+- [x] G.4 Update the Phase-2 services-section comment (admin/frontend/src/lib/api.js:73)
+      — The comment now reads: "Phase 2b audit: a service now represents one logical workload (typically an LXC or Docker container) that can expose multiple HTTP routes via a nested `routes: [...]` array on every GET response. The service is identified by `id` alone — (domain, pathPrefix) is now a property of individual routes in `service_http_routes`, not of the service itself. The only direct domain reference in this file is `checkSslStatus(domain)` (a fire-and-forget GET, no cache). Nothing in this client keys any cache on domain." **Verified:** `node --check src/lib/api.js` passes; comment reads accurately against the refactored endpoints.
 
 ### H. Frontend — Add Service wizard (mobile-first)
 

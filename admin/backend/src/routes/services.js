@@ -1053,32 +1053,83 @@ servicesRouter.get('/', (req, res) => {
 });
 
 // Get single service
+// Phase 2b D.13: same shape as D.12's list endpoint — the single service
+// object carries a nested `routes` array in primary-first order, exposes
+// Phase 2b service-level fields, and retains legacy top-level route-owned
+// fields for backward compatibility with the pre-Section-H frontend.
 servicesRouter.get('/:id', (req, res) => {
   try {
     const db = getDb();
-    const service = db.prepare(`
-      SELECT id, name, domain, path_prefix as pathPrefix, type, target, port,
-             root_dir as rootDir,
-             container_name as containerName, ssl_enabled as sslEnabled,
-             force_https as forceHttps, websocket_enabled as websocketEnabled,
-             max_upload_size as maxUploadSize, status, is_admin as isAdmin,
-             is_favorite as isFavorite, data_dir as dataDir,
-             created_at as createdAt, updated_at as updatedAt
-      FROM services WHERE id = ?
-    `).get(req.params.id);
+    const s = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
 
-    if (!service) {
+    if (!s) {
       return res.status(404).json({ error: 'Service not found' });
     }
 
+    const routeRows = db
+      .prepare(
+        `SELECT id, service_id, domain, path_prefix, target_port,
+                websocket_enabled, ssl_enabled, force_https,
+                max_upload_size, created_at
+           FROM service_http_routes
+          WHERE service_id = ?
+          ORDER BY created_at ASC, id ASC`
+      )
+      .all(s.id);
+
+    const routes = routeRows.map((r) => ({
+      id: r.id,
+      serviceId: r.service_id,
+      domain: r.domain,
+      pathPrefix: r.path_prefix,
+      targetPort: r.target_port,
+      websocketEnabled: !!r.websocket_enabled,
+      sslEnabled: !!r.ssl_enabled,
+      forceHttps: !!r.force_https,
+      maxUploadSize: r.max_upload_size,
+      createdAt: r.created_at,
+    }));
+
+    const primary = routes[0];
+    const topDomain = s.domain ?? primary?.domain ?? null;
+    const topPathPrefix = s.path_prefix ?? primary?.pathPrefix ?? '/';
+    const topPort = s.port ?? primary?.targetPort ?? null;
+    const topSsl = s.ssl_enabled ?? (primary ? (primary.sslEnabled ? 1 : 0) : 0);
+    const topForce = s.force_https ?? (primary ? (primary.forceHttps ? 1 : 0) : 0);
+    const topWs = s.websocket_enabled ?? (primary ? (primary.websocketEnabled ? 1 : 0) : 0);
+    const topMax = s.max_upload_size ?? primary?.maxUploadSize ?? '1G';
+
     res.json({
       service: {
-        ...service,
-        sslEnabled: !!service.sslEnabled,
-        forceHttps: !!service.forceHttps,
-        websocketEnabled: !!service.websocketEnabled,
-        isAdmin: !!service.isAdmin,
-        isFavorite: !!service.isFavorite,
+        id: s.id,
+        name: s.name,
+        kind: s.kind,
+        runtime: s.runtime,
+        targetIp: s.target_ip ?? null,
+        lxcContainerName: s.lxc_container_name ?? null,
+        type: s.type,
+        target: s.target,
+        rootDir: s.root_dir,
+        containerName: s.container_name,
+        dataDir: s.data_dir,
+        status: s.status,
+        isAdmin: !!s.is_admin,
+        isFavorite: !!s.is_favorite,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+        // Legacy top-level backcompat fields
+        domain: topDomain,
+        pathPrefix: topPathPrefix,
+        port: topPort,
+        sslEnabled: !!topSsl,
+        forceHttps: !!topForce,
+        websocketEnabled: !!topWs,
+        maxUploadSize: topMax,
+        sslCertificateExists: !!topSsl,
+        // Phase 2b nested routes
+        routes,
       },
     });
   } catch (error) {

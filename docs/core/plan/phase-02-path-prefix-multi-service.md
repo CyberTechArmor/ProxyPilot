@@ -100,8 +100,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 - [x] Call site 2: `DELETE /:id/certificate` (admin/backend/src/routes/services.js:344)
       — Same substitution as call site 1, after the `UPDATE services SET ssl_enabled = 0 ...` statement. **Verified:** integration test — seed an ssl_enabled=1 service, confirm merged file uses `example.com {`, flip ssl_enabled=0 + call regenerate, confirm merged file now uses `http://example.com {`.
 
-- [ ] Call site 3: `POST /:id/regenerate-config` (admin/backend/src/routes/services.js:439)
-      — Replace the `generateCaddyConfig(serviceConfig)` + write with `await regenerateDomainCaddyConfig(db, service.domain)`.
+- [x] Call site 3: `POST /:id/regenerate-config` (admin/backend/src/routes/services.js:385)
+      — Replace the `generateCaddyConfig(serviceConfig)` + write with `await regenerateDomainCaddyConfig(db, service.domain)`. **Verified:** integration test — seeded two services on `ex.test` (`/` static, `/api` docker) and called the helper; confirmed merged file contains both a `handle_path /api*` block and a `handle {` root block inside a single `ex.test {` site block.
 
 - [ ] Call site 4: `POST /caddy/regenerate-all` loop (admin/backend/src/routes/services.js:519)
       — Replace the per-service Caddy write inside `for (const service of services) { ... }` with a dedupe pass: collect `uniqueDomains = new Set(services.filter(s => !s.is_admin).map(s => s.domain))`, then `for (const domain of uniqueDomains) await regenerateDomainCaddyConfig(db, domain)`. Keep the backup/revert logic unchanged (it already keys on filenames, which still line up with domains). Update `results.success` to record each domain once instead of each service.

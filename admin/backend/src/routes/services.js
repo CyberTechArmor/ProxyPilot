@@ -393,24 +393,9 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Build service config object
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: !!service.force_https,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: !!service.ssl_enabled,
-    };
-
-    // Generate and write new Caddy config
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain are picked up too (not just this service).
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy
     const reloadResult = await reloadCaddy();

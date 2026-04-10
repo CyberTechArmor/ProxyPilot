@@ -26,6 +26,7 @@ import {
   AlertCircle,
   RefreshCw,
   Bell,
+  Menu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -33,6 +34,14 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const { toasts } = useToast();
+
+  // Mobile sidebar drawer state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Close the mobile sidebar whenever the route changes
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
   // Notification panel state
   const [notifOpen, setNotifOpen] = useState(false);

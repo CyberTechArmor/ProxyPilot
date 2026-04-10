@@ -495,7 +495,7 @@ export default function UsersPage() {
 
       {/* Service Access Dialog */}
       <Dialog open={accessDialogOpen} onOpenChange={setAccessDialogOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Access Control for {selectedUser?.username}</DialogTitle>
             <DialogDescription>
@@ -541,12 +541,12 @@ export default function UsersPage() {
                     <p className="text-center text-muted-foreground py-4">No services available</p>
                   ) : (
                     userAccess.map((access, index) => (
-                      <div key={access.serviceId} className="flex items-center justify-between p-3 border rounded-lg">
-                        <div>
-                          <p className="font-medium">{access.serviceName}</p>
-                          <p className="text-sm text-muted-foreground">{access.domain}</p>
+                      <div key={access.serviceId} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg">
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">{access.serviceName}</p>
+                          <p className="text-sm text-muted-foreground truncate">{access.domain}</p>
                         </div>
-                        <div className="flex items-center gap-4">
+                        <div className="flex flex-wrap items-center gap-4">
                           <div className="flex items-center gap-2">
                             <Eye className="h-4 w-4 text-muted-foreground" />
                             <Label htmlFor={`view-${access.serviceId}`} className="text-sm">View</Label>
@@ -592,15 +592,15 @@ export default function UsersPage() {
                         Folder access grants permissions to all services within that folder.
                       </p>
                       {userFolderAccess.map((folderAccess, index) => (
-                        <div key={folderAccess.folderPath} className="flex items-center justify-between p-3 border rounded-lg">
-                          <div className="flex items-center gap-2">
-                            <Folder className="h-4 w-4 text-yellow-500" />
-                            <div>
-                              <p className="font-medium">{folderAccess.folderName}</p>
+                        <div key={folderAccess.folderPath} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Folder className="h-4 w-4 text-yellow-500 shrink-0" />
+                            <div className="min-w-0">
+                              <p className="font-medium truncate">{folderAccess.folderName}</p>
                               <p className="text-sm text-muted-foreground">{folderAccess.serviceCount} services</p>
                             </div>
                           </div>
-                          <div className="flex items-center gap-4">
+                          <div className="flex flex-wrap items-center gap-4">
                             <div className="flex items-center gap-2">
                               <Eye className="h-4 w-4 text-muted-foreground" />
                               <Label htmlFor={`folder-view-${index}`} className="text-sm">View</Label>

@@ -203,8 +203,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
 - [x] `Users` delete-user dialog (admin/frontend/src/pages/Users.jsx:458)
       — same full-screen-on-sm treatment.
-- [ ] `Users` manage-access dialog (admin/frontend/src/pages/Users.jsx:495)
-      — `max-w-2xl` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg`; inner access rows (`flex items-center justify-between p-3` at 541 and 592) become `flex-col sm:flex-row sm:items-center sm:justify-between gap-2` so switches do not overflow.
+- [x] `Users` manage-access dialog (admin/frontend/src/pages/Users.jsx:495)
+      — `max-w-2xl` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg`; both service-access and folder-access inner rows stack on mobile (`flex-col sm:flex-row sm:items-center sm:justify-between gap-2`) with switch row wrapping; truncation added so long names don't overflow.
 
 ### I. Profile page
 

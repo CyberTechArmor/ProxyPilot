@@ -2063,6 +2063,208 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
   }
 });
 
+// ==================== PHASE 2b LXC IP REFRESH ====================
+//
+// Phase 2b E.2: re-queries Incus for a service's cached LXC container
+// IP and — if the new IP differs — updates `services.target_ip`,
+// regenerates the merged Caddy config for every domain the service's
+// routes touch, and reloads Caddy. Audit-logged as `LXC_IP_REFRESHED`.
+// No-op (returns 200 with `old_ip === new_ip`) when the IP is unchanged.
+// On any downstream failure, reverts the DB + restores merged files.
+servicesRouter.post('/:id/refresh-ip', async (req, res) => {
+  try {
+    const db = getDb();
+    const serviceId = req.params.id;
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(serviceId);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    if (!service.lxc_container_name) {
+      return res
+        .status(400)
+        .json({ error: 'Service has no associated LXC container' });
+    }
+
+    // Query Incus for the current IPv4. The container name is stored
+    // without the `pp-` prefix in `services.lxc_container_name`; add it
+    // back here so the `incus list` call matches the real instance.
+    const incusName = `pp-${service.lxc_container_name}`;
+    let newIp = null;
+    try {
+      const result = await execOnHost(
+        `incus list ${JSON.stringify(incusName)} --format json 2>/dev/null`
+      );
+      const containers = JSON.parse(result.stdout || '[]');
+      const target = containers.find((c) => c.name === incusName);
+      if (target && target.state && target.state.network) {
+        for (const [name, iface] of Object.entries(target.state.network)) {
+          if (name === 'lo') continue;
+          for (const addr of iface.addresses || []) {
+            if (addr.family === 'inet' && !addr.address.startsWith('127.')) {
+              newIp = addr.address;
+              break;
+            }
+          }
+          if (newIp) break;
+        }
+      }
+    } catch (e) {
+      return res.status(500).json({
+        error: 'Failed to query Incus: ' + (e.stderr || e.message),
+      });
+    }
+
+    const oldIp = service.target_ip;
+    if (!newIp) {
+      return res.status(400).json({
+        error: `LXC container "${service.lxc_container_name}" has no IPv4 address (is it running?)`,
+      });
+    }
+
+    // No-op path — just return the audit-friendly shape.
+    if (newIp === oldIp) {
+      logAudit(
+        req.user.id,
+        'LXC_IP_REFRESHED',
+        'service',
+        serviceId,
+        {
+          service_id: serviceId,
+          lxc_container_name: service.lxc_container_name,
+          old_ip: oldIp,
+          new_ip: newIp,
+        },
+        req.ip
+      );
+      return res.json({
+        success: true,
+        changed: false,
+        oldIp,
+        newIp,
+        message: 'IP unchanged — no regeneration needed',
+      });
+    }
+
+    // Collect every domain the service's routes touch so we can
+    // regenerate each merged file after the DB update.
+    const routeDomains = db
+      .prepare(
+        `SELECT DISTINCT domain FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(serviceId)
+      .map((r) => r.domain);
+    const affectedDomains = new Set(routeDomains);
+
+    // Backup every affected merged file.
+    await ensureCaddyStructure();
+    const backups = {};
+    for (const domain of affectedDomains) {
+      const configPath = caddyFilePath(domain);
+      let content = null;
+      let existed = false;
+      if (existsSync(configPath)) {
+        try {
+          content = await readFile(configPath, 'utf-8');
+          existed = true;
+        } catch (e) {
+          // Continue without a backup.
+        }
+      }
+      backups[domain] = { existed, content, path: configPath };
+    }
+
+    // Update the DB row with the new IP.
+    db.prepare(
+      `UPDATE services SET target_ip = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).run(newIp, serviceId);
+
+    const rollback = async () => {
+      try {
+        db.prepare(
+          `UPDATE services SET target_ip = ? WHERE id = ?`
+        ).run(oldIp, serviceId);
+      } catch (e) {
+        console.error('Rollback: failed to revert target_ip', e);
+      }
+      for (const [domain, b] of Object.entries(backups)) {
+        try {
+          if (b.existed && b.content !== null) {
+            await writeCaddyConfig(b.path, b.content);
+          } else {
+            await unlink(b.path).catch(() => {});
+          }
+        } catch (e) {
+          console.error(`Rollback: failed to restore ${domain}`, e);
+        }
+      }
+    };
+
+    // Regenerate merged Caddy config for every affected domain.
+    try {
+      for (const domain of affectedDomains) {
+        await regenerateDomainCaddyConfig(db, domain);
+      }
+    } catch (genErr) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Failed to regenerate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // Validate + reload Caddy.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testError) {
+      await rollback();
+      return res.status(400).json({
+        error: 'Caddy config validation failed - reverted to previous IP',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    const reloadResult = await reloadCaddy();
+    if (!reloadResult.success) {
+      await rollback();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - reverted to previous IP',
+        details: reloadResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'LXC_IP_REFRESHED',
+      'service',
+      serviceId,
+      {
+        service_id: serviceId,
+        lxc_container_name: service.lxc_container_name,
+        old_ip: oldIp,
+        new_ip: newIp,
+      },
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      changed: true,
+      oldIp,
+      newIp,
+      domains: [...affectedDomains],
+      caddyReloaded: reloadResult.success,
+    });
+  } catch (error) {
+    console.error('Error refreshing LXC IP:', error);
+    res.status(500).json({ error: 'Failed to refresh IP: ' + error.message });
+  }
+});
+
 // ==================== PHASE 2b ROUTES CRUD ====================
 //
 // A Phase 2b service (one workload, typically an LXC or Docker container)

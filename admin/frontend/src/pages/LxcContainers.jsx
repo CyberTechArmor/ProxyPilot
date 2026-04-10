@@ -1990,7 +1990,7 @@ export default function LxcContainers() {
                       A full interactive WebSocket-based terminal is coming soon. This will provide a real PTY session
                       with proper shell support, tab completion, colors, and interactive programs like <code className="text-cyan-400">vim</code>, <code className="text-cyan-400">htop</code>, and <code className="text-cyan-400">nano</code>.
                     </p>
-                    <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
                       <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
                         <Terminal className="h-4 w-4 text-green-500" />
                         <span>Full PTY support</span>

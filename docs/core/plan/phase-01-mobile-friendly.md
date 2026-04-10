@@ -173,8 +173,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — on `<sm`, `max-w-full h-full rounded-none`; on `sm+`, `w-[95vw] max-w-[95vw] h-[90vh]` keeps the existing viewport-hugging behavior with `rounded-lg`. Tabs list (`grid grid-cols-4`) becomes `grid grid-cols-2 sm:grid-cols-4 h-auto` so tab labels wrap to two rows at 360px instead of truncating.
 - [x] `LxcContainers` detail-tab inner grids (admin/frontend/src/pages/LxcContainers.jsx:1563, 1601, 1627)
       — `grid-cols-2` → `grid-cols-1 sm:grid-cols-2` for the Info tab key/value readouts, resource-limit cards, and live-usage cards.
-- [ ] `LxcContainers` image-picker stats grid (admin/frontend/src/pages/LxcContainers.jsx:1993)
-      — `grid grid-cols-2` stats row becomes `grid grid-cols-1 sm:grid-cols-2`.
+- [x] `LxcContainers` interactive-terminal-coming-soon grid (admin/frontend/src/pages/LxcContainers.jsx:1993)
+      — `grid grid-cols-2` placeholder features grid → `grid grid-cols-1 sm:grid-cols-2`. *Note: old checklist called this "image-picker stats grid" — it's actually the "coming soon" features grid on the beta terminal tab.*
 - [ ] `LxcContainers` delete / confirm dialogs (admin/frontend/src/pages/LxcContainers.jsx:2029, 2077, 2110)
       — each `sm:max-w-md` / `sm:max-w-sm` prepended with `max-w-full h-full rounded-none sm:h-auto sm:rounded-lg`.
 

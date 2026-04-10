@@ -662,10 +662,18 @@ servicesRouter.post('/', async (req, res) => {
     data.pathPrefix = normalizePathPrefix(data.pathPrefix);
     const db = getDb();
 
-    // Check if domain already exists
-    const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(data.domain);
+    // Phase 2: multiple services can share a domain on different path
+    // prefixes. Reject only when the full (domain, path_prefix) tuple is
+    // already taken, not just the domain.
+    const existing = db
+      .prepare(
+        'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
+      )
+      .get(data.domain, data.pathPrefix);
     if (existing) {
-      return res.status(400).json({ error: 'Domain already exists' });
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
     }
 
     // Validate type-specific requirements

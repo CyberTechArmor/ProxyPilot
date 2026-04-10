@@ -129,8 +129,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 
 ### C. Backend — Uniqueness validation
 
-- [ ] Create endpoint uniqueness check (admin/backend/src/routes/services.js:718)
-      — Replace `SELECT id FROM services WHERE domain = ?` with `SELECT id FROM services WHERE domain = ? AND path_prefix = ?`, binding the normalized `data.pathPrefix`. Error message becomes `'Domain + path prefix combination already exists'`. Normalization already happens on line 714 via `normalizePathPrefix`.
+- [x] Create endpoint uniqueness check (admin/backend/src/routes/services.js:666)
+      — Replaced `SELECT id FROM services WHERE domain = ?` with `SELECT id FROM services WHERE domain = ? AND path_prefix = ?`, binding the normalized `data.pathPrefix`. Error message changed to `'Domain + path prefix combination already exists'`. **Verified:** Express integration test — POST root `/` on fresh domain returns 201; POST `/api` sibling on same domain returns 201 (previously rejected by the old check); POST duplicate `/` on the same domain returns 400 with `"Domain + path prefix combination already exists"`; POST duplicate `/api` returns the same 400; the merged `mul.test` file contains both `handle_path /api*` and the root `handle {`.
 
 - [ ] Update endpoint uniqueness check (admin/backend/src/routes/services.js:909)
       — The existing check only fires when `data.domain !== service.domain`. Broaden it so the check also fires when `data.pathPrefix !== service.path_prefix`. Replace the `SELECT id FROM services WHERE domain = ? AND id != ?` query with `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?`, binding the final normalized `updatedData.domain` and `updatedData.pathPrefix`. Same error message. Success criterion: editing the `/api` service to use prefix `/` on the same domain fails when a `/` sibling already exists.

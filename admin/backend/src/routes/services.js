@@ -3706,6 +3706,121 @@ async function regenerateDomainCaddyConfig(db, domain) {
   await writeCaddyConfig(configPath, merged);
 }
 
+// Phase 2b SSL-consistency guard.
+//
+// Throws when any existing sibling row on the same domain disagrees with
+// the candidate's `ssl_enabled` or `force_https` stance. The merged Caddy
+// site block has one site address (https vs http://) and one force-https
+// stance per domain, so every entry on the domain has to agree.
+//
+// Scans BOTH sources during the Section D transition window:
+//   1. `service_http_routes` JOIN `services` for Phase 2b routes on the
+//      same domain (the post-D.14 source of truth)
+//   2. The legacy `services` table directly, skipping anything whose
+//      `(id, path_prefix)` tuple is already present in the routes query
+//      so the A.3 backfill state doesn't trigger a false self-conflict
+//
+// Admin services are skipped so the installer-managed admin domain can
+// keep whatever stance it was configured with without polluting user
+// route checks.
+//
+// Params:
+//   - db: sqlite instance
+//   - domain: the target domain to check
+//   - candidateRoute: { sslEnabled, forceHttps } for the row being
+//     inserted/updated
+//   - excludeRouteId: optional — the route id being updated, so the
+//     update flow does not compare the row against itself. Pass null
+//     for create-flow callers.
+//
+// Throws an `Error` whose `.code === 'ROUTE_SSL_CONFLICT'` and whose
+// `.message` names the conflicting sibling's service name + path prefix
+// so the caller can surface a helpful error to the operator. Returns
+// undefined on success.
+export function assertRoutesShareSslStance(
+  db,
+  domain,
+  candidateRoute,
+  excludeRouteId = null
+) {
+  const wantSsl = !!candidateRoute.sslEnabled;
+  const wantForce = !!candidateRoute.forceHttps;
+
+  const conflict = (siblingLabel, siblingSsl, siblingForce) => {
+    const err = new Error(
+      `SSL settings on domain ${domain} must match all sibling routes. ` +
+        `Sibling ${siblingLabel} has sslEnabled=${!!siblingSsl}, ` +
+        `forceHttps=${!!siblingForce}; candidate has ` +
+        `sslEnabled=${wantSsl}, forceHttps=${wantForce}.`
+    );
+    err.code = 'ROUTE_SSL_CONFLICT';
+    return err;
+  };
+
+  // (1) Phase 2b siblings from service_http_routes joined to services.
+  const routeSiblings = db
+    .prepare(
+      `SELECT r.id           AS route_id,
+              r.service_id   AS service_id,
+              r.path_prefix  AS path_prefix,
+              r.ssl_enabled  AS ssl_enabled,
+              r.force_https  AS force_https,
+              s.name         AS service_name
+         FROM service_http_routes r
+         INNER JOIN services s ON s.id = r.service_id
+        WHERE r.domain = ? AND s.is_admin = 0 AND r.id != COALESCE(?, '')`
+    )
+    .all(domain, excludeRouteId);
+
+  for (const sib of routeSiblings) {
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" route ${sib.path_prefix}`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
+
+  // (2) Legacy siblings from services table. Skip anything the routes
+  // query already covered via (service_id, path_prefix) tuple.
+  const coveredTuples = new Set(
+    routeSiblings.map(
+      (s) => `${s.service_id}|${normalizePathPrefix(s.path_prefix)}`
+    )
+  );
+
+  let legacySiblings = [];
+  try {
+    legacySiblings = db
+      .prepare(
+        `SELECT id AS service_id,
+                name AS service_name,
+                path_prefix,
+                ssl_enabled,
+                force_https
+           FROM services
+          WHERE domain = ? AND is_admin = 0`
+      )
+      .all(domain);
+  } catch (e) {
+    // Post-D.14 — legacy columns dropped → routes-only path.
+    legacySiblings = [];
+  }
+
+  for (const sib of legacySiblings) {
+    const tuple = `${sib.service_id}|${normalizePathPrefix(sib.path_prefix)}`;
+    if (coveredTuples.has(tuple)) continue;
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" (legacy path ${sib.path_prefix})`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
+}
+
 // Phase 2 note: the single-service `generateCaddyConfig` function was
 // retired — all nine previous call sites now use `regenerateDomainCaddyConfig`
 // (DB reconciliation) or `buildDomainCaddyConfig` (pure in-memory builder).

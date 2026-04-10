@@ -1389,7 +1389,7 @@ export default function LxcContainers() {
                   <div className="space-y-2">
                     {createForm.services.map((svc, idx) => (
                       <div key={idx} className="flex items-start gap-2 p-2.5 rounded-lg border border-border/50 bg-muted/30">
-                        <div className="flex-1 grid grid-cols-2 gap-2">
+                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <Input
                             placeholder="myapp.example.com"
                             value={svc.domain}
@@ -1446,7 +1446,7 @@ export default function LxcContainers() {
                     <span className="flex items-center gap-1"><Shield className="h-3 w-3" /> = obtain TLS cert</span>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="ct-cpu">CPU Limit</Label>
                     <Input

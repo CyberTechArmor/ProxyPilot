@@ -167,8 +167,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — Terminal/Start/Stop/Restart/Delete buttons were `h-7 w-7`; now `h-9 w-9 sm:h-7 sm:w-7` so they hit a 36px touch target on mobile while staying compact on desktop. Row also wraps (`flex-wrap justify-end`) so cards at 360px don't overflow.
 - [x] `LxcContainers` create container dialog (admin/frontend/src/pages/LxcContainers.jsx:1249)
       — `sm:max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
-- [ ] `LxcContainers` create form paired grids (admin/frontend/src/pages/LxcContainers.jsx:1392, 1449, 1690, 1768)
-      — every inner `grid grid-cols-2` becomes `grid grid-cols-1 sm:grid-cols-2` so name/value input pairs stack on phones.
+- [x] `LxcContainers` create form paired grids (admin/frontend/src/pages/LxcContainers.jsx:1392, 1449)
+      — create-form `grid grid-cols-2` entries (service domain/port row, CPU/memory row) now `grid grid-cols-1 sm:grid-cols-2` so input pairs stack on phones. *Lines 1690/1768 belong to the info/detail dialog image-picker and are handled in the info-dialog item below.*
 - [ ] `LxcContainers` info/detail dialog (admin/frontend/src/pages/LxcContainers.jsx:1538)
       — `w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh]` is already viewport-hugging; add `rounded-none` at `<sm` and `sm:rounded-lg` at `sm+`. Tabs list (`grid grid-cols-4` at 1550) becomes `grid-cols-2 sm:grid-cols-4` so tab labels do not truncate at 360px.
 - [ ] `LxcContainers` detail-tab inner grids (admin/frontend/src/pages/LxcContainers.jsx:1563, 1601, 1627)

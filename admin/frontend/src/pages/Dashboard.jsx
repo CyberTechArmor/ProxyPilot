@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
@@ -114,6 +114,16 @@ const getLanguageFromFile = (filename) => {
 // Default docker-compose template
 const DEFAULT_COMPOSE_CONTENT = "version: '3.8'\nservices:\n  app:\n    image: nginx:alpine\n    ports:\n      - \"8080:80\"\n    restart: unless-stopped\n";
 
+// Phase 2b H.3: per-row React keys for the wizard routes builder. Not a
+// crypto-strong UID — just needs to be unique within a single wizard
+// session so adding/removing rows keeps input focus + does not confuse
+// React's reconciler into reusing a stale input node.
+let _pp2bRouteUidCounter = 0;
+function pp2bRouteUid() {
+  _pp2bRouteUidCounter += 1;
+  return `wiz-route-${Date.now().toString(36)}-${_pp2bRouteUidCounter}`;
+}
+
 // Syntax highlighting colors by language
 const getLanguageColor = (lang) => {
   const colors = {
@@ -186,6 +196,18 @@ export default function Dashboard() {
   });
   const [settingsTab, setSettingsTab] = useState('settings'); // 'settings', 'history', or 'caddy'
   const [savingSettings, setSavingSettings] = useState(false);
+  // Phase 2b I.1: Routes card state for the settings dialog's Settings
+  // tab. `settingsRoutes` mirrors the service's routes as loaded from
+  // `api.getServiceRoutes`. `editingRouteId` is either a route id (edit
+  // mode), the sentinel string `'new'` (add mode), or `null` (no form).
+  // `editingRouteDraft` holds the inline form's current values.
+  const [settingsRoutes, setSettingsRoutes] = useState([]);
+  const [settingsRoutesLoading, setSettingsRoutesLoading] = useState(false);
+  const [editingRouteId, setEditingRouteId] = useState(null);
+  const [editingRouteDraft, setEditingRouteDraft] = useState(null);
+  const [savingRoute, setSavingRoute] = useState(false);
+  // Phase 2b I.2: LXC IP refresh state for the settings dialog.
+  const [refreshingLxcIp, setRefreshingLxcIp] = useState(false);
   const [configVersions, setConfigVersions] = useState([]);
   const [caddyConfig, setCaddyConfig] = useState('');
   const [caddyConfigOriginal, setCaddyConfigOriginal] = useState('');
@@ -211,10 +233,39 @@ export default function Dashboard() {
 
   // Add service wizard state
   const [wizardStep, setWizardStep] = useState(0);
+  // Phase 2b H.2: LXC container picker state shared between the runtime
+  // sub-step and the container dropdown it renders. Populated on demand
+  // via api.getLxcContainersWithIp() when the operator clicks the LXC
+  // runtime tile so we do not pay the Incus round-trip on every wizard
+  // open. Cleared alongside the rest of the wizard state in resetForm().
+  const [lxcWizardContainers, setLxcWizardContainers] = useState([]);
+  const [lxcWizardLoading, setLxcWizardLoading] = useState(false);
+  const [lxcWizardError, setLxcWizardError] = useState('');
   const [formData, setFormData] = useState({
     name: '',
+    // Phase 2b H.3: the primary source of truth for per-route fields is
+    // now the `routes` array. Each entry is
+    // `{id, domain, pathPrefix, targetPort, sslEnabled}`. The legacy
+    // top-level mirror fields (domain, pathPrefix, port, sslEnabled)
+    // stay in sync with routes[0] so the Phase 2 flat POST payload in
+    // `handleAddService` keeps validating until H.6 swaps in the
+    // nested-routes payload. `pp2bRouteUid()` generates stable row keys
+    // so React does not lose focus when the routes list mutates.
+    routes: [
+      { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+    ],
+    rootDir: '',
     domain: '',
     pathPrefix: '/',
+    // Phase 2b H.1: the Add Service wizard now branches on `kind`
+    // (static_site | container_service) at Step 0. `runtime` is the
+    // container_service sub-choice filled in at H.2 (Step 1 picker).
+    // `type` is the legacy Phase 2 field kept in sync for backend D.2
+    // which still accepts a flat payload — H.6 will sort out the map.
+    kind: '',
+    runtime: null,
+    targetIp: '',
+    lxcContainerName: '',
     type: '',
     target: '127.0.0.1',
     port: '',
@@ -533,17 +584,48 @@ export default function Dashboard() {
     return result;
   }, [services, searchQuery, filterType, sortBy, showFavoritesOnly, selectedFolderFilter, serviceFolders]);
 
-  // Phase 2: list every existing path prefix for the domain the operator is
-  // currently typing into the Add Service wizard. Used by the info banner
-  // (so the operator can see "/, /api are taken") and by the client-side
-  // collision guard in handleAddService.
+  // Phase 2b H.4: the wizard now renders one banner per in-progress
+  // route, so the memo returns a `Map<domain, prefixList>` keyed on
+  // every route across every service instead of filtering by a single
+  // form-scoped domain. Services pre-Phase 2b still expose a legacy
+  // top-level `domain`/`pathPrefix` fallback alongside the nested
+  // `routes` array, so the flattener falls back on the legacy pair
+  // when `routes` is missing — that keeps old installs rendering
+  // during the phase-2b rollout. The lowercase-normalized domain is
+  // the map key; prefix strings are stored as-given (normalization
+  // for the collision check lives in H.5's handleAddService).
+  const existingPrefixesByDomain = useMemo(() => {
+    const map = new Map();
+    const push = (rawDomain, rawPrefix) => {
+      const d = (rawDomain || '').toLowerCase().trim();
+      if (!d) return;
+      const prefix = rawPrefix || '/';
+      const list = map.get(d) || [];
+      list.push(prefix);
+      map.set(d, list);
+    };
+    for (const svc of services) {
+      if (Array.isArray(svc.routes) && svc.routes.length > 0) {
+        for (const r of svc.routes) {
+          push(r.domain, r.pathPrefix);
+        }
+      } else if (svc.domain) {
+        // Fallback: legacy Phase 2 shape with a single top-level route.
+        push(svc.domain, svc.pathPrefix);
+      }
+    }
+    return map;
+  }, [services]);
+
+  // Phase 2b H.4: backward-compat shim for any code paths still
+  // reading the single-domain list (notably the H.5-pending client
+  // collision guard in handleAddService). Returns the flattened
+  // prefix list for the wizard's primary-row domain. Replaced in H.5.
   const existingPrefixesForDomain = useMemo(() => {
     const d = (formData.domain || '').toLowerCase().trim();
     if (!d) return [];
-    return services
-      .filter((s) => s.domain && s.domain.toLowerCase() === d)
-      .map((s) => s.pathPrefix || '/');
-  }, [services, formData.domain]);
+    return existingPrefixesByDomain.get(d) || [];
+  }, [existingPrefixesByDomain, formData.domain]);
 
   // Group compose services by project with search/filter/sort
   const groupedComposeProjects = useMemo(() => {
@@ -776,6 +858,178 @@ export default function Dashboard() {
     setWizardStep(1);
   };
 
+  // Phase 2b H.2: pick the container runtime (lxc or docker) inside
+  // the Step 1 sub-step that only shows for kind='container_service'.
+  // For LXC we eagerly fetch the compact container-with-ip listing so
+  // the dropdown can render immediately; failures surface inline via
+  // lxcWizardError rather than a toast (the dialog is the only focus).
+  const handleRuntimeSelect = async (runtime) => {
+    setFormData((f) => ({
+      ...f,
+      runtime,
+      // Both LXC and Docker runtimes reverse-proxy to a container IP,
+      // and D.2's Phase 2 schema only accepts `type: 'static'|'docker'`.
+      // Map both container runtimes onto the legacy 'docker' type so the
+      // existing POST payload keeps validating until H.6 swaps in the
+      // full nested-routes payload.
+      type: 'docker',
+      // Reset any half-filled state from a previous runtime pick.
+      lxcContainerName: '',
+      targetIp: runtime === 'docker' ? (f.target || '127.0.0.1') : '',
+      containerName: runtime === 'docker' ? f.containerName : '',
+    }));
+    if (runtime === 'lxc') {
+      setLxcWizardLoading(true);
+      setLxcWizardError('');
+      try {
+        const { containers } = await api.getLxcContainersWithIp();
+        setLxcWizardContainers(containers || []);
+      } catch (err) {
+        setLxcWizardError(err.message || 'Failed to load LXC containers');
+        setLxcWizardContainers([]);
+      } finally {
+        setLxcWizardLoading(false);
+      }
+    }
+  };
+
+  // Phase 2b H.2: the operator picked a specific LXC container from the
+  // dropdown. Stamp the (name, ipv4) pair onto formData and expose it
+  // read-only downstream — the wizard uses the cached IP, not a live
+  // re-resolution (see the spec's "LXC IP refresh" note + E.2).
+  const handleLxcContainerSelect = (containerName) => {
+    const container = lxcWizardContainers.find((c) => c.name === containerName);
+    if (!container) return;
+    const ipv4 = container.ipv4 || '';
+    setFormData((f) => ({
+      ...f,
+      lxcContainerName: container.name,
+      targetIp: ipv4,
+      // Keep legacy `target` in sync so the pre-H.6 POST payload still
+      // carries the right IP — D.2 reads `target` to populate
+      // services.target_ip.
+      target: ipv4 || f.target,
+      containerName: container.name,
+    }));
+  };
+
+  // Phase 2b H.3: append a fresh empty route row to the wizard routes
+  // array. The row is initialized with the conventional defaults
+  // (pathPrefix='/', sslEnabled=true) and a stable React key.
+  const addWizardRoute = () => {
+    setFormData((f) => ({
+      ...f,
+      routes: [
+        ...f.routes,
+        { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+      ],
+    }));
+  };
+
+  // Phase 2b H.3: remove the route at index `i`. No-ops when only one
+  // row remains (the trash icon is also disabled on the last row so
+  // this is defense-in-depth). When the first row is removed the
+  // legacy mirror fields (domain, pathPrefix, port, sslEnabled) are
+  // resynced from the new routes[0] so the Phase 2 flat POST body
+  // still carries the primary route values through the H.3 → H.6
+  // intermediate window.
+  const removeWizardRoute = (i) => {
+    setFormData((f) => {
+      if (f.routes.length <= 1) return f;
+      const newRoutes = f.routes.filter((_, idx) => idx !== i);
+      if (i === 0) {
+        const primary = newRoutes[0];
+        return {
+          ...f,
+          routes: newRoutes,
+          domain: primary.domain,
+          pathPrefix: primary.pathPrefix,
+          port: primary.targetPort,
+          sslEnabled: primary.sslEnabled,
+        };
+      }
+      return { ...f, routes: newRoutes };
+    });
+  };
+
+  // Phase 2b H.3: patch a single route row. When the primary route
+  // (index 0) changes, mirror its fields onto the legacy top-level
+  // formData keys so `handleAddService` (still on the Phase 2 flat
+  // payload until H.6) keeps receiving the correct values.
+  const updateWizardRoute = (i, patch) => {
+    setFormData((f) => {
+      const newRoutes = f.routes.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+      if (i === 0) {
+        const primary = newRoutes[0];
+        return {
+          ...f,
+          routes: newRoutes,
+          domain: primary.domain,
+          pathPrefix: primary.pathPrefix,
+          port: primary.targetPort,
+          sslEnabled: primary.sslEnabled,
+        };
+      }
+      return { ...f, routes: newRoutes };
+    });
+  };
+
+  // Phase 2b H.2: allow the operator to back out of the runtime pick
+  // without bailing to Step 0. Clears runtime + LXC picker state so the
+  // sub-step renders fresh tiles again.
+  const handleRuntimeChange = () => {
+    setFormData((f) => ({
+      ...f,
+      runtime: null,
+      lxcContainerName: '',
+      targetIp: '',
+    }));
+    setLxcWizardContainers([]);
+    setLxcWizardError('');
+  };
+
+  // Phase 2b H.1: handler for the new two-tile kind picker at Step 0.
+  // static_site → kind='static_site' + type='static' (backend D.2 still
+  // reads `type`, so both fields stay in sync during the transitional
+  // period until D.2 is refactored to accept nested routes).
+  // container_service → kind='container_service' + runtime=null (runtime
+  // is filled in at Step 1 by the H.2 picker). `type` is temporarily set
+  // to 'docker' so the existing Step 1 form renders its container inputs
+  // until H.2/H.3 land. Both `lxcContainerName` and `targetIp` reset so a
+  // second run through the wizard does not leak state from a previous
+  // container_service pick.
+  const handleKindSelect = (kind) => {
+    if (kind === 'static_site') {
+      setFormData({
+        ...formData,
+        kind: 'static_site',
+        type: 'static',
+        runtime: null,
+        lxcContainerName: '',
+        targetIp: '',
+      });
+    } else {
+      // container_service: runtime starts null so the H.2 Step 1
+      // sub-step renders its "Pick runtime" tiles. `type` stays blank
+      // until handleRuntimeSelect maps it onto the legacy field (lxc +
+      // docker both become type='docker' since D.2 only knows about
+      // the 'static' and 'docker' enum values).
+      setFormData({
+        ...formData,
+        kind: 'container_service',
+        type: '',
+        runtime: null,
+        lxcContainerName: '',
+        targetIp: '',
+        containerName: '',
+      });
+      // Clear any leftover LXC picker state from a previous open.
+      setLxcWizardContainers([]);
+      setLxcWizardError('');
+    }
+    setWizardStep(1);
+  };
+
   // Phase 2: extracted from the inline `.map` in the services grid so the
   // grouped renderer can call it. The card body is byte-for-byte identical
   // to the pre-Phase-2 inline version — only the surrounding control flow
@@ -938,15 +1192,19 @@ export default function Dashboard() {
     setSubmitting(true);
 
     try {
-      const submitData = { ...formData };
-      if (formData.port) {
-        submitData.port = parseInt(formData.port, 10);
-      }
-      // Phase 2 client-side guard: refuse to even attempt the create when
-      // the (domain, prefix) tuple already exists locally. The backend
-      // re-checks, but failing fast here keeps the toast meaningful and
-      // avoids a wasted round trip. Mirrors the backend's normalization
-      // (strip trailing slashes, default to '/').
+      // Phase 2b H.5: generalized client-side collision guard. The
+      // wizard may submit multiple routes at once (via the H.3 routes
+      // builder), so the guard walks `formData.routes` and rejects:
+      //   (a) in-wizard duplicates — two rows with the same
+      //       `(domain, pathPrefix)` tuple. Fails with a toast naming
+      //       the duplicate so the operator can spot it.
+      //   (b) collisions against any existing route across all
+      //       services — any row whose `(domain, pathPrefix)` tuple is
+      //       already present in the backend's nested routes array.
+      //       Fails with the same error text the backend returns so
+      //       the two surfaces stay consistent.
+      // Normalization mirrors the backend's: trim, prepend a leading
+      // slash if missing, strip trailing slashes, default empty → '/'.
       const normalize = (value) => {
         if (value === undefined || value === null || value === '') return '/';
         let p = String(value).trim();
@@ -954,21 +1212,163 @@ export default function Dashboard() {
         if (p.length > 1 && p.endsWith('/')) p = p.replace(/\/+$/, '');
         return p || '/';
       };
-      const desiredPrefix = normalize(formData.pathPrefix);
-      const existingNormalized = existingPrefixesForDomain.map(normalize);
-      if (existingNormalized.includes(desiredPrefix)) {
-        setSubmitting(false);
-        toast({
-          variant: 'destructive',
-          title: 'Error',
-          description: 'Domain + path prefix combination already exists',
-        });
-        return;
+      const normalizeDomain = (d) => (d || '').toLowerCase().trim();
+
+      // Build a Set of existing (domain, prefix) tuples across every
+      // service's nested routes, with a legacy-shape fallback for
+      // services still on the Phase 2 flat shape.
+      const existingTuples = new Set();
+      for (const svc of services) {
+        if (Array.isArray(svc.routes) && svc.routes.length > 0) {
+          for (const r of svc.routes) {
+            existingTuples.add(
+              `${normalizeDomain(r.domain)}|${normalize(r.pathPrefix)}`
+            );
+          }
+        } else if (svc.domain) {
+          existingTuples.add(
+            `${normalizeDomain(svc.domain)}|${normalize(svc.pathPrefix)}`
+          );
+        }
       }
-      await api.createService(submitData);
+
+      // Pass 1: intra-wizard duplicate detection.
+      const seen = new Set();
+      for (let i = 0; i < formData.routes.length; i++) {
+        const r = formData.routes[i];
+        const d = normalizeDomain(r.domain);
+        const p = normalize(r.pathPrefix);
+        if (!d) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: `Route ${i + 1} is missing a domain`,
+          });
+          return;
+        }
+        const key = `${d}|${p}`;
+        if (seen.has(key)) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: `Duplicate (domain, path_prefix) in this wizard: ${d}${p}`,
+          });
+          return;
+        }
+        seen.add(key);
+      }
+
+      // Pass 2: collisions against any existing route.
+      for (const r of formData.routes) {
+        const d = normalizeDomain(r.domain);
+        const p = normalize(r.pathPrefix);
+        if (existingTuples.has(`${d}|${p}`)) {
+          setSubmitting(false);
+          toast({
+            variant: 'destructive',
+            title: 'Error',
+            description: 'Domain + path prefix combination already exists',
+          });
+          return;
+        }
+      }
+
+      // Phase 2b H.6: build the primary-route submit payload from
+      // routes[0] + the service-level fields, then POST it to D.2's
+      // still-flat endpoint. Any additional routes (routes[1..]) are
+      // fanned out as api.createRoute calls against the freshly
+      // created service id. This is the "Option (b)" approach from
+      // the phase prompt: D.2 keeps the Phase 2 flat contract and
+      // the wizard layers the nested-routes flow on top of it. The
+      // only backend concession is D.2's optional `kind` / `runtime`
+      // / `lxcContainerName` / `targetIp` fields so LXC runtime
+      // metadata can land in one round trip.
+      const primaryRoute = formData.routes[0];
+      const additionalRoutes = formData.routes.slice(1);
+      const submitData = {
+        name: formData.name,
+        domain: primaryRoute.domain,
+        pathPrefix: normalize(primaryRoute.pathPrefix),
+        type: formData.kind === 'static_site' ? 'static' : 'docker',
+        target: formData.targetIp || formData.target || '127.0.0.1',
+        containerName: formData.containerName || undefined,
+        rootDir: formData.rootDir || undefined,
+        sslEnabled: !!primaryRoute.sslEnabled,
+        forceHttps: formData.forceHttps,
+        websocketEnabled: formData.websocketEnabled,
+        maxUploadSize: formData.maxUploadSize,
+        obtainCertificate: formData.obtainCertificate,
+      };
+      // Only container_service rows need a targetPort on the primary
+      // route. Static sites ignore the port entirely.
+      if (formData.kind === 'container_service' && primaryRoute.targetPort) {
+        submitData.port = parseInt(primaryRoute.targetPort, 10);
+      }
+      // Phase 2b H.6: when the operator picked the LXC runtime the
+      // wizard has the container name + cached IP captured in
+      // formData. Forward both through D.2's optional metadata
+      // fields so services.runtime lands as 'lxc' and
+      // services.lxc_container_name is populated for the Refresh IP
+      // button (I.2) and for future LXC-aware features. Docker and
+      // static_site skip these fields so D.2's legacy inference runs
+      // unchanged.
+      if (formData.kind === 'container_service' && formData.runtime === 'lxc') {
+        submitData.kind = 'container_service';
+        submitData.runtime = 'lxc';
+        submitData.lxcContainerName = formData.lxcContainerName;
+        submitData.targetIp = formData.targetIp;
+      }
+
+      const createRes = await api.createService(submitData);
+      const createdServiceId = createRes?.service?.id;
+      if (!createdServiceId) {
+        throw new Error('Service create did not return an id');
+      }
+
+      // Fan out additional routes one at a time. If any fails, stop
+      // and surface the first failure so the operator knows which
+      // route to retry. The already-created service + primary route
+      // remain in place — they will be visible on the next refetch.
+      for (let i = 0; i < additionalRoutes.length; i++) {
+        const r = additionalRoutes[i];
+        const routeBody = {
+          domain: r.domain,
+          pathPrefix: normalize(r.pathPrefix),
+          targetPort:
+            formData.kind === 'container_service' && r.targetPort
+              ? parseInt(r.targetPort, 10)
+              : undefined,
+          sslEnabled: !!r.sslEnabled,
+          forceHttps: formData.forceHttps,
+          websocketEnabled: formData.websocketEnabled,
+          maxUploadSize: formData.maxUploadSize,
+        };
+        try {
+          await api.createRoute(createdServiceId, routeBody);
+        } catch (routeErr) {
+          toast({
+            variant: 'destructive',
+            title: `Route ${i + 2} failed to create`,
+            description: `${r.domain}${normalize(r.pathPrefix)}: ${routeErr.message}`,
+          });
+          // The primary route + service still exist; refresh to
+          // show the partial state so the operator can recover via
+          // the Routes card (I.1).
+          setAddDialogOpen(false);
+          resetForm();
+          fetchServices();
+          return;
+        }
+      }
+
       toast({
         title: 'Success',
-        description: 'Service created successfully',
+        description:
+          formData.routes.length > 1
+            ? `Service created with ${formData.routes.length} routes`
+            : 'Service created successfully',
       });
       setAddDialogOpen(false);
       resetForm();
@@ -1109,8 +1509,16 @@ export default function Dashboard() {
   const resetForm = () => {
     setFormData({
       name: '',
+      routes: [
+        { id: pp2bRouteUid(), domain: '', pathPrefix: '/', targetPort: '', sslEnabled: true },
+      ],
+      rootDir: '',
       domain: '',
       pathPrefix: '/',
+      kind: '',
+      runtime: null,
+      targetIp: '',
+      lxcContainerName: '',
       type: '',
       target: '127.0.0.1',
       port: '',
@@ -1122,6 +1530,9 @@ export default function Dashboard() {
       obtainCertificate: true,
     });
     setWizardStep(0);
+    setLxcWizardContainers([]);
+    setLxcWizardLoading(false);
+    setLxcWizardError('');
   };
 
   const openDeleteDialog = (service) => {
@@ -1594,9 +2005,27 @@ export default function Dashboard() {
 
         const exposedPorts = portsResult.output?.trim().split('\n').filter(Boolean) || [];
 
-        // Pre-fill the proxy container form
+        // Pre-fill the proxy container form. Phase 2b H.3: seed a
+        // single-route array keyed on the first exposed port so the new
+        // routes builder lands ready-to-submit. The legacy top-level
+        // (domain, pathPrefix, port, sslEnabled) mirror fields stay in
+        // sync with routes[0] for the Phase 2 flat POST payload.
         setFormData({
           name: composeCreateForm.serviceName,
+          kind: 'container_service',
+          runtime: 'docker',
+          lxcContainerName: '',
+          targetIp: '127.0.0.1',
+          routes: [
+            {
+              id: pp2bRouteUid(),
+              domain: '',
+              pathPrefix: '/',
+              targetPort: exposedPorts[0] || '',
+              sslEnabled: true,
+            },
+          ],
+          rootDir: '',
           domain: '',
           pathPrefix: '/',
           type: 'docker',
@@ -2266,6 +2695,150 @@ volumes:
     }
   };
 
+  // Phase 2b I.1: routes card loaders + mutation handlers.
+  const loadSettingsRoutes = async (serviceId) => {
+    setSettingsRoutesLoading(true);
+    try {
+      const { routes } = await api.getServiceRoutes(serviceId);
+      setSettingsRoutes(routes || []);
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to load routes',
+        description: err.message,
+      });
+      setSettingsRoutes([]);
+    } finally {
+      setSettingsRoutesLoading(false);
+    }
+  };
+
+  // Begin inline edit on an existing route row. Seeds the draft form
+  // with the row's current values.
+  const beginEditSettingsRoute = (route) => {
+    setEditingRouteId(route.id);
+    setEditingRouteDraft({
+      domain: route.domain || '',
+      pathPrefix: route.pathPrefix || '/',
+      targetPort: route.targetPort != null ? String(route.targetPort) : '',
+      sslEnabled: route.sslEnabled !== false,
+      forceHttps: route.forceHttps !== false,
+      websocketEnabled: !!route.websocketEnabled,
+      maxUploadSize: route.maxUploadSize || '1G',
+    });
+  };
+
+  // Begin inline add — uses the sentinel 'new' so the form lives
+  // under the last row instead of replacing one of them.
+  const beginAddSettingsRoute = () => {
+    setEditingRouteId('new');
+    setEditingRouteDraft({
+      domain: '',
+      pathPrefix: '/',
+      targetPort: '',
+      sslEnabled: true,
+      forceHttps: true,
+      websocketEnabled: false,
+      maxUploadSize: '1G',
+    });
+  };
+
+  const cancelEditSettingsRoute = () => {
+    setEditingRouteId(null);
+    setEditingRouteDraft(null);
+  };
+
+  // Save either a new or edited route. On success reload the routes
+  // list so the card reflects the canonical backend state.
+  const saveEditSettingsRoute = async () => {
+    if (!settingsService || !editingRouteDraft) return;
+    setSavingRoute(true);
+    try {
+      const body = {
+        domain: editingRouteDraft.domain,
+        pathPrefix: editingRouteDraft.pathPrefix,
+        targetPort: editingRouteDraft.targetPort
+          ? parseInt(editingRouteDraft.targetPort, 10)
+          : undefined,
+        sslEnabled: !!editingRouteDraft.sslEnabled,
+        forceHttps: !!editingRouteDraft.forceHttps,
+        websocketEnabled: !!editingRouteDraft.websocketEnabled,
+        maxUploadSize: editingRouteDraft.maxUploadSize || '1G',
+      };
+      if (editingRouteId === 'new') {
+        await api.createRoute(settingsService.id, body);
+        toast({ title: 'Route added' });
+      } else {
+        await api.updateRoute(settingsService.id, editingRouteId, body);
+        toast({ title: 'Route updated' });
+      }
+      await loadSettingsRoutes(settingsService.id);
+      // Also refresh the top-level services list so the grid card
+      // mirrors the new state and the sibling warnings in I.3 are
+      // computed off the latest routes.
+      fetchServices();
+      cancelEditSettingsRoute();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to save route',
+        description: err.message,
+      });
+    } finally {
+      setSavingRoute(false);
+    }
+  };
+
+  // Delete a route inline from the card. No TOTP dialog — routes are
+  // sub-objects and removing one does not destroy the parent service.
+  const deleteSettingsRoute = async (route) => {
+    if (!settingsService) return;
+    setSavingRoute(true);
+    try {
+      await api.deleteRoute(settingsService.id, route.id);
+      toast({ title: 'Route removed' });
+      await loadSettingsRoutes(settingsService.id);
+      fetchServices();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to delete route',
+        description: err.message,
+      });
+    } finally {
+      setSavingRoute(false);
+    }
+  };
+
+  // Phase 2b I.2: refresh the cached LXC IP for an LXC-runtime
+  // service. Backend E.2 re-queries Incus and regenerates every
+  // affected merged Caddy config.
+  const handleRefreshLxcIp = async () => {
+    if (!settingsService) return;
+    setRefreshingLxcIp(true);
+    try {
+      const res = await api.refreshLxcIp(settingsService.id);
+      const oldIp = res?.oldIp ?? settingsService.targetIp ?? '(unknown)';
+      const newIp = res?.newIp ?? res?.targetIp ?? '(unchanged)';
+      toast({
+        title: 'LXC IP refreshed',
+        description: `${oldIp} → ${newIp}`,
+      });
+      // Re-fetch the service so the card reflects the updated IP.
+      const { service: fresh } = await api.getService(settingsService.id);
+      setSettingsService(fresh);
+      fetchServices();
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: 'Refresh IP failed',
+        description: err.message,
+      });
+    } finally {
+      setRefreshingLxcIp(false);
+    }
+  };
+
   // Service Settings Functions
   const openSettings = async (service) => {
     setSettingsDialogOpen(true);
@@ -2273,6 +2846,10 @@ volumes:
     setConfigVersions([]);
     setCaddyConfig('');
     setCaddyConfigOriginal('');
+    // Phase 2b I.1: reset any leftover inline-edit state from a
+    // previous settings-dialog open.
+    cancelEditSettingsRoute();
+    setSettingsRoutes([]);
 
     try {
       // Fetch fresh service data to ensure we have the latest settings
@@ -2288,6 +2865,10 @@ volumes:
         rootDir: freshService.rootDir || '',
         dataDir: freshService.dataDir || '',
       });
+      // Phase 2b I.1: eagerly load the nested routes alongside the
+      // service so the Routes card in the Settings tab renders as
+      // soon as the dialog opens.
+      loadSettingsRoutes(freshService.id);
     } catch (error) {
       // Fallback to passed service if fetch fails
       setSettingsService(service);
@@ -2301,6 +2882,7 @@ volumes:
         rootDir: service.rootDir || '',
         dataDir: service.dataDir || '',
       });
+      loadSettingsRoutes(service.id);
     }
   };
 
@@ -2953,7 +3535,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
+            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>
@@ -2962,110 +3544,222 @@ volumes:
               </DialogHeader>
 
               {wizardStep === 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 py-4">
-                  <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('static')}>
+                /*
+                 * Phase 2b H.1: the picker collapses from four tiles (Static
+                 * Site / Proxy Container / Docker Compose / LXC Container) to
+                 * two top-level kinds. Runtime (LXC vs Docker) becomes a
+                 * sub-choice inside Container Service, handled in Step 1 by
+                 * H.2. The Docker Compose and LXC-container-creation entry
+                 * points live on the dedicated Compose and LXC tabs in the
+                 * dashboard — the Add Service dialog is now exclusively for
+                 * creating HTTP-reverse-proxy services backed by a container
+                 * or a local static directory.
+                 */
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-4">
+                  <Card
+                    data-testid="wizard-kind-static-site"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleKindSelect('static_site')}
+                  >
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
                       <CardTitle className="text-lg">Static Site</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <CardDescription className="text-center">Serve static HTML, CSS, and JavaScript files</CardDescription>
+                      <CardDescription className="text-center">
+                        Serve static HTML, CSS, and JavaScript from a local directory.
+                      </CardDescription>
                     </CardContent>
                   </Card>
-                  <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('docker')}>
+                  <Card
+                    data-testid="wizard-kind-container-service"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleKindSelect('container_service')}
+                  >
                     <CardHeader className="text-center pb-2">
                       <Container className="h-12 w-12 mx-auto text-primary" />
-                      <CardTitle className="text-lg">Proxy Container</CardTitle>
+                      <CardTitle className="text-lg">Container Service</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <CardDescription className="text-center">Proxy to a Docker container running on a port</CardDescription>
-                    </CardContent>
-                  </Card>
-                  <Card className="cursor-pointer hover:border-purple-500 border-purple-500/30 transition-colors" onClick={() => {
-                    setAddDialogOpen(false);
-                    setComposeCreateOpen(true);
-                    setComposeCreateForm({
-                      serviceName: '',
-                      composeContent: DEFAULT_COMPOSE_CONTENT,
-                      envVars: [],
-                    });
-                  }}>
-                    <CardHeader className="text-center pb-2">
-                      <Boxes className="h-12 w-12 mx-auto text-purple-500" />
-                      <CardTitle className="text-lg">Docker Compose</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <CardDescription className="text-center">Create a multi-container app with docker-compose.yml</CardDescription>
-                    </CardContent>
-                  </Card>
-                  <Card className="cursor-pointer hover:border-cyan-500 border-cyan-500/30 transition-colors" onClick={() => {
-                    setAddDialogOpen(false);
-                    setDashboardTab('lxc');
-                  }}>
-                    <CardHeader className="text-center pb-2">
-                      <svg className="h-12 w-12 mx-auto text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                        <line x1="12" y1="22.08" x2="12" y2="12"/>
-                      </svg>
-                      <CardTitle className="text-lg">LXC Container</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <CardDescription className="text-center">Launch a system container with Incus</CardDescription>
+                      <CardDescription className="text-center">
+                        Reverse-proxy HTTP routes to a Docker or LXC container. Pick the runtime next.
+                      </CardDescription>
                     </CardContent>
                   </Card>
                 </div>
               ) : (
                 <form onSubmit={handleAddService} className="space-y-4">
                   <div className="flex items-center gap-2 p-2 bg-muted rounded mb-4">
-                    {formData.type === 'static' ? <FolderOpen className="h-5 w-5 text-primary" /> : <Container className="h-5 w-5 text-primary" />}
-                    <span className="font-medium capitalize">{formData.type} Site</span>
+                    {formData.kind === 'static_site' ? (
+                      <FolderOpen className="h-5 w-5 text-primary" />
+                    ) : (
+                      <Container className="h-5 w-5 text-primary" />
+                    )}
+                    <span className="font-medium">
+                      {formData.kind === 'static_site' ? 'Static Site' : 'Container Service'}
+                    </span>
                     <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => setWizardStep(0)}>Change</Button>
                   </div>
+
+                  {/*
+                   * Phase 2b H.2: runtime + LXC-container sub-step. Only
+                   * renders for `kind='container_service'`. Static sites
+                   * skip this entirely and fall through to the form tail.
+                   * Until a runtime is picked (and — for LXC — a container
+                   * is chosen) the rest of the form is hidden via the
+                   * `formReady` gate below.
+                   */}
+                  {formData.kind === 'container_service' && (
+                    <>
+                      {formData.runtime === null ? (
+                        <div className="space-y-2">
+                          <Label>Runtime</Label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-2">
+                            <Card
+                              data-testid="wizard-runtime-lxc"
+                              className="cursor-pointer hover:border-primary transition-colors"
+                              onClick={() => handleRuntimeSelect('lxc')}
+                            >
+                              <CardHeader className="text-center pb-2">
+                                <svg className="h-10 w-10 mx-auto text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                  <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                                  <line x1="12" y1="22.08" x2="12" y2="12"/>
+                                </svg>
+                                <CardTitle className="text-base">LXC Container</CardTitle>
+                              </CardHeader>
+                              <CardContent className="pb-3">
+                                <CardDescription className="text-center text-xs">
+                                  Proxy to an Incus-managed system container.
+                                </CardDescription>
+                              </CardContent>
+                            </Card>
+                            <Card
+                              data-testid="wizard-runtime-docker"
+                              className="cursor-pointer hover:border-primary transition-colors"
+                              onClick={() => handleRuntimeSelect('docker')}
+                            >
+                              <CardHeader className="text-center pb-2">
+                                <Container className="h-10 w-10 mx-auto text-primary" />
+                                <CardTitle className="text-base">Docker Container</CardTitle>
+                              </CardHeader>
+                              <CardContent className="pb-3">
+                                <CardDescription className="text-center text-xs">
+                                  Proxy to an existing Docker container by name + port.
+                                </CardDescription>
+                              </CardContent>
+                            </Card>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 p-2 bg-muted/50 rounded">
+                          <span className="text-xs text-muted-foreground">Runtime:</span>
+                          <span className="font-medium text-sm uppercase">{formData.runtime}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="ml-auto"
+                            data-testid="wizard-runtime-change"
+                            onClick={handleRuntimeChange}
+                          >
+                            Change
+                          </Button>
+                        </div>
+                      )}
+
+                      {formData.runtime === 'lxc' && !formData.lxcContainerName && (
+                        <div data-testid="wizard-lxc-container-picker" className="space-y-2">
+                          <Label htmlFor="lxcContainerPicker">LXC Container</Label>
+                          {lxcWizardLoading ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground p-3 bg-muted/50 rounded">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Loading containers…
+                            </div>
+                          ) : lxcWizardError ? (
+                            <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
+                              Failed to load LXC containers: {lxcWizardError}
+                            </div>
+                          ) : lxcWizardContainers.length === 0 ? (
+                            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-600 dark:text-amber-300">
+                              No LXC containers found. Create one from the LXC tab first.
+                            </div>
+                          ) : (
+                            <Select onValueChange={handleLxcContainerSelect}>
+                              <SelectTrigger id="lxcContainerPicker">
+                                <SelectValue placeholder="Pick a container…" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {lxcWizardContainers.map((c) => (
+                                  <SelectItem key={c.name} value={c.name}>
+                                    {c.name}
+                                    {c.ipv4 ? ` — ${c.ipv4}` : ' (no IPv4)'}
+                                    {c.status ? ` (${c.status.toLowerCase()})` : ''}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
+                          <p className="text-xs text-muted-foreground">
+                            The container's cached IPv4 address is stored on the service.
+                            Use Refresh IP on the service detail page if the container IP changes.
+                          </p>
+                        </div>
+                      )}
+
+                      {formData.runtime === 'lxc' && formData.lxcContainerName && (
+                        <div data-testid="wizard-lxc-container-summary" className="p-3 bg-muted/50 rounded space-y-1 text-sm">
+                          <p>
+                            <span className="text-muted-foreground">Container:</span>{' '}
+                            <code className="font-mono">{formData.lxcContainerName}</code>
+                          </p>
+                          <p>
+                            <span className="text-muted-foreground">Target IP:</span>{' '}
+                            <code className="font-mono">{formData.targetIp || '(not set)'}</code>
+                          </p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs"
+                            onClick={() =>
+                              setFormData((f) => ({
+                                ...f,
+                                lxcContainerName: '',
+                                targetIp: '',
+                                target: '127.0.0.1',
+                                containerName: '',
+                              }))
+                            }
+                          >
+                            Change container
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/*
+                   * Phase 2b H.2: form tail gate. `formReady` is true for
+                   * static sites unconditionally, for container_service +
+                   * docker runtime as soon as the runtime tile is tapped
+                   * (containerName/target/port are collected below), and
+                   * for container_service + lxc runtime once the operator
+                   * has picked a container from the dropdown. The gate
+                   * hides the tail plus the Create button so the wizard
+                   * cannot be submitted with an incomplete runtime pick.
+                   */}
+                  {(
+                    formData.kind === 'static_site' ||
+                    (formData.kind === 'container_service' && formData.runtime === 'docker') ||
+                    (formData.kind === 'container_service' && formData.runtime === 'lxc' && !!formData.lxcContainerName)
+                  ) && (
+                  <>
                   <div className="space-y-2">
                     <Label htmlFor="name">Service Name</Label>
                     <Input id="name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="My Application" required />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="domain">Domain</Label>
-                    <Input
-                      id="domain"
-                      value={formData.domain}
-                      onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
-                      placeholder="app.example.com or *.example.com"
-                      required
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Use a plain hostname (app.example.com) or a wildcard (*.example.com).
-                      Wildcards require a DNS-01 solver in Caddy for TLS.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="pathPrefix">Path Prefix</Label>
-                    <Input
-                      id="pathPrefix"
-                      value={formData.pathPrefix}
-                      onChange={(e) => setFormData({ ...formData, pathPrefix: e.target.value })}
-                      placeholder="/"
-                      pattern="^/(?:[a-zA-Z0-9._~\-]+(?:/[a-zA-Z0-9._~\-]+)*/?)?$"
-                      title="Must start with / and contain only URL-safe characters"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Default <code>/</code> matches all paths. Set <code>/api</code> to scope this
-                      service to <code>/api/*</code> (Caddy strips the prefix before proxying).
-                    </p>
-                    {existingPrefixesForDomain.length > 0 && (
-                      <div
-                        data-testid="existing-prefixes-banner"
-                        className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-600 dark:text-blue-300"
-                      >
-                        Domain already in use. Existing path prefixes:{' '}
-                        <code className="font-mono">{existingPrefixesForDomain.join(', ')}</code>.
-                        Choose a different prefix to add a second service to this domain.
-                      </div>
-                    )}
-                  </div>
-                  {formData.type === 'docker' && (
+                  {formData.kind === 'container_service' && formData.runtime === 'docker' && (
                     <>
                       <div className="space-y-2">
                         <Label htmlFor="containerName">Container Name</Label>
@@ -3083,25 +3777,166 @@ volumes:
                         />
                         <p className="text-xs text-muted-foreground">Default: localhost (127.0.0.1)</p>
                       </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="port">Port</Label>
-                        <Input id="port" type="number" value={formData.port} onChange={(e) => setFormData({ ...formData, port: e.target.value })} placeholder="3000" min="1" max="65535" required />
-                      </div>
                     </>
                   )}
+                  {formData.kind === 'static_site' && (
+                    <div className="space-y-2">
+                      <Label htmlFor="rootDir">Root Directory</Label>
+                      <Input
+                        id="rootDir"
+                        value={formData.rootDir}
+                        onChange={(e) => setFormData({ ...formData, rootDir: e.target.value })}
+                        placeholder="/var/www/mysite (leave empty to auto-create)"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Directory containing the site files. Leave blank and ProxyPilot will
+                        create one under <code>/data/services</code>.
+                      </p>
+                    </div>
+                  )}
+
+                  {/*
+                   * Phase 2b H.3: routes builder. Each row carries its own
+                   * (domain, pathPrefix, targetPort, sslEnabled) tuple. The
+                   * trash icon removes the row — disabled on the last
+                   * remaining row so the form always has at least one
+                   * route. The Add Route button appends a new empty row.
+                   * Layout stacks at <sm via flex-col and inlines at sm+
+                   * per MOBILE_FIRST.md §4. Trash + add buttons hit the
+                   * 44x44 touch target on mobile per MOBILE_FIRST.md §5.
+                   * Static Site skips the Port column since routes just
+                   * point at the service's rootDir, not a port.
+                   */}
+                  <div className="space-y-3" data-testid="wizard-routes-builder">
+                    <div className="flex items-center justify-between">
+                      <Label>HTTP Routes</Label>
+                      <span className="text-xs text-muted-foreground">
+                        {formData.routes.length} route{formData.routes.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    {formData.routes.map((route, i) => (
+                      <div
+                        key={route.id}
+                        data-testid={`wizard-route-row-${i}`}
+                        className="rounded-md border p-3 space-y-3"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <Label htmlFor={`route-domain-${i}`} className="text-xs">Domain</Label>
+                            <Input
+                              id={`route-domain-${i}`}
+                              data-testid={`wizard-route-domain-${i}`}
+                              value={route.domain}
+                              onChange={(e) => updateWizardRoute(i, { domain: e.target.value })}
+                              placeholder="app.example.com"
+                              required
+                            />
+                          </div>
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <Label htmlFor={`route-prefix-${i}`} className="text-xs">Path Prefix</Label>
+                            <Input
+                              id={`route-prefix-${i}`}
+                              data-testid={`wizard-route-prefix-${i}`}
+                              value={route.pathPrefix}
+                              onChange={(e) => updateWizardRoute(i, { pathPrefix: e.target.value })}
+                              placeholder="/"
+                              pattern="^/(?:[a-zA-Z0-9._~\-]+(?:/[a-zA-Z0-9._~\-]+)*/?)?$"
+                              title="Must start with / and contain only URL-safe characters"
+                            />
+                          </div>
+                          {formData.kind === 'container_service' && (
+                            <div className="w-full sm:w-28 space-y-1">
+                              <Label htmlFor={`route-port-${i}`} className="text-xs">Port</Label>
+                              <Input
+                                id={`route-port-${i}`}
+                                data-testid={`wizard-route-port-${i}`}
+                                type="number"
+                                value={route.targetPort}
+                                onChange={(e) => updateWizardRoute(i, { targetPort: e.target.value })}
+                                placeholder="3000"
+                                min="1"
+                                max="65535"
+                                required
+                              />
+                            </div>
+                          )}
+                          <div className="flex items-center justify-end sm:self-end gap-1 shrink-0">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-11 w-11 sm:h-10 sm:w-10 text-red-500 hover:text-red-600"
+                              data-testid={`wizard-route-remove-${i}`}
+                              onClick={() => removeWizardRoute(i)}
+                              disabled={formData.routes.length <= 1}
+                              title={formData.routes.length <= 1 ? 'At least one route is required' : 'Remove route'}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <Label htmlFor={`route-ssl-${i}`} className="text-xs">SSL enabled</Label>
+                            <p className="text-xs text-muted-foreground">HTTPS with an auto-obtained certificate.</p>
+                          </div>
+                          <Switch
+                            id={`route-ssl-${i}`}
+                            data-testid={`wizard-route-ssl-${i}`}
+                            checked={!!route.sslEnabled}
+                            onCheckedChange={(checked) => updateWizardRoute(i, { sslEnabled: checked })}
+                          />
+                        </div>
+                        {/*
+                         * Phase 2b H.4: per-row "existing prefixes" banner.
+                         * Looks up the lowercase-normalized domain the
+                         * operator typed against the global
+                         * existingPrefixesByDomain map (flattened from
+                         * every service's routes). Surfaces immediately
+                         * when the domain has any existing prefix across
+                         * any service so the operator sees the conflict
+                         * before they click Create.
+                         */}
+                        {(() => {
+                          const key = (route.domain || '').toLowerCase().trim();
+                          if (!key) return null;
+                          const existing = existingPrefixesByDomain.get(key);
+                          if (!existing || existing.length === 0) return null;
+                          return (
+                            <div
+                              data-testid={`wizard-existing-prefixes-${i}`}
+                              className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-blue-600 dark:text-blue-300"
+                            >
+                              Domain already in use. Existing path prefixes:{' '}
+                              <code className="font-mono">{existing.join(', ')}</code>.
+                              Choose a different prefix to add another route on this domain.
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    ))}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="wizard-route-add"
+                      onClick={addWizardRoute}
+                      className="h-11 sm:h-10"
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Add route
+                    </Button>
+                  </div>
                   <div className="space-y-2">
                     <Label htmlFor="maxUploadSize">Max Upload Size</Label>
                     <Input id="maxUploadSize" value={formData.maxUploadSize} onChange={(e) => setFormData({ ...formData, maxUploadSize: e.target.value })} placeholder="1G" />
+                    <p className="text-xs text-muted-foreground">Applied to every route on this service.</p>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="sslEnabled">SSL Enabled</Label>
-                    <Switch id="sslEnabled" checked={formData.sslEnabled} onCheckedChange={(checked) => setFormData({ ...formData, sslEnabled: checked })} />
-                  </div>
-                  {formData.sslEnabled && (
+                  {formData.routes.some((r) => r.sslEnabled) && (
                     <div className="flex items-center justify-between pl-4 border-l-2 border-primary/20">
                       <div>
                         <Label htmlFor="obtainCertificate">Auto-obtain Certificate</Label>
-                        <p className="text-xs text-muted-foreground">Caddy will auto-obtain a certificate via ACME</p>
+                        <p className="text-xs text-muted-foreground">Caddy will auto-obtain a certificate via ACME for every SSL-enabled route.</p>
                       </div>
                       <Switch id="obtainCertificate" checked={formData.obtainCertificate} onCheckedChange={(checked) => setFormData({ ...formData, obtainCertificate: checked })} />
                     </div>
@@ -3116,6 +3951,21 @@ volumes:
                       {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</> : 'Create Service'}
                     </Button>
                   </DialogFooter>
+                  </>
+                  )}
+                  {/* Phase 2b H.2: Cancel button still reachable even when
+                      the form tail is gated off, so an operator who
+                      accidentally opened the wizard can close it without
+                      completing the runtime pick. */}
+                  {!(
+                    formData.kind === 'static_site' ||
+                    (formData.kind === 'container_service' && formData.runtime === 'docker') ||
+                    (formData.kind === 'container_service' && formData.runtime === 'lxc' && !!formData.lxcContainerName)
+                  ) && (
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={() => setAddDialogOpen(false)}>Cancel</Button>
+                    </DialogFooter>
+                  )}
                 </form>
               )}
             </DialogContent>
@@ -3587,24 +4437,55 @@ volumes:
         <div className="flex-1">
           <div className={viewMode === 'grid' ? 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
             {/*
-              Phase 2: when sorted by the default favorite view, group
-              services that share a domain and emit a header row above each
-              group with 2+ services so operators see "N services on
-              example.com" together. Single-service domains stay headerless.
-              The grouping preserves the inherited per-group order so the
-              favorite-first sort inside each group still wins.
+              Phase 2b J.1: generalize the domain-grouped header to
+              route-derived domains. Phase 2 assumed one service owns
+              one (domain, path_prefix) tuple and grouped by
+              service.domain. After Phase 2b a service can touch
+              multiple domains via its nested routes array, so the
+              grouping flattens every service into its
+              (service, route) pairs first, then groups by
+              route.domain, then emits a header above each domain
+              that has ≥2 DISTINCT services. Each service card may
+              appear under multiple headers (once per domain its
+              routes touch); single-service single-domain layouts
+              still stay headerless. The Phase 2 favorite-sort order
+              is preserved because the flatten walks `filteredServices`
+              in its existing order and the Map insertion order
+              mirrors that walk.
             */}
             {(() => {
               if (sortBy !== 'favorite') {
                 return filteredServices.map((service) => renderServiceCard(service));
               }
+              const normalize = (d) => (d || '').toLowerCase().trim();
+
+              // Flatten every service into (service, domain) pairs
+              // via its nested routes array (or its legacy top-level
+              // domain for pre-Phase-2b installs). A service that has
+              // two routes on the same domain contributes once to
+              // that domain's bucket — we de-dupe per-service inside
+              // the same domain to match "distinct services" counting.
               const groups = new Map();
               for (const s of filteredServices) {
-                const arr = groups.get(s.domain) || [];
-                arr.push(s);
-                groups.set(s.domain, arr);
+                const svcDomains = new Set();
+                if (Array.isArray(s.routes) && s.routes.length > 0) {
+                  for (const r of s.routes) {
+                    const d = normalize(r.domain);
+                    if (d) svcDomains.add(d);
+                  }
+                }
+                if (svcDomains.size === 0 && s.domain) {
+                  svcDomains.add(normalize(s.domain));
+                }
+                for (const d of svcDomains) {
+                  const arr = groups.get(d) || [];
+                  arr.push(s);
+                  groups.set(d, arr);
+                }
               }
+
               const out = [];
+              const emittedSolo = new Set();
               for (const [domain, list] of groups) {
                 if (list.length >= 2) {
                   out.push(
@@ -3620,8 +4501,34 @@ volumes:
                       </span>
                     </div>
                   );
+                  // Wrap each card in a Fragment keyed on the
+                  // (domain, service.id) pair so a service that
+                  // appears under multiple domain headers can render
+                  // multiple times without tripping React's duplicate-
+                  // key warning. The inner Card's own key stays the
+                  // service id so any per-card state (drag handles,
+                  // etc) keeps its identity across re-renders.
+                  for (const s of list) {
+                    out.push(
+                      <Fragment key={`card-${domain}-${s.id}`}>
+                        {renderServiceCard(s)}
+                      </Fragment>
+                    );
+                  }
+                } else {
+                  // Single-service bucket: only emit the card the
+                  // FIRST time we see it so services with routes on
+                  // multiple headerless domains do not render twice.
+                  for (const s of list) {
+                    if (emittedSolo.has(s.id)) continue;
+                    emittedSolo.add(s.id);
+                    out.push(
+                      <Fragment key={`card-solo-${s.id}`}>
+                        {renderServiceCard(s)}
+                      </Fragment>
+                    );
+                  }
                 }
-                for (const s of list) out.push(renderServiceCard(s));
               }
               return out;
             })()}
@@ -3829,8 +4736,26 @@ volumes:
                               variant="outline"
                               className="w-full h-7 text-xs"
                               onClick={() => {
+                                // Phase 2b H.3: seed a single-row routes
+                                // array alongside the legacy mirror
+                                // fields so the wizard lands ready-to-
+                                // submit under the new shape.
                                 setFormData({
                                   name: svc.serviceName || svc.containerName,
+                                  kind: 'container_service',
+                                  runtime: 'docker',
+                                  lxcContainerName: '',
+                                  targetIp: '127.0.0.1',
+                                  routes: [
+                                    {
+                                      id: pp2bRouteUid(),
+                                      domain: '',
+                                      pathPrefix: '/',
+                                      targetPort: svc.exposedPort.toString(),
+                                      sslEnabled: true,
+                                    },
+                                  ],
+                                  rootDir: '',
                                   domain: '',
                                   pathPrefix: '/',
                                   type: 'docker',
@@ -3886,15 +4811,70 @@ volumes:
                   Are you sure you want to delete &quot;{serviceToDelete?.name}&quot;? Enter your TOTP code to confirm.
                 </p>
                 {(() => {
+                  // Phase 2b I.3: generalize the sibling-warning to
+                  // count every route across every service that lives
+                  // on any domain the service-to-delete owns a route
+                  // on, minus routes owned by the service-to-delete
+                  // itself. A single service can now touch multiple
+                  // domains, so the warning may name multiple domains
+                  // — each domain appears once regardless of how many
+                  // sibling routes exist on it, and its sibling count
+                  // is shown in parentheses after the domain.
                   if (!serviceToDelete) return null;
-                  const siblingsCount = services.filter(
-                    (s) => s.domain === serviceToDelete.domain && s.id !== serviceToDelete.id
-                  ).length;
-                  if (siblingsCount === 0) return null;
+
+                  const normalize = (d) => (d || '').toLowerCase().trim();
+
+                  // Collect the set of domains this service-to-delete
+                  // owns a route on, using the nested routes array
+                  // first and the legacy top-level domain as fallback
+                  // for pre-Phase-2b installs that have not been
+                  // migrated yet.
+                  const ownDomains = new Set();
+                  if (Array.isArray(serviceToDelete.routes) && serviceToDelete.routes.length > 0) {
+                    for (const r of serviceToDelete.routes) {
+                      const d = normalize(r.domain);
+                      if (d) ownDomains.add(d);
+                    }
+                  } else if (serviceToDelete.domain) {
+                    ownDomains.add(normalize(serviceToDelete.domain));
+                  }
+                  if (ownDomains.size === 0) return null;
+
+                  // For each of the service-to-delete's domains, count
+                  // the surviving sibling routes (every route on that
+                  // domain across every OTHER service).
+                  const siblingByDomain = new Map();
+                  for (const svc of services) {
+                    if (svc.id === serviceToDelete.id) continue;
+                    const svcRoutes = Array.isArray(svc.routes) && svc.routes.length > 0
+                      ? svc.routes.map((r) => ({ domain: normalize(r.domain) }))
+                      : svc.domain
+                      ? [{ domain: normalize(svc.domain) }]
+                      : [];
+                    for (const r of svcRoutes) {
+                      if (!ownDomains.has(r.domain)) continue;
+                      siblingByDomain.set(r.domain, (siblingByDomain.get(r.domain) || 0) + 1);
+                    }
+                  }
+
+                  // If no sibling routes exist on any affected domain,
+                  // suppress the warning entirely.
+                  if (siblingByDomain.size === 0) return null;
+
+                  const totalSiblings = [...siblingByDomain.values()].reduce(
+                    (a, b) => a + b,
+                    0
+                  );
+                  const domainSummary = [...siblingByDomain.entries()]
+                    .map(([domain, count]) => `${domain} (${count})`)
+                    .join(', ');
+
                   return (
                     <p data-testid="delete-sibling-warning" className="text-amber-600 dark:text-amber-400">
-                      This will leave {siblingsCount} other service{siblingsCount === 1 ? '' : 's'}{' '}
-                      running on <code className="font-mono">{serviceToDelete.domain}</code>.
+                      This will leave {totalSiblings} other route{totalSiblings === 1 ? '' : 's'}{' '}
+                      on{' '}
+                      <code className="font-mono">{domainSummary}</code>
+                      .
                     </p>
                   );
                 })()}
@@ -5039,6 +6019,299 @@ volumes:
             <div className="p-3 bg-muted rounded-lg space-y-1">
               <p className="text-sm"><span className="text-muted-foreground">Domain:</span> {settingsService?.domain}</p>
               <p className="text-sm"><span className="text-muted-foreground">Type:</span> <span className="capitalize">{settingsService?.type}</span></p>
+              {/*
+               * Phase 2b I.2: Refresh IP button + container summary row
+               * for LXC container_services. Only renders when the
+               * service was created with runtime='lxc' and a cached
+               * container name. The button calls api.refreshLxcIp which
+               * re-queries Incus and rewrites every affected domain's
+               * merged Caddy config; on success a toast shows the
+               * old→new IP and the displayed targetIp is updated from
+               * the re-fetched service payload.
+               */}
+              {settingsService?.kind === 'container_service'
+                && settingsService?.runtime === 'lxc'
+                && settingsService?.lxcContainerName && (
+                <div
+                  data-testid="settings-lxc-refresh-ip"
+                  className="pt-2 mt-2 border-t border-border/50 space-y-2"
+                >
+                  <p className="text-sm">
+                    <span className="text-muted-foreground">Container:</span>{' '}
+                    <code className="font-mono">{settingsService.lxcContainerName}</code>
+                  </p>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <p className="text-sm">
+                      <span className="text-muted-foreground">Target IP:</span>{' '}
+                      <code className="font-mono" data-testid="settings-lxc-target-ip">{settingsService.targetIp || settingsService.target || '(unknown)'}</code>
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="settings-lxc-refresh-ip-button"
+                      className="h-11 sm:h-10 gap-2"
+                      onClick={handleRefreshLxcIp}
+                      disabled={refreshingLxcIp}
+                    >
+                      {refreshingLxcIp ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCcw className="h-4 w-4" />
+                      )}
+                      Refresh IP
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Tip: assign a static IP via an Incus profile to avoid needing this after each container restart.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/*
+             * Phase 2b I.1: HTTP Routes card. Lists every route
+             * owned by settingsService, with inline edit + delete per
+             * row and an "Add route" inline form keyed on the
+             * editingRouteId === 'new' sentinel. Mobile layout stacks
+             * each row via flex flex-col + inlines at sm+.
+             */}
+            <div
+              className="space-y-3 border rounded-lg p-3"
+              data-testid="settings-routes-card"
+            >
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium text-sm">HTTP Routes</h4>
+                <span className="text-xs text-muted-foreground">
+                  {settingsRoutesLoading
+                    ? 'Loading…'
+                    : `${settingsRoutes.length} route${settingsRoutes.length === 1 ? '' : 's'}`}
+                </span>
+              </div>
+
+              {settingsRoutes.map((route) => (
+                <div
+                  key={route.id}
+                  data-testid={`settings-route-row-${route.id}`}
+                  className="rounded-md border"
+                >
+                  {editingRouteId === route.id ? (
+                    // ---- Inline edit form ----
+                    <div className="p-3 bg-muted/30 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-domain-${route.id}`} className="text-xs">Domain</Label>
+                          <Input
+                            id={`sr-domain-${route.id}`}
+                            data-testid={`settings-route-domain-${route.id}`}
+                            value={editingRouteDraft.domain}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, domain: e.target.value })
+                            }
+                            placeholder="app.example.com"
+                            required
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-prefix-${route.id}`} className="text-xs">Path prefix</Label>
+                          <Input
+                            id={`sr-prefix-${route.id}`}
+                            data-testid={`settings-route-prefix-${route.id}`}
+                            value={editingRouteDraft.pathPrefix}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, pathPrefix: e.target.value })
+                            }
+                            placeholder="/"
+                          />
+                        </div>
+                      </div>
+                      {settingsService?.kind === 'container_service' && (
+                        <div className="space-y-1">
+                          <Label htmlFor={`sr-port-${route.id}`} className="text-xs">Target port</Label>
+                          <Input
+                            id={`sr-port-${route.id}`}
+                            data-testid={`settings-route-port-${route.id}`}
+                            type="number"
+                            value={editingRouteDraft.targetPort}
+                            onChange={(e) =>
+                              setEditingRouteDraft({ ...editingRouteDraft, targetPort: e.target.value })
+                            }
+                            placeholder="3000"
+                            min="1"
+                            max="65535"
+                          />
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs">SSL enabled</Label>
+                        <Switch
+                          checked={!!editingRouteDraft.sslEnabled}
+                          onCheckedChange={(checked) =>
+                            setEditingRouteDraft({ ...editingRouteDraft, sslEnabled: checked })
+                          }
+                        />
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-11 sm:h-9"
+                          onClick={cancelEditSettingsRoute}
+                          disabled={savingRoute}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-11 sm:h-9"
+                          data-testid={`settings-route-save-${route.id}`}
+                          onClick={saveEditSettingsRoute}
+                          disabled={savingRoute}
+                        >
+                          {savingRoute ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    // ---- Display row ----
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3">
+                      <div className="min-w-0 flex-1">
+                        <code className="font-mono text-sm break-all">
+                          {route.domain}
+                          {route.pathPrefix}
+                        </code>
+                        {route.targetPort != null && (
+                          <span className="text-sm text-muted-foreground ml-2">
+                            → :{route.targetPort}
+                          </span>
+                        )}
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {route.sslEnabled === false ? 'HTTP only' : 'HTTPS'}
+                        </div>
+                      </div>
+                      <div className="flex gap-1 shrink-0 justify-end">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 sm:h-10 sm:w-10"
+                          data-testid={`settings-route-edit-${route.id}`}
+                          onClick={() => beginEditSettingsRoute(route)}
+                          title="Edit route"
+                        >
+                          <Edit3 className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 sm:h-10 sm:w-10 text-red-500 hover:text-red-600"
+                          data-testid={`settings-route-delete-${route.id}`}
+                          onClick={() => deleteSettingsRoute(route)}
+                          title="Delete route"
+                          disabled={savingRoute}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {editingRouteId === 'new' ? (
+                <div className="rounded-md border p-3 bg-muted/30 space-y-3" data-testid="settings-route-new-form">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-domain" className="text-xs">Domain</Label>
+                      <Input
+                        id="sr-new-domain"
+                        data-testid="settings-route-new-domain"
+                        value={editingRouteDraft.domain}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, domain: e.target.value })
+                        }
+                        placeholder="app.example.com"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-prefix" className="text-xs">Path prefix</Label>
+                      <Input
+                        id="sr-new-prefix"
+                        data-testid="settings-route-new-prefix"
+                        value={editingRouteDraft.pathPrefix}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, pathPrefix: e.target.value })
+                        }
+                        placeholder="/"
+                      />
+                    </div>
+                  </div>
+                  {settingsService?.kind === 'container_service' && (
+                    <div className="space-y-1">
+                      <Label htmlFor="sr-new-port" className="text-xs">Target port</Label>
+                      <Input
+                        id="sr-new-port"
+                        data-testid="settings-route-new-port"
+                        type="number"
+                        value={editingRouteDraft.targetPort}
+                        onChange={(e) =>
+                          setEditingRouteDraft({ ...editingRouteDraft, targetPort: e.target.value })
+                        }
+                        placeholder="3000"
+                        min="1"
+                        max="65535"
+                      />
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs">SSL enabled</Label>
+                    <Switch
+                      checked={!!editingRouteDraft.sslEnabled}
+                      onCheckedChange={(checked) =>
+                        setEditingRouteDraft({ ...editingRouteDraft, sslEnabled: checked })
+                      }
+                    />
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-11 sm:h-9"
+                      onClick={cancelEditSettingsRoute}
+                      disabled={savingRoute}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-11 sm:h-9"
+                      data-testid="settings-route-new-save"
+                      onClick={saveEditSettingsRoute}
+                      disabled={savingRoute}
+                    >
+                      {savingRoute ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add route'}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-11 sm:h-10 w-full sm:w-auto"
+                  data-testid="settings-route-add-button"
+                  onClick={beginAddSettingsRoute}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add route
+                </Button>
+              )}
             </div>
 
             {/* File Path Settings (for static sites) */}

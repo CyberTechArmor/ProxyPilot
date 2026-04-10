@@ -354,3 +354,117 @@ export function setSetting(key, value) {
     ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
   `).run(key, value, value);
 }
+
+// Phase 2 migration: rebuild the services table so that UNIQUE(domain) is
+// replaced with UNIQUE(domain, path_prefix). Idempotent — a services table
+// that already carries the new constraint is left alone. Runs inside a
+// transaction so a crash mid-rebuild does not corrupt the DB.
+//
+// SQLite FKs are not enforced in this app (no `PRAGMA foreign_keys = ON`),
+// so child tables (user_service_access, file_versions, service_config_versions)
+// keep their service_id values across the DROP/RENAME without cascading.
+// Their indexes live on the child tables and are unaffected by this rebuild;
+// we explicitly (re)create idx_services_domain_path on the rebuilt table so
+// lookups on the new tuple stay fast.
+export function migrateServicesUniqueConstraint(dbInstance) {
+  const db = dbInstance || getDb();
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='services'")
+    .get();
+  if (!row || !row.sql) {
+    return; // table does not exist yet — initDatabase will create it fresh
+  }
+
+  const currentSql = row.sql;
+  if (currentSql.includes('UNIQUE(domain, path_prefix)')) {
+    // Already migrated — make sure the helper index exists and return.
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_services_domain_path ON services(domain, path_prefix)`
+    );
+    return;
+  }
+
+  console.log(
+    'Migrating services table: UNIQUE(domain) -> UNIQUE(domain, path_prefix)'
+  );
+
+  const runMigration = db.transaction(() => {
+    // Discover the actual column set on the current table so we copy every
+    // column the deployed install already has (including any future columns
+    // added via ALTER TABLE in initDatabase). This keeps the rebuild safe
+    // across installs that may be one or more migrations behind.
+    const existingCols = db.prepare(`PRAGMA table_info(services)`).all();
+    const colNames = existingCols.map((c) => c.name);
+
+    // Ensure path_prefix is present in the column list — if an older install
+    // somehow got here without the ALTER TABLE having run (defensive), add it
+    // so the rebuilt table has a value to copy from.
+    if (!colNames.includes('path_prefix')) {
+      db.exec(`ALTER TABLE services ADD COLUMN path_prefix TEXT NOT NULL DEFAULT '/'`);
+      colNames.push('path_prefix');
+    }
+
+    // Build the CREATE TABLE for services_new. We emit the canonical column
+    // set (matching the fresh-install CREATE TABLE) with the new UNIQUE
+    // constraint. Any legacy columns the old table carries that are NOT in
+    // this canonical list are dropped — they are not referenced anywhere
+    // in the current codebase.
+    db.exec(`
+      CREATE TABLE services_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('proxy', 'static', 'docker')),
+        target TEXT,
+        port INTEGER,
+        root_dir TEXT,
+        container_name TEXT,
+        ssl_enabled INTEGER DEFAULT 1,
+        force_https INTEGER DEFAULT 1,
+        websocket_enabled INTEGER DEFAULT 0,
+        max_upload_size TEXT DEFAULT '1G',
+        data_dir TEXT,
+        status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
+        is_admin INTEGER DEFAULT 0,
+        is_favorite INTEGER DEFAULT 0,
+        path_prefix TEXT NOT NULL DEFAULT '/',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(domain, path_prefix)
+      )
+    `);
+
+    // Copy every row. COALESCE path_prefix to '/' so NULLs from pre-wildcard
+    // installs land on the canonical root value the rest of the app expects.
+    // Columns the old table lacks (e.g. is_favorite on very old installs)
+    // fall back to their schema defaults via NULL.
+    const has = (name) => colNames.includes(name) ? name : `NULL AS ${name}`;
+    const copySql = `
+      INSERT INTO services_new (
+        id, name, domain, type, target, port, root_dir, container_name,
+        ssl_enabled, force_https, websocket_enabled, max_upload_size,
+        data_dir, status, is_admin, is_favorite, path_prefix,
+        created_at, updated_at
+      )
+      SELECT
+        id, name, domain, type, target, port, root_dir, container_name,
+        ${has('ssl_enabled')}, ${has('force_https')},
+        ${has('websocket_enabled')}, ${has('max_upload_size')},
+        ${has('data_dir')}, ${has('status')}, ${has('is_admin')},
+        ${colNames.includes('is_favorite') ? 'is_favorite' : '0 AS is_favorite'},
+        COALESCE(path_prefix, '/') AS path_prefix,
+        created_at, updated_at
+      FROM services
+    `;
+    db.exec(copySql);
+
+    db.exec(`DROP TABLE services`);
+    db.exec(`ALTER TABLE services_new RENAME TO services`);
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_services_domain_path ON services(domain, path_prefix)`
+    );
+  });
+
+  runMigration();
+  console.log('Services table migration complete');
+}

@@ -458,7 +458,7 @@ export default function UsersPage() {
 
       {/* Delete User Dialog */}
       <Dialog open={deleteUserOpen} onOpenChange={setDeleteUserOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Delete User</DialogTitle>
             <DialogDescription>

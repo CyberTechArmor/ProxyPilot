@@ -201,7 +201,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — Manage-access / Reset-password / Delete icon buttons now `h-11 w-11 sm:h-9 sm:w-9 p-0` so they hit the 44px touch target on phones while staying compact on desktop.
 - [x] `Users` create-user dialog (admin/frontend/src/pages/Users.jsx:363)
       — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
-- [ ] `Users` delete-user dialog (admin/frontend/src/pages/Users.jsx:458)
+- [x] `Users` delete-user dialog (admin/frontend/src/pages/Users.jsx:458)
       — same full-screen-on-sm treatment.
 - [ ] `Users` manage-access dialog (admin/frontend/src/pages/Users.jsx:495)
       — `max-w-2xl` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg`; inner access rows (`flex items-center justify-between p-3` at 541 and 592) become `flex-col sm:flex-row sm:items-center sm:justify-between gap-2` so switches do not overflow.

@@ -145,8 +145,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `max-w-5xl h-[90vh]` (caddy tab) and `max-w-lg` (settings tab) both gain `max-w-full h-full rounded-none sm:*` prefix so the dialog is full-screen on phones.
 - [x] `Dashboard` service settings two-column form grid (admin/frontend/src/pages/Dashboard.jsx:4822)
       — `grid grid-cols-2` → `grid grid-cols-1 sm:grid-cols-2`.
-- [ ] `Dashboard` remove-cert / regenerate / misc simple confirm dialogs (admin/frontend/src/pages/Dashboard.jsx:5011, 5048, 5078)
-      — every bare `<DialogContent>` without `className` in this range gets `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
+- [x] `Dashboard` remove-cert / export / import / kill-switch bare confirm dialogs (admin/frontend/src/pages/Dashboard.jsx — removeCert ~3810, export/import/killSwitch ~5076-5143)
+      — every bare `<DialogContent>` without `className` gets `className="max-w-full h-full rounded-none sm:max-w-{md|lg} sm:h-auto sm:rounded-lg"`. *Note: the E8 line numbers in the draft were stale — the four bare dialogs are removeCert, export, import, and killSwitch.*
 - [ ] `Dashboard` versions dialog (admin/frontend/src/pages/Dashboard.jsx:5129)
       — `max-w-2xl max-h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[80vh] sm:rounded-lg`.
 - [ ] `Dashboard` kill-switch TOTP dialog (admin/frontend/src/pages/Dashboard.jsx:5241)

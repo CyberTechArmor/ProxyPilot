@@ -3807,7 +3807,7 @@ volumes:
 
       {/* Remove Certificate Confirmation Dialog */}
       <Dialog open={removeCertDialogOpen} onOpenChange={setRemoveCertDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Remove SSL Certificate</DialogTitle>
             <DialogDescription>
@@ -5073,7 +5073,7 @@ volumes:
 
       {/* Export Dialog */}
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Export Services</DialogTitle>
             <DialogDescription>Select services to export and download as JSON</DialogDescription>
@@ -5110,7 +5110,7 @@ volumes:
 
       {/* Import Dialog */}
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Import Services</DialogTitle>
             <DialogDescription>Upload a previously exported JSON file to import services</DialogDescription>
@@ -5140,7 +5140,7 @@ volumes:
 
       {/* Kill Switch Dialog */}
       <Dialog open={killSwitchDialogOpen} onOpenChange={setKillSwitchDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <ShieldAlert className="h-5 w-5" />

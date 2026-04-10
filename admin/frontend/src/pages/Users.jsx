@@ -308,7 +308,7 @@ export default function UsersPage() {
                         {user.role}
                       </span>
                     </div>
-                    <div className="flex items-center gap-4 mt-1 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-muted-foreground">
                       <span className={user.totpEnabled ? 'text-green-500' : 'text-yellow-500'}>
                         TOTP: {user.totpEnabled ? 'Enabled' : 'Not Set'}
                       </span>

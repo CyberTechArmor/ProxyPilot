@@ -450,39 +450,30 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
       console.error('Error backing up configs:', e);
     }
 
-    // Generate and write new configs for services in database
-    for (const service of services) {
-      // Skip admin service - its config is managed by the installer
-      if (service.is_admin) {
-        console.log(`Skipping admin service: ${service.domain}`);
-        results.success.push(`${service.domain} (skipped - admin)`);
-        continue;
-      }
+    // With merged per-domain configs, we regenerate once per *distinct*
+    // domain — not once per service — so two sibling services on the same
+    // domain don't cause two overlapping writes. Admin service domains are
+    // skipped outright so the installer-owned Caddyfile never gets clobbered.
+    const uniqueDomains = [
+      ...new Set(
+        services.filter((s) => !s.is_admin).map((s) => s.domain)
+      ),
+    ];
+    const adminDomains = services
+      .filter((s) => s.is_admin)
+      .map((s) => s.domain);
+    for (const adminDomain of new Set(adminDomains)) {
+      console.log(`Skipping admin domain: ${adminDomain}`);
+      results.success.push(`${adminDomain} (skipped - admin)`);
+    }
 
+    for (const domain of uniqueDomains) {
       try {
-        const serviceConfig = {
-          domain: service.domain,
-          pathPrefix: service.path_prefix,
-          type: service.type,
-          target: service.target,
-          port: service.port,
-          rootDir: service.root_dir,
-          websocketEnabled: !!service.websocket_enabled,
-          forceHttps: !!service.force_https,
-          maxUploadSize: service.max_upload_size,
-          sslEnabled: !!service.ssl_enabled,
-        };
-
-        const caddyConfig = generateCaddyConfig(serviceConfig);
-        const configPath = caddyFilePath(service.domain);
-
-        // Write config
-        await writeCaddyConfig(configPath, caddyConfig);
-
-        results.success.push(service.domain);
+        await regenerateDomainCaddyConfig(db, domain);
+        results.success.push(domain);
       } catch (err) {
-        console.error(`Failed to regenerate config for ${service.domain}:`, err);
-        results.failed.push({ domain: service.domain, error: err.message });
+        console.error(`Failed to regenerate merged config for ${domain}:`, err);
+        results.failed.push({ domain, error: err.message });
       }
     }
 

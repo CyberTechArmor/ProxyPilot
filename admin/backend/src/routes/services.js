@@ -4657,6 +4657,13 @@ servicesRouter.get('/discover/caddy-sites', async (req, res) => {
 });
 
 // Import a discovered site
+// Phase 2b D.11: a discovered Caddy site becomes one new service with
+// exactly one route at `path_prefix='/'`. In addition to writing the
+// legacy services columns, the handler now (a) sets the Phase 2b
+// service-level fields (`kind`, `runtime`, `target_ip`) by mapping the
+// discovered `type` and (b) calls `syncPrimaryRouteFromLegacy` right
+// after the INSERT so a matching `service_http_routes` row exists.
+// Mirrors the D.2 POST /api/services dual-write strategy.
 servicesRouter.post('/discover/import', async (req, res) => {
   try {
     const { domain, name, type, rootDir, target, port, sslEnabled, websocketEnabled } = req.body;
@@ -4667,8 +4674,19 @@ servicesRouter.post('/discover/import', async (req, res) => {
 
     const db = getDb();
 
-    // Check if already exists
-    const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(domain);
+    // Check if already exists — scan both sources so the pre-D.14
+    // transitional state and post-D.14 state both surface the collision.
+    let existing = null;
+    try {
+      existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(domain);
+    } catch (e) {
+      // Post-D.14 — column gone.
+    }
+    if (!existing) {
+      existing = db
+        .prepare('SELECT service_id AS id FROM service_http_routes WHERE domain = ? LIMIT 1')
+        .get(domain);
+    }
     if (existing) {
       return res.status(400).json({ error: 'Service with this domain already exists' });
     }
@@ -4680,49 +4698,71 @@ servicesRouter.post('/discover/import', async (req, res) => {
     // For static sites with existing rootDir, use the original path directly
     // This allows file editing and terminal to work with the original location
     if (type === 'static' && rootDir) {
-      // Use the original rootDir as both root_dir and data_dir
       dataDir = rootDir;
       actualRootDir = rootDir;
-
-      // Ensure the directory exists
       if (!existsSync(rootDir)) {
         await mkdir(rootDir, { recursive: true });
       }
     } else if (type === 'static') {
-      // New static site without existing rootDir - create in default location
       const safeDir = toSafeDirectoryName(name);
       dataDir = join(SERVICES_DATA_DIR, safeDir);
       actualRootDir = dataDir;
       await mkdir(dataDir, { recursive: true });
     } else if (type === 'docker') {
-      // For docker services, create a data directory for compose files etc.
       const safeDir = toSafeDirectoryName(name);
       dataDir = join(SERVICES_DATA_DIR, safeDir);
       await mkdir(dataDir, { recursive: true });
     } else {
-      // Proxy or other types
       const safeDir = toSafeDirectoryName(name);
       dataDir = join(SERVICES_DATA_DIR, safeDir);
     }
 
-    // Insert into database - for imported static sites, data_dir = root_dir (the original path).
-    // Discovered sites always land on path_prefix '/' — if the original Caddyfile
-    // used handle_path, the operator can refine it after import.
+    // Phase 2b: infer service-level fields from the discovered `type`.
+    const svcKind = type === 'static' ? 'static_site' : 'container_service';
+    const svcRuntime = type === 'docker' ? 'docker' : null;
+    const svcTargetIp = type === 'static' ? null : target || null;
+
+    // Insert the services row with both the legacy route-owned columns
+    // AND the Phase 2b service-level fields so the dual-source B.3 read
+    // renders this entry immediately.
     db.prepare(`
       INSERT INTO services (
-        id, name, domain, path_prefix, type, target, port, root_dir, container_name,
-        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        id, name, kind, runtime, type, target, target_ip, domain, path_prefix,
+        port, root_dir, container_name, ssl_enabled, force_https,
+        websocket_enabled, max_upload_size, data_dir, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      id, name, domain, '/', type, target || null, port || null,
+      id, name, svcKind, svcRuntime, type || null, target || null,
+      svcTargetIp, domain, '/', port || null,
       actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
 
+    // Phase 2b D.11: mirror the discovered row into service_http_routes
+    // as the primary route. If the sync fails (typically a UNIQUE
+    // violation from a racing route on the same (domain, /)), delete
+    // the services row and return 400.
+    try {
+      syncPrimaryRouteFromLegacy(db, id, {
+        domain,
+        pathPrefix: '/',
+        targetPort: port || null,
+        sslEnabled: !!sslEnabled,
+        forceHttps: !!sslEnabled,
+        websocketEnabled: !!websocketEnabled,
+        maxUploadSize: '1G',
+      });
+    } catch (routeErr) {
+      db.prepare('DELETE FROM services WHERE id = ?').run(id);
+      return res.status(400).json({
+        error: 'Failed to sync primary route: ' + routeErr.message,
+      });
+    }
+
     // Regenerate the merged Caddy config for the imported domain. The DB
-    // row was inserted just above, so regenerateDomainCaddyConfig reads it
-    // plus any sibling services on the same domain and writes a single
-    // merged site block.
+    // row + route were inserted just above, so regenerateDomainCaddyConfig
+    // reads them plus any sibling services on the same domain and writes
+    // a single merged site block.
     try {
       await ensureCaddyStructure();
       await regenerateDomainCaddyConfig(db, domain);
@@ -4735,11 +4775,18 @@ servicesRouter.post('/discover/import', async (req, res) => {
       // Don't fail the import, but log the error
     }
 
-    logAudit(req.user.id, 'SERVICE_IMPORTED', 'service', id, { domain, type, rootDir: actualRootDir }, req.ip);
+    logAudit(
+      req.user.id,
+      'SERVICE_IMPORTED',
+      'service',
+      id,
+      { service_id: id, domain, type, kind: svcKind, rootDir: actualRootDir },
+      req.ip
+    );
 
     res.json({
       success: true,
-      service: { id, name, domain, type, rootDir: actualRootDir, dataDir },
+      service: { id, name, domain, type, kind: svcKind, rootDir: actualRootDir, dataDir },
     });
   } catch (error) {
     console.error('Error importing site:', error);

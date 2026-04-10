@@ -1988,6 +1988,149 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
   }
 });
 
+// Delete a single route.
+// Snapshots the pre-delete row + the merged file for the affected domain,
+// DELETEs the row, regenerates the merged file (which shrinks or unlinks
+// depending on whether siblings remain), and on any downstream failure
+// restores both the row and the file. Parent service is NOT touched —
+// a service with zero routes is legal in Phase 2b; the operator can add
+// routes back without recreating the service.
+servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot delete routes from admin service' });
+    }
+
+    const route = db
+      .prepare(
+        `SELECT * FROM service_http_routes WHERE id = ? AND service_id = ?`
+      )
+      .get(req.params.routeId, req.params.id);
+    if (!route) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+
+    // Backup the merged file for the affected domain so rollback can
+    // restore it. Also snapshot the row so rollback can re-insert it.
+    await ensureCaddyStructure();
+    const configPath = caddyFilePath(route.domain);
+    let backupMergedConfig = null;
+    let backupExisted = false;
+    try {
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup.
+    }
+
+    const preDeleteRow = { ...route };
+
+    // DELETE the row.
+    db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(
+      req.params.routeId
+    );
+
+    const rollbackRouteDelete = async () => {
+      try {
+        db.prepare(
+          `INSERT INTO service_http_routes (
+             id, service_id, domain, path_prefix, target_port,
+             websocket_enabled, ssl_enabled, force_https, max_upload_size,
+             created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          preDeleteRow.id,
+          preDeleteRow.service_id,
+          preDeleteRow.domain,
+          preDeleteRow.path_prefix,
+          preDeleteRow.target_port,
+          preDeleteRow.websocket_enabled,
+          preDeleteRow.ssl_enabled,
+          preDeleteRow.force_https,
+          preDeleteRow.max_upload_size,
+          preDeleteRow.created_at
+        );
+      } catch (e) {
+        console.error('Rollback: failed to re-insert deleted route', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore merged file', e);
+      }
+    };
+
+    try {
+      await regenerateDomainCaddyConfig(db, route.domain);
+    } catch (genErr) {
+      await rollbackRouteDelete();
+      return res.status(400).json({
+        error: 'Failed to regenerate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteDelete();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration after delete: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteDelete();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route delete rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_DELETED',
+      'route',
+      req.params.routeId,
+      {
+        service_id: req.params.id,
+        route: {
+          id: preDeleteRow.id,
+          domain: preDeleteRow.domain,
+          pathPrefix: normalizePathPrefix(preDeleteRow.path_prefix),
+          targetPort: preDeleteRow.target_port,
+        },
+      },
+      req.ip
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting route:', error);
+    res.status(500).json({ error: 'Failed to delete route' });
+  }
+});
+
 // Delete service (requires TOTP)
 servicesRouter.delete('/:id', async (req, res) => {
   try {

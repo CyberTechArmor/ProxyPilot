@@ -1406,6 +1406,90 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 // against legacy columns on `services` until Section D refactors them
 // to read and write through this CRUD surface.
 
+// Phase 2b D.1 dual-write helper — `syncPrimaryRouteFromLegacy`
+//
+// Mirrors the legacy (domain, path_prefix, port, ssl flags, ...) fields
+// on a `services` row into a corresponding `service_http_routes` row so
+// the legacy Phase 2 endpoints (POST /, PUT /:id, obtain-certificate,
+// revert-config, import, discover/import) can keep accepting unchanged
+// payloads while Section H updates the frontend. After every legacy
+// write, the routes table has a matching entry — D.14 can safely drop
+// the legacy columns once every endpoint calls this helper.
+//
+// The "primary route" for a service is defined as the earliest-created
+// route owned by that service. On a post-A.3-backfilled install, every
+// service has exactly one primary route (the one A.3 inserted), and
+// later routes added via C.2 have later timestamps. For fresh installs,
+// D.2 inserts the primary directly. For Phase 2 endpoints that run
+// mid-phase, this helper updates whichever route is currently primary.
+//
+// Params:
+//   - db: sqlite instance
+//   - serviceId: the parent services row id
+//   - legacy: { domain, pathPrefix, targetPort, sslEnabled, forceHttps,
+//     websocketEnabled, maxUploadSize } — the target state
+//
+// Returns the id of the synced route row (either the existing primary
+// that was updated, or the newly inserted route).
+function syncPrimaryRouteFromLegacy(db, serviceId, legacy) {
+  const normalizedPrefix = normalizePathPrefix(legacy.pathPrefix);
+
+  // Find the earliest-created route owned by this service. If it exists
+  // we update it in place; otherwise we insert a new primary. Secondary
+  // routes added via C.2 have later timestamps and are left alone.
+  const primary = db
+    .prepare(
+      `SELECT id FROM service_http_routes
+        WHERE service_id = ?
+     ORDER BY created_at ASC, id ASC
+        LIMIT 1`
+    )
+    .get(serviceId);
+
+  if (primary) {
+    db.prepare(
+      `UPDATE service_http_routes SET
+         domain = ?,
+         path_prefix = ?,
+         target_port = ?,
+         websocket_enabled = ?,
+         ssl_enabled = ?,
+         force_https = ?,
+         max_upload_size = ?
+       WHERE id = ?`
+    ).run(
+      legacy.domain,
+      normalizedPrefix,
+      legacy.targetPort || null,
+      legacy.websocketEnabled ? 1 : 0,
+      legacy.sslEnabled ? 1 : 0,
+      legacy.forceHttps ? 1 : 0,
+      legacy.maxUploadSize || '1G',
+      primary.id
+    );
+    return primary.id;
+  }
+
+  const newId = uuidv4();
+  db.prepare(
+    `INSERT INTO service_http_routes (
+       id, service_id, domain, path_prefix, target_port,
+       websocket_enabled, ssl_enabled, force_https, max_upload_size
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    newId,
+    serviceId,
+    legacy.domain,
+    normalizedPrefix,
+    legacy.targetPort || null,
+    legacy.websocketEnabled ? 1 : 0,
+    legacy.sslEnabled ? 1 : 0,
+    legacy.forceHttps ? 1 : 0,
+    legacy.maxUploadSize || '1G'
+  );
+  return newId;
+}
+
 // Zod schema for the Phase 2b route CRUD endpoints. `maxUploadSize`
 // matches the same regex the legacy createServiceSchema uses so the
 // merged request_body max_size directive stays well-formed.
@@ -4616,4 +4700,4 @@ export function assertRoutesShareSslStance(
 // this module at the call-site level but exported so integration tests and
 // the Phase 2 verification pass can invoke them directly without spinning
 // up the full HTTP router.
-export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody };
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy };

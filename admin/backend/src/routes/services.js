@@ -798,19 +798,60 @@ services:
     }
 
     // Insert into database first so the merged config includes the new row.
+    //
+    // Phase 2b D.2: also populate `target_ip` alongside the legacy `target`
+    // column. The B.3 routes-join query in regenerateDomainCaddyConfig
+    // reads `s.target_ip` for container_service rows; writing both here
+    // keeps newly-created services renderable via the routes path without
+    // waiting for the next A.3 backfill pass.
+    //
+    // `kind` derives from `type`: static_site for static type, otherwise
+    // container_service. `runtime` derives from type='docker' only; proxy
+    // and static leave it NULL (operator can set runtime='lxc' later via
+    // Section H's wizard).
+    const inferredKind = data.type === 'static' ? 'static_site' : 'container_service';
+    const inferredRuntime = data.type === 'docker' ? 'docker' : null;
+
     db.prepare(`
       INSERT INTO services (
         id, name, domain, path_prefix, type, target, port, root_dir, container_name,
-        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status,
+        kind, runtime, target_ip
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       id, data.name, data.domain, data.pathPrefix, data.type, data.target || null,
       data.port || null, data.rootDir || null, data.containerName || null,
       data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
-      data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir
+      data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir,
+      inferredKind, inferredRuntime,
+      data.type !== 'static' ? (data.target || null) : null
     );
 
-    // Helper to undo the create on a downstream failure.
+    // Phase 2b D.2: dual-write the primary route row so Section H's
+    // routes-sourced UI sees every newly-created service immediately,
+    // and D.14 can eventually drop the legacy columns without data loss.
+    try {
+      syncPrimaryRouteFromLegacy(db, id, {
+        domain: data.domain,
+        pathPrefix: data.pathPrefix,
+        targetPort: data.port,
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+        websocketEnabled: data.websocketEnabled,
+        maxUploadSize: data.maxUploadSize,
+      });
+    } catch (routeErr) {
+      // If the dual-write fails, roll back the services insert and
+      // abort the whole create — a half-committed state would be worse
+      // than no service at all.
+      db.prepare('DELETE FROM services WHERE id = ?').run(id);
+      return res.status(400).json({
+        error: 'Failed to create primary route: ' + routeErr.message,
+      });
+    }
+
+    // Helper to undo the create on a downstream failure. Also deletes
+    // any route rows owned by this service via the ON DELETE CASCADE FK.
     const rollbackCreate = async () => {
       try {
         db.prepare('DELETE FROM services WHERE id = ?').run(id);

@@ -676,6 +676,30 @@ servicesRouter.post('/', async (req, res) => {
         .json({ error: 'Domain + path prefix combination already exists' });
     }
 
+    // Phase 2 design decision: SSL is all-or-nothing per domain. The merged
+    // Caddy site block has one site address (`example.com` for auto-TLS or
+    // `http://example.com` for the no-SSL/wildcard fallback) and one
+    // forceHttps stance, so every sibling service on a domain must agree.
+    // If a sibling already exists, the new service must use matching
+    // sslEnabled + forceHttps values.
+    const sibling = db
+      .prepare(
+        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? LIMIT 1'
+      )
+      .get(data.domain);
+    if (sibling) {
+      const siblingSsl = !!sibling.ssl_enabled;
+      const siblingForce = !!sibling.force_https;
+      if (siblingSsl !== !!data.sslEnabled || siblingForce !== !!data.forceHttps) {
+        return res.status(400).json({
+          error:
+            `All services on this domain must share the same SSL settings ` +
+            `(sslEnabled, forceHttps). Existing siblings use ` +
+            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
+        });
+      }
+    }
+
     // Validate type-specific requirements
     if (data.type === 'static' && !data.rootDir) {
       // For static sites, we'll create a directory automatically
@@ -945,6 +969,31 @@ servicesRouter.put('/:id', async (req, res) => {
       if (existing) {
         return res.status(400).json({
           error: 'Domain + path prefix combination already exists',
+        });
+      }
+    }
+
+    // Phase 2 design decision: SSL is all-or-nothing per domain. After the
+    // update, every sibling service on `updatedData.domain` (excluding this
+    // row) must share the new sslEnabled + forceHttps values. If the SSL
+    // settings differ from any sibling, reject the update.
+    const sslSibling = db
+      .prepare(
+        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? AND id != ? LIMIT 1'
+      )
+      .get(updatedData.domain, req.params.id);
+    if (sslSibling) {
+      const siblingSsl = !!sslSibling.ssl_enabled;
+      const siblingForce = !!sslSibling.force_https;
+      if (
+        siblingSsl !== !!updatedData.sslEnabled ||
+        siblingForce !== !!updatedData.forceHttps
+      ) {
+        return res.status(400).json({
+          error:
+            `All services on this domain must share the same SSL settings ` +
+            `(sslEnabled, forceHttps). Existing siblings use ` +
+            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
         });
       }
     }

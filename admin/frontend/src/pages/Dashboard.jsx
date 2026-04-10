@@ -785,6 +785,29 @@ export default function Dashboard() {
       if (formData.port) {
         submitData.port = parseInt(formData.port, 10);
       }
+      // Phase 2 client-side guard: refuse to even attempt the create when
+      // the (domain, prefix) tuple already exists locally. The backend
+      // re-checks, but failing fast here keeps the toast meaningful and
+      // avoids a wasted round trip. Mirrors the backend's normalization
+      // (strip trailing slashes, default to '/').
+      const normalize = (value) => {
+        if (value === undefined || value === null || value === '') return '/';
+        let p = String(value).trim();
+        if (!p.startsWith('/')) p = '/' + p;
+        if (p.length > 1 && p.endsWith('/')) p = p.replace(/\/+$/, '');
+        return p || '/';
+      };
+      const desiredPrefix = normalize(formData.pathPrefix);
+      const existingNormalized = existingPrefixesForDomain.map(normalize);
+      if (existingNormalized.includes(desiredPrefix)) {
+        setSubmitting(false);
+        toast({
+          variant: 'destructive',
+          title: 'Error',
+          description: 'Domain + path prefix combination already exists',
+        });
+        return;
+      }
       await api.createService(submitData);
       toast({
         title: 'Success',

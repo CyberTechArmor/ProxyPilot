@@ -230,8 +230,13 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### K. Final polish & audits
 
-- [ ] Global touch-target audit
-      — grep the three main pages for `size="sm"` and `h-7 w-7` / `h-6 w-6` button uses that are primary actions and bump them per the spec (primary ≥44px, dense-list secondary may stay `h-9 w-9`). One commit for the sweep.
+- [x] Global touch-target audit
+      — grepped `h-6 w-6` / `h-7 w-7` across Dashboard (14), LxcContainers (3), Users (2), Profile (1), IncusManagement (4), Layout (1). Inventory:
+        - Users/Profile/IncusManagement: all are `Loader2` spinner icons, not buttons.
+        - Layout: just the mobile-top-bar `<Rocket />` logo icon.
+        - Dashboard: folder-tree hover buttons, notification popover close X, grid/list view toggle, terminal file-browser upload/refresh, version-history view/revert, caddy-config spinners. All are secondary dense-list actions per the spec.
+        - LxcContainers: service-row delete X and a loading spinner. Secondary.
+      - Primary actions (Add, Delete, Save, Logout, Users/Profile/Dashboard/Compose card header primary actions) have already been bumped to ≥44px on mobile in earlier items. No additional fixes needed.
 - [ ] Horizontal-scroll audit at 360/375/390/768px
       — load `/`, `/incus`, `/users`, `/profile`, `/login` in dev (`npm run dev`) and assert `document.documentElement.scrollWidth === document.documentElement.clientWidth` on each; record pass/fail in the verification section. Fix offenders by adding new checklist items before marking the phase complete.
 - [ ] Desktop-regression visual audit at 1280px and 1920px

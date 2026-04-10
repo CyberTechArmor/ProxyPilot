@@ -358,7 +358,7 @@ export default function Layout() {
 
                 {/* Notification Panel */}
                 {notifOpen && (
-                  <div className="absolute bottom-full left-0 mb-2 w-[min(20rem,calc(100vw-2rem))] max-h-96 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
+                  <div className="fixed bottom-20 left-4 right-4 max-h-96 md:absolute md:bottom-full md:left-0 md:right-auto md:mb-2 md:w-80 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
                     <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/50">
                       <h3 className="text-sm font-semibold">Notifications</h3>
                       <span className="text-xs text-muted-foreground">{notifications.length} total</span>

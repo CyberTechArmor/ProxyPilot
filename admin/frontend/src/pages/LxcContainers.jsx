@@ -1069,20 +1069,20 @@ export default function LxcContainers() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-cyan-500/10 rounded-lg">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 bg-cyan-500/10 rounded-lg shrink-0">
             <Box className="h-6 w-6 text-cyan-500" />
           </div>
-          <div>
-            <h1 className="text-2xl font-bold">LXC Containers</h1>
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold truncate">LXC Containers</h1>
             <p className="text-sm text-muted-foreground">
               {containers.length} container{containers.length !== 1 ? 's' : ''}
               {incusVersion && ` \u2022 Incus ${incusVersion}`}
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={fetchContainers}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh

@@ -120,21 +120,28 @@ function NetworksTab() {
           {managedNetworks.map((net) => (
             <Card key={net.name} className="overflow-hidden">
               <div
-                className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
+                className="flex items-center justify-between gap-2 px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors flex-wrap"
                 onClick={() => setExpandedNet(expandedNet === net.name ? null : net.name)}
               >
-                <div className="flex items-center gap-3">
-                  {expandedNet === net.name ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  <Network className="h-4 w-4 text-primary" />
-                  <div>
-                    <span className="font-medium text-sm">{net.name}</span>
-                    <span className="ml-2 text-xs text-muted-foreground">{net.type}</span>
-                    <span className="ml-2 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  {expandedNet === net.name ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                  <Network className="h-4 w-4 text-primary shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium text-sm truncate">{net.name}</span>
+                      <span className="text-xs text-muted-foreground">{net.type}</span>
+                      <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">managed</span>
+                    </div>
+                    {net.config?.['ipv4.address'] && (
+                      <div className="text-xs font-mono text-muted-foreground truncate sm:hidden">
+                        {net.config['ipv4.address']}
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 shrink-0">
                   {net.config?.['ipv4.address'] && (
-                    <span className="text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
+                    <span className="hidden sm:inline text-xs font-mono text-muted-foreground">{net.config['ipv4.address']}</span>
                   )}
                   <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <span className="text-xs text-muted-foreground">NAT</span>
@@ -167,9 +174,9 @@ function NetworksTab() {
                           return a.localeCompare(b);
                         })
                         .map(([key, value]) => (
-                          <div key={key} className="flex items-baseline gap-2 py-0.5">
-                            <span className={cn("text-xs font-mono", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
-                            <span className="text-xs font-mono text-primary">{value || '(empty)'}</span>
+                          <div key={key} className="flex items-baseline gap-2 py-0.5 min-w-0">
+                            <span className={cn("text-xs font-mono shrink-0", importantKeys.includes(key) ? 'text-foreground font-medium' : 'text-muted-foreground')}>{key}:</span>
+                            <span className="text-xs font-mono text-primary break-all min-w-0">{value || '(empty)'}</span>
                           </div>
                         ))}
                     </div>
@@ -564,12 +571,12 @@ function ImagesTab() {
           {images.map((img) => (
             <Card key={img.fingerprint}>
               <CardContent className="py-3 px-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Image className="h-4 w-4 text-primary shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{getImageLabel(img)}</p>
-                      <div className="flex items-center gap-3 mt-0.5">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <Image className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium break-words">{getImageLabel(img)}</p>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">
                         <span className="text-xs text-muted-foreground font-mono">{img.fingerprint?.substring(0, 12)}</span>
                         <span className="text-xs text-muted-foreground">{formatBytes(img.size)}</span>
                         <span className="text-xs text-muted-foreground">{img.type || 'container'}</span>
@@ -577,18 +584,18 @@ function ImagesTab() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <div className="text-right">
+                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <div className="text-left sm:text-right">
                       <p className="text-xs text-muted-foreground">Uploaded</p>
                       <p className="text-xs">{formatDate(img.uploaded_at)}</p>
                     </div>
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-red-500 hover:text-red-600 hover:bg-red-500/10 h-8 w-8 p-0"
+                      className="text-red-500 hover:text-red-600 hover:bg-red-500/10 h-11 w-11 sm:h-8 sm:w-8 p-0"
                       onClick={() => setDeleteTarget(img)}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
                     </Button>
                   </div>
                 </div>

@@ -1391,6 +1391,66 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
   }
 });
 
+// ==================== PHASE 2b ROUTES CRUD ====================
+//
+// A Phase 2b service (one workload, typically an LXC or Docker container)
+// can expose multiple HTTP routes at once. Each route is a row in the
+// `service_http_routes` table carrying its own (domain, path_prefix,
+// target_port, ssl_enabled, force_https, websocket_enabled,
+// max_upload_size). The parent service contributes the target IP
+// (services.target_ip), the kind (static_site vs container_service),
+// and (for LXC) the container name.
+//
+// These endpoints are new in Phase 2b and live alongside the existing
+// Phase 2 service endpoints. The Phase 2 endpoints continue to operate
+// against legacy columns on `services` until Section D refactors them
+// to read and write through this CRUD surface.
+
+// List routes for a service.
+// Returns `{routes: [...]}` ordered by length(path_prefix) DESC so the
+// more-specific prefixes appear first (matching Caddy's source-order
+// matching behavior). 404 when the parent service does not exist.
+servicesRouter.get('/:id/routes', (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT id FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT id, service_id, domain, path_prefix, target_port,
+                websocket_enabled, ssl_enabled, force_https,
+                max_upload_size, created_at
+           FROM service_http_routes
+          WHERE service_id = ?
+          ORDER BY length(path_prefix) DESC, created_at ASC`
+      )
+      .all(req.params.id);
+
+    const routes = rows.map((r) => ({
+      id: r.id,
+      serviceId: r.service_id,
+      domain: r.domain,
+      pathPrefix: r.path_prefix,
+      targetPort: r.target_port,
+      websocketEnabled: !!r.websocket_enabled,
+      sslEnabled: !!r.ssl_enabled,
+      forceHttps: !!r.force_https,
+      maxUploadSize: r.max_upload_size,
+      createdAt: r.created_at,
+    }));
+
+    res.json({ routes });
+  } catch (error) {
+    console.error('Error listing routes:', error);
+    res.status(500).json({ error: 'Failed to list routes' });
+  }
+});
+
 // Delete service (requires TOTP)
 servicesRouter.delete('/:id', async (req, res) => {
   try {

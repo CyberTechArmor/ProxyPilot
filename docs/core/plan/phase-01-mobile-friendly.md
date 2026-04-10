@@ -175,7 +175,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `grid-cols-2` → `grid-cols-1 sm:grid-cols-2` for the Info tab key/value readouts, resource-limit cards, and live-usage cards.
 - [x] `LxcContainers` interactive-terminal-coming-soon grid (admin/frontend/src/pages/LxcContainers.jsx:1993)
       — `grid grid-cols-2` placeholder features grid → `grid grid-cols-1 sm:grid-cols-2`. *Note: old checklist called this "image-picker stats grid" — it's actually the "coming soon" features grid on the beta terminal tab.*
-- [ ] `LxcContainers` delete / confirm dialogs (admin/frontend/src/pages/LxcContainers.jsx:2029, 2077, 2110)
+- [x] `LxcContainers` delete / confirm dialogs (admin/frontend/src/pages/LxcContainers.jsx:2029, 2077, 2110)
       — each `sm:max-w-md` / `sm:max-w-sm` prepended with `max-w-full h-full rounded-none sm:h-auto sm:rounded-lg`.
 
 ### G. IncusManagement page

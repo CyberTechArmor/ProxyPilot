@@ -2026,7 +2026,7 @@ export default function LxcContainers() {
 
       {/* Import Container Dialog */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Upload className="h-5 w-5 text-cyan-500" />
@@ -2074,7 +2074,7 @@ export default function LxcContainers() {
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <Trash2 className="h-5 w-5" />
@@ -2107,7 +2107,7 @@ export default function LxcContainers() {
 
       {/* Resize Dialog */}
       <Dialog open={resizeOpen} onOpenChange={setResizeOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-sm sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Cpu className="h-5 w-5 text-blue-500" />

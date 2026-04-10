@@ -81,7 +81,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — replace `pl-64` with `pl-0 md:pl-64`; add `pt-14 md:pt-0` when mobile top bar is visible so content is not under the bar. Inner wrapper becomes `p-4 md:p-8` so pages breathe on 360px without wasting space.
 - [x] `Layout` update banner positioning (admin/frontend/src/components/Layout.jsx:229)
       — `left-0 md:left-64`; wraps content (`flex-wrap`) so text + dismiss button do not push off-screen at 360px.
-- [ ] `Layout` notification panel clamping (admin/frontend/src/components/Layout.jsx:320)
+- [x] `Layout` notification panel clamping (admin/frontend/src/components/Layout.jsx:320)
       — swap `w-80` for `w-[min(20rem,calc(100vw-2rem))]`; verify at 360px that the panel no longer overflows the viewport.
 - [ ] `Layout` primary user-section icon buttons (admin/frontend/src/components/Layout.jsx:302)
       — bell and logout `Button size="icon"` instances become `h-11 w-11` on mobile (`h-11 w-11 md:h-10 md:w-10`) so they hit the 44px touch target.

@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 117-141) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 3: Valkey
+## Phase 5: Valkey
 
 **Goal:** Cache/queue service for Infisical.
 
@@ -22,7 +22,7 @@ src/core/valkey.ts           # Config generation, service management
 - [ ] Can AUTH with generated password and PING
 - [ ] Not accessible from bridge network (localhost only)
 
-**Commit:** `phase-03: valkey - cache service for infisical`
+**Commit:** `phase-05: valkey - cache service for infisical`
 
 ---
 

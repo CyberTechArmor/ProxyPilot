@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 405-438) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 12: AIDE
+## Phase 14: AIDE
 
 **Goal:** Filesystem integrity monitoring with baseline management.
 
@@ -31,7 +31,7 @@ src/core/aide.ts             # Init, check, baseline update
 - [ ] Timer installed and scheduled
 - [ ] Check results recorded in SQLite
 
-**Commit:** `phase-12: aide - filesystem integrity monitoring`
+**Commit:** `phase-14: aide - filesystem integrity monitoring`
 
 ---
 

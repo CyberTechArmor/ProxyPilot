@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 582-624) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 17: Documentation Generator
+## Phase 19: Documentation Generator
 
 **Goal:** Auto-generate compliance documentation from live system state.
 
@@ -40,7 +40,7 @@ src/compliance/templates/         # Markdown templates with {{placeholders}}
 - [ ] Previous generation directories are retained
 - [ ] Missing Pandoc prints install instructions, falls back to Markdown
 
-**Commit:** `phase-17: docs-generator - compliance documentation from live state`
+**Commit:** `phase-19: docs-generator - compliance documentation from live state`
 
 ---
 

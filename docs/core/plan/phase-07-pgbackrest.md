@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 173-202) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 5: pgBackRest
+## Phase 7: pgBackRest
 
 **Goal:** Postgres backup with WAL archiving, scheduled full + differential backups.
 
@@ -27,7 +27,7 @@ src/core/pgbackrest.ts       # Config, stanza management, verify, backup command
 - [ ] `proxypilot core backup verify` passes
 - [ ] (Optional) `--restore-test` restores to temp dir, starts temp Postgres, runs query, cleans up
 
-**Commit:** `phase-05: pgbackrest - postgres backup with wal archiving`
+**Commit:** `phase-07: pgbackrest - postgres backup with wal archiving`
 
 ---
 

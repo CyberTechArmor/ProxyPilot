@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 339-374) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 10: WireGuard VPN
+## Phase 12: WireGuard VPN
 
 **Goal:** Admin VPN access with peer management.
 
@@ -33,7 +33,7 @@ src/commands/vpn.ts          # CLI command definitions
 - [ ] `proxypilot vpn list` shows peers with live handshake data
 - [ ] All operations produce audit log entries
 
-**Commit:** `phase-10: wireguard-vpn - admin access with peer management`
+**Commit:** `phase-12: wireguard-vpn - admin access with peer management`
 
 ---
 

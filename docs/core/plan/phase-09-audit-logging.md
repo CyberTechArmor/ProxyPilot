@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 228-260) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 7: Audit Logging (File-Based)
+## Phase 9: Audit Logging (File-Based)
 
 **Goal:** Append-only audit trail for every ProxyPilot mutation. This is the foundation for compliance — everything after this phase generates audit entries.
 
@@ -30,7 +30,7 @@ src/audit/index.ts
 - [ ] Logrotate config installed
 - [ ] Command fails if audit write fails (test by making log file read-only temporarily)
 
-**Commit:** `phase-07: audit-logging - append-only audit trail for all commands`
+**Commit:** `phase-09: audit-logging - append-only audit trail for all commands`
 
 ---
 

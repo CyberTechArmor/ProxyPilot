@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 142-172) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 4: Infisical + Credential Bootstrap
+## Phase 6: Infisical + Credential Bootstrap
 
 **Goal:** Secrets management with zero-plaintext credential lifecycle.
 
@@ -28,7 +28,7 @@ src/core/bootstrap.ts        # Credential generation, bootstrap sequence, rotati
 - [ ] PgBouncer still works after switching to agent-rendered userlist
 - [ ] Can retrieve any secret via Infisical API
 
-**Commit:** `phase-04: infisical - secrets management with credential bootstrap`
+**Commit:** `phase-06: infisical - secrets management with credential bootstrap`
 
 ---
 

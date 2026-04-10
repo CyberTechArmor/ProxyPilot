@@ -45,26 +45,30 @@ see [`../plan/`](../plan/).
 ## Which sections each phase references
 
 When you pick up a phase file from [`../plan/`](../plan/), these are the
-prompt sections it most relies on:
+prompt sections it most relies on. Phases 1 and 2 are frontend/Caddy
+work that predates the core spec and do not reference any prompt
+section.
 
 | Phase | Primary prompt sections |
 |---|---|
-| 01 Foundation | 24 (schema), 25 (file org), 27 (constraints) |
-| 02 Postgres + PgBouncer | 06, 07 |
-| 03 Valkey | 08 |
-| 04 Infisical + Bootstrap | 09, 22 |
-| 05 pgBackRest | 21 |
-| 06 DNS-over-TLS | 12 |
-| 07 Audit Logging | 10 |
-| 08 Database Management | 20 |
-| 09 SSH Hardening | 04 |
-| 10 WireGuard VPN | 13 |
-| 11 CrowdSec | 11 |
-| 12 AIDE | 14 |
-| 13 Host Hardening | 16 |
-| 14 Audit Sync + History | 05, 10 |
-| 15 Patch Management | 17 |
-| 16 Compliance Checker | 18 |
-| 17 Documentation Generator | 19 |
-| 18 Observability | 15 |
-| 19 Init Orchestrator | 02, 22, 23 |
+| 01 Mobile-Friendly Admin Dashboard | — (predates spec) |
+| 02 Multi-Service Path-Prefix Routing | — (predates spec) |
+| 03 Foundation | 24 (schema), 25 (file org), 27 (constraints) |
+| 04 Postgres + PgBouncer | 06, 07 |
+| 05 Valkey | 08 |
+| 06 Infisical + Bootstrap | 09, 22 |
+| 07 pgBackRest | 21 |
+| 08 DNS-over-TLS | 12 |
+| 09 Audit Logging | 10 |
+| 10 Database Management | 20 |
+| 11 SSH Hardening | 04 |
+| 12 WireGuard VPN | 13 |
+| 13 CrowdSec | 11 |
+| 14 AIDE | 14 |
+| 15 Host Hardening | 16 |
+| 16 Audit Sync + History | 05, 10 |
+| 17 Patch Management | 17 |
+| 18 Compliance Checker | 18 |
+| 19 Documentation Generator | 19 |
+| 20 Observability | 15 |
+| 21 Init Orchestrator | 02, 22, 23 |

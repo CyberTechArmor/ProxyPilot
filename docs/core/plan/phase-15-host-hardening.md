@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 439-466) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 13: Host Hardening
+## Phase 15: Host Hardening
 
 **Goal:** Kernel/network hardening, automatic security updates, Incus network ACLs.
 
@@ -25,7 +25,7 @@ src/core/hardening.ts        # sysctl, unattended-upgrades, service disable, Inc
 - [ ] Containers with `--db` can still reach PgBouncer
 - [ ] Containers without `--db` cannot
 
-**Commit:** `phase-13: host-hardening - sysctl, auto-updates, incus acls`
+**Commit:** `phase-15: host-hardening - sysctl, auto-updates, incus acls`
 
 ---
 

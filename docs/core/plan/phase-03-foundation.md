@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 52-85) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 1: Foundation
+## Phase 3: Foundation
 
 **Goal:** Build the infrastructure that every subsequent phase depends on — state store, configuration, and systemd management.
 
@@ -31,7 +31,7 @@ src/core/index.ts
 - [ ] Systemd generator can create a test unit, start it, check status, stop it, remove it
 - [ ] Unit tests pass for schema initialization, config loading, systemd generation
 
-**Commit:** `phase-01: foundation - sqlite schema, config loader, systemd generator`
+**Commit:** `phase-03: foundation - sqlite schema, config loader, systemd generator`
 
 ---
 

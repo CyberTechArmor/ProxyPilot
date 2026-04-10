@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 666-705) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 19: Init Orchestrator
+## Phase 21: Init Orchestrator
 
 **Goal:** `proxypilot init` ties every phase into a single profile-based bootstrap command.
 
@@ -37,7 +37,7 @@ src/commands/status.ts       # Updated proxypilot status with all subsystems
 - [ ] `proxypilot core status` shows all core service states
 - [ ] Full end-to-end: init → create container with database → verify route, TLS, database, secrets, firewall, audit trail
 
-**Commit:** `phase-19: init-orchestrator - proxypilot init with profile-based bootstrap`
+**Commit:** `phase-21: init-orchestrator - proxypilot init with profile-based bootstrap`
 
 ---
 

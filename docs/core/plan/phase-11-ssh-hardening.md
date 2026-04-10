@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 302-338) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 9: SSH Hardening + Access Management
+## Phase 11: SSH Hardening + Access Management
 
 **Goal:** Per-person SSH access with safe transition sequence.
 
@@ -34,7 +34,7 @@ src/commands/access.ts       # CLI command definitions
 - [ ] All operations produce audit log entries
 - [ ] Revert works if test fails after lockdown
 
-**Commit:** `phase-09: ssh-access - per-person ssh with safe transition`
+**Commit:** `phase-11: ssh-access - per-person ssh with safe transition`
 
 ---
 

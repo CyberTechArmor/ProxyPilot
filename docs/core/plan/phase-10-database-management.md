@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 261-301) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 8: Database Management
+## Phase 10: Database Management
 
 **Goal:** `proxypilot db` commands for workload database lifecycle + per-container firewall rules.
 
@@ -38,7 +38,7 @@ src/commands/db.ts           # CLI command definitions
 - [ ] All operations produce audit log entries
 - [ ] nftables rules persist across reboot
 
-**Commit:** `phase-08: database-management - db lifecycle with firewall rules`
+**Commit:** `phase-10: database-management - db lifecycle with firewall rules`
 
 ---
 

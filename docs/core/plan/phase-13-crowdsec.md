@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 375-404) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 11: CrowdSec
+## Phase 13: CrowdSec
 
 **Goal:** Threat detection with Caddy and SSH bouncers.
 
@@ -27,7 +27,7 @@ src/commands/security.ts     # CLI command definitions (shared with AIDE in Phas
 - [ ] `proxypilot core status` includes CrowdSec state
 - [ ] Simulated SSH brute force triggers a ban
 
-**Commit:** `phase-11: crowdsec - threat detection with caddy and ssh bouncers`
+**Commit:** `phase-13: crowdsec - threat detection with caddy and ssh bouncers`
 
 ---
 

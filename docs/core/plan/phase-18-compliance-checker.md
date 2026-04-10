@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 541-581) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 16: Compliance Checker
+## Phase 18: Compliance Checker
 
 **Goal:** Automated SOC 2 + HIPAA control verification against live system state.
 
@@ -38,7 +38,7 @@ src/commands/compliance.ts      # CLI command definitions
 - [ ] Classification tagging works and affects compliance check strictness
 - [ ] Weekly timer installed for Compliant profile
 
-**Commit:** `phase-16: compliance-checker - soc2 and hipaa control verification`
+**Commit:** `phase-18: compliance-checker - soc2 and hipaa control verification`
 
 ---
 

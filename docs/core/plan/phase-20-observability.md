@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 625-665) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 18: Observability Stack
+## Phase 20: Observability Stack
 
 **Goal:** Optional Grafana + Loki + Alloy for dashboards, log search, and alerting.
 
@@ -38,7 +38,7 @@ src/commands/observability.ts    # CLI command definitions
 - [ ] `proxypilot observability status` shows all three services
 - [ ] Without observability installed: `proxypilot observability status` prints install suggestion, does not error
 
-**Commit:** `phase-18: observability - grafana, loki, alloy dashboards and alerting`
+**Commit:** `phase-20: observability - grafana, loki, alloy dashboards and alerting`
 
 ---
 

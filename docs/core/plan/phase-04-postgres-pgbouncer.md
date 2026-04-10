@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 86-116) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 2: PostgreSQL + PgBouncer
+## Phase 4: PostgreSQL + PgBouncer
 
 **Goal:** Core Postgres instance with PgBouncer connection pooling, managed by systemd.
 
@@ -28,7 +28,7 @@ src/core/pgbouncer.ts        # Config generation, dual listener, reload via admi
 - [ ] PgBouncer listens on both 127.0.0.1:6432 and 10.0.100.1:6432
 - [ ] PgBouncer reload works via admin console without dropping connections
 
-**Commit:** `phase-02: postgresql + pgbouncer - core database with connection pooling`
+**Commit:** `phase-04: postgresql + pgbouncer - core database with connection pooling`
 
 ---
 

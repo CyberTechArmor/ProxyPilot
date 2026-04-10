@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 203-227) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 6: DNS-over-TLS
+## Phase 8: DNS-over-TLS
 
 **Goal:** Encrypted DNS for every ProxyPilot host.
 
@@ -22,7 +22,7 @@ src/core/dns.ts              # resolved.conf generation, restart, verify
 - [ ] DNS queries resolve correctly
 - [ ] Re-running does not overwrite if already configured
 
-**Commit:** `phase-06: dns-over-tls - encrypted dns`
+**Commit:** `phase-08: dns-over-tls - encrypted dns`
 
 ---
 

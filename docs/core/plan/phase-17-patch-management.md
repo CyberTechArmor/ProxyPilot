@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 504-540) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 15: Patch Management
+## Phase 17: Patch Management
 
 **Goal:** Container patching with pre-patch snapshots and auto-rollback.
 
@@ -34,7 +34,7 @@ src/commands/patch.ts        # CLI command definitions
 - [ ] Expired snapshots auto-deleted by cleanup timer
 - [ ] All operations produce audit log entries
 
-**Commit:** `phase-15: patch-management - patching with snapshot rollback`
+**Commit:** `phase-17: patch-management - patching with snapshot rollback`
 
 ---
 

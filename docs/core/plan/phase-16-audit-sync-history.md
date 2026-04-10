@@ -1,7 +1,7 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 467-503) -->
 <!-- Index: docs/core/plan/README.md -->
 
-## Phase 14: Audit Postgres Sync + History Tracking
+## Phase 16: Audit Postgres Sync + History Tracking
 
 **Goal:** Sync audit log to Postgres for querying. Track SSH sessions, PgBouncer connections, and TLS certificates.
 
@@ -34,7 +34,7 @@ src/commands/certs.ts        # CLI command definitions
 - [ ] `proxypilot certs list` shows current certificates
 - [ ] `proxypilot certs history <domain>` shows cert lifecycle
 
-**Commit:** `phase-14: audit-sync-history - postgres sync, ssh/db/cert tracking`
+**Commit:** `phase-16: audit-sync-history - postgres sync, ssh/db/cert tracking`
 
 ---
 

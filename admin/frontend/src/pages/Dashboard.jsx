@@ -5191,7 +5191,7 @@ volumes:
 
       {/* Discover Dialog */}
       <Dialog open={discoverDialogOpen} onOpenChange={setDiscoverDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[80vh] sm:rounded-lg overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Radar className="h-5 w-5" />
@@ -5303,7 +5303,7 @@ volumes:
 
       {/* Remove Site Dialog */}
       <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <Trash2 className="h-5 w-5" />
@@ -5394,7 +5394,7 @@ volumes:
 
       {/* Nano Editor Dialog */}
       <Dialog open={nanoEditorOpen} onOpenChange={setNanoEditorOpen}>
-        <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-4xl sm:h-[80vh] sm:rounded-lg flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2 font-mono">
               <Code className="h-5 w-5" />
@@ -5449,7 +5449,7 @@ volumes:
 
       {/* One-Click Install Dialog */}
       <Dialog open={oneClickDialogOpen} onOpenChange={setOneClickDialogOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Rocket className="h-5 w-5 text-green-500" />
@@ -5511,7 +5511,7 @@ volumes:
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label htmlFor="wpPort">WordPress Port</Label>
                     <Input
@@ -5585,7 +5585,7 @@ volumes:
           setNewFolderName('');
         }
       }}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FolderTree className="h-5 w-5 text-yellow-500" />

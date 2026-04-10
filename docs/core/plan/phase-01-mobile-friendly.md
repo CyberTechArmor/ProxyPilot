@@ -147,18 +147,17 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `grid grid-cols-2` → `grid grid-cols-1 sm:grid-cols-2`.
 - [x] `Dashboard` remove-cert / export / import / kill-switch bare confirm dialogs (admin/frontend/src/pages/Dashboard.jsx — removeCert ~3810, export/import/killSwitch ~5076-5143)
       — every bare `<DialogContent>` without `className` gets `className="max-w-full h-full rounded-none sm:max-w-{md|lg} sm:h-auto sm:rounded-lg"`. *Note: the E8 line numbers in the draft were stale — the four bare dialogs are removeCert, export, import, and killSwitch.*
-- [ ] `Dashboard` versions dialog (admin/frontend/src/pages/Dashboard.jsx:5129)
-      — `max-w-2xl max-h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[80vh] sm:rounded-lg`.
-- [ ] `Dashboard` kill-switch TOTP dialog (admin/frontend/src/pages/Dashboard.jsx:5241)
-      — `max-w-md` → `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`.
-- [ ] `Dashboard` one-click install dialog (admin/frontend/src/pages/Dashboard.jsx:5332)
-      — `max-w-4xl h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-4xl sm:h-[80vh] sm:rounded-lg`.
-- [ ] `Dashboard` discover sites dialog (admin/frontend/src/pages/Dashboard.jsx:5387)
-      — `max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`; inner `grid grid-cols-1` stays but `grid grid-cols-2` at line 5449 becomes `grid grid-cols-1 sm:grid-cols-2`.
-- [ ] `Dashboard` export dialog (admin/frontend/src/pages/Dashboard.jsx:5523)
-      — `max-w-md` → `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`.
-- [ ] `Dashboard` folder management dialog (admin/frontend/src/pages/Dashboard.jsx:3814)
-      — `max-w-md` → `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`.
+- [x] `Dashboard` discover sites dialog (admin/frontend/src/pages/Dashboard.jsx — discoverDialogOpen, ~line 5194 `max-w-2xl max-h-[80vh]`)
+      — `max-w-2xl max-h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[80vh] sm:rounded-lg`. *Note: old checklist labelled this "versions dialog" at line 5129 — it's actually the Discover Sites dialog based on the Dialog `open` binding.*
+- [x] `Dashboard` remove-site dialog (admin/frontend/src/pages/Dashboard.jsx — removeDialogOpen, ~line 5306 `max-w-md`)
+      — `max-w-md` → `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`. *Note: old checklist labelled this "kill-switch TOTP" at line 5241 — it's actually the Remove Site dialog.*
+- [x] `Dashboard` nano editor dialog (admin/frontend/src/pages/Dashboard.jsx — nanoEditorOpen, ~line 5397 `max-w-4xl h-[80vh]`)
+      — `max-w-4xl h-[80vh]` → `max-w-full h-full rounded-none sm:max-w-4xl sm:h-[80vh] sm:rounded-lg`. *Note: old checklist labelled this "one-click install" at line 5332 — it's actually the Nano Editor dialog.*
+- [x] `Dashboard` one-click install dialog (admin/frontend/src/pages/Dashboard.jsx — oneClickDialogOpen, ~line 5452 `max-w-lg`)
+      — `max-w-lg` → `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`; inner `grid grid-cols-2` (WordPress port + DB port row) → `grid grid-cols-1 sm:grid-cols-2`. *Note: old checklist labelled this "discover sites" at line 5387.*
+- [x] `Dashboard` folder management dialog (admin/frontend/src/pages/Dashboard.jsx — folderDialogOpen, ~line 5588 `max-w-md`)
+      — `max-w-md` → `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`. *Note: old checklist labelled this "export dialog" at line 5523 — it's actually the Folder Management dialog (export was already covered in the bare-dialog commit).*
+- [x] `Dashboard` folder management dialog (duplicate — rolled into the correctly-identified folder management item above).
 
 ### F. LxcContainers page
 

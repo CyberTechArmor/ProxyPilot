@@ -97,8 +97,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 - [x] Call site 1: `POST /:id/obtain-certificate` (admin/backend/src/routes/services.js:277)
       — After the `UPDATE services SET ssl_enabled = 1 ...` runs, replace the `generateCaddyConfig(serviceConfig)` + `writeCaddyConfig(configPath, caddyConfig)` pair with a single `await regenerateDomainCaddyConfig(db, service.domain)`. Keep the subsequent `reloadCaddy()` call. Remove the now-unused local `serviceConfig` object. **Verified:** integration test — two services seeded with `ssl_enabled=0` produce `http://example.com {` merged config; after flipping both rows to `ssl_enabled=1` and calling `regenerateDomainCaddyConfig`, the merged file switches to plain `example.com {` (Caddy auto-TLS path).
 
-- [ ] Call site 2: `DELETE /:id/certificate` (admin/backend/src/routes/services.js:344)
-      — Same substitution as call site 1, after the `UPDATE services SET ssl_enabled = 0 ...` statement.
+- [x] Call site 2: `DELETE /:id/certificate` (admin/backend/src/routes/services.js:344)
+      — Same substitution as call site 1, after the `UPDATE services SET ssl_enabled = 0 ...` statement. **Verified:** integration test — seed an ssl_enabled=1 service, confirm merged file uses `example.com {`, flip ssl_enabled=0 + call regenerate, confirm merged file now uses `http://example.com {`.
 
 - [ ] Call site 3: `POST /:id/regenerate-config` (admin/backend/src/routes/services.js:439)
       — Replace the `generateCaddyConfig(serviceConfig)` + write with `await regenerateDomainCaddyConfig(db, service.domain)`.

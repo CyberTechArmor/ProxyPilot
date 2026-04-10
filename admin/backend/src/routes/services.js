@@ -313,23 +313,9 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     // Disable SSL in database
     db.prepare('UPDATE services SET ssl_enabled = 0, force_https = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
 
-    // Regenerate Caddy config without HTTPS
-    const serviceConfig = {
-      domain: service.domain,
-      pathPrefix: service.path_prefix,
-      type: service.type,
-      target: service.target,
-      port: service.port,
-      rootDir: service.root_dir,
-      websocketEnabled: !!service.websocket_enabled,
-      forceHttps: false,
-      maxUploadSize: service.max_upload_size,
-      sslEnabled: false,
-    };
-
-    const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = caddyFilePath(service.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
+    // Regenerate the merged Caddy config for the whole domain so sibling
+    // services on the same domain keep sharing a single site block.
+    await regenerateDomainCaddyConfig(db, service.domain);
 
     // Reload Caddy
     const reloadResult = await reloadCaddy();

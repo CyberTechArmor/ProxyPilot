@@ -416,8 +416,13 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className={cn("pl-64", showUpdateBanner && updateInfo?.updateAvailable && "pt-10")}>
-        <div className="p-8">
+      <main
+        className={cn(
+          "pl-0 md:pl-64 pt-14 md:pt-0",
+          showUpdateBanner && updateInfo?.updateAvailable && "md:pt-10"
+        )}
+      >
+        <div className="p-4 md:p-8">
           <Outlet />
         </div>
       </main>

@@ -1082,12 +1082,19 @@ servicesRouter.put('/:id', async (req, res) => {
     // Snapshot the current row so we can revert on failure.
     const preUpdateRow = { ...service };
 
+    // Phase 2b D.3: derive updated target_ip from the legacy target for
+    // non-static services (matches the A.3 backfill rule) so the routes
+    // JOIN query picks up the new IP. Static sites keep target_ip = NULL.
+    const updatedTargetIp =
+      updatedData.type === 'static' ? null : updatedData.target || null;
+
     // Update DB row first so regenerateDomainCaddyConfig picks it up.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
         root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
         force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+        target_ip = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
@@ -1095,8 +1102,48 @@ servicesRouter.put('/:id', async (req, res) => {
       updatedData.target, updatedData.port, updatedData.rootDir,
       updatedData.dataDir, updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
-      updatedData.maxUploadSize, req.params.id
+      updatedData.maxUploadSize, updatedTargetIp, req.params.id
     );
+
+    // Phase 2b D.3: dual-write the primary route to match the new legacy
+    // values. syncPrimaryRouteFromLegacy finds the earliest-created route
+    // owned by this service and updates it in place. Secondary routes
+    // (added via C.2) are left untouched.
+    try {
+      syncPrimaryRouteFromLegacy(db, req.params.id, {
+        domain: updatedData.domain,
+        pathPrefix: updatedData.pathPrefix,
+        targetPort: updatedData.port,
+        sslEnabled: updatedData.sslEnabled,
+        forceHttps: updatedData.forceHttps,
+        websocketEnabled: updatedData.websocketEnabled,
+        maxUploadSize: updatedData.maxUploadSize,
+      });
+    } catch (routeErr) {
+      // Route sync failed (typically a UNIQUE violation from the new
+      // (domain, path_prefix) tuple colliding with another service's
+      // route). Revert the services row and return 400.
+      db.prepare(`
+        UPDATE services SET
+          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+          root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
+          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+          target_ip = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
+        preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
+        preUpdateRow.root_dir, preUpdateRow.data_dir,
+        preUpdateRow.container_name, preUpdateRow.ssl_enabled,
+        preUpdateRow.force_https, preUpdateRow.websocket_enabled,
+        preUpdateRow.max_upload_size, preUpdateRow.target_ip,
+        preUpdateRow.updated_at, req.params.id
+      );
+      return res
+        .status(400)
+        .json({ error: 'Failed to sync primary route: ' + routeErr.message });
+    }
 
     const rollbackUpdate = async () => {
       try {
@@ -1105,6 +1152,7 @@ servicesRouter.put('/:id', async (req, res) => {
             name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
             root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
             force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+            target_ip = ?,
             updated_at = ?
           WHERE id = ?
         `).run(
@@ -1113,10 +1161,26 @@ servicesRouter.put('/:id', async (req, res) => {
           preUpdateRow.root_dir, preUpdateRow.data_dir,
           preUpdateRow.container_name, preUpdateRow.ssl_enabled,
           preUpdateRow.force_https, preUpdateRow.websocket_enabled,
-          preUpdateRow.max_upload_size, preUpdateRow.updated_at, req.params.id
+          preUpdateRow.max_upload_size, preUpdateRow.target_ip,
+          preUpdateRow.updated_at, req.params.id
         );
       } catch (e) {
         console.error('Rollback: failed to revert service row', e);
+      }
+      // Phase 2b D.3: also revert the primary route via the same helper
+      // so the routes table stays consistent with the services row.
+      try {
+        syncPrimaryRouteFromLegacy(db, req.params.id, {
+          domain: preUpdateRow.domain,
+          pathPrefix: preUpdateRow.path_prefix,
+          targetPort: preUpdateRow.port,
+          sslEnabled: !!preUpdateRow.ssl_enabled,
+          forceHttps: !!preUpdateRow.force_https,
+          websocketEnabled: !!preUpdateRow.websocket_enabled,
+          maxUploadSize: preUpdateRow.max_upload_size,
+        });
+      } catch (e) {
+        console.error('Rollback: failed to revert primary route', e);
       }
       try {
         if (backupNewExisted && backupNew !== null) {

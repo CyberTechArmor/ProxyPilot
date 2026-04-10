@@ -2874,6 +2874,16 @@ volumes:
                       Default <code>/</code> matches all paths. Set <code>/api</code> to scope this
                       service to <code>/api/*</code> (Caddy strips the prefix before proxying).
                     </p>
+                    {existingPrefixesForDomain.length > 0 && (
+                      <div
+                        data-testid="existing-prefixes-banner"
+                        className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-600 dark:text-blue-300"
+                      >
+                        Domain already in use. Existing path prefixes:{' '}
+                        <code className="font-mono">{existingPrefixesForDomain.join(', ')}</code>.
+                        Choose a different prefix to add a second service to this domain.
+                      </div>
+                    )}
                   </div>
                   {formData.type === 'docker' && (
                     <>

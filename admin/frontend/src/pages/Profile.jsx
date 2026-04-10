@@ -850,7 +850,7 @@ export default function Profile() {
 
       {/* Revoke Device Dialog */}
       <Dialog open={revokeDeviceOpen} onOpenChange={setRevokeDeviceOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Revoke Device</DialogTitle>
             <DialogDescription>

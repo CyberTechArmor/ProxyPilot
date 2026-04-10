@@ -124,8 +124,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 - [x] `DELETE /:id` endpoint (admin/backend/src/routes/services.js:1326)
       — Reordered so `DELETE FROM services WHERE id = ?` runs first, then `regenerateDomainCaddyConfig(db, service.domain)` writes or unlinks the merged file based on the new DB state. The old bare `unlink(caddyFilePath(service.domain))` is gone so sibling services on the same domain survive a delete. **Verified:** Express integration test — seeded two services on `del.test` (`/` port 4000, `/api` port 3000), DELETEd the `/api` row, got 200 with the merged file still present, containing the root `handle {` at port 4000 and no trace of `/api` or port 3000; DELETEd the last remaining row, got 200, confirmed the merged file at `CADDY_SITES_DIR/del.test` was unlinked.
 
-- [ ] Retire `generateCaddyConfig(service)` (admin/backend/src/routes/services.js:3127)
-      — Once all nine call sites have been flipped, delete the old single-service function definition. `grep generateCaddyConfig admin/backend/src/routes/services.js` returns zero matches. `generateServiceHandlerLines` + `buildDomainCaddyConfig` are the only path.
+- [x] Retire `generateCaddyConfig(service)` (admin/backend/src/routes/services.js)
+      — Deleted the old single-service function definition and replaced it with a short "Phase 2 note" comment pointing future readers at `regenerateDomainCaddyConfig` / `buildDomainCaddyConfig`. **Verified:** `grep generateCaddyConfig` returns only the comment mention (no function definition, no call sites). The backend module loads cleanly with the expected named exports.
 
 ### C. Backend — Uniqueness validation
 

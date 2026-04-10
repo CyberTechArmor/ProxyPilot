@@ -3459,76 +3459,11 @@ async function regenerateDomainCaddyConfig(db, domain) {
   await writeCaddyConfig(configPath, merged);
 }
 
-// Generate Caddy site config based on service type
-function generateCaddyConfig(service) {
-  const { domain, type, maxUploadSize, sslEnabled } = service;
-  const pathPrefix = normalizePathPrefix(service.pathPrefix || service.path_prefix);
-  const hasPathPrefix = pathPrefix !== '/';
-  const isWildcardDomain = typeof domain === 'string' && domain.startsWith('*.');
-
-  // Caddy auto-handles TLS when domain is used without http:// prefix.
-  // Wildcard domains require a wildcard certificate, which Caddy can obtain
-  // only via a DNS-01 challenge (needs a DNS provider plugin). Fall back to
-  // http:// for wildcards so the admin can still serve traffic without TLS
-  // until a DNS-01 solver is configured. The operator can enable TLS for
-  // wildcards manually by editing the Caddyfile for that domain.
-  let siteAddress;
-  if (!sslEnabled || isWildcardDomain) {
-    siteAddress = `http://${domain}`;
-  } else {
-    siteAddress = domain;
-  }
-
-  let lines = [];
-  lines.push(`# ProxyPilot Managed Configuration`);
-  lines.push(`# Domain: ${domain}`);
-  lines.push(`# Path prefix: ${pathPrefix}`);
-  lines.push(`# Type: ${type}`);
-  lines.push(`# Generated: ${new Date().toISOString()}`);
-  lines.push(``);
-  lines.push(`${siteAddress} {`);
-
-  // Request body size limit (site-level — applies to all matchers below)
-  if (maxUploadSize) {
-    lines.push(`    request_body {`);
-    lines.push(`        max_size ${toCaddySize(maxUploadSize)}`);
-    lines.push(`    }`);
-    lines.push(``);
-  }
-
-  // When a path prefix is set, all of this service's handling is wrapped in
-  // a `handle_path` block so Caddy strips the prefix before proxying. Any
-  // request that does not match the prefix falls through to Caddy's default
-  // 404 — the operator can add more services on the same domain later.
-  if (hasPathPrefix) {
-    lines.push(`    handle_path ${pathPrefix}* {`);
-    lines.push(...generateServiceHandlerBody(service, '        '));
-    lines.push(`    }`);
-  } else {
-    lines.push(...generateServiceHandlerBody(service, '    '));
-  }
-
-  // Security headers (site-level so they apply even on 404s)
-  lines.push(``);
-  lines.push(`    header {`);
-  lines.push(`        X-Frame-Options "SAMEORIGIN"`);
-  lines.push(`        X-Content-Type-Options "nosniff"`);
-  lines.push(`        X-XSS-Protection "1; mode=block"`);
-  lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
-  lines.push(`    }`);
-
-  // Logging — sanitize the domain so wildcard `*` does not leak into the
-  // log filename. Uses the same sanitizer as the Caddy site config filename.
-  lines.push(``);
-  lines.push(`    log {`);
-  lines.push(`        output file /var/log/caddy/${caddyFileName(domain)}.log`);
-  lines.push(`    }`);
-
-  lines.push(`}`);
-  lines.push(``);
-
-  return lines.join('\n');
-}
+// Phase 2 note: the single-service `generateCaddyConfig` function was
+// retired — all nine previous call sites now use `regenerateDomainCaddyConfig`
+// (DB reconciliation) or `buildDomainCaddyConfig` (pure in-memory builder).
+// A single domain can host multiple services on distinct path prefixes, so
+// every Caddy write now goes through the merged-config path.
 
 // Named exports for the Phase 2 Caddy helpers. These are kept internal to
 // this module at the call-site level but exported so integration tests and

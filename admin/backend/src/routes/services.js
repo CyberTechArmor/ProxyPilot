@@ -743,27 +743,29 @@ services:
       data.target = data.target || '127.0.0.1';
     }
 
-    // Generate Caddy config
-    const caddyConfig = generateCaddyConfig(data);
-
-    // Write Caddy site config file
+    // Phase 2: with merged per-domain configs, the new service must be in
+    // the DB before we regenerate the merged file for the domain — otherwise
+    // the file would be rewritten without the new row. Flow:
+    //   1. Backup the current merged file for the domain (may not exist).
+    //   2. Insert the row into the DB.
+    //   3. Call regenerateDomainCaddyConfig to write the merged file.
+    //   4. caddy adapt + reload; on any failure, roll back both the DB row
+    //      and the on-disk file to the pre-create state.
     await ensureCaddyStructure();
     const configPath = caddyFilePath(data.domain);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate Caddy config
+    let backupMergedConfig = null;
+    let backupExisted = false;
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    } catch (testErr) {
-      // Rollback
-      await unlink(configPath).catch(() => {});
-      return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // If reading the backup fails, continue without one — the rollback
+      // will just unlink the file.
     }
 
-    // Reload Caddy
-    const caddyResult = await reloadCaddy();
-
-    // Insert into database
+    // Insert into database first so the merged config includes the new row.
     db.prepare(`
       INSERT INTO services (
         id, name, domain, path_prefix, type, target, port, root_dir, container_name,
@@ -775,6 +777,55 @@ services:
       data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
       data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir
     );
+
+    // Helper to undo the create on a downstream failure.
+    const rollbackCreate = async () => {
+      try {
+        db.prepare('DELETE FROM services WHERE id = ?').run(id);
+      } catch (e) {
+        console.error('Rollback: failed to delete service row', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore Caddy config', e);
+      }
+    };
+
+    // Write the merged Caddy config for the whole domain (now including the
+    // newly inserted row).
+    try {
+      await regenerateDomainCaddyConfig(db, data.domain);
+    } catch (genErr) {
+      await rollbackCreate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // Validate Caddy config
+    try {
+      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    } catch (testErr) {
+      await rollbackCreate();
+      return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
+    }
+
+    // Reload Caddy
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackCreate();
+      // Best-effort reload to bring Caddy back to the pre-create state.
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - create rolled back',
+        details: caddyResult.error,
+      });
+    }
 
     logAudit(req.user.id, 'SERVICE_CREATED', 'service', id, data, req.ip);
 

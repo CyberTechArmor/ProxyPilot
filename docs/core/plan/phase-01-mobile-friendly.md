@@ -88,7 +88,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 ### B. Dashboard page — Services tab header + chrome
 
-- [ ] `Dashboard` page header row (admin/frontend/src/pages/Dashboard.jsx:2647)
+- [x] `Dashboard` page header row (admin/frontend/src/pages/Dashboard.jsx:2647)
       — header becomes `flex-col gap-3 sm:flex-row sm:items-center sm:justify-between`; action button row wraps (`flex-wrap`) so Reload/Regenerate/Export/Import/Discover/Terminal/One-Click/Kill Switch/Add Service do not cause horizontal scroll at 375px.
 - [ ] `Dashboard` header notification popover (admin/frontend/src/pages/Dashboard.jsx:2715)
       — popover width becomes `w-[min(20rem,calc(100vw-2rem))]`; `right-0` stays so it anchors to the bell and stays in the viewport at 360px.

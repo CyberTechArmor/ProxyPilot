@@ -3327,6 +3327,44 @@ function buildDomainCaddyConfig(servicesList, domain) {
   return lines.join('\n');
 }
 
+// Read every service for a domain from the DB, build the merged Caddy site
+// config, and write it to disk (or unlink the file when no services remain).
+// Callers use this after they have already mutated the DB — the helper is a
+// reconciliation step that makes the on-disk Caddy config match DB state.
+//
+// Admin services are skipped (their config is owned by the installer) so
+// running this on the admin domain never clobbers the Caddyfile the operator
+// maintains by hand.
+async function regenerateDomainCaddyConfig(db, domain) {
+  const rows = db
+    .prepare(
+      `SELECT id, name, domain, type, target, port, root_dir, container_name,
+              ssl_enabled, force_https, websocket_enabled, max_upload_size,
+              data_dir, is_admin, path_prefix
+         FROM services
+        WHERE domain = ? AND is_admin = 0`
+    )
+    .all(domain);
+
+  const configPath = caddyFilePath(domain);
+
+  // No managed services left on this domain — remove the merged file so
+  // Caddy stops serving it. Swallow ENOENT; nothing to clean up is fine.
+  if (!rows || rows.length === 0) {
+    await unlink(configPath).catch(() => {});
+    return;
+  }
+
+  const merged = buildDomainCaddyConfig(rows, domain);
+  if (merged === null) {
+    await unlink(configPath).catch(() => {});
+    return;
+  }
+
+  await ensureCaddyStructure();
+  await writeCaddyConfig(configPath, merged);
+}
+
 // Generate Caddy site config based on service type
 function generateCaddyConfig(service) {
   const { domain, type, maxUploadSize, sslEnabled } = service;
@@ -3397,3 +3435,9 @@ function generateCaddyConfig(service) {
 
   return lines.join('\n');
 }
+
+// Named exports for the Phase 2 Caddy helpers. These are kept internal to
+// this module at the call-site level but exported so integration tests and
+// the Phase 2 verification pass can invoke them directly without spinning
+// up the full HTTP router.
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody };

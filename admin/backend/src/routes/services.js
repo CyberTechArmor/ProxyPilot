@@ -930,56 +930,50 @@ servicesRouter.put('/:id', async (req, res) => {
       maxUploadSize: data.maxUploadSize || service.max_upload_size,
     };
 
-    // Remove old Caddy config if domain changed
-    if (data.domain && data.domain !== service.domain) {
-      await unlink(caddyFilePath(service.domain)).catch(() => {});
-    }
+    // Phase 2: the merged per-domain config reflects DB state, so we must
+    // update the DB row before regenerating. Flow:
+    //   1. Snapshot the pre-update DB row (for rollback).
+    //   2. Backup the merged file for the new domain.
+    //   3. If the domain changed, also backup the merged file for the old
+    //      domain (so we can restore it if the update fails).
+    //   4. Update the DB row.
+    //   5. Regenerate merged config for the new domain (and the old domain,
+    //      if it changed — that rewrite shrinks or unlinks the old file).
+    //   6. caddy adapt + reload; on any failure, roll back everything.
+    await ensureCaddyStructure();
+    const newConfigPath = caddyFilePath(updatedData.domain);
+    const oldConfigPath = caddyFilePath(service.domain);
+    const domainChanged =
+      data.domain && data.domain !== service.domain;
 
-    // Backup existing Caddy config before changes
-    const configPath = caddyFilePath(updatedData.domain);
-    let backupConfig = null;
+    let backupNew = null;
+    let backupNewExisted = false;
     try {
-      if (existsSync(configPath)) {
-        backupConfig = await readFile(configPath, 'utf-8');
+      if (existsSync(newConfigPath)) {
+        backupNew = await readFile(newConfigPath, 'utf-8');
+        backupNewExisted = true;
       }
     } catch (e) {
-      // No backup available
+      // Continue without a backup — rollback will unlink instead.
     }
 
-    // Generate and write new Caddy config
-    const caddyConfig = generateCaddyConfig(updatedData);
-    await writeCaddyConfig(configPath, caddyConfig);
-
-    // Validate Caddy config before reload
-    try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
-    } catch (testError) {
-      // Config validation failed - revert to backup
-      if (backupConfig) {
-        await writeCaddyConfig(configPath, backupConfig);
+    let backupOld = null;
+    let backupOldExisted = false;
+    if (domainChanged) {
+      try {
+        if (existsSync(oldConfigPath)) {
+          backupOld = await readFile(oldConfigPath, 'utf-8');
+          backupOldExisted = true;
+        }
+      } catch (e) {
+        // Continue without a backup.
       }
-      return res.status(400).json({
-        error: 'Caddy config validation failed - reverted to previous config',
-        details: testError.stderr || testError.message,
-      });
     }
 
-    // Reload Caddy with failsafe
-    try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
-    } catch (reloadError) {
-      // Reload failed - revert to backup
-      if (backupConfig) {
-        await writeCaddyConfig(configPath, backupConfig);
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
-      }
-      return res.status(400).json({
-        error: 'Caddy reload failed - reverted to previous config',
-        details: reloadError.stderr || reloadError.message,
-      });
-    }
+    // Snapshot the current row so we can revert on failure.
+    const preUpdateRow = { ...service };
 
-    // Update database
+    // Update DB row first so regenerateDomainCaddyConfig picks it up.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
@@ -994,6 +988,87 @@ servicesRouter.put('/:id', async (req, res) => {
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
       updatedData.maxUploadSize, req.params.id
     );
+
+    const rollbackUpdate = async () => {
+      try {
+        db.prepare(`
+          UPDATE services SET
+            name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+            root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
+            force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(
+          preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
+          preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
+          preUpdateRow.root_dir, preUpdateRow.data_dir,
+          preUpdateRow.container_name, preUpdateRow.ssl_enabled,
+          preUpdateRow.force_https, preUpdateRow.websocket_enabled,
+          preUpdateRow.max_upload_size, preUpdateRow.updated_at, req.params.id
+        );
+      } catch (e) {
+        console.error('Rollback: failed to revert service row', e);
+      }
+      try {
+        if (backupNewExisted && backupNew !== null) {
+          await writeCaddyConfig(newConfigPath, backupNew);
+        } else {
+          await unlink(newConfigPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore new-domain Caddy config', e);
+      }
+      if (domainChanged) {
+        try {
+          if (backupOldExisted && backupOld !== null) {
+            await writeCaddyConfig(oldConfigPath, backupOld);
+          } else {
+            await unlink(oldConfigPath).catch(() => {});
+          }
+        } catch (e) {
+          console.error('Rollback: failed to restore old-domain Caddy config', e);
+        }
+      }
+    };
+
+    // Regenerate merged configs. The new-domain config always needs a
+    // rewrite; if the domain changed, the old-domain config also needs a
+    // rewrite so it either shrinks (leaving remaining siblings) or unlinks
+    // (if the moved service was the last one on the old domain).
+    try {
+      await regenerateDomainCaddyConfig(db, updatedData.domain);
+      if (domainChanged) {
+        await regenerateDomainCaddyConfig(db, service.domain);
+      }
+    } catch (genErr) {
+      await rollbackUpdate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // Validate Caddy config before reload
+    try {
+      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    } catch (testError) {
+      await rollbackUpdate();
+      return res.status(400).json({
+        error: 'Caddy config validation failed - reverted to previous config',
+        details: testError.stderr || testError.message,
+      });
+    }
+
+    // Reload Caddy with failsafe
+    try {
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
+    } catch (reloadError) {
+      await rollbackUpdate();
+      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - reverted to previous config',
+        details: reloadError.stderr || reloadError.message,
+      });
+    }
 
     // Save config version for history
     try {

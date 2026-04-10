@@ -798,19 +798,60 @@ services:
     }
 
     // Insert into database first so the merged config includes the new row.
+    //
+    // Phase 2b D.2: also populate `target_ip` alongside the legacy `target`
+    // column. The B.3 routes-join query in regenerateDomainCaddyConfig
+    // reads `s.target_ip` for container_service rows; writing both here
+    // keeps newly-created services renderable via the routes path without
+    // waiting for the next A.3 backfill pass.
+    //
+    // `kind` derives from `type`: static_site for static type, otherwise
+    // container_service. `runtime` derives from type='docker' only; proxy
+    // and static leave it NULL (operator can set runtime='lxc' later via
+    // Section H's wizard).
+    const inferredKind = data.type === 'static' ? 'static_site' : 'container_service';
+    const inferredRuntime = data.type === 'docker' ? 'docker' : null;
+
     db.prepare(`
       INSERT INTO services (
         id, name, domain, path_prefix, type, target, port, root_dir, container_name,
-        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status,
+        kind, runtime, target_ip
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       id, data.name, data.domain, data.pathPrefix, data.type, data.target || null,
       data.port || null, data.rootDir || null, data.containerName || null,
       data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
-      data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir
+      data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir,
+      inferredKind, inferredRuntime,
+      data.type !== 'static' ? (data.target || null) : null
     );
 
-    // Helper to undo the create on a downstream failure.
+    // Phase 2b D.2: dual-write the primary route row so Section H's
+    // routes-sourced UI sees every newly-created service immediately,
+    // and D.14 can eventually drop the legacy columns without data loss.
+    try {
+      syncPrimaryRouteFromLegacy(db, id, {
+        domain: data.domain,
+        pathPrefix: data.pathPrefix,
+        targetPort: data.port,
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+        websocketEnabled: data.websocketEnabled,
+        maxUploadSize: data.maxUploadSize,
+      });
+    } catch (routeErr) {
+      // If the dual-write fails, roll back the services insert and
+      // abort the whole create — a half-committed state would be worse
+      // than no service at all.
+      db.prepare('DELETE FROM services WHERE id = ?').run(id);
+      return res.status(400).json({
+        error: 'Failed to create primary route: ' + routeErr.message,
+      });
+    }
+
+    // Helper to undo the create on a downstream failure. Also deletes
+    // any route rows owned by this service via the ON DELETE CASCADE FK.
     const rollbackCreate = async () => {
       try {
         db.prepare('DELETE FROM services WHERE id = ?').run(id);
@@ -1041,12 +1082,19 @@ servicesRouter.put('/:id', async (req, res) => {
     // Snapshot the current row so we can revert on failure.
     const preUpdateRow = { ...service };
 
+    // Phase 2b D.3: derive updated target_ip from the legacy target for
+    // non-static services (matches the A.3 backfill rule) so the routes
+    // JOIN query picks up the new IP. Static sites keep target_ip = NULL.
+    const updatedTargetIp =
+      updatedData.type === 'static' ? null : updatedData.target || null;
+
     // Update DB row first so regenerateDomainCaddyConfig picks it up.
     db.prepare(`
       UPDATE services SET
         name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
         root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
         force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+        target_ip = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
@@ -1054,8 +1102,48 @@ servicesRouter.put('/:id', async (req, res) => {
       updatedData.target, updatedData.port, updatedData.rootDir,
       updatedData.dataDir, updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
-      updatedData.maxUploadSize, req.params.id
+      updatedData.maxUploadSize, updatedTargetIp, req.params.id
     );
+
+    // Phase 2b D.3: dual-write the primary route to match the new legacy
+    // values. syncPrimaryRouteFromLegacy finds the earliest-created route
+    // owned by this service and updates it in place. Secondary routes
+    // (added via C.2) are left untouched.
+    try {
+      syncPrimaryRouteFromLegacy(db, req.params.id, {
+        domain: updatedData.domain,
+        pathPrefix: updatedData.pathPrefix,
+        targetPort: updatedData.port,
+        sslEnabled: updatedData.sslEnabled,
+        forceHttps: updatedData.forceHttps,
+        websocketEnabled: updatedData.websocketEnabled,
+        maxUploadSize: updatedData.maxUploadSize,
+      });
+    } catch (routeErr) {
+      // Route sync failed (typically a UNIQUE violation from the new
+      // (domain, path_prefix) tuple colliding with another service's
+      // route). Revert the services row and return 400.
+      db.prepare(`
+        UPDATE services SET
+          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
+          root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
+          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+          target_ip = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
+        preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
+        preUpdateRow.root_dir, preUpdateRow.data_dir,
+        preUpdateRow.container_name, preUpdateRow.ssl_enabled,
+        preUpdateRow.force_https, preUpdateRow.websocket_enabled,
+        preUpdateRow.max_upload_size, preUpdateRow.target_ip,
+        preUpdateRow.updated_at, req.params.id
+      );
+      return res
+        .status(400)
+        .json({ error: 'Failed to sync primary route: ' + routeErr.message });
+    }
 
     const rollbackUpdate = async () => {
       try {
@@ -1064,6 +1152,7 @@ servicesRouter.put('/:id', async (req, res) => {
             name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
             root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
             force_https = ?, websocket_enabled = ?, max_upload_size = ?,
+            target_ip = ?,
             updated_at = ?
           WHERE id = ?
         `).run(
@@ -1072,10 +1161,26 @@ servicesRouter.put('/:id', async (req, res) => {
           preUpdateRow.root_dir, preUpdateRow.data_dir,
           preUpdateRow.container_name, preUpdateRow.ssl_enabled,
           preUpdateRow.force_https, preUpdateRow.websocket_enabled,
-          preUpdateRow.max_upload_size, preUpdateRow.updated_at, req.params.id
+          preUpdateRow.max_upload_size, preUpdateRow.target_ip,
+          preUpdateRow.updated_at, req.params.id
         );
       } catch (e) {
         console.error('Rollback: failed to revert service row', e);
+      }
+      // Phase 2b D.3: also revert the primary route via the same helper
+      // so the routes table stays consistent with the services row.
+      try {
+        syncPrimaryRouteFromLegacy(db, req.params.id, {
+          domain: preUpdateRow.domain,
+          pathPrefix: preUpdateRow.path_prefix,
+          targetPort: preUpdateRow.port,
+          sslEnabled: !!preUpdateRow.ssl_enabled,
+          forceHttps: !!preUpdateRow.force_https,
+          websocketEnabled: !!preUpdateRow.websocket_enabled,
+          maxUploadSize: preUpdateRow.max_upload_size,
+        });
+      } catch (e) {
+        console.error('Rollback: failed to revert primary route', e);
       }
       try {
         if (backupNewExisted && backupNew !== null) {
@@ -1391,6 +1496,830 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
   }
 });
 
+// ==================== PHASE 2b ROUTES CRUD ====================
+//
+// A Phase 2b service (one workload, typically an LXC or Docker container)
+// can expose multiple HTTP routes at once. Each route is a row in the
+// `service_http_routes` table carrying its own (domain, path_prefix,
+// target_port, ssl_enabled, force_https, websocket_enabled,
+// max_upload_size). The parent service contributes the target IP
+// (services.target_ip), the kind (static_site vs container_service),
+// and (for LXC) the container name.
+//
+// These endpoints are new in Phase 2b and live alongside the existing
+// Phase 2 service endpoints. The Phase 2 endpoints continue to operate
+// against legacy columns on `services` until Section D refactors them
+// to read and write through this CRUD surface.
+
+// Phase 2b D.1 dual-write helper — `syncPrimaryRouteFromLegacy`
+//
+// Mirrors the legacy (domain, path_prefix, port, ssl flags, ...) fields
+// on a `services` row into a corresponding `service_http_routes` row so
+// the legacy Phase 2 endpoints (POST /, PUT /:id, obtain-certificate,
+// revert-config, import, discover/import) can keep accepting unchanged
+// payloads while Section H updates the frontend. After every legacy
+// write, the routes table has a matching entry — D.14 can safely drop
+// the legacy columns once every endpoint calls this helper.
+//
+// The "primary route" for a service is defined as the earliest-created
+// route owned by that service. On a post-A.3-backfilled install, every
+// service has exactly one primary route (the one A.3 inserted), and
+// later routes added via C.2 have later timestamps. For fresh installs,
+// D.2 inserts the primary directly. For Phase 2 endpoints that run
+// mid-phase, this helper updates whichever route is currently primary.
+//
+// Params:
+//   - db: sqlite instance
+//   - serviceId: the parent services row id
+//   - legacy: { domain, pathPrefix, targetPort, sslEnabled, forceHttps,
+//     websocketEnabled, maxUploadSize } — the target state
+//
+// Returns the id of the synced route row (either the existing primary
+// that was updated, or the newly inserted route).
+function syncPrimaryRouteFromLegacy(db, serviceId, legacy) {
+  const normalizedPrefix = normalizePathPrefix(legacy.pathPrefix);
+
+  // Find the earliest-created route owned by this service. If it exists
+  // we update it in place; otherwise we insert a new primary. Secondary
+  // routes added via C.2 have later timestamps and are left alone.
+  const primary = db
+    .prepare(
+      `SELECT id FROM service_http_routes
+        WHERE service_id = ?
+     ORDER BY created_at ASC, id ASC
+        LIMIT 1`
+    )
+    .get(serviceId);
+
+  if (primary) {
+    db.prepare(
+      `UPDATE service_http_routes SET
+         domain = ?,
+         path_prefix = ?,
+         target_port = ?,
+         websocket_enabled = ?,
+         ssl_enabled = ?,
+         force_https = ?,
+         max_upload_size = ?
+       WHERE id = ?`
+    ).run(
+      legacy.domain,
+      normalizedPrefix,
+      legacy.targetPort || null,
+      legacy.websocketEnabled ? 1 : 0,
+      legacy.sslEnabled ? 1 : 0,
+      legacy.forceHttps ? 1 : 0,
+      legacy.maxUploadSize || '1G',
+      primary.id
+    );
+    return primary.id;
+  }
+
+  const newId = uuidv4();
+  db.prepare(
+    `INSERT INTO service_http_routes (
+       id, service_id, domain, path_prefix, target_port,
+       websocket_enabled, ssl_enabled, force_https, max_upload_size
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    newId,
+    serviceId,
+    legacy.domain,
+    normalizedPrefix,
+    legacy.targetPort || null,
+    legacy.websocketEnabled ? 1 : 0,
+    legacy.sslEnabled ? 1 : 0,
+    legacy.forceHttps ? 1 : 0,
+    legacy.maxUploadSize || '1G'
+  );
+  return newId;
+}
+
+// Zod schema for the Phase 2b route CRUD endpoints. `maxUploadSize`
+// matches the same regex the legacy createServiceSchema uses so the
+// merged request_body max_size directive stays well-formed.
+const createRouteSchema = z.object({
+  domain: z
+    .string()
+    .regex(DOMAIN_REGEX, 'Invalid domain (use example.com or *.example.com)'),
+  pathPrefix: z
+    .string()
+    .regex(
+      PATH_PREFIX_REGEX,
+      'Path prefix must start with / and contain only URL-safe characters'
+    )
+    .default('/'),
+  targetPort: z
+    .union([z.number().int().min(1).max(65535), z.string(), z.null()])
+    .optional()
+    .transform((val) => {
+      if (val === null || val === undefined || val === '') return undefined;
+      const num = typeof val === 'string' ? parseInt(val, 10) : val;
+      return isNaN(num) ? undefined : num;
+    }),
+  websocketEnabled: z.boolean().default(false),
+  sslEnabled: z.boolean().default(true),
+  forceHttps: z.boolean().default(true),
+  maxUploadSize: z
+    .string()
+    .regex(/^[1-9][0-9]*[MG]$/i)
+    .default('1G'),
+});
+
+// List routes for a service.
+// Returns `{routes: [...]}` ordered by length(path_prefix) DESC so the
+// more-specific prefixes appear first (matching Caddy's source-order
+// matching behavior). 404 when the parent service does not exist.
+servicesRouter.get('/:id/routes', (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT id FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT id, service_id, domain, path_prefix, target_port,
+                websocket_enabled, ssl_enabled, force_https,
+                max_upload_size, created_at
+           FROM service_http_routes
+          WHERE service_id = ?
+          ORDER BY length(path_prefix) DESC, created_at ASC`
+      )
+      .all(req.params.id);
+
+    const routes = rows.map((r) => ({
+      id: r.id,
+      serviceId: r.service_id,
+      domain: r.domain,
+      pathPrefix: r.path_prefix,
+      targetPort: r.target_port,
+      websocketEnabled: !!r.websocket_enabled,
+      sslEnabled: !!r.ssl_enabled,
+      forceHttps: !!r.force_https,
+      maxUploadSize: r.max_upload_size,
+      createdAt: r.created_at,
+    }));
+
+    res.json({ routes });
+  } catch (error) {
+    console.error('Error listing routes:', error);
+    res.status(500).json({ error: 'Failed to list routes' });
+  }
+});
+
+// Create a route for a service.
+// Validates (domain, path_prefix) uniqueness across BOTH service_http_routes
+// AND the legacy services table (dual-source during the Section D transition),
+// validates SSL stance consistency against siblings on the same domain via
+// assertRoutesShareSslStance, backs up the merged file for the affected
+// domain, INSERTs the route, regenerates the merged config, runs caddy adapt,
+// and reloads. On any downstream failure, rolls back both the DB row and
+// the merged file to pre-POST state.
+servicesRouter.post('/:id/routes', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot add routes to admin service' });
+    }
+
+    const data = createRouteSchema.parse(req.body);
+    data.pathPrefix = normalizePathPrefix(data.pathPrefix);
+
+    // (1) Uniqueness check against service_http_routes. The DB UNIQUE
+    // constraint is the primary guard; this query surfaces a better
+    // error message before we hit it.
+    const existingRoute = db
+      .prepare(
+        `SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ?`
+      )
+      .get(data.domain, data.pathPrefix);
+    if (existingRoute) {
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
+    }
+
+    // (2) Uniqueness check against legacy services rows on the same
+    // (domain, path_prefix) tuple so Section D can ship incrementally
+    // without risking double-registration.
+    let legacyCollision = null;
+    try {
+      legacyCollision = db
+        .prepare(
+          `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND is_admin = 0`
+        )
+        .get(data.domain, data.pathPrefix);
+    } catch (e) {
+      // Post-D.14 — legacy columns dropped. Nothing to check.
+      legacyCollision = null;
+    }
+    if (legacyCollision) {
+      return res
+        .status(400)
+        .json({ error: 'Domain + path prefix combination already exists' });
+    }
+
+    // (3) SSL stance consistency against all siblings on the domain.
+    try {
+      assertRoutesShareSslStance(db, data.domain, {
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+      });
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
+      }
+      throw e;
+    }
+
+    // (4) Backup the merged file for the affected domain so we can
+    // restore it on any downstream failure.
+    await ensureCaddyStructure();
+    const configPath = caddyFilePath(data.domain);
+    let backupMergedConfig = null;
+    let backupExisted = false;
+    try {
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup; rollback will unlink on failure.
+    }
+
+    // (5) INSERT the route row.
+    const routeId = uuidv4();
+    db.prepare(
+      `INSERT INTO service_http_routes (
+         id, service_id, domain, path_prefix, target_port,
+         websocket_enabled, ssl_enabled, force_https, max_upload_size
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      routeId,
+      req.params.id,
+      data.domain,
+      data.pathPrefix,
+      data.targetPort || null,
+      data.websocketEnabled ? 1 : 0,
+      data.sslEnabled ? 1 : 0,
+      data.forceHttps ? 1 : 0,
+      data.maxUploadSize
+    );
+
+    // Rollback helper: delete the inserted row + restore the merged file.
+    const rollbackRouteCreate = async () => {
+      try {
+        db.prepare('DELETE FROM service_http_routes WHERE id = ?').run(
+          routeId
+        );
+      } catch (e) {
+        console.error('Rollback: failed to delete inserted route', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore merged Caddy config', e);
+      }
+    };
+
+    // (6) Regenerate the merged file for the affected domain.
+    try {
+      await regenerateDomainCaddyConfig(db, data.domain);
+    } catch (genErr) {
+      await rollbackRouteCreate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (7) Validate Caddy config.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteCreate();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration generated: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    // (8) Reload Caddy.
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteCreate();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route create rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_CREATED',
+      'route',
+      routeId,
+      {
+        service_id: req.params.id,
+        route: {
+          id: routeId,
+          domain: data.domain,
+          pathPrefix: data.pathPrefix,
+          targetPort: data.targetPort,
+        },
+      },
+      req.ip
+    );
+
+    res.status(201).json({
+      success: true,
+      route: {
+        id: routeId,
+        serviceId: req.params.id,
+        domain: data.domain,
+        pathPrefix: data.pathPrefix,
+        targetPort: data.targetPort,
+        websocketEnabled: data.websocketEnabled,
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+        maxUploadSize: data.maxUploadSize,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error creating route:', error);
+    res.status(500).json({ error: 'Failed to create route' });
+  }
+});
+
+// Update a route. Handles:
+//   - partial payloads (any subset of domain/pathPrefix/targetPort/
+//     websocketEnabled/sslEnabled/forceHttps/maxUploadSize)
+//   - domain change: regenerates merged files for BOTH the old and
+//     the new domain so the old file shrinks/unlinks and the new
+//     file picks up the moved route
+//   - uniqueness + SSL consistency re-validation against the new tuple
+//   - dual-layer rollback (DB row + both merged files) on any failure
+servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot modify routes on admin service' });
+    }
+
+    const route = db
+      .prepare(
+        `SELECT * FROM service_http_routes WHERE id = ? AND service_id = ?`
+      )
+      .get(req.params.routeId, req.params.id);
+    if (!route) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+
+    const data = createRouteSchema.partial().parse(req.body);
+    if (data.pathPrefix !== undefined) {
+      data.pathPrefix = normalizePathPrefix(data.pathPrefix);
+    }
+
+    // Merge partial payload onto the current row.
+    const updated = {
+      domain: data.domain !== undefined ? data.domain : route.domain,
+      pathPrefix:
+        data.pathPrefix !== undefined
+          ? data.pathPrefix
+          : normalizePathPrefix(route.path_prefix),
+      targetPort:
+        data.targetPort !== undefined ? data.targetPort : route.target_port,
+      websocketEnabled:
+        data.websocketEnabled !== undefined
+          ? data.websocketEnabled
+          : !!route.websocket_enabled,
+      sslEnabled:
+        data.sslEnabled !== undefined ? data.sslEnabled : !!route.ssl_enabled,
+      forceHttps:
+        data.forceHttps !== undefined
+          ? data.forceHttps
+          : !!route.force_https,
+      maxUploadSize:
+        data.maxUploadSize !== undefined
+          ? data.maxUploadSize
+          : route.max_upload_size,
+    };
+
+    const oldDomain = route.domain;
+    const oldPathPrefix = normalizePathPrefix(route.path_prefix);
+    const domainChanged = updated.domain !== oldDomain;
+    const prefixChanged = updated.pathPrefix !== oldPathPrefix;
+
+    // (1) Uniqueness check — only re-run when the tuple actually changed,
+    // so an update that keeps (domain, path_prefix) the same does not
+    // false-positive against its own row.
+    if (domainChanged || prefixChanged) {
+      const existingRoute = db
+        .prepare(
+          `SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ? AND id != ?`
+        )
+        .get(updated.domain, updated.pathPrefix, req.params.routeId);
+      if (existingRoute) {
+        return res
+          .status(400)
+          .json({ error: 'Domain + path prefix combination already exists' });
+      }
+      let legacyCollision = null;
+      try {
+        legacyCollision = db
+          .prepare(
+            `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND is_admin = 0`
+          )
+          .get(updated.domain, updated.pathPrefix);
+      } catch (e) {
+        legacyCollision = null;
+      }
+      if (legacyCollision) {
+        return res
+          .status(400)
+          .json({ error: 'Domain + path prefix combination already exists' });
+      }
+    }
+
+    // (2) SSL stance consistency against siblings on the target domain.
+    // excludeRouteId prevents the check from false-positiving against
+    // the row we are updating in-place.
+    try {
+      assertRoutesShareSslStance(
+        db,
+        updated.domain,
+        {
+          sslEnabled: updated.sslEnabled,
+          forceHttps: updated.forceHttps,
+        },
+        req.params.routeId
+      );
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
+      }
+      throw e;
+    }
+
+    // (3) Backup merged files for both the new and (if it changed) the
+    // old domain so rollback can restore whichever failed.
+    await ensureCaddyStructure();
+    const newConfigPath = caddyFilePath(updated.domain);
+    const oldConfigPath = caddyFilePath(oldDomain);
+
+    let backupNew = null;
+    let backupNewExisted = false;
+    try {
+      if (existsSync(newConfigPath)) {
+        backupNew = await readFile(newConfigPath, 'utf-8');
+        backupNewExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup.
+    }
+
+    let backupOld = null;
+    let backupOldExisted = false;
+    if (domainChanged) {
+      try {
+        if (existsSync(oldConfigPath)) {
+          backupOld = await readFile(oldConfigPath, 'utf-8');
+          backupOldExisted = true;
+        }
+      } catch (e) {
+        // Continue without a backup.
+      }
+    }
+
+    // Snapshot the pre-update row for rollback.
+    const preUpdateRow = { ...route };
+
+    // (4) UPDATE the row.
+    db.prepare(
+      `UPDATE service_http_routes SET
+         domain = ?,
+         path_prefix = ?,
+         target_port = ?,
+         websocket_enabled = ?,
+         ssl_enabled = ?,
+         force_https = ?,
+         max_upload_size = ?
+       WHERE id = ?`
+    ).run(
+      updated.domain,
+      updated.pathPrefix,
+      updated.targetPort || null,
+      updated.websocketEnabled ? 1 : 0,
+      updated.sslEnabled ? 1 : 0,
+      updated.forceHttps ? 1 : 0,
+      updated.maxUploadSize,
+      req.params.routeId
+    );
+
+    const rollbackRouteUpdate = async () => {
+      try {
+        db.prepare(
+          `UPDATE service_http_routes SET
+             domain = ?,
+             path_prefix = ?,
+             target_port = ?,
+             websocket_enabled = ?,
+             ssl_enabled = ?,
+             force_https = ?,
+             max_upload_size = ?
+           WHERE id = ?`
+        ).run(
+          preUpdateRow.domain,
+          preUpdateRow.path_prefix,
+          preUpdateRow.target_port,
+          preUpdateRow.websocket_enabled,
+          preUpdateRow.ssl_enabled,
+          preUpdateRow.force_https,
+          preUpdateRow.max_upload_size,
+          req.params.routeId
+        );
+      } catch (e) {
+        console.error('Rollback: failed to revert route row', e);
+      }
+      try {
+        if (backupNewExisted && backupNew !== null) {
+          await writeCaddyConfig(newConfigPath, backupNew);
+        } else {
+          await unlink(newConfigPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore new-domain merged file', e);
+      }
+      if (domainChanged) {
+        try {
+          if (backupOldExisted && backupOld !== null) {
+            await writeCaddyConfig(oldConfigPath, backupOld);
+          } else {
+            await unlink(oldConfigPath).catch(() => {});
+          }
+        } catch (e) {
+          console.error('Rollback: failed to restore old-domain merged file', e);
+        }
+      }
+    };
+
+    // (5) Regenerate merged files. New domain always needs a rewrite.
+    // Old domain also needs a rewrite when the domain changed — its
+    // merged file shrinks if siblings remain, or unlinks otherwise.
+    try {
+      await regenerateDomainCaddyConfig(db, updated.domain);
+      if (domainChanged) {
+        await regenerateDomainCaddyConfig(db, oldDomain);
+      }
+    } catch (genErr) {
+      await rollbackRouteUpdate();
+      return res.status(400).json({
+        error: 'Failed to generate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    // (6) Validate Caddy config.
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteUpdate();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration generated: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    // (7) Reload Caddy.
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteUpdate();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route update rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_UPDATED',
+      'route',
+      req.params.routeId,
+      {
+        service_id: req.params.id,
+        before: {
+          domain: preUpdateRow.domain,
+          pathPrefix: normalizePathPrefix(preUpdateRow.path_prefix),
+          targetPort: preUpdateRow.target_port,
+        },
+        after: {
+          domain: updated.domain,
+          pathPrefix: updated.pathPrefix,
+          targetPort: updated.targetPort,
+        },
+      },
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      route: {
+        id: req.params.routeId,
+        serviceId: req.params.id,
+        domain: updated.domain,
+        pathPrefix: updated.pathPrefix,
+        targetPort: updated.targetPort,
+        websocketEnabled: updated.websocketEnabled,
+        sslEnabled: updated.sslEnabled,
+        forceHttps: updated.forceHttps,
+        maxUploadSize: updated.maxUploadSize,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error updating route:', error);
+    res.status(500).json({ error: 'Failed to update route' });
+  }
+});
+
+// Delete a single route.
+// Snapshots the pre-delete row + the merged file for the affected domain,
+// DELETEs the row, regenerates the merged file (which shrinks or unlinks
+// depending on whether siblings remain), and on any downstream failure
+// restores both the row and the file. Parent service is NOT touched —
+// a service with zero routes is legal in Phase 2b; the operator can add
+// routes back without recreating the service.
+servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
+  try {
+    const db = getDb();
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(req.params.id);
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    if (service.is_admin) {
+      return res
+        .status(403)
+        .json({ error: 'Cannot delete routes from admin service' });
+    }
+
+    const route = db
+      .prepare(
+        `SELECT * FROM service_http_routes WHERE id = ? AND service_id = ?`
+      )
+      .get(req.params.routeId, req.params.id);
+    if (!route) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+
+    // Backup the merged file for the affected domain so rollback can
+    // restore it. Also snapshot the row so rollback can re-insert it.
+    await ensureCaddyStructure();
+    const configPath = caddyFilePath(route.domain);
+    let backupMergedConfig = null;
+    let backupExisted = false;
+    try {
+      if (existsSync(configPath)) {
+        backupMergedConfig = await readFile(configPath, 'utf-8');
+        backupExisted = true;
+      }
+    } catch (e) {
+      // Continue without a backup.
+    }
+
+    const preDeleteRow = { ...route };
+
+    // DELETE the row.
+    db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(
+      req.params.routeId
+    );
+
+    const rollbackRouteDelete = async () => {
+      try {
+        db.prepare(
+          `INSERT INTO service_http_routes (
+             id, service_id, domain, path_prefix, target_port,
+             websocket_enabled, ssl_enabled, force_https, max_upload_size,
+             created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          preDeleteRow.id,
+          preDeleteRow.service_id,
+          preDeleteRow.domain,
+          preDeleteRow.path_prefix,
+          preDeleteRow.target_port,
+          preDeleteRow.websocket_enabled,
+          preDeleteRow.ssl_enabled,
+          preDeleteRow.force_https,
+          preDeleteRow.max_upload_size,
+          preDeleteRow.created_at
+        );
+      } catch (e) {
+        console.error('Rollback: failed to re-insert deleted route', e);
+      }
+      try {
+        if (backupExisted && backupMergedConfig !== null) {
+          await writeCaddyConfig(configPath, backupMergedConfig);
+        } else {
+          await unlink(configPath).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Rollback: failed to restore merged file', e);
+      }
+    };
+
+    try {
+      await regenerateDomainCaddyConfig(db, route.domain);
+    } catch (genErr) {
+      await rollbackRouteDelete();
+      return res.status(400).json({
+        error: 'Failed to regenerate merged Caddy config: ' + genErr.message,
+      });
+    }
+
+    try {
+      await execOnHost(
+        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
+      );
+    } catch (testErr) {
+      await rollbackRouteDelete();
+      return res.status(400).json({
+        error:
+          'Invalid Caddy configuration after delete: ' +
+          (testErr.stderr || testErr.message),
+      });
+    }
+
+    const caddyResult = await reloadCaddy();
+    if (!caddyResult.success) {
+      await rollbackRouteDelete();
+      await reloadCaddy().catch(() => {});
+      return res.status(400).json({
+        error: 'Caddy reload failed - route delete rolled back',
+        details: caddyResult.error,
+      });
+    }
+
+    logAudit(
+      req.user.id,
+      'ROUTE_DELETED',
+      'route',
+      req.params.routeId,
+      {
+        service_id: req.params.id,
+        route: {
+          id: preDeleteRow.id,
+          domain: preDeleteRow.domain,
+          pathPrefix: normalizePathPrefix(preDeleteRow.path_prefix),
+          targetPort: preDeleteRow.target_port,
+        },
+      },
+      req.ip
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting route:', error);
+    res.status(500).json({ error: 'Failed to delete route' });
+  }
+});
+
 // Delete service (requires TOTP)
 servicesRouter.delete('/:id', async (req, res) => {
   try {
@@ -1424,21 +2353,45 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
+    // Phase 2b: a service can span multiple domains via its routes
+    // (one service, many `service_http_routes` rows). Collect EVERY
+    // domain the service touches BEFORE the delete so we can regenerate
+    // each affected merged file afterwards. Sources:
+    //   1. The legacy `services.domain` column (still populated during
+    //      the Section D transition window)
+    //   2. The distinct set of route domains owned by this service
+    const routeRows = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(req.params.id);
+    const affectedDomains = new Set();
+    if (service.domain) affectedDomains.add(service.domain);
+    for (const r of routeRows) affectedDomains.add(r.domain);
+
     // Delete from database first so regenerateDomainCaddyConfig picks up
     // the remaining siblings (or an empty list if this was the last one).
+    // The ON DELETE CASCADE FK on service_http_routes.service_id wipes
+    // every child route row in the same statement — better-sqlite3 9.x
+    // enforces foreign_keys=ON by default.
     db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
 
-    // Regenerate the merged Caddy config for the domain. If this was the
-    // last service on the domain, regenerateDomainCaddyConfig unlinks the
-    // file. Otherwise it rewrites it without the deleted row so siblings
-    // stay reachable.
-    try {
-      await regenerateDomainCaddyConfig(db, service.domain);
-    } catch (e) {
-      console.error('Error regenerating merged Caddy config after delete:', e);
+    // Regenerate the merged Caddy config for every domain the service
+    // touched. A domain whose last remaining entry was owned by this
+    // service gets its merged file unlinked; a domain that still has
+    // sibling entries gets its file rewritten without the deleted rows.
+    for (const domain of affectedDomains) {
+      try {
+        await regenerateDomainCaddyConfig(db, domain);
+      } catch (e) {
+        console.error(
+          `Error regenerating merged Caddy config for ${domain} after delete:`,
+          e
+        );
+      }
     }
 
-    // Reload Caddy
+    // Reload Caddy once at the end so N domain rewrites share one reload.
     await reloadCaddy().catch((e) => {
       console.error('Error reloading Caddy after delete:', e);
     });
@@ -1446,7 +2399,28 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
 
-    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain, pathPrefix: service.path_prefix }, req.ip);
+    // Phase 2b: audit payload nests every route that was cascaded so a
+    // post-hoc audit can replay the full delete without needing the
+    // routes table (which may have shrunk by the time the audit is
+    // reviewed). Legacy `{domain, pathPrefix}` tuple is still included
+    // so the Phase 2 audit format stays backward-compatible.
+    logAudit(
+      req.user.id,
+      'SERVICE_DELETED',
+      'service',
+      req.params.id,
+      {
+        domain: service.domain,
+        pathPrefix: service.path_prefix,
+        routes: routeRows.map((r) => ({
+          id: r.id,
+          domain: r.domain,
+          pathPrefix: normalizePathPrefix(r.path_prefix),
+          targetPort: r.target_port,
+        })),
+      },
+      req.ip
+    );
 
     res.json({ success: true });
   } catch (error) {
@@ -3285,16 +4259,52 @@ function toCaddySize(size) {
   return size.toUpperCase().replace(/^(\d+)G$/i, '$1GB').replace(/^(\d+)M$/i, '$1MB');
 }
 
-// Emit the per-service handler body (the `reverse_proxy` / `root` + `file_server`
+// Emit the per-entry handler body (the `reverse_proxy` / `root` + `file_server`
 // lines) without any wrapping site block, `handle_path`, or `handle`. The caller
 // decides how to wrap these lines — single-service configs emit them bare inside
-// the site block, multi-service (merged) configs wrap each service's body in its
+// the site block, multi-service (merged) configs wrap each entry's body in its
 // own `handle_path ${prefix}*` or `handle` block.
 //
 // `indent` controls the leading whitespace so the caller can nest the body at the
 // appropriate depth (e.g. '    ' for site-level, '        ' for inside a handle).
-function generateServiceHandlerBody(service, indent = '    ') {
-  const { type, target, port, rootDir } = service;
+//
+// Phase 2b accepts two input shapes so callers during the Section D transition
+// can pass either:
+//
+//   Legacy (Phase 2) service row:
+//     { type: 'static' | 'docker' | 'proxy',
+//       target: '127.0.0.1', port: 3000,
+//       root_dir or rootDir: '/data/services/foo' }
+//
+//   Phase 2b joined (service, route) entry:
+//     { kind: 'static_site' | 'container_service',
+//       target_ip or targetIp: '10.0.0.5',
+//       target_port or targetPort: 8000,
+//       root_dir or rootDir: '/data/services/foo',
+//       type: retained for backward compatibility (optional) }
+//
+// The function normalizes both shapes into a canonical `{branch, target, port,
+// caddyRootDir}` tuple before emitting. `kind` takes precedence over `type` when
+// both are present — once D.14 drops the legacy columns, `type` will be gone
+// and `kind` will be the only decider.
+function generateServiceHandlerBody(entry, indent = '    ') {
+  // Field name normalization: accept DB snake_case, JS camelCase, and both
+  // Phase 2 legacy (`port`, `target`) and Phase 2b (`target_port`/`targetPort`,
+  // `target_ip`/`targetIp`) names.
+  const port =
+    entry.targetPort !== undefined
+      ? entry.targetPort
+      : entry.target_port !== undefined
+      ? entry.target_port
+      : entry.port;
+  const target =
+    entry.targetIp !== undefined && entry.targetIp !== null
+      ? entry.targetIp
+      : entry.target_ip !== undefined && entry.target_ip !== null
+      ? entry.target_ip
+      : entry.target;
+  const rootDir =
+    entry.rootDir !== undefined ? entry.rootDir : entry.root_dir;
 
   // Convert container path to host path for Caddy. If rootDir starts with
   // SERVICES_DATA_DIR, rewrite to CADDY_STATIC_ROOT (same translation the
@@ -3304,9 +4314,26 @@ function generateServiceHandlerBody(service, indent = '    ') {
     caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
 
+  // Branch selection: Phase 2b `kind` wins when present; otherwise fall back
+  // to legacy `type`. Map `type='static'` to the static-site branch and
+  // `type='docker'`/`type='proxy'` to the reverse-proxy branch.
+  let branch;
+  if (entry.kind === 'static_site') {
+    branch = 'static';
+  } else if (entry.kind === 'container_service') {
+    branch = 'proxy';
+  } else if (entry.type === 'static') {
+    branch = 'static';
+  } else if (entry.type === 'docker' || entry.type === 'proxy') {
+    branch = 'proxy';
+  } else {
+    // Unknown input: emit nothing rather than crash. The caller's outer
+    // validation should catch this before we get here.
+    branch = 'unknown';
+  }
+
   const lines = [];
-  switch (type) {
-    case 'docker':
+  switch (branch) {
     case 'proxy':
       // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For,
       // X-Forwarded-Proto, and WebSocket upgrades.
@@ -3359,17 +4386,48 @@ function parseUploadSizeMB(size) {
 // and update endpoints. This function uses the first service's SSL flag to
 // pick the site address (http:// fallback for wildcards or when SSL is off).
 //
-// Throws when two services in the list share the same normalized path_prefix
+// Throws when two entries in the list share the same normalized path_prefix
 // — defense-in-depth against a UNIQUE-constraint bypass.
-function buildDomainCaddyConfig(servicesList, domain) {
-  if (!servicesList || servicesList.length === 0) return null;
+//
+// Phase 2b: accepts both the legacy Phase 2 service-row shape (where domain/
+// path_prefix/port/ssl_* live on the services row) AND the Phase 2b joined
+// `(service, route)` entry shape (where those fields live on the route row
+// and target_ip lives on the service). The normalize step below reads from
+// either field convention. See `generateServiceHandlerBody` for the same
+// dual-shape handling at the body-line level.
+function buildDomainCaddyConfig(entriesList, domain) {
+  if (!entriesList || entriesList.length === 0) return null;
 
-  // Normalize each service into a consistent shape (handles DB rows that use
-  // snake_case as well as JS objects that use camelCase).
-  const normalized = servicesList.map((s) => ({
+  // Normalize each entry into a consistent shape. Handles:
+  //   - DB rows using snake_case (root_dir, max_upload_size, ssl_enabled,
+  //     path_prefix, target_ip, target_port)
+  //   - JS objects using camelCase (rootDir, maxUploadSize, sslEnabled,
+  //     pathPrefix, targetIp, targetPort)
+  //   - Legacy Phase 2 rows where target/port live on the service directly
+  //     and kind is absent (inferred from type)
+  //   - Phase 2b joined rows where target/port come from target_ip/
+  //     target_port and kind comes from the service side of the join
+  const normalized = entriesList.map((s) => ({
+    // Branch selector for generateServiceHandlerBody. kind wins over type
+    // when both are set (the A.3 backfill state: legacy rows carry both).
+    kind: s.kind,
     type: s.type,
-    target: s.target,
-    port: s.port,
+    // Reverse-proxy target: Phase 2b target_ip / targetIp first, then the
+    // legacy target field.
+    target:
+      s.targetIp !== undefined && s.targetIp !== null
+        ? s.targetIp
+        : s.target_ip !== undefined && s.target_ip !== null
+        ? s.target_ip
+        : s.target,
+    // Reverse-proxy port: Phase 2b target_port / targetPort first, then the
+    // legacy port field.
+    port:
+      s.targetPort !== undefined && s.targetPort !== null
+        ? s.targetPort
+        : s.target_port !== undefined && s.target_port !== null
+        ? s.target_port
+        : s.port,
     rootDir: s.rootDir !== undefined ? s.rootDir : s.root_dir,
     maxUploadSize:
       s.maxUploadSize !== undefined ? s.maxUploadSize : s.max_upload_size,
@@ -3428,12 +4486,18 @@ function buildDomainCaddyConfig(servicesList, domain) {
     }
   }
 
+  // Friendly label for the header comment. Phase 2b entries carry `kind`
+  // (static_site/container_service); legacy Phase 2 entries carry `type`
+  // (static/docker/proxy). Prefer the Phase 2b label when available so
+  // the comment stays informative once legacy `type` is gone (D.14).
+  const entryLabel = (s) => s.kind || s.type || 'unknown';
+
   const lines = [];
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
   lines.push(
     `# Services: ${normalized
-      .map((s) => `${s.pathPrefix} (${s.type})`)
+      .map((s) => `${s.pathPrefix} (${entryLabel(s)})`)
       .join(', ')}`
   );
   lines.push(`# Generated: ${new Date().toISOString()}`);
@@ -3489,35 +4553,124 @@ function buildDomainCaddyConfig(servicesList, domain) {
   return lines.join('\n');
 }
 
-// Read every service for a domain from the DB, build the merged Caddy site
-// config, and write it to disk (or unlink the file when no services remain).
+// Read every entry for a domain from the DB, build the merged Caddy site
+// config, and write it to disk (or unlink the file when no entries remain).
 // Callers use this after they have already mutated the DB — the helper is a
 // reconciliation step that makes the on-disk Caddy config match DB state.
 //
 // Admin services are skipped (their config is owned by the installer) so
 // running this on the admin domain never clobbers the Caddyfile the operator
 // maintains by hand.
+//
+// Phase 2b dual-source read: walks BOTH the legacy `services` table AND the
+// new `service_http_routes` JOIN for this domain, then dedupes by
+// `(service_id, path_prefix)` preferring the routes row when both sources
+// carry the same tuple.
+//
+// Why dual-source: during the Section D transition window, some endpoints
+// have been refactored to write to `service_http_routes` and others still
+// write to the legacy services columns only. Reading from just one source
+// would miss data the other source owns. The dedupe rule ensures the
+// A.3 backfill state (where every non-admin service has a matching route
+// row AND still carries its legacy columns) does not produce duplicated
+// handlers in the merged Caddyfile — the routes row wins because it is
+// the post-D.14 source of truth.
+//
+// Post-D.14 the legacy query will return zero rows (columns dropped), so
+// this helper collapses cleanly to a single routes-only read path at that
+// point without any further code change.
 async function regenerateDomainCaddyConfig(db, domain) {
-  const rows = db
+  // (1) Phase 2b routes path — join service_http_routes to services so the
+  // emitted entries carry both the route-owned fields (path_prefix,
+  // target_port, ssl_enabled, force_https, websocket_enabled, max_upload_size)
+  // and the service-owned fields (kind, runtime, type, target_ip, root_dir).
+  const routeRows = db
     .prepare(
-      `SELECT id, name, domain, type, target, port, root_dir, container_name,
-              ssl_enabled, force_https, websocket_enabled, max_upload_size,
-              data_dir, is_admin, path_prefix
-         FROM services
-        WHERE domain = ? AND is_admin = 0`
+      `SELECT r.id           AS route_id,
+              r.service_id   AS service_id,
+              r.domain       AS domain,
+              r.path_prefix  AS path_prefix,
+              r.target_port  AS target_port,
+              r.websocket_enabled,
+              r.ssl_enabled,
+              r.force_https,
+              r.max_upload_size,
+              s.name         AS name,
+              s.kind         AS kind,
+              s.runtime      AS runtime,
+              s.type         AS type,
+              s.target_ip    AS target_ip,
+              s.root_dir     AS root_dir,
+              s.container_name,
+              s.data_dir,
+              s.is_admin
+         FROM service_http_routes r
+         INNER JOIN services s ON s.id = r.service_id
+        WHERE r.domain = ? AND s.is_admin = 0`
     )
     .all(domain);
 
+  // (2) Legacy Phase 2 services path — unchanged from pre-B.3. We wrap the
+  // query in a try/catch so the helper survives post-D.14 installs where
+  // the legacy columns no longer exist (the SELECT would throw
+  // `no such column` and we want to fall through cleanly).
+  let legacyRows = [];
+  try {
+    legacyRows = db
+      .prepare(
+        `SELECT id           AS service_id,
+                name,
+                domain,
+                type,
+                target,
+                port,
+                root_dir,
+                container_name,
+                ssl_enabled,
+                force_https,
+                websocket_enabled,
+                max_upload_size,
+                data_dir,
+                is_admin,
+                path_prefix,
+                kind,
+                target_ip
+           FROM services
+          WHERE domain = ? AND is_admin = 0`
+      )
+      .all(domain);
+  } catch (e) {
+    // Post-D.14: legacy columns dropped → routes-only path.
+    legacyRows = [];
+  }
+
+  // (3) Dedupe: if `(service_id, path_prefix)` already exists in routeRows,
+  // drop the matching legacy row. Routes are the post-D.14 source of truth,
+  // so they win in the mixed A.3-backfill state where both sources describe
+  // the same tuple.
+  const routeTuples = new Set(
+    routeRows.map((r) => `${r.service_id}|${normalizePathPrefix(r.path_prefix)}`)
+  );
+  const legacyOnly = legacyRows.filter((l) => {
+    const tuple = `${l.service_id}|${normalizePathPrefix(l.path_prefix)}`;
+    return !routeTuples.has(tuple);
+  });
+
+  const allRows = [...routeRows, ...legacyOnly];
+
   const configPath = caddyFilePath(domain);
 
-  // No managed services left on this domain — remove the merged file so
+  // No managed entries left on this domain — remove the merged file so
   // Caddy stops serving it. Swallow ENOENT; nothing to clean up is fine.
-  if (!rows || rows.length === 0) {
+  if (!allRows || allRows.length === 0) {
     await unlink(configPath).catch(() => {});
     return;
   }
 
-  const merged = buildDomainCaddyConfig(rows, domain);
+  // buildDomainCaddyConfig accepts both legacy and Phase 2b shapes (B.2),
+  // so the mixed array flows through its normalize step without any
+  // per-row branching here.
+  const merged = buildDomainCaddyConfig(allRows, domain);
   if (merged === null) {
     await unlink(configPath).catch(() => {});
     return;
@@ -3525,6 +4678,121 @@ async function regenerateDomainCaddyConfig(db, domain) {
 
   await ensureCaddyStructure();
   await writeCaddyConfig(configPath, merged);
+}
+
+// Phase 2b SSL-consistency guard.
+//
+// Throws when any existing sibling row on the same domain disagrees with
+// the candidate's `ssl_enabled` or `force_https` stance. The merged Caddy
+// site block has one site address (https vs http://) and one force-https
+// stance per domain, so every entry on the domain has to agree.
+//
+// Scans BOTH sources during the Section D transition window:
+//   1. `service_http_routes` JOIN `services` for Phase 2b routes on the
+//      same domain (the post-D.14 source of truth)
+//   2. The legacy `services` table directly, skipping anything whose
+//      `(id, path_prefix)` tuple is already present in the routes query
+//      so the A.3 backfill state doesn't trigger a false self-conflict
+//
+// Admin services are skipped so the installer-managed admin domain can
+// keep whatever stance it was configured with without polluting user
+// route checks.
+//
+// Params:
+//   - db: sqlite instance
+//   - domain: the target domain to check
+//   - candidateRoute: { sslEnabled, forceHttps } for the row being
+//     inserted/updated
+//   - excludeRouteId: optional — the route id being updated, so the
+//     update flow does not compare the row against itself. Pass null
+//     for create-flow callers.
+//
+// Throws an `Error` whose `.code === 'ROUTE_SSL_CONFLICT'` and whose
+// `.message` names the conflicting sibling's service name + path prefix
+// so the caller can surface a helpful error to the operator. Returns
+// undefined on success.
+export function assertRoutesShareSslStance(
+  db,
+  domain,
+  candidateRoute,
+  excludeRouteId = null
+) {
+  const wantSsl = !!candidateRoute.sslEnabled;
+  const wantForce = !!candidateRoute.forceHttps;
+
+  const conflict = (siblingLabel, siblingSsl, siblingForce) => {
+    const err = new Error(
+      `SSL settings on domain ${domain} must match all sibling routes. ` +
+        `Sibling ${siblingLabel} has sslEnabled=${!!siblingSsl}, ` +
+        `forceHttps=${!!siblingForce}; candidate has ` +
+        `sslEnabled=${wantSsl}, forceHttps=${wantForce}.`
+    );
+    err.code = 'ROUTE_SSL_CONFLICT';
+    return err;
+  };
+
+  // (1) Phase 2b siblings from service_http_routes joined to services.
+  const routeSiblings = db
+    .prepare(
+      `SELECT r.id           AS route_id,
+              r.service_id   AS service_id,
+              r.path_prefix  AS path_prefix,
+              r.ssl_enabled  AS ssl_enabled,
+              r.force_https  AS force_https,
+              s.name         AS service_name
+         FROM service_http_routes r
+         INNER JOIN services s ON s.id = r.service_id
+        WHERE r.domain = ? AND s.is_admin = 0 AND r.id != COALESCE(?, '')`
+    )
+    .all(domain, excludeRouteId);
+
+  for (const sib of routeSiblings) {
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" route ${sib.path_prefix}`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
+
+  // (2) Legacy siblings from services table. Skip anything the routes
+  // query already covered via (service_id, path_prefix) tuple.
+  const coveredTuples = new Set(
+    routeSiblings.map(
+      (s) => `${s.service_id}|${normalizePathPrefix(s.path_prefix)}`
+    )
+  );
+
+  let legacySiblings = [];
+  try {
+    legacySiblings = db
+      .prepare(
+        `SELECT id AS service_id,
+                name AS service_name,
+                path_prefix,
+                ssl_enabled,
+                force_https
+           FROM services
+          WHERE domain = ? AND is_admin = 0`
+      )
+      .all(domain);
+  } catch (e) {
+    // Post-D.14 — legacy columns dropped → routes-only path.
+    legacySiblings = [];
+  }
+
+  for (const sib of legacySiblings) {
+    const tuple = `${sib.service_id}|${normalizePathPrefix(sib.path_prefix)}`;
+    if (coveredTuples.has(tuple)) continue;
+    if (!!sib.ssl_enabled !== wantSsl || !!sib.force_https !== wantForce) {
+      throw conflict(
+        `"${sib.service_name}" (legacy path ${sib.path_prefix})`,
+        sib.ssl_enabled,
+        sib.force_https
+      );
+    }
+  }
 }
 
 // Phase 2 note: the single-service `generateCaddyConfig` function was
@@ -3537,4 +4805,4 @@ async function regenerateDomainCaddyConfig(db, domain) {
 // this module at the call-site level but exported so integration tests and
 // the Phase 2 verification pass can invoke them directly without spinning
 // up the full HTTP router.
-export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody };
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy };

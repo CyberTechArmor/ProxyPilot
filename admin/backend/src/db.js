@@ -112,6 +112,17 @@ export function initDatabase() {
   // so the UNIQUE constraint is on the (domain, path_prefix) tuple instead of
   // domain alone. Existing installs that still have UNIQUE(domain) are rebuilt
   // to this shape by migrateServicesUniqueConstraint() below.
+  //
+  // Phase 2b: a service now represents one logical workload (typically an LXC
+  // or Docker container) that can expose multiple HTTP routes through the
+  // sibling `service_http_routes` table. The new Phase 2b columns are
+  // ADDITIVE only in this commit (A.1) — the legacy route-owned columns
+  // (`domain`, `path_prefix`, `port`, `ssl_enabled`, `force_https`,
+  // `websocket_enabled`, `max_upload_size`) plus the `UNIQUE(domain,
+  // path_prefix)` constraint stay in place until D.14 drops them via a
+  // table-rebuild, after every endpoint has been refactored to read and
+  // write from the routes table. This keeps every intermediate commit
+  // runtime-correct.
   db.exec(`
     CREATE TABLE IF NOT EXISTS services (
       id TEXT PRIMARY KEY,
@@ -130,6 +141,10 @@ export function initDatabase() {
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
       is_admin INTEGER DEFAULT 0,
       path_prefix TEXT NOT NULL DEFAULT '/',
+      kind TEXT NOT NULL DEFAULT 'container_service' CHECK(kind IN ('static_site', 'container_service')),
+      runtime TEXT CHECK(runtime IN ('lxc', 'docker') OR runtime IS NULL),
+      target_ip TEXT,
+      lxc_container_name TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(domain, path_prefix)
@@ -163,6 +178,98 @@ export function initDatabase() {
   // CREATE TABLE above already carries the new constraint) and on already-
   // migrated existing installs.
   migrateServicesUniqueConstraint(db);
+
+  // Phase 2b additive columns — MUST run AFTER migrateServicesUniqueConstraint
+  // because that helper does a table rebuild with a hardcoded canonical column
+  // set; any Phase 2b columns added BEFORE the rebuild would get dropped by
+  // it. Running after the Phase 2 rebuild means:
+  //   - Fresh installs: CREATE TABLE IF NOT EXISTS already created the table
+  //     with the Phase 2b columns, so these ALTER TABLEs no-op via try/catch.
+  //   - Pre-Phase-2 installs: the rebuild runs first (producing a Phase 2
+  //     shape services table), then these ALTER TABLEs add the Phase 2b
+  //     columns on top.
+  //   - Already-Phase-2b installs: both the rebuild and these ALTER TABLEs
+  //     no-op.
+  //
+  // These columns are additive only in A.1; existing data is backfilled by
+  // A.3's migrateServicesToRoutes(db) and the legacy route-owned columns
+  // stay in place until D.14 drops them via a table rebuild, after every
+  // endpoint has been refactored to read and write from service_http_routes.
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN kind TEXT NOT NULL DEFAULT 'container_service' CHECK(kind IN ('static_site', 'container_service'))`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN runtime TEXT CHECK(runtime IN ('lxc', 'docker') OR runtime IS NULL)`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN target_ip TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN lxc_container_name TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
+
+  // Phase 2b: sibling table that carries one row per HTTP route exposed by
+  // a service. A single service (one workload / container) can expose many
+  // routes at once — e.g. example.com/ and example.com/api pointing at
+  // different ports of the same container. The Phase 2 (domain, path_prefix)
+  // uniqueness constraint migrates from `services` to this table, which is
+  // the only place that carries the tuple after D.14 drops the legacy
+  // columns from `services`.
+  //
+  // Populated by A.3's migrateServicesToRoutes() backfill on installs that
+  // already have Phase 2 services rows. Fresh installs start empty and the
+  // create/update endpoints (section D) will insert rows as the operator
+  // adds routes.
+  //
+  // FK to services(id) is declared but not enforced at the SQLite level —
+  // this app does not `PRAGMA foreign_keys = ON`. The service-level DELETE
+  // handler (C.5) walks child rows explicitly before deleting the parent.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS service_http_routes (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      path_prefix TEXT NOT NULL DEFAULT '/',
+      target_port INTEGER,
+      websocket_enabled INTEGER DEFAULT 0,
+      ssl_enabled INTEGER DEFAULT 1,
+      force_https INTEGER DEFAULT 1,
+      max_upload_size TEXT DEFAULT '1G',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+      UNIQUE(domain, path_prefix)
+    )
+  `);
+
+  // Index on service_id so the routes-for-a-service lookup (used by the
+  // list + service-detail endpoints in section D and by the per-service
+  // routes CRUD in section C) stays O(log n).
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_routes_service
+    ON service_http_routes(service_id)
+  `);
+
+  // Phase 2b data backfill: populate service_http_routes rows from the
+  // legacy Phase 2 services columns and derive the new (kind, runtime,
+  // target_ip) values from the legacy `type` and `target` fields.
+  //
+  // Idempotent — runs silently on every boot and only logs + mutates when
+  // there is actually something to backfill. Must run AFTER:
+  //   (a) the services CREATE TABLE + Phase 2b ALTER TABLEs above, so
+  //       `kind`/`runtime`/`target_ip`/`lxc_container_name` exist on every
+  //       row, and
+  //   (b) the service_http_routes CREATE TABLE directly above, so the
+  //       INSERT has somewhere to write.
+  // Legacy columns on `services` are NOT dropped here — D.14 owns that.
+  migrateServicesToRoutes(db);
 
   // Create file versions table for version control
   db.exec(`
@@ -473,4 +580,132 @@ export function migrateServicesUniqueConstraint(dbInstance) {
 
   runMigration();
   console.log('Services table migration complete');
+}
+
+// Phase 2b backfill: splits legacy Phase 2 services rows into (services,
+// service_http_routes) pairs by copying the legacy route-owned columns
+// (domain, path_prefix, port, ssl_enabled, force_https, websocket_enabled,
+// max_upload_size) into a new child row and deriving the new service-level
+// columns (kind, runtime, target_ip) from the legacy `type` and `target`.
+//
+// This helper is ADDITIVE only — it does NOT drop any legacy columns from
+// the `services` table. The legacy columns stay in place until D.14 runs a
+// table-rebuild, after every endpoint has been refactored to read and write
+// from `service_http_routes`. That invariant keeps every intermediate
+// commit runtime-correct (existing Phase 2 endpoints keep working against
+// the legacy columns while the Phase 2b read paths come online).
+//
+// Idempotent — safe to call on every `initDatabase()`:
+//   - Detects whether the services table still carries the legacy route
+//     columns (domain/path_prefix/port). Post-D.14 installs no longer have
+//     them, so there is nothing to backfill and the helper returns early.
+//   - The INSERT's `WHERE id NOT IN (SELECT service_id FROM
+//     service_http_routes)` clause ensures only services that lack a
+//     corresponding route row get backfilled. Admin services are skipped
+//     because their Caddy block is installer-managed.
+//   - Each UPDATE's WHERE clause targets only rows whose new column is
+//     still in the unpopulated state, so a second run matches zero rows.
+//   - Only logs when at least one route was actually inserted.
+export function migrateServicesToRoutes(dbInstance) {
+  const db = dbInstance || getDb();
+
+  // Post-D.14 detection: if the services table no longer has the legacy
+  // route columns, there is nothing left to backfill.
+  const cols = db
+    .prepare(`PRAGMA table_info(services)`)
+    .all()
+    .map((c) => c.name);
+  const hasLegacyCols =
+    cols.includes('domain') &&
+    cols.includes('path_prefix') &&
+    cols.includes('port');
+  if (!hasLegacyCols) {
+    return;
+  }
+
+  // Guard: if the Phase 2b columns are missing the helper is being called
+  // before A.1's ALTER TABLE has run (unit-test seeding a raw Phase 2 shape
+  // without going through initDatabase). Bail out cleanly rather than
+  // crashing on an unknown column.
+  const hasPhase2bCols =
+    cols.includes('kind') &&
+    cols.includes('runtime') &&
+    cols.includes('target_ip') &&
+    cols.includes('lxc_container_name');
+  if (!hasPhase2bCols) {
+    return;
+  }
+
+  const runBackfill = db.transaction(() => {
+    // (1) One service_http_routes row per non-admin service that does not
+    // yet have one. `lower(hex(randomblob(16)))` gives a 32-char random
+    // hex string for the primary key, keeping the helper dependency-free
+    // (no uuidv4 imported into SQL). COALESCE wraps each legacy column so
+    // NULLs from very old installs land on sensible defaults.
+    const insertResult = db
+      .prepare(
+        `
+      INSERT INTO service_http_routes (
+        id, service_id, domain, path_prefix, target_port,
+        websocket_enabled, ssl_enabled, force_https, max_upload_size
+      )
+      SELECT
+        lower(hex(randomblob(16))),
+        id,
+        domain,
+        COALESCE(path_prefix, '/'),
+        port,
+        COALESCE(websocket_enabled, 0),
+        COALESCE(ssl_enabled, 1),
+        COALESCE(force_https, 1),
+        COALESCE(max_upload_size, '1G')
+      FROM services
+      WHERE is_admin = 0
+        AND domain IS NOT NULL
+        AND id NOT IN (SELECT service_id FROM service_http_routes)
+    `
+      )
+      .run();
+
+    // (2) Derive `kind` from legacy `type`: static -> static_site,
+    // docker/proxy -> container_service. A.1's ALTER TABLE set the
+    // default to 'container_service' on every existing row, so we only
+    // need to flip static rows. Admin rows stay at the default — their
+    // kind is not meaningful (they bypass the routes pipeline entirely).
+    db.prepare(
+      `UPDATE services
+         SET kind = 'static_site'
+       WHERE is_admin = 0 AND type = 'static' AND kind != 'static_site'`
+    ).run();
+
+    // (3) Derive `runtime` from legacy `type`. Only 'docker' maps to a
+    // non-NULL runtime; 'proxy' and 'static' stay NULL (operator can set
+    // runtime='lxc' later via the wizard). Idempotent via the NULL check.
+    db.prepare(
+      `UPDATE services
+         SET runtime = 'docker'
+       WHERE is_admin = 0 AND runtime IS NULL AND type = 'docker'`
+    ).run();
+
+    // (4) Copy legacy `target` into the new `target_ip` column for
+    // non-static services. Static sites use `root_dir`, not an IP target,
+    // so they stay at NULL. Idempotent via the `target_ip IS NULL` check.
+    db.prepare(
+      `UPDATE services
+         SET target_ip = target
+       WHERE is_admin = 0
+         AND target_ip IS NULL
+         AND target IS NOT NULL
+         AND type != 'static'`
+    ).run();
+
+    return insertResult.changes;
+  });
+
+  const insertedRoutes = runBackfill();
+  if (insertedRoutes > 0) {
+    console.log(
+      `Backfilled services → service_http_routes (${insertedRoutes} routes)`
+    );
+  }
 }

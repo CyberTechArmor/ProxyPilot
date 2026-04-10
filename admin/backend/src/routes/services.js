@@ -3035,24 +3035,13 @@ servicesRouter.post('/discover/import', async (req, res) => {
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
 
-    // Generate Caddy config for the imported site
+    // Regenerate the merged Caddy config for the imported domain. The DB
+    // row was inserted just above, so regenerateDomainCaddyConfig reads it
+    // plus any sibling services on the same domain and writes a single
+    // merged site block.
     try {
-      const serviceConfig = {
-        domain,
-        type,
-        target: target || '127.0.0.1',
-        port: port || null,
-        rootDir: actualRootDir,
-        websocketEnabled: !!websocketEnabled,
-        forceHttps: !!sslEnabled,
-        maxUploadSize: '1G',
-        sslEnabled: !!sslEnabled,
-      };
-
       await ensureCaddyStructure();
-      const caddyConfig = generateCaddyConfig(serviceConfig);
-      const configPath = caddyFilePath(domain);
-      await writeCaddyConfig(configPath, caddyConfig);
+      await regenerateDomainCaddyConfig(db, domain);
 
       // Validate and reload Caddy
       await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);

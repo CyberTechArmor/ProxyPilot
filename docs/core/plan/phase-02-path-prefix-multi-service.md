@@ -145,8 +145,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 
 ### E. Frontend — Dashboard wizard UX (mobile-first)
 
-- [ ] `existingPrefixesForDomain` memo in Dashboard (admin/frontend/src/pages/Dashboard.jsx, near line 470 with the other memos)
-      — Add `const existingPrefixesForDomain = useMemo(() => { const d = (formData.domain || '').toLowerCase().trim(); if (!d) return []; return services.filter(s => s.domain.toLowerCase() === d).map(s => s.pathPrefix || '/'); }, [services, formData.domain]);`. Used by the info banner and the submit validation below.
+- [x] `existingPrefixesForDomain` memo in Dashboard (admin/frontend/src/pages/Dashboard.jsx:537)
+      — Added the memo right after the existing `filteredServices` `useMemo`. Returns `[]` when the domain field is empty, otherwise the array of `pathPrefix` values for every service whose domain matches case-insensitively. **Verified:** `npm run build` succeeds; headless puppeteer load at 360×640 and 1280×800 — `scrollWidth === clientWidth` at both, zero `pageerror`s, only the expected "API 500" console.errors from `/api/auth/verify` (no backend in the test environment).
 
 - [ ] Info banner in Add Service wizard (admin/frontend/src/pages/Dashboard.jsx:2865, directly under the Path Prefix Input)
       — When `existingPrefixesForDomain.length > 0`, render a mobile-friendly banner: `<div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-600 dark:text-blue-300">Domain already in use. Existing path prefixes: <code className="font-mono">{existingPrefixesForDomain.join(', ')}</code>. Choose a different prefix to add a second service to this domain.</div>`. Full width, wraps cleanly at 360px. No fixed width.

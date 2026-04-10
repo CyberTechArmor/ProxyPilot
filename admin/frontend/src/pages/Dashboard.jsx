@@ -533,6 +533,18 @@ export default function Dashboard() {
     return result;
   }, [services, searchQuery, filterType, sortBy, showFavoritesOnly, selectedFolderFilter, serviceFolders]);
 
+  // Phase 2: list every existing path prefix for the domain the operator is
+  // currently typing into the Add Service wizard. Used by the info banner
+  // (so the operator can see "/, /api are taken") and by the client-side
+  // collision guard in handleAddService.
+  const existingPrefixesForDomain = useMemo(() => {
+    const d = (formData.domain || '').toLowerCase().trim();
+    if (!d) return [];
+    return services
+      .filter((s) => s.domain && s.domain.toLowerCase() === d)
+      .map((s) => s.pathPrefix || '/');
+  }, [services, formData.domain]);
+
   // Group compose services by project with search/filter/sort
   const groupedComposeProjects = useMemo(() => {
     const groups = {};

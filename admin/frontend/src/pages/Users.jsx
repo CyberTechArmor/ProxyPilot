@@ -318,11 +318,12 @@ export default function UsersPage() {
                       <span>Created: {new Date(user.createdAt).toLocaleDateString()}</span>
                     </div>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex gap-1 shrink-0">
                     {user.role !== 'admin' && (
                       <Button
                         variant="ghost"
                         size="sm"
+                        className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                         onClick={() => openAccessDialog(user)}
                         title="Manage service access"
                       >
@@ -332,6 +333,7 @@ export default function UsersPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                       onClick={() => handleResetPassword(user.id)}
                       title="Reset password"
                     >
@@ -340,6 +342,7 @@ export default function UsersPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                       onClick={() => {
                         setUserToDelete(user);
                         setDeleteUserOpen(true);

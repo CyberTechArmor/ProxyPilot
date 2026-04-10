@@ -3880,8 +3880,25 @@ volumes:
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Delete Service</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete "{serviceToDelete?.name}"? Enter your TOTP code to confirm.
+            <DialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  Are you sure you want to delete &quot;{serviceToDelete?.name}&quot;? Enter your TOTP code to confirm.
+                </p>
+                {(() => {
+                  if (!serviceToDelete) return null;
+                  const siblingsCount = services.filter(
+                    (s) => s.domain === serviceToDelete.domain && s.id !== serviceToDelete.id
+                  ).length;
+                  if (siblingsCount === 0) return null;
+                  return (
+                    <p data-testid="delete-sibling-warning" className="text-amber-600 dark:text-amber-400">
+                      This will leave {siblingsCount} other service{siblingsCount === 1 ? '' : 's'}{' '}
+                      running on <code className="font-mono">{serviceToDelete.domain}</code>.
+                    </p>
+                  );
+                })()}
+              </div>
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">

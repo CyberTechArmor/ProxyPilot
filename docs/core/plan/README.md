@@ -33,6 +33,35 @@ next — potentially across multiple Claude Code sessions per phase.
 - [`01-phase-overview.md`](01-phase-overview.md) — phase dependency matrix
 - [`99-execution-order.md`](99-execution-order.md) — recommended ordering with milestones
 
+## Cross-cutting rule: mobile-first UI
+
+**Any phase that touches `admin/frontend/src/pages/` or
+`admin/frontend/src/components/` must deliver a mobile-friendly version
+in the same phase.** Phase 1 established the baseline (responsive shell,
+full-screen dialogs on `<sm`, 44px touch targets, etc.). Every new page,
+dialog, grid, form, or icon button added in a later phase must follow
+[`admin/frontend/MOBILE_FIRST.md`](../../../admin/frontend/MOBILE_FIRST.md)
+and pass its pre-merge checklist before the phase is marked complete:
+
+- Runs locally via `npm run dev` without runtime errors (not just
+  `npm run build` — Vite build does not catch unresolved references like
+  missing `cn` imports).
+- Renders at 360px, 375px, 768px, and 1280px with no horizontal scroll.
+- Every new dialog uses the `max-w-full h-full rounded-none sm:…`
+  pattern or is a tiny confirmation that fits a 360px viewport.
+- Every new `grid-cols-N` starts at `grid-cols-1` and ramps up at
+  `sm:`/`md:`/`lg:`.
+- Every new primary `Button size="icon"` hits the 44px touch target on
+  mobile.
+- Lighthouse mobile accessibility score ≥ 90 on the changed page.
+
+This rule is not optional. A phase that ships desktop-only UI is
+considered unfinished and cannot be marked ✅ in the Phases table below.
+When reviewing a phase-level spec, if its "Files to edit" list includes
+anything under `admin/frontend/`, the phase author must add a
+"Mobile-first UI" subsection to the Deliverables block spelling out
+which screens/dialogs/forms get the mobile treatment.
+
 ## Phases
 
 | Phase | File | Depends on | Delivers |

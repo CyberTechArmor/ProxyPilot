@@ -42,6 +42,13 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
   - Client-side validation: accept a create that reuses the domain as long as the path prefix differs from every existing entry for that domain.
   - Service list rendering: group services by domain in the sort-by-favorite view, so operators can see "3 services on example.com" together.
   - Delete confirmation: warn "This will leave N other services running on example.com" when applicable.
+- **Mobile-first UI (per the cross-cutting rule in [`README.md`](README.md#cross-cutting-rule-mobile-first-ui)):**
+  - Follow [`admin/frontend/MOBILE_FIRST.md`](../../../admin/frontend/MOBILE_FIRST.md) for every Dashboard change above.
+  - The "Domain already in use" info banner must wrap (`flex-wrap` or block) and remain readable at 360px — no fixed width, no `whitespace-nowrap` on the prefix list.
+  - The domain-grouped service list must still stack to one card per row at `<sm` (respect the existing `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` pattern on the services grid); the group header row must wrap so "3 services on example.com" does not overflow.
+  - The delete confirmation "This will leave N other services running on example.com" warning must render inside the existing full-screen-on-`<sm` delete dialog without adding fixed widths.
+  - Do not introduce any new `grid-cols-N` without a `grid-cols-1` base, any new `max-w-md`/`max-w-lg`/`max-w-4xl` on a `DialogContent` without the `max-w-full h-full rounded-none sm:…` prefix, or any new primary action `Button size="icon"` under 44px on mobile.
+  - Before marking the phase complete, run `npm run dev` and load the Dashboard at 360px in Chrome DevTools — confirm the Add Service wizard's info banner wraps, the grouped service list stacks, and the delete dialog fits. `vite build` passing is not sufficient evidence; the Phase 1 cn-import regression proved that.
 - **Export/import:** `serviceExport` already includes `pathPrefix` from commit `be3f81d`. Verify the import path now accepts multiple services per domain without the old uniqueness check.
 - **Audit log:** no schema change — existing `SERVICE_CREATED` / `SERVICE_UPDATED` / `SERVICE_DELETED` entries already include the domain in `details`. Add `pathPrefix` to the details payload for disambiguation.
 
@@ -63,6 +70,10 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 - [ ] Add Service wizard shows existing path prefixes when the typed domain is in use
 - [ ] Audit log entries include `pathPrefix` in the details JSON
 - [ ] Caddy `adapt` validates every generated merged config — no syntax errors, no duplicate site addresses
+- [ ] **Mobile:** Add Service wizard + "Domain already in use" info banner render at 360px with zero horizontal scroll; the new wizard flow is completable end-to-end on a 375px viewport
+- [ ] **Mobile:** Service list grouping by domain still stacks to one card per row at `<sm` — no regression from Phase 1's `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`
+- [ ] **Mobile:** Delete confirmation "This will leave N other services running" warning fits inside the full-screen-on-`<sm` delete dialog without overflow
+- [ ] **Mobile:** `npm run dev` load of `/` at 360px shows no runtime errors in the console (not just a clean `vite build`)
 
 **Commit:** `phase-02: multi-service path routing - multiple services per domain via handle_path`
 

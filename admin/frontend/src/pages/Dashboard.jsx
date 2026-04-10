@@ -199,9 +199,14 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState('favorite');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
+  // Mobile-only collapse of the folder sidebar (closed by default at <md)
+  const [mobileFoldersOpen, setMobileFoldersOpen] = useState(false);
+
   // Full screen editor state
   const [editorOpen, setEditorOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Mobile-only file tree drawer toggle in the file editor
+  const [mobileFileTreeOpen, setMobileFileTreeOpen] = useState(false);
 
   // Add service wizard state
   const [wizardStep, setWizardStep] = useState(0);
@@ -2644,14 +2649,14 @@ volumes:
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Services</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold">Services</h1>
           <p className="text-muted-foreground">
             Manage your proxy services and domains
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={handleReloadCaddy} title="Reload Caddy">
             <RefreshCw className="h-4 w-4" />
           </Button>
@@ -2712,7 +2717,7 @@ volumes:
               <Bell className="h-4 w-4" />
             </Button>
             {notifOpen && (
-              <div className="absolute right-0 top-10 z-50 w-80 max-h-96 overflow-y-auto border rounded-lg bg-background shadow-lg">
+              <div className="absolute right-0 top-10 z-50 w-[min(20rem,calc(100vw-2rem))] max-h-96 overflow-y-auto border rounded-lg bg-background shadow-lg">
                 <div className="flex items-center justify-between p-3 border-b">
                   <h4 className="text-sm font-medium">Notifications</h4>
                   <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setNotifOpen(false)}>
@@ -2751,7 +2756,7 @@ volumes:
                 Add Service
               </Button>
             </DialogTrigger>
-            <DialogContent className={wizardStep === 0 ? "max-w-4xl" : "max-w-lg"}>
+            <DialogContent className={wizardStep === 0 ? "max-w-full h-full rounded-none sm:max-w-4xl sm:h-auto sm:rounded-lg" : "max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"}>
               <DialogHeader>
                 <DialogTitle>Add New Service</DialogTitle>
                 <DialogDescription>
@@ -2760,7 +2765,7 @@ volumes:
               </DialogHeader>
 
               {wizardStep === 0 ? (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 py-4">
                   <Card className="cursor-pointer hover:border-primary transition-colors" onClick={() => handleTypeSelect('static')}>
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
@@ -2912,13 +2917,13 @@ volumes:
       </div>
 
       {/* Dashboard Tabs */}
-      <div className="flex items-center gap-2 border-b pb-2">
-        <div className="flex gap-1 p-1 bg-muted rounded-lg">
+      <div className="flex flex-col gap-2 border-b pb-2 sm:flex-row sm:items-center">
+        <div className="flex gap-1 p-1 bg-muted rounded-lg flex-nowrap overflow-x-auto max-w-full">
           <Button
             variant={dashboardTab === 'resources' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('resources')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Activity className="h-4 w-4" />
             Resources
@@ -2927,7 +2932,7 @@ volumes:
             variant={dashboardTab === 'services' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('services')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <LayoutGrid className="h-4 w-4" />
             Services
@@ -2936,7 +2941,7 @@ volumes:
             variant={dashboardTab === 'compose' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('compose')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Container className="h-4 w-4" />
             Compose
@@ -2945,13 +2950,13 @@ volumes:
             variant={dashboardTab === 'lxc' ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setDashboardTab('lxc')}
-            className="gap-2"
+            className="gap-2 shrink-0"
           >
             <Box className="h-4 w-4" />
             LXC
           </Button>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="sm:ml-auto flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Default view:</span>
           <select
             className="text-xs border rounded px-2 py-1 bg-background"
@@ -3131,7 +3136,7 @@ volumes:
           />
         </div>
         <Select value={filterType} onValueChange={setFilterType}>
-          <SelectTrigger className="w-[140px]">
+          <SelectTrigger className="w-full sm:w-[140px]">
             <Filter className="h-4 w-4 mr-2" />
             <SelectValue />
           </SelectTrigger>
@@ -3143,7 +3148,7 @@ volumes:
           </SelectContent>
         </Select>
         <Select value={sortBy} onValueChange={setSortBy}>
-          <SelectTrigger className="w-[140px]">
+          <SelectTrigger className="w-full sm:w-[140px]">
             <SortAsc className="h-4 w-4 mr-2" />
             <SelectValue />
           </SelectTrigger>
@@ -3190,19 +3195,35 @@ volumes:
       </div>
 
       {/* Main Content with Folder Sidebar */}
-      <div className="flex gap-4">
-        {/* Left Sidebar - Folder Navigation */}
-        <div className="w-56 shrink-0">
-          <div className="border rounded-lg sticky top-4">
+      <div className="flex flex-col md:flex-row gap-4">
+        {/* Left Sidebar - Folder Navigation (collapsible on mobile) */}
+        <div className="w-full md:w-56 md:shrink-0">
+          <div className="border rounded-lg md:sticky md:top-4">
             <div className="p-3 border-b bg-muted/50 flex items-center justify-between">
-              <span className="font-medium text-sm flex items-center gap-2">
-                <FolderTree className="h-4 w-4" />
-                Folders
-              </span>
+              <button
+                type="button"
+                className="flex-1 flex items-center justify-between gap-2 text-left md:cursor-default"
+                onClick={() => setMobileFoldersOpen((v) => !v)}
+                aria-expanded={mobileFoldersOpen}
+              >
+                <span className="font-medium text-sm flex items-center gap-2">
+                  <FolderTree className="h-4 w-4" />
+                  Folders
+                  <span className="md:hidden text-xs text-muted-foreground">
+                    ({services.length} total)
+                  </span>
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 md:hidden transition-transform shrink-0",
+                    mobileFoldersOpen ? "rotate-180" : "rotate-0"
+                  )}
+                />
+              </button>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-6 w-6 p-0"
+                className="h-6 w-6 p-0 ml-2 shrink-0"
                 onClick={() => {
                   setNewFolderName('');
                   setSelectedParentFolder(null);
@@ -3213,7 +3234,13 @@ volumes:
                 <FolderPlus className="h-4 w-4" />
               </Button>
             </div>
-            <div className="p-2 space-y-1">
+            <div
+              className={cn(
+                "p-2 space-y-1",
+                mobileFoldersOpen ? "block" : "hidden",
+                "md:block"
+              )}
+            >
               {/* All Services */}
               <div
                 className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${selectedFolderFilter === null ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
@@ -3351,7 +3378,7 @@ volumes:
 
         {/* Services Grid/List */}
         <div className="flex-1">
-          <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
+          <div className={viewMode === 'grid' ? 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
             {filteredServices.map((service) => (
           <Card
             key={service.id}
@@ -3360,12 +3387,12 @@ volumes:
             onDragEnd={handleServiceDragEnd}
             className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''} ${draggedService?.id === service.id ? 'opacity-50' : ''} cursor-grab active:cursor-grabbing`}>
             <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div className="flex items-start justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
                   {getServiceIcon(service.type)}
-                  <CardTitle className="text-lg">{service.name}</CardTitle>
+                  <CardTitle className="text-lg truncate">{service.name}</CardTitle>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 flex-wrap justify-end">
                   <Button
                     variant="ghost"
                     size="icon"
@@ -3548,7 +3575,7 @@ volumes:
               />
             </div>
             <Select value={composeStatusFilter} onValueChange={setComposeStatusFilter}>
-              <SelectTrigger className="w-[130px]">
+              <SelectTrigger className="w-full sm:w-[130px]">
                 <Filter className="h-4 w-4 mr-2" />
                 <SelectValue />
               </SelectTrigger>
@@ -3559,7 +3586,7 @@ volumes:
               </SelectContent>
             </Select>
             <Select value={composeSortBy} onValueChange={setComposeSortBy}>
-              <SelectTrigger className="w-[140px]">
+              <SelectTrigger className="w-full sm:w-[140px]">
                 <SortAsc className="h-4 w-4 mr-2" />
                 <SelectValue />
               </SelectTrigger>
@@ -3574,24 +3601,24 @@ volumes:
             </span>
           </div>
           {groupedComposeProjects.length > 0 && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
             {groupedComposeProjects.map((project) => (
               <Card key={project.projectName} className="border-dashed border-purple-500/30">
                 <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-3 h-3 rounded-full ${project.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                      <Boxes className="h-4 w-4 text-purple-500" />
-                      <CardTitle className="text-lg">{project.projectName}</CardTitle>
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className={`w-3 h-3 rounded-full shrink-0 ${project.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                      <Boxes className="h-4 w-4 text-purple-500 shrink-0" />
+                      <CardTitle className="text-lg truncate">{project.projectName}</CardTitle>
                     </div>
                     {/* Hot command buttons */}
-                    <div className="flex gap-1">
+                    <div className="flex gap-1 flex-wrap justify-end">
                       {/* Start/Stop button */}
                       {project.isRunning ? (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0 text-yellow-500 hover:text-yellow-600"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-yellow-500 hover:text-yellow-600"
                           onClick={() => handleComposeAction('stop', project)}
                           disabled={composeActionLoading[`${project.projectName}-stop`]}
                           title="Stop"
@@ -3606,7 +3633,7 @@ volumes:
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0 text-green-500 hover:text-green-600"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-green-500 hover:text-green-600"
                           onClick={() => handleComposeAction('start', project)}
                           disabled={composeActionLoading[`${project.projectName}-start`]}
                           title="Start"
@@ -3622,7 +3649,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-blue-500 hover:text-blue-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-blue-500 hover:text-blue-600"
                         onClick={() => handleComposeAction('restart', project)}
                         disabled={composeActionLoading[`${project.projectName}-restart`]}
                         title="Restart"
@@ -3637,7 +3664,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-red-500 hover:text-red-600"
                         onClick={() => openDestroyDialog(project)}
                         title="Destroy"
                       >
@@ -3648,7 +3675,7 @@ volumes:
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0"
+                          className="h-9 w-9 sm:h-7 sm:w-7 p-0"
                           onClick={() => {
                             const firstService = project.services[0];
                             const composeDir = firstService?.composeDir || `/root/docker/${project.projectName}`;
@@ -3663,7 +3690,7 @@ volumes:
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0"
                         onClick={() => setExpandedProjects(prev => ({ ...prev, [project.projectName]: !prev[project.projectName] }))}
                       >
                         {expandedProjects[project.projectName] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -3756,7 +3783,7 @@ volumes:
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Delete Service</DialogTitle>
             <DialogDescription>
@@ -3780,7 +3807,7 @@ volumes:
 
       {/* Remove Certificate Confirmation Dialog */}
       <Dialog open={removeCertDialogOpen} onOpenChange={setRemoveCertDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Remove SSL Certificate</DialogTitle>
             <DialogDescription>
@@ -3811,7 +3838,7 @@ volumes:
 
       {/* Docker Compose Destroy Dialog */}
       <Dialog open={destroyDialogOpen} onOpenChange={setDestroyDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="text-red-500 flex items-center gap-2">
               <Trash2 className="h-5 w-5" />
@@ -3894,7 +3921,7 @@ volumes:
 
       {/* Docker Compose Create Dialog */}
       <Dialog open={composeCreateOpen} onOpenChange={setComposeCreateOpen}>
-        <DialogContent className="max-w-4xl h-[90vh] flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-4xl sm:h-[90vh] sm:rounded-lg flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Boxes className="h-5 w-5 text-purple-500" />
@@ -3972,23 +3999,25 @@ volumes:
               {composeCreateForm.envVars.length > 0 && (
                 <div className="space-y-2 max-h-32 overflow-y-auto">
                   {composeCreateForm.envVars.map((env, index) => (
-                    <div key={index} className="flex gap-2 items-center">
+                    <div key={index} className="flex flex-col sm:flex-row gap-2 sm:items-center">
                       <Input
                         placeholder="KEY"
                         value={env.key}
                         onChange={(e) => updateEnvVar(index, 'key', e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'))}
-                        className="w-1/3 font-mono text-sm"
+                        className="w-full sm:w-1/3 font-mono text-sm"
                       />
-                      <span className="text-muted-foreground">=</span>
-                      <Input
-                        placeholder="value or {password}"
-                        value={env.value}
-                        onChange={(e) => updateEnvVar(index, 'value', e.target.value)}
-                        className="flex-1 font-mono text-sm"
-                      />
-                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500" onClick={() => removeEnvVar(index)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <span className="text-muted-foreground hidden sm:inline">=</span>
+                      <div className="flex gap-2 items-center">
+                        <Input
+                          placeholder="value or {password}"
+                          value={env.value}
+                          onChange={(e) => updateEnvVar(index, 'value', e.target.value)}
+                          className="flex-1 font-mono text-sm"
+                        />
+                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 shrink-0" onClick={() => removeEnvVar(index)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -4016,7 +4045,7 @@ volumes:
 
       {/* Terminal Dialog */}
       <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
-        <DialogContent className={`${terminalFullscreen ? 'max-w-[100vw] w-screen h-screen max-h-screen m-0 rounded-none' : 'max-w-5xl h-[85vh]'} flex flex-col overflow-hidden`}>
+        <DialogContent className={`max-w-full h-full rounded-none ${terminalFullscreen ? 'sm:max-w-[100vw] sm:w-screen sm:h-screen sm:max-h-screen sm:m-0 sm:rounded-none' : 'sm:max-w-5xl sm:h-[85vh] sm:rounded-lg'} flex flex-col overflow-hidden`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>
@@ -4043,7 +4072,7 @@ volumes:
 
           <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0 overflow-hidden`}>
             {/* Left Panel: File Browser + Docker Containers */}
-            <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 ${terminalFullscreen ? '' : 'max-h-64 md:max-h-none'}`}>
+            <div className={`${terminalFullscreen ? 'w-full md:w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 max-h-48 md:max-h-none`}>
               {/* Current View - File Browser */}
               <div className="border rounded flex flex-col flex-1 min-h-0">
                 <div className="p-2 border-b bg-muted shrink-0 flex items-center justify-between">
@@ -4472,7 +4501,7 @@ volumes:
 
       {/* Full Screen File Editor */}
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
-        <DialogContent className={`${isFullscreen ? 'max-w-full h-full m-0 rounded-none' : 'max-w-6xl h-[90vh]'} flex flex-col`}>
+        <DialogContent className={`max-w-full h-full rounded-none ${isFullscreen ? 'sm:max-w-full sm:h-full sm:m-0 sm:rounded-none' : 'sm:max-w-6xl sm:h-[90vh] sm:rounded-lg'} flex flex-col`}>
           <DialogHeader className="shrink-0">
             <div className="flex items-center justify-between">
               <div>
@@ -4505,14 +4534,14 @@ volumes:
           {/* Path Picker for Static Sites */}
           {selectedService?.type === 'static' && (
             <div className="p-3 bg-muted/50 rounded-lg border mb-2 shrink-0">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Label htmlFor="editorPath" className="text-sm font-medium whitespace-nowrap">Site Path:</Label>
                 <Input
                   id="editorPath"
                   defaultValue={selectedService?.dataDir || selectedService?.rootDir || ''}
                   key={selectedService?.id}
                   placeholder="/var/www/mysite"
-                  className="flex-1 h-8 text-sm font-mono"
+                  className="flex-1 min-w-[150px] h-8 text-sm font-mono"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.target.blur();
@@ -4552,14 +4581,40 @@ volumes:
             </div>
           )}
 
-          <div className="flex gap-4 flex-1 min-h-0">
-            {/* File Tree */}
-            <div className="w-64 shrink-0 border rounded flex flex-col">
+          <div className="relative flex gap-4 flex-1 min-h-0">
+            {/* Mobile file tree backdrop */}
+            {mobileFileTreeOpen && (
+              <div
+                className="fixed inset-0 z-40 bg-black/50 md:hidden"
+                onClick={() => setMobileFileTreeOpen(false)}
+                aria-hidden="true"
+              />
+            )}
+            {/* File Tree (drawer on <md, static sidebar on md+) */}
+            <div
+              className={cn(
+                "border rounded flex flex-col bg-card",
+                "md:w-64 md:shrink-0 md:static md:translate-x-0",
+                "fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-out md:transform-none",
+                mobileFileTreeOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+              )}
+            >
               <div className="p-2 border-b bg-muted flex items-center justify-between shrink-0">
                 <span className="font-medium text-sm">Files</span>
-                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setShowNewFileInput(true)}>
-                  <FilePlus className="h-4 w-4" />
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setShowNewFileInput(true)}>
+                    <FilePlus className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 md:hidden"
+                    onClick={() => setMobileFileTreeOpen(false)}
+                    aria-label="Close file tree"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
               {showNewFileInput && (
                 <div className="p-2 border-b flex gap-2 shrink-0">
@@ -4575,8 +4630,18 @@ volumes:
 
             {/* Editor Area */}
             <div className="flex-1 flex flex-col border rounded min-w-0">
-              <div className="p-2 border-b bg-muted flex items-center gap-2 shrink-0">
-                <span className="font-medium text-sm truncate flex-1">
+              <div className="p-2 border-b bg-muted flex items-center gap-2 flex-wrap shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="md:hidden"
+                  onClick={() => setMobileFileTreeOpen(true)}
+                  aria-label="Show file tree"
+                >
+                  <FileText className="h-4 w-4 mr-1" />
+                  Files
+                </Button>
+                <span className="font-medium text-sm truncate flex-1 min-w-0">
                   {selectedFile ? selectedFile.path : 'Select a file to edit'}
                 </span>
                 {selectedFile && (
@@ -4609,7 +4674,7 @@ volumes:
                     </Button>
                     {hasUnsavedChanges && (
                       <Input
-                        className="w-40 h-7 text-xs"
+                        className="w-full sm:w-40 h-7 text-xs"
                         placeholder="Version notes..."
                         value={saveNotes}
                         onChange={(e) => setSaveNotes(e.target.value)}
@@ -4740,7 +4805,7 @@ volumes:
 
       {/* Service Settings Dialog */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
-        <DialogContent className={settingsTab === 'caddy' ? 'max-w-5xl h-[90vh] flex flex-col' : 'max-w-lg max-h-[90vh] overflow-y-auto'}>
+        <DialogContent className={settingsTab === 'caddy' ? 'max-w-full h-full rounded-none sm:max-w-5xl sm:h-[90vh] sm:rounded-lg flex flex-col' : 'max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto'}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Server className="h-5 w-5" />
@@ -4819,7 +4884,7 @@ volumes:
             {/* Proxy Settings (for docker/proxy types) */}
             {(settingsService?.type === 'docker' || settingsService?.type === 'proxy') && (
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label htmlFor="target">Target IP/Host</Label>
                     <Input
@@ -5008,7 +5073,7 @@ volumes:
 
       {/* Export Dialog */}
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Export Services</DialogTitle>
             <DialogDescription>Select services to export and download as JSON</DialogDescription>
@@ -5045,7 +5110,7 @@ volumes:
 
       {/* Import Dialog */}
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Import Services</DialogTitle>
             <DialogDescription>Upload a previously exported JSON file to import services</DialogDescription>
@@ -5075,7 +5140,7 @@ volumes:
 
       {/* Kill Switch Dialog */}
       <Dialog open={killSwitchDialogOpen} onOpenChange={setKillSwitchDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <ShieldAlert className="h-5 w-5" />
@@ -5126,7 +5191,7 @@ volumes:
 
       {/* Discover Dialog */}
       <Dialog open={discoverDialogOpen} onOpenChange={setDiscoverDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[80vh] sm:rounded-lg overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Radar className="h-5 w-5" />
@@ -5238,7 +5303,7 @@ volumes:
 
       {/* Remove Site Dialog */}
       <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <Trash2 className="h-5 w-5" />
@@ -5329,7 +5394,7 @@ volumes:
 
       {/* Nano Editor Dialog */}
       <Dialog open={nanoEditorOpen} onOpenChange={setNanoEditorOpen}>
-        <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-4xl sm:h-[80vh] sm:rounded-lg flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2 font-mono">
               <Code className="h-5 w-5" />
@@ -5384,7 +5449,7 @@ volumes:
 
       {/* One-Click Install Dialog */}
       <Dialog open={oneClickDialogOpen} onOpenChange={setOneClickDialogOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Rocket className="h-5 w-5 text-green-500" />
@@ -5446,7 +5511,7 @@ volumes:
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label htmlFor="wpPort">WordPress Port</Label>
                     <Input
@@ -5520,7 +5585,7 @@ volumes:
           setNewFolderName('');
         }
       }}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FolderTree className="h-5 w-5 text-yellow-500" />

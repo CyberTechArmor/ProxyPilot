@@ -717,7 +717,7 @@ export default function Profile() {
                 <img
                   src={qrCodeUrl}
                   alt="TOTP QR Code"
-                  className="w-48 h-48 bg-white p-2 rounded-lg"
+                  className="w-48 h-48 max-w-full h-auto bg-white p-2 rounded-lg"
                 />
               </div>
 
@@ -817,13 +817,13 @@ export default function Profile() {
           ) : (
             <div className="space-y-2">
               {devices.map((device) => (
-                <div key={device.id} className="flex items-center justify-between p-3 border rounded-lg">
-                  <div className="flex-1">
+                <div key={device.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <Monitor className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium">{device.device_name}</span>
+                      <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="font-medium truncate">{device.device_name}</span>
                     </div>
-                    <div className="flex items-center gap-4 mt-1 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 mt-1 text-sm text-muted-foreground">
                       <span>IP: {device.ip_address}</span>
                       <span>Last used: {new Date(device.last_used_at).toLocaleString()}</span>
                     </div>
@@ -831,6 +831,7 @@ export default function Profile() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    className="h-11 w-11 sm:h-9 sm:w-9 p-0 self-end sm:self-auto shrink-0"
                     onClick={() => {
                       setDeviceToRevoke(device);
                       setRevokeDeviceOpen(true);
@@ -849,7 +850,7 @@ export default function Profile() {
 
       {/* Revoke Device Dialog */}
       <Dialog open={revokeDeviceOpen} onOpenChange={setRevokeDeviceOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Revoke Device</DialogTitle>
             <DialogDescription>
@@ -886,7 +887,7 @@ export default function Profile() {
 
       {/* Revoke All Devices Dialog */}
       <Dialog open={revokeAllOpen} onOpenChange={setRevokeAllOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Revoke All Devices</DialogTitle>
             <DialogDescription>

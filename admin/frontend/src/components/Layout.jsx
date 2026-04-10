@@ -26,6 +26,7 @@ import {
   AlertCircle,
   RefreshCw,
   Bell,
+  Menu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -33,6 +34,14 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const { toasts } = useToast();
+
+  // Mobile sidebar drawer state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Close the mobile sidebar whenever the route changes
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
   // Notification panel state
   const [notifOpen, setNotifOpen] = useState(false);
@@ -224,21 +233,38 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Mobile top bar (hidden on md+) */}
+      <header className="fixed top-0 inset-x-0 z-40 flex h-14 items-center gap-2 border-b bg-card px-4 md:hidden">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Open navigation menu"
+          className="h-11 w-11"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <div className="flex items-center gap-2">
+          <Rocket className="h-6 w-6 text-primary" />
+          <span className="text-lg font-bold">ProxyPilot</span>
+        </div>
+      </header>
+
       {/* Update Banner */}
       {showUpdateBanner && updateInfo?.updateAvailable && (
-        <div className="fixed top-0 left-64 right-0 z-50 bg-primary text-primary-foreground px-4 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Download className="h-4 w-4" />
+        <div className="fixed top-14 md:top-0 left-0 md:left-64 right-0 z-30 bg-primary text-primary-foreground px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <Download className="h-4 w-4 shrink-0" />
             <span className="text-sm">
               Update available: v{updateInfo.latestVersion} (current: v{version})
-              {' '}<span className="opacity-75">- Update via command line: git pull && npm run build</span>
+              {' '}<span className="opacity-75 hidden sm:inline">- Update via command line: git pull && npm run build</span>
             </span>
           </div>
           <Button
             size="sm"
             variant="ghost"
             onClick={handleDismiss}
-            className="text-primary-foreground hover:bg-primary/80"
+            className="text-primary-foreground hover:bg-primary/80 shrink-0"
             title="Dismiss"
           >
             <X className="h-4 w-4" />
@@ -246,8 +272,23 @@ export default function Layout() {
         </div>
       )}
 
+      {/* Mobile sidebar backdrop (click to close) */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r">
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 w-64 bg-card border-r transform transition-transform duration-200 ease-out",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full",
+          "md:translate-x-0"
+        )}
+      >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
           <div className="flex flex-col px-6 py-4 border-b">
@@ -305,7 +346,7 @@ export default function Layout() {
                   size="icon"
                   onClick={openNotifications}
                   title="Notifications"
-                  className="relative"
+                  className="relative h-11 w-11 md:h-10 md:w-10"
                 >
                   <Bell className="h-5 w-5" />
                   {unreadCount > 0 && (
@@ -317,7 +358,7 @@ export default function Layout() {
 
                 {/* Notification Panel */}
                 {notifOpen && (
-                  <div className="absolute bottom-full left-0 mb-2 w-80 max-h-96 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
+                  <div className="absolute bottom-full left-0 mb-2 w-[min(20rem,calc(100vw-2rem))] max-h-96 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
                     <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/50">
                       <h3 className="text-sm font-semibold">Notifications</h3>
                       <span className="text-xs text-muted-foreground">{notifications.length} total</span>
@@ -366,6 +407,7 @@ export default function Layout() {
                 size="icon"
                 onClick={logout}
                 title="Logout"
+                className="h-11 w-11 md:h-10 md:w-10"
               >
                 <LogOut className="h-5 w-5" />
               </Button>
@@ -375,8 +417,13 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className={cn("pl-64", showUpdateBanner && updateInfo?.updateAvailable && "pt-10")}>
-        <div className="p-8">
+      <main
+        className={cn(
+          "pl-0 md:pl-64 pt-14 md:pt-0",
+          showUpdateBanner && updateInfo?.updateAvailable && "md:pt-10"
+        )}
+      >
+        <div className="p-4 md:p-8">
           <Outlet />
         </div>
       </main>

@@ -1125,7 +1125,7 @@ export default function LxcContainers() {
           </div>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
           {containers.map((ct) => (
             <Card
               key={ct.name}
@@ -1133,17 +1133,17 @@ export default function LxcContainers() {
               onClick={() => openInfo(ct)}
             >
               <CardHeader className="pb-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-start justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
                     <StatusBadge status={ct.status} />
-                    <CardTitle className="text-lg">{ct.name}</CardTitle>
+                    <CardTitle className="text-lg truncate">{ct.name}</CardTitle>
                   </div>
-                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex gap-1 flex-wrap justify-end" onClick={(e) => e.stopPropagation()}>
                     {ct.status?.toLowerCase() === 'running' && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-cyan-500 hover:text-cyan-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-cyan-500 hover:text-cyan-600"
                         onClick={() => openInfo(ct, 'terminal')}
                         title="Terminal"
                       >
@@ -1154,7 +1154,7 @@ export default function LxcContainers() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-yellow-500 hover:text-yellow-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-yellow-500 hover:text-yellow-600"
                         onClick={() => handleAction('stop', ct.name)}
                         disabled={actionLoading[`${ct.name}-stop`]}
                         title="Stop"
@@ -1169,7 +1169,7 @@ export default function LxcContainers() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 w-7 p-0 text-green-500 hover:text-green-600"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-green-500 hover:text-green-600"
                         onClick={() => handleAction('start', ct.name)}
                         disabled={actionLoading[`${ct.name}-start`]}
                         title="Start"
@@ -1184,7 +1184,7 @@ export default function LxcContainers() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 w-7 p-0 text-blue-500 hover:text-blue-600"
+                      className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-blue-500 hover:text-blue-600"
                       onClick={() => handleAction('restart', ct.name)}
                       disabled={actionLoading[`${ct.name}-restart`]}
                       title="Restart"
@@ -1198,7 +1198,7 @@ export default function LxcContainers() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                      className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-red-500 hover:text-red-600"
                       onClick={() => { setDeleteTarget(ct.name); setDeleteOpen(true); }}
                       title="Delete"
                     >
@@ -1246,7 +1246,7 @@ export default function LxcContainers() {
 
       {/* Create Container Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
-        <DialogContent className="sm:max-w-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="h-5 w-5 text-cyan-500" />
@@ -1389,7 +1389,7 @@ export default function LxcContainers() {
                   <div className="space-y-2">
                     {createForm.services.map((svc, idx) => (
                       <div key={idx} className="flex items-start gap-2 p-2.5 rounded-lg border border-border/50 bg-muted/30">
-                        <div className="flex-1 grid grid-cols-2 gap-2">
+                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <Input
                             placeholder="myapp.example.com"
                             value={svc.domain}
@@ -1446,7 +1446,7 @@ export default function LxcContainers() {
                     <span className="flex items-center gap-1"><Shield className="h-3 w-3" /> = obtain TLS cert</span>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="ct-cpu">CPU Limit</Label>
                     <Input
@@ -1535,7 +1535,7 @@ export default function LxcContainers() {
 
       {/* Container Info Dialog with Tabs */}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] overflow-hidden flex flex-col p-4 gap-2">
+        <DialogContent className="max-w-full h-full rounded-none sm:w-[95vw] sm:max-w-[95vw] sm:h-[90vh] sm:max-h-[90vh] sm:rounded-lg overflow-hidden flex flex-col p-4 gap-2">
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
@@ -1547,7 +1547,7 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-4 shrink-0">
+              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
                 <TabsTrigger value="terminal-beta" className="flex items-center gap-1">
@@ -1560,7 +1560,7 @@ export default function LxcContainers() {
 
               {/* Details Tab */}
               <TabsContent value="details" className="space-y-4 flex-1 overflow-y-auto min-h-0">
-                <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">Status</span>
                     <div className="mt-0.5"><StatusBadge status={selectedContainer.status} /></div>
@@ -1598,7 +1598,7 @@ export default function LxcContainers() {
                       Resize
                     </Button>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Card className="p-3">
                       <div className="flex items-center gap-2">
                         <Cpu className="h-4 w-4 text-blue-500" />
@@ -1624,7 +1624,7 @@ export default function LxcContainers() {
                 {containerState && (
                   <div>
                     <h4 className="text-sm font-medium mb-2">Live Usage</h4>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {containerState.cpu?.usage !== undefined && (
                         <Card className="p-3">
                           <div className="flex items-center gap-2">
@@ -1990,7 +1990,7 @@ export default function LxcContainers() {
                       A full interactive WebSocket-based terminal is coming soon. This will provide a real PTY session
                       with proper shell support, tab completion, colors, and interactive programs like <code className="text-cyan-400">vim</code>, <code className="text-cyan-400">htop</code>, and <code className="text-cyan-400">nano</code>.
                     </p>
-                    <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
                       <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
                         <Terminal className="h-4 w-4 text-green-500" />
                         <span>Full PTY support</span>
@@ -2026,7 +2026,7 @@ export default function LxcContainers() {
 
       {/* Import Container Dialog */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Upload className="h-5 w-5 text-cyan-500" />
@@ -2074,7 +2074,7 @@ export default function LxcContainers() {
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-500">
               <Trash2 className="h-5 w-5" />
@@ -2107,7 +2107,7 @@ export default function LxcContainers() {
 
       {/* Resize Dialog */}
       <Dialog open={resizeOpen} onOpenChange={setResizeOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-sm sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Cpu className="h-5 w-5 text-blue-500" />

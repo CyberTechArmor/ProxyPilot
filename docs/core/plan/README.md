@@ -37,7 +37,7 @@ next — potentially across multiple Claude Code sessions per phase.
 
 | Phase | File | Depends on | Delivers |
 |---|---|---|---|
-| 01 | [`phase-01-mobile-friendly.md`](phase-01-mobile-friendly.md) | existing ProxyPilot | Responsive admin dashboard for phones and tablets |
+| 01 | ✅ [`phase-01-mobile-friendly.md`](phase-01-mobile-friendly.md) | existing ProxyPilot | Responsive admin dashboard for phones and tablets |
 | 02 | [`phase-02-path-prefix-multi-service.md`](phase-02-path-prefix-multi-service.md) | existing ProxyPilot | Multiple services per domain via merged `handle_path` |
 | 03 | [`phase-03-foundation.md`](phase-03-foundation.md) | existing ProxyPilot | SQLite schema, config loader, systemd generator |
 | 04 | [`phase-04-postgres-pgbouncer.md`](phase-04-postgres-pgbouncer.md) | 03 | Core database + connection pool |
@@ -71,6 +71,11 @@ next — potentially across multiple Claude Code sessions per phase.
 
 ## Status
 
-None of the phases are implemented yet. The docs exist so that a later
-session can craft the function-level checklists and start executing phase
-by phase.
+- **Phase 1** — ✅ Complete (mobile-friendly admin dashboard). See
+  `phase-01-mobile-friendly.md` for the per-function checklist and
+  verification notes. Live browser sign-off at 360/375/390/768/1280/1920
+  and Lighthouse ≥90 still to be confirmed by the operator via
+  `npm run dev`. Future UI changes must follow
+  [`admin/frontend/MOBILE_FIRST.md`](../../../admin/frontend/MOBILE_FIRST.md).
+- **Phases 2–21** — Not started. The docs exist so that later sessions
+  can craft the function-level checklists and execute phase by phase.

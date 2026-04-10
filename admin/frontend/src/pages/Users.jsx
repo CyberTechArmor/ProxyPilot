@@ -295,9 +295,9 @@ export default function UsersPage() {
           ) : (
             <div className="space-y-2">
               {users.map((user) => (
-                <div key={user.id} className="flex items-center justify-between p-4 border rounded-lg">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
+                <div key={user.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 border rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-lg">{user.username}</span>
                       {user.displayName && (
                         <span className="text-sm text-muted-foreground">({user.displayName})</span>
@@ -308,7 +308,7 @@ export default function UsersPage() {
                         {user.role}
                       </span>
                     </div>
-                    <div className="flex items-center gap-4 mt-1 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-muted-foreground">
                       <span className={user.totpEnabled ? 'text-green-500' : 'text-yellow-500'}>
                         TOTP: {user.totpEnabled ? 'Enabled' : 'Not Set'}
                       </span>
@@ -318,11 +318,12 @@ export default function UsersPage() {
                       <span>Created: {new Date(user.createdAt).toLocaleDateString()}</span>
                     </div>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex gap-1 shrink-0">
                     {user.role !== 'admin' && (
                       <Button
                         variant="ghost"
                         size="sm"
+                        className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                         onClick={() => openAccessDialog(user)}
                         title="Manage service access"
                       >
@@ -332,6 +333,7 @@ export default function UsersPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                       onClick={() => handleResetPassword(user.id)}
                       title="Reset password"
                     >
@@ -340,6 +342,7 @@ export default function UsersPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                       onClick={() => {
                         setUserToDelete(user);
                         setDeleteUserOpen(true);
@@ -360,7 +363,7 @@ export default function UsersPage() {
 
       {/* Create User Dialog */}
       <Dialog open={createUserOpen} onOpenChange={setCreateUserOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>
               {createdUser ? 'User Created' : 'Create New User'}
@@ -455,7 +458,7 @@ export default function UsersPage() {
 
       {/* Delete User Dialog */}
       <Dialog open={deleteUserOpen} onOpenChange={setDeleteUserOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Delete User</DialogTitle>
             <DialogDescription>
@@ -492,7 +495,7 @@ export default function UsersPage() {
 
       {/* Service Access Dialog */}
       <Dialog open={accessDialogOpen} onOpenChange={setAccessDialogOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Access Control for {selectedUser?.username}</DialogTitle>
             <DialogDescription>
@@ -538,12 +541,12 @@ export default function UsersPage() {
                     <p className="text-center text-muted-foreground py-4">No services available</p>
                   ) : (
                     userAccess.map((access, index) => (
-                      <div key={access.serviceId} className="flex items-center justify-between p-3 border rounded-lg">
-                        <div>
-                          <p className="font-medium">{access.serviceName}</p>
-                          <p className="text-sm text-muted-foreground">{access.domain}</p>
+                      <div key={access.serviceId} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg">
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">{access.serviceName}</p>
+                          <p className="text-sm text-muted-foreground truncate">{access.domain}</p>
                         </div>
-                        <div className="flex items-center gap-4">
+                        <div className="flex flex-wrap items-center gap-4">
                           <div className="flex items-center gap-2">
                             <Eye className="h-4 w-4 text-muted-foreground" />
                             <Label htmlFor={`view-${access.serviceId}`} className="text-sm">View</Label>
@@ -589,15 +592,15 @@ export default function UsersPage() {
                         Folder access grants permissions to all services within that folder.
                       </p>
                       {userFolderAccess.map((folderAccess, index) => (
-                        <div key={folderAccess.folderPath} className="flex items-center justify-between p-3 border rounded-lg">
-                          <div className="flex items-center gap-2">
-                            <Folder className="h-4 w-4 text-yellow-500" />
-                            <div>
-                              <p className="font-medium">{folderAccess.folderName}</p>
+                        <div key={folderAccess.folderPath} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Folder className="h-4 w-4 text-yellow-500 shrink-0" />
+                            <div className="min-w-0">
+                              <p className="font-medium truncate">{folderAccess.folderName}</p>
                               <p className="text-sm text-muted-foreground">{folderAccess.serviceCount} services</p>
                             </div>
                           </div>
-                          <div className="flex items-center gap-4">
+                          <div className="flex flex-wrap items-center gap-4">
                             <div className="flex items-center gap-2">
                               <Eye className="h-4 w-4 text-muted-foreground" />
                               <Label htmlFor={`folder-view-${index}`} className="text-sm">View</Label>

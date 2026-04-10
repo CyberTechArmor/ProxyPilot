@@ -135,6 +135,9 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 - [ ] Update endpoint uniqueness check (admin/backend/src/routes/services.js:909)
       — The existing check only fires when `data.domain !== service.domain`. Broaden it so the check also fires when `data.pathPrefix !== service.path_prefix`. Replace the `SELECT id FROM services WHERE domain = ? AND id != ?` query with `SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?`, binding the final normalized `updatedData.domain` and `updatedData.pathPrefix`. Same error message. Success criterion: editing the `/api` service to use prefix `/` on the same domain fails when a `/` sibling already exists.
 
+- [ ] SSL-consistency validation on create + update (admin/backend/src/routes/services.js:709 and :894)
+      — Per design decision 2 (all-or-nothing per domain), a new service cannot be created on a domain whose existing siblings disagree on `sslEnabled` (and `forceHttps`). In the create endpoint, after the uniqueness check: `SELECT ssl_enabled, force_https FROM services WHERE domain = ? LIMIT 1` — if a sibling exists and `!!row.ssl_enabled !== data.sslEnabled` (or `!!row.force_https !== data.forceHttps`), reject with 400 and `'All services on this domain must share the same SSL settings (sslEnabled, forceHttps). Existing siblings use sslEnabled=<X>, forceHttps=<Y>.'`. In the update endpoint, perform the same check against `WHERE domain = ? AND id != ?`. Ensures the merged site block has one unambiguous SSL decision.
+
 ### D. Backend — Audit log disambiguation
 
 - [ ] `SERVICE_DELETED` audit detail payload (admin/backend/src/routes/services.js:1303)

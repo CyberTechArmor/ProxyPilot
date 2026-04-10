@@ -2019,19 +2019,39 @@ servicesRouter.post('/import', async (req, res) => {
     const db = getDb();
     const results = { imported: [], skipped: [], errors: [] };
 
+    // Collect every domain we touch so we can regenerate each merged file
+    // once after the whole batch is applied, rather than once per row.
+    const touchedDomains = new Set();
+
     for (const serviceData of importServices) {
       try {
-        // Check if domain exists
-        const existing = db.prepare('SELECT id FROM services WHERE domain = ?').get(serviceData.domain);
+        // Exports created before wildcard routing have no pathPrefix —
+        // default to '/' so the rest of the pipeline treats them as root
+        // services.
+        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
+
+        // Phase 2: multiple services can share a domain on different path
+        // prefixes, so the existence check must match on the full
+        // (domain, path_prefix) tuple instead of just domain.
+        const existing = db
+          .prepare(
+            'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
+          )
+          .get(serviceData.domain, importPathPrefix);
 
         if (existing && !overwrite) {
-          results.skipped.push({ name: serviceData.name, reason: 'Domain already exists' });
+          results.skipped.push({
+            name: serviceData.name,
+            reason: 'Domain + path prefix combination already exists',
+          });
           continue;
         }
 
         if (existing && overwrite) {
-          // Delete existing service first
-          await unlink(caddyFilePath(serviceData.domain)).catch(() => {});
+          // Delete only the matching (domain, prefix) row so any sibling
+          // services on the same domain survive the import. The merged
+          // Caddy file is regenerated after the insert, which rewrites it
+          // with the new row and the remaining siblings.
           db.prepare('DELETE FROM services WHERE id = ?').run(existing.id);
         }
 
@@ -2071,15 +2091,8 @@ servicesRouter.post('/import', async (req, res) => {
           }
         }
 
-        // Generate Caddy config. Exports created before wildcard routing
-        // support have no pathPrefix — default to '/' to preserve behavior.
-        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
-        const configData = { ...serviceData, rootDir, pathPrefix: importPathPrefix };
-        const caddyConfig = generateCaddyConfig(configData);
-        const configPath = caddyFilePath(serviceData.domain);
-        await writeCaddyConfig(configPath, caddyConfig);
-
-        // Insert into database
+        // Insert into database first — the merged Caddy config is written
+        // once per domain after the loop so siblings are included.
         db.prepare(`
           INSERT INTO services (
             id, name, domain, path_prefix, type, target, port, root_dir, container_name,
@@ -2094,9 +2107,23 @@ servicesRouter.post('/import', async (req, res) => {
           dataDir
         );
 
+        touchedDomains.add(serviceData.domain);
         results.imported.push({ name: serviceData.name, id });
       } catch (err) {
         results.errors.push({ name: serviceData.name, error: err.message });
+      }
+    }
+
+    // Regenerate merged configs for every domain the import touched. One
+    // write per domain is enough even if the import contributed multiple
+    // rows to that domain — regenerateDomainCaddyConfig reads all current
+    // rows from the DB.
+    for (const domain of touchedDomains) {
+      try {
+        await regenerateDomainCaddyConfig(db, domain);
+      } catch (err) {
+        console.error(`Failed to regenerate merged config for ${domain} during import:`, err);
+        results.errors.push({ name: domain, error: err.message });
       }
     }
 

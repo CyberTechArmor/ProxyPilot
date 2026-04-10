@@ -112,6 +112,17 @@ export function initDatabase() {
   // so the UNIQUE constraint is on the (domain, path_prefix) tuple instead of
   // domain alone. Existing installs that still have UNIQUE(domain) are rebuilt
   // to this shape by migrateServicesUniqueConstraint() below.
+  //
+  // Phase 2b: a service now represents one logical workload (typically an LXC
+  // or Docker container) that can expose multiple HTTP routes through the
+  // sibling `service_http_routes` table. The new Phase 2b columns are
+  // ADDITIVE only in this commit (A.1) — the legacy route-owned columns
+  // (`domain`, `path_prefix`, `port`, `ssl_enabled`, `force_https`,
+  // `websocket_enabled`, `max_upload_size`) plus the `UNIQUE(domain,
+  // path_prefix)` constraint stay in place until D.14 drops them via a
+  // table-rebuild, after every endpoint has been refactored to read and
+  // write from the routes table. This keeps every intermediate commit
+  // runtime-correct.
   db.exec(`
     CREATE TABLE IF NOT EXISTS services (
       id TEXT PRIMARY KEY,
@@ -130,6 +141,10 @@ export function initDatabase() {
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
       is_admin INTEGER DEFAULT 0,
       path_prefix TEXT NOT NULL DEFAULT '/',
+      kind TEXT NOT NULL DEFAULT 'container_service' CHECK(kind IN ('static_site', 'container_service')),
+      runtime TEXT CHECK(runtime IN ('lxc', 'docker') OR runtime IS NULL),
+      target_ip TEXT,
+      lxc_container_name TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(domain, path_prefix)
@@ -163,6 +178,43 @@ export function initDatabase() {
   // CREATE TABLE above already carries the new constraint) and on already-
   // migrated existing installs.
   migrateServicesUniqueConstraint(db);
+
+  // Phase 2b additive columns — MUST run AFTER migrateServicesUniqueConstraint
+  // because that helper does a table rebuild with a hardcoded canonical column
+  // set; any Phase 2b columns added BEFORE the rebuild would get dropped by
+  // it. Running after the Phase 2 rebuild means:
+  //   - Fresh installs: CREATE TABLE IF NOT EXISTS already created the table
+  //     with the Phase 2b columns, so these ALTER TABLEs no-op via try/catch.
+  //   - Pre-Phase-2 installs: the rebuild runs first (producing a Phase 2
+  //     shape services table), then these ALTER TABLEs add the Phase 2b
+  //     columns on top.
+  //   - Already-Phase-2b installs: both the rebuild and these ALTER TABLEs
+  //     no-op.
+  //
+  // These columns are additive only in A.1; existing data is backfilled by
+  // A.3's migrateServicesToRoutes(db) and the legacy route-owned columns
+  // stay in place until D.14 drops them via a table rebuild, after every
+  // endpoint has been refactored to read and write from service_http_routes.
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN kind TEXT NOT NULL DEFAULT 'container_service' CHECK(kind IN ('static_site', 'container_service'))`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN runtime TEXT CHECK(runtime IN ('lxc', 'docker') OR runtime IS NULL)`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN target_ip TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN lxc_container_name TEXT`);
+  } catch (e) {
+    // Column already exists
+  }
 
   // Create file versions table for version control
   db.exec(`

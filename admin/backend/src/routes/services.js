@@ -676,30 +676,77 @@ servicesRouter.get('/system-check', async (req, res) => {
 });
 
 // Regenerate Caddy config for a service
+// Regenerate Caddy config for a single service.
+//
+// Phase 2b D.6: a service with N routes can span up to N distinct domains,
+// so the handler now collects `SELECT DISTINCT domain FROM service_http_routes
+// WHERE service_id = ?` UNION'd with the legacy `services.domain` fallback
+// (transitional dual-source state) and calls `regenerateDomainCaddyConfig`
+// once per distinct domain. Caddy is reloaded exactly once at the end so
+// N domain rewrites share a single reload.
 servicesRouter.post('/:id/regenerate-config', async (req, res) => {
   try {
     const db = getDb();
-    const service = db.prepare(`
-      SELECT * FROM services WHERE id = ?
-    `).get(req.params.id);
+    const serviceId = req.params.id;
+    const service = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(serviceId);
 
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Regenerate the merged Caddy config for the whole domain so sibling
-    // services on the same domain are picked up too (not just this service).
-    await regenerateDomainCaddyConfig(db, service.domain);
+    // Collect every distinct domain this service touches — routes side
+    // + legacy fallback so both the pre-D.14 transitional state and any
+    // post-D.14 state work without edits.
+    const routeDomains = db
+      .prepare(
+        `SELECT DISTINCT domain FROM service_http_routes WHERE service_id = ?`
+      )
+      .all(serviceId)
+      .map((r) => r.domain);
+    const affectedDomains = new Set(routeDomains);
+    if (service.domain) affectedDomains.add(service.domain);
 
-    // Reload Caddy
+    const regenerated = [];
+    const failed = [];
+    for (const domain of affectedDomains) {
+      try {
+        await regenerateDomainCaddyConfig(db, domain);
+        regenerated.push(domain);
+      } catch (genErr) {
+        console.error(
+          `Failed to regenerate merged config for ${domain}:`,
+          genErr
+        );
+        failed.push({ domain, error: genErr.message });
+      }
+    }
+
+    // Reload Caddy once at the end so N domain rewrites share a single
+    // reload — keeps the stub-caddy integration tests deterministic too.
     const reloadResult = await reloadCaddy();
 
-    logAudit(req.user.id, 'CONFIG_REGENERATED', 'service', req.params.id, { sslEnabled: !!service.ssl_enabled }, req.ip);
+    logAudit(
+      req.user.id,
+      'CONFIG_REGENERATED',
+      'service',
+      serviceId,
+      { service_id: serviceId, domains: regenerated },
+      req.ip
+    );
 
     res.json({
-      success: true,
-      message: reloadResult.success ? 'Configuration regenerated and Caddy reloaded' : 'Configuration regenerated but Caddy reload failed',
+      success: failed.length === 0,
+      message:
+        failed.length === 0
+          ? reloadResult.success
+            ? 'Configuration regenerated and Caddy reloaded'
+            : 'Configuration regenerated but Caddy reload failed'
+          : `Some domains failed to regenerate: ${failed.map((f) => f.domain).join(', ')}`,
       sslCertificateExists: !!service.ssl_enabled,
+      domains: regenerated,
+      failed,
       caddyReloaded: reloadResult.success,
       caddyError: reloadResult.error,
     });

@@ -133,6 +133,22 @@ function extractIPv4(container) {
   return null;
 }
 
+// Phase 2b E.1: extract the first non-loopback IPv6 address from container
+// state, mirroring the `extractIPv4` helper. Returns null when no IPv6
+// address is bound (common for default Incus profiles).
+function extractIPv6(container) {
+  if (!container.state?.network) return null;
+  for (const [name, iface] of Object.entries(container.state.network)) {
+    if (name === 'lo') continue;
+    for (const addr of iface.addresses || []) {
+      if (addr.family === 'inet6' && !addr.address.startsWith('::1') && !addr.address.startsWith('fe80')) {
+        return addr.address;
+      }
+    }
+  }
+  return null;
+}
+
 // Helper to sleep for polling
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -194,6 +210,32 @@ lxcRouter.get('/containers', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
+      error: 'Failed to list containers',
+      details: error.stderr || error.message,
+    });
+  }
+});
+
+// Phase 2b E.1: GET /containers/with-ip — compact listing used by the
+// Add Service wizard's LXC dropdown. Returns `{containers: [{name,
+// status, ipv4, ipv6}]}` with the `pp-` instance prefix stripped so the
+// caller sees the operator-facing name directly. Reuses the same
+// `incus list --format json` call + extract helpers as GET /containers.
+lxcRouter.get('/containers/with-ip', async (req, res) => {
+  try {
+    const result = await execOnHost('incus list --format json');
+    const all = JSON.parse(result.stdout || '[]');
+    const containers = all
+      .filter((c) => c.name.startsWith(INSTANCE_PREFIX))
+      .map((c) => ({
+        name: c.name.replace(new RegExp(`^${INSTANCE_PREFIX}`), ''),
+        status: c.status.toLowerCase(),
+        ipv4: extractIPv4(c),
+        ipv6: extractIPv6(c),
+      }));
+    res.json({ containers });
+  } catch (error) {
+    res.status(500).json({
       error: 'Failed to list containers',
       details: error.stderr || error.message,
     });

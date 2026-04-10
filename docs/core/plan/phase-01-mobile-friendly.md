@@ -112,7 +112,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — already `flex-wrap`; fix fixed `w-[140px]` selects to `w-full sm:w-[140px]` so filter/sort controls are full-width on phone, then inline-sized at `sm+`. Search input stays `flex-1`.
 - [x] `Dashboard` services + folder sidebar wrapper (admin/frontend/src/pages/Dashboard.jsx:3193)
       — `flex gap-4` → `flex flex-col md:flex-row gap-4`; folder sidebar (`w-56 shrink-0`) becomes `w-full md:w-56` and collapses into an expandable "Folders" disclosure on `<md` so the service grid gets full width.
-- [ ] `Dashboard` services grid (admin/frontend/src/pages/Dashboard.jsx:3354)
+- [x] `Dashboard` services grid (admin/frontend/src/pages/Dashboard.jsx:3354)
       — `grid gap-4 md:grid-cols-2 lg:grid-cols-3` → `grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`; cards stack to one column on phones per spec.
 - [ ] `Dashboard` service card header actions (admin/frontend/src/pages/Dashboard.jsx:3368)
       — action button row wraps (`flex-wrap justify-end`) so Favorite/Folder/Settings/Files/Terminal/Delete never overflow the card title on narrow cards; icon buttons remain 44px-compliant via existing `size="icon"` default.

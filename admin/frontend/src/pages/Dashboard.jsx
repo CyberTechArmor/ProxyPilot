@@ -3376,7 +3376,7 @@ volumes:
 
         {/* Services Grid/List */}
         <div className="flex-1">
-          <div className={viewMode === 'grid' ? 'grid gap-4 md:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
+          <div className={viewMode === 'grid' ? 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
             {filteredServices.map((service) => (
           <Card
             key={service.id}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
@@ -4437,24 +4437,55 @@ volumes:
         <div className="flex-1">
           <div className={viewMode === 'grid' ? 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
             {/*
-              Phase 2: when sorted by the default favorite view, group
-              services that share a domain and emit a header row above each
-              group with 2+ services so operators see "N services on
-              example.com" together. Single-service domains stay headerless.
-              The grouping preserves the inherited per-group order so the
-              favorite-first sort inside each group still wins.
+              Phase 2b J.1: generalize the domain-grouped header to
+              route-derived domains. Phase 2 assumed one service owns
+              one (domain, path_prefix) tuple and grouped by
+              service.domain. After Phase 2b a service can touch
+              multiple domains via its nested routes array, so the
+              grouping flattens every service into its
+              (service, route) pairs first, then groups by
+              route.domain, then emits a header above each domain
+              that has ≥2 DISTINCT services. Each service card may
+              appear under multiple headers (once per domain its
+              routes touch); single-service single-domain layouts
+              still stay headerless. The Phase 2 favorite-sort order
+              is preserved because the flatten walks `filteredServices`
+              in its existing order and the Map insertion order
+              mirrors that walk.
             */}
             {(() => {
               if (sortBy !== 'favorite') {
                 return filteredServices.map((service) => renderServiceCard(service));
               }
+              const normalize = (d) => (d || '').toLowerCase().trim();
+
+              // Flatten every service into (service, domain) pairs
+              // via its nested routes array (or its legacy top-level
+              // domain for pre-Phase-2b installs). A service that has
+              // two routes on the same domain contributes once to
+              // that domain's bucket — we de-dupe per-service inside
+              // the same domain to match "distinct services" counting.
               const groups = new Map();
               for (const s of filteredServices) {
-                const arr = groups.get(s.domain) || [];
-                arr.push(s);
-                groups.set(s.domain, arr);
+                const svcDomains = new Set();
+                if (Array.isArray(s.routes) && s.routes.length > 0) {
+                  for (const r of s.routes) {
+                    const d = normalize(r.domain);
+                    if (d) svcDomains.add(d);
+                  }
+                }
+                if (svcDomains.size === 0 && s.domain) {
+                  svcDomains.add(normalize(s.domain));
+                }
+                for (const d of svcDomains) {
+                  const arr = groups.get(d) || [];
+                  arr.push(s);
+                  groups.set(d, arr);
+                }
               }
+
               const out = [];
+              const emittedSolo = new Set();
               for (const [domain, list] of groups) {
                 if (list.length >= 2) {
                   out.push(
@@ -4470,8 +4501,34 @@ volumes:
                       </span>
                     </div>
                   );
+                  // Wrap each card in a Fragment keyed on the
+                  // (domain, service.id) pair so a service that
+                  // appears under multiple domain headers can render
+                  // multiple times without tripping React's duplicate-
+                  // key warning. The inner Card's own key stays the
+                  // service id so any per-card state (drag handles,
+                  // etc) keeps its identity across re-renders.
+                  for (const s of list) {
+                    out.push(
+                      <Fragment key={`card-${domain}-${s.id}`}>
+                        {renderServiceCard(s)}
+                      </Fragment>
+                    );
+                  }
+                } else {
+                  // Single-service bucket: only emit the card the
+                  // FIRST time we see it so services with routes on
+                  // multiple headerless domains do not render twice.
+                  for (const s of list) {
+                    if (emittedSolo.has(s.id)) continue;
+                    emittedSolo.add(s.id);
+                    out.push(
+                      <Fragment key={`card-solo-${s.id}`}>
+                        {renderServiceCard(s)}
+                      </Fragment>
+                    );
+                  }
                 }
-                for (const s of list) out.push(renderServiceCard(s));
               }
               return out;
             })()}

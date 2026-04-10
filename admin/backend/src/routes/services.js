@@ -273,25 +273,19 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Snapshot pre-flip state of both tables so the rollback closure can
-    // revert every row to its exact previous value (not just zero them).
+    // Snapshot pre-flip state so the rollback closure can revert every
+    // route row to its exact previous value.
     const preRoutes = db
       .prepare(
         `SELECT id, domain, ssl_enabled, force_https
            FROM service_http_routes WHERE service_id = ?`
       )
       .all(serviceId);
-    const preServiceSsl = {
-      ssl_enabled: service.ssl_enabled,
-      force_https: service.force_https,
-    };
 
-    // Collect every affected domain from BOTH sources — route rows and
-    // the legacy services.domain fallback. During the D.1–D.13 dual-write
-    // phase both sources may carry a row for this service.
+    // Phase 2b D.14: route rows are the sole source of truth for SSL
+    // stance. Collect every affected domain from the routes table.
     const affectedDomains = new Set();
     for (const r of preRoutes) affectedDomains.add(r.domain);
-    if (service.domain) affectedDomains.add(service.domain);
 
     // (1) Validate SSL stance against EXTERNAL sibling routes on every
     // affected domain BEFORE any mutation. `assertSiblingsMatchStance`
@@ -309,11 +303,12 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
       }
     }
 
-    // (2) Flip both tables in lockstep. Legacy columns stay in sync with
-    // the route rows until D.14 drops them.
+    // (2) Flip every child route row. The legacy ssl_enabled / force_https
+    // columns on services were dropped by D.14 — SSL stance lives only on
+    // service_http_routes now. Bump services.updated_at so the row still
+    // reflects the change in GET list / detail responses.
     db.prepare(
-      `UPDATE services SET ssl_enabled = 1, force_https = 1,
-         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      `UPDATE services SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).run(serviceId);
     db.prepare(
       `UPDATE service_http_routes SET ssl_enabled = 1, force_https = 1
@@ -340,14 +335,6 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
     }
 
     const rollback = async () => {
-      try {
-        db.prepare(
-          `UPDATE services SET ssl_enabled = ?, force_https = ?
-             WHERE id = ?`
-        ).run(preServiceSsl.ssl_enabled, preServiceSsl.force_https, serviceId);
-      } catch (e) {
-        console.error('Rollback: failed to revert services row', e);
-      }
       for (const pr of preRoutes) {
         try {
           db.prepare(
@@ -483,14 +470,10 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
            FROM service_http_routes WHERE service_id = ?`
       )
       .all(serviceId);
-    const preServiceSsl = {
-      ssl_enabled: service.ssl_enabled,
-      force_https: service.force_https,
-    };
 
+    // Phase 2b D.14: SSL stance lives only on service_http_routes now.
     const affectedDomains = new Set();
     for (const r of preRoutes) affectedDomains.add(r.domain);
-    if (service.domain) affectedDomains.add(service.domain);
 
     // (1) Pre-mutation stance check: every external sibling must already
     // be (ssl=0, force=0) for the flip to be valid. `assertSiblingsMatchStance`
@@ -507,10 +490,10 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       }
     }
 
-    // (2) Flip both tables in lockstep.
+    // (2) Flip every child route row. Services row keeps only its
+    // updated_at bump.
     db.prepare(
-      `UPDATE services SET ssl_enabled = 0, force_https = 0,
-         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      `UPDATE services SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).run(serviceId);
     db.prepare(
       `UPDATE service_http_routes SET ssl_enabled = 0, force_https = 0
@@ -536,14 +519,6 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     }
 
     const rollback = async () => {
-      try {
-        db.prepare(
-          `UPDATE services SET ssl_enabled = ?, force_https = ?
-             WHERE id = ?`
-        ).run(preServiceSsl.ssl_enabled, preServiceSsl.force_https, serviceId);
-      } catch (e) {
-        console.error('Rollback: failed to revert services row', e);
-      }
       for (const pr of preRoutes) {
         try {
           db.prepare(
@@ -633,19 +608,28 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
 
 // Check SSL certificate status for a domain
 // Caddy auto-manages certificates - this endpoint reports whether SSL is enabled
+//
+// Phase 2b D.14: reads from `service_http_routes` since `services.domain`
+// and `services.ssl_enabled` are gone after the legacy column drop. Any
+// route on the domain is considered authoritative — if one exists with
+// ssl_enabled=1, the domain is SSL-enabled.
 servicesRouter.get('/ssl-status/:domain', async (req, res) => {
   try {
     const domain = req.params.domain;
     const db = getDb();
-    const service = db.prepare('SELECT ssl_enabled FROM services WHERE domain = ?').get(domain);
+    const route = db
+      .prepare(
+        `SELECT ssl_enabled FROM service_http_routes WHERE domain = ? LIMIT 1`
+      )
+      .get(domain);
     const caddyInstalled = await isCaddyInstalled();
 
     res.json({
       domain,
-      certificateExists: !!service?.ssl_enabled,
+      certificateExists: !!route?.ssl_enabled,
       autoManaged: true,
       caddyInstalled,
-      message: service?.ssl_enabled
+      message: route?.ssl_enabled
         ? 'Caddy automatically manages TLS certificates for this domain'
         : 'SSL is disabled for this domain - enable it to auto-obtain a certificate',
     });
@@ -736,6 +720,14 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
       req.ip
     );
 
+    // Phase 2b D.14: derive sslCertificateExists from the primary route
+    // since services.ssl_enabled is gone.
+    const primaryForSsl = db
+      .prepare(
+        `SELECT ssl_enabled FROM service_http_routes WHERE service_id = ? ORDER BY created_at ASC, id ASC LIMIT 1`
+      )
+      .get(serviceId);
+
     res.json({
       success: failed.length === 0,
       message:
@@ -744,7 +736,7 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
             ? 'Configuration regenerated and Caddy reloaded'
             : 'Configuration regenerated but Caddy reload failed'
           : `Some domains failed to regenerate: ${failed.map((f) => f.domain).join(', ')}`,
-      sslCertificateExists: !!service.ssl_enabled,
+      sslCertificateExists: !!primaryForSsl?.ssl_enabled,
       domains: regenerated,
       failed,
       caddyReloaded: reloadResult.success,
@@ -1167,42 +1159,34 @@ servicesRouter.post('/', async (req, res) => {
     data.pathPrefix = normalizePathPrefix(data.pathPrefix);
     const db = getDb();
 
-    // Phase 2: multiple services can share a domain on different path
-    // prefixes. Reject only when the full (domain, path_prefix) tuple is
-    // already taken, not just the domain.
-    const existing = db
+    // Phase 2b D.14: uniqueness and SSL stance checks read from
+    // service_http_routes since the legacy services.(domain, path_prefix,
+    // ssl flags) columns were dropped.
+    const existingRoute = db
       .prepare(
-        'SELECT id FROM services WHERE domain = ? AND path_prefix = ?'
+        `SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ?`
       )
       .get(data.domain, data.pathPrefix);
-    if (existing) {
+    if (existingRoute) {
       return res
         .status(400)
         .json({ error: 'Domain + path prefix combination already exists' });
     }
 
-    // Phase 2 design decision: SSL is all-or-nothing per domain. The merged
-    // Caddy site block has one site address (`example.com` for auto-TLS or
-    // `http://example.com` for the no-SSL/wildcard fallback) and one
-    // forceHttps stance, so every sibling service on a domain must agree.
-    // If a sibling already exists, the new service must use matching
-    // sslEnabled + forceHttps values.
-    const sibling = db
-      .prepare(
-        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? LIMIT 1'
-      )
-      .get(data.domain);
-    if (sibling) {
-      const siblingSsl = !!sibling.ssl_enabled;
-      const siblingForce = !!sibling.force_https;
-      if (siblingSsl !== !!data.sslEnabled || siblingForce !== !!data.forceHttps) {
-        return res.status(400).json({
-          error:
-            `All services on this domain must share the same SSL settings ` +
-            `(sslEnabled, forceHttps). Existing siblings use ` +
-            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
-        });
+    // SSL stance consistency: every existing sibling route on the same
+    // domain must agree with the candidate's sslEnabled + forceHttps.
+    // Reuses the dual-source assertRoutesShareSslStance helper — post-D.14
+    // its legacy-services branch returns empty via try/catch.
+    try {
+      assertRoutesShareSslStance(db, data.domain, {
+        sslEnabled: data.sslEnabled,
+        forceHttps: data.forceHttps,
+      });
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
       }
+      throw e;
     }
 
     // Validate type-specific requirements
@@ -1302,13 +1286,10 @@ services:
       // will just unlink the file.
     }
 
-    // Insert into database first so the merged config includes the new row.
-    //
-    // Phase 2b D.2: also populate `target_ip` alongside the legacy `target`
-    // column. The B.3 routes-join query in regenerateDomainCaddyConfig
-    // reads `s.target_ip` for container_service rows; writing both here
-    // keeps newly-created services renderable via the routes path without
-    // waiting for the next A.3 backfill pass.
+    // Phase 2b D.14: Insert only the Phase 2b service-level columns — the
+    // legacy route-owned columns (domain, path_prefix, port, ssl flags,
+    // max_upload_size) were dropped. All route-owned values go into
+    // service_http_routes via `syncPrimaryRouteFromLegacy` below.
     //
     // `kind` derives from `type`: static_site for static type, otherwise
     // container_service. `runtime` derives from type='docker' only; proxy
@@ -1319,17 +1300,14 @@ services:
 
     db.prepare(`
       INSERT INTO services (
-        id, name, domain, path_prefix, type, target, port, root_dir, container_name,
-        ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status,
-        kind, runtime, target_ip
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+        id, name, kind, runtime, type, target, target_ip,
+        root_dir, container_name, data_dir, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      id, data.name, data.domain, data.pathPrefix, data.type, data.target || null,
-      data.port || null, data.rootDir || null, data.containerName || null,
-      data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
-      data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir,
-      inferredKind, inferredRuntime,
-      data.type !== 'static' ? (data.target || null) : null
+      id, data.name, inferredKind, inferredRuntime, data.type,
+      data.target || null,
+      data.type !== 'static' ? (data.target || null) : null,
+      data.rootDir || null, data.containerName || null, dataDir
     );
 
     // Phase 2b D.2: dual-write the primary route row so Section H's
@@ -1482,36 +1460,55 @@ servicesRouter.put('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Merge with existing data
+    // Phase 2b D.14: route-owned fields (domain, path_prefix, port, ssl
+    // flags, max_upload_size) live only on service_http_routes now. The
+    // "primary route" (earliest-created) is the source of truth for
+    // pre-update values that the request didn't override.
+    const primaryRoute = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port, websocket_enabled,
+                ssl_enabled, force_https, max_upload_size
+           FROM service_http_routes
+          WHERE service_id = ?
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1`
+      )
+      .get(req.params.id);
+    // If this services row has no route yet (edge case during mid-migration
+    // or right after a failed create), fall back to empty defaults. The
+    // subsequent syncPrimaryRouteFromLegacy call will insert a row.
+    const preRoutePrefix = normalizePathPrefix(primaryRoute?.path_prefix);
+    const preRouteDomain = primaryRoute?.domain || '';
+
+    // Merge request data with the current primary route + services state.
     const updatedData = {
       name: data.name || service.name,
-      domain: data.domain || service.domain,
-      pathPrefix: data.pathPrefix !== undefined ? normalizePathPrefix(data.pathPrefix) : normalizePathPrefix(service.path_prefix),
+      domain: data.domain || preRouteDomain,
+      pathPrefix: data.pathPrefix !== undefined ? normalizePathPrefix(data.pathPrefix) : preRoutePrefix,
       type: data.type || service.type,
       target: data.target !== undefined ? data.target : service.target,
-      port: data.port !== undefined ? data.port : service.port,
+      port: data.port !== undefined ? data.port : (primaryRoute?.target_port ?? null),
       rootDir: data.rootDir !== undefined ? data.rootDir : service.root_dir,
       dataDir: data.dataDir !== undefined ? data.dataDir : service.data_dir,
       containerName: data.containerName !== undefined ? data.containerName : service.container_name,
-      sslEnabled: data.sslEnabled !== undefined ? data.sslEnabled : !!service.ssl_enabled,
-      forceHttps: data.forceHttps !== undefined ? data.forceHttps : !!service.force_https,
-      websocketEnabled: data.websocketEnabled !== undefined ? data.websocketEnabled : !!service.websocket_enabled,
-      maxUploadSize: data.maxUploadSize || service.max_upload_size,
+      sslEnabled: data.sslEnabled !== undefined ? data.sslEnabled : !!(primaryRoute?.ssl_enabled),
+      forceHttps: data.forceHttps !== undefined ? data.forceHttps : !!(primaryRoute?.force_https),
+      websocketEnabled: data.websocketEnabled !== undefined ? data.websocketEnabled : !!(primaryRoute?.websocket_enabled),
+      maxUploadSize: data.maxUploadSize || primaryRoute?.max_upload_size || '1G',
     };
 
-    // Phase 2: a service's (domain, path_prefix) tuple must be unique. Only
-    // re-check when the tuple actually changes — if neither domain nor path
-    // prefix was touched, the DB's existing row is the sole match and the
-    // check would false-positive.
-    const domainChangedForCheck = updatedData.domain !== service.domain;
-    const prefixChangedForCheck =
-      updatedData.pathPrefix !== normalizePathPrefix(service.path_prefix);
+    // Phase 2b D.14: uniqueness check reads from service_http_routes. Only
+    // re-check when the tuple actually changes, excluding the primary
+    // route id so the check doesn't false-positive against itself.
+    const domainChangedForCheck = updatedData.domain !== preRouteDomain;
+    const prefixChangedForCheck = updatedData.pathPrefix !== preRoutePrefix;
     if (domainChangedForCheck || prefixChangedForCheck) {
       const existing = db
         .prepare(
-          'SELECT id FROM services WHERE domain = ? AND path_prefix = ? AND id != ?'
+          `SELECT id FROM service_http_routes
+            WHERE domain = ? AND path_prefix = ? AND id != COALESCE(?, '')`
         )
-        .get(updatedData.domain, updatedData.pathPrefix, req.params.id);
+        .get(updatedData.domain, updatedData.pathPrefix, primaryRoute?.id || null);
       if (existing) {
         return res.status(400).json({
           error: 'Domain + path prefix combination already exists',
@@ -1519,46 +1516,33 @@ servicesRouter.put('/:id', async (req, res) => {
       }
     }
 
-    // Phase 2 design decision: SSL is all-or-nothing per domain. After the
-    // update, every sibling service on `updatedData.domain` (excluding this
-    // row) must share the new sslEnabled + forceHttps values. If the SSL
-    // settings differ from any sibling, reject the update.
-    const sslSibling = db
-      .prepare(
-        'SELECT ssl_enabled, force_https FROM services WHERE domain = ? AND id != ? LIMIT 1'
-      )
-      .get(updatedData.domain, req.params.id);
-    if (sslSibling) {
-      const siblingSsl = !!sslSibling.ssl_enabled;
-      const siblingForce = !!sslSibling.force_https;
-      if (
-        siblingSsl !== !!updatedData.sslEnabled ||
-        siblingForce !== !!updatedData.forceHttps
-      ) {
-        return res.status(400).json({
-          error:
-            `All services on this domain must share the same SSL settings ` +
-            `(sslEnabled, forceHttps). Existing siblings use ` +
-            `sslEnabled=${siblingSsl}, forceHttps=${siblingForce}.`,
-        });
+    // SSL stance check via the dual-source helper, excluding the primary
+    // route id so an unchanged stance doesn't trigger a self-conflict.
+    try {
+      assertRoutesShareSslStance(
+        db,
+        updatedData.domain,
+        {
+          sslEnabled: updatedData.sslEnabled,
+          forceHttps: updatedData.forceHttps,
+        },
+        primaryRoute?.id || null
+      );
+    } catch (e) {
+      if (e.code === 'ROUTE_SSL_CONFLICT') {
+        return res.status(400).json({ error: e.message });
       }
+      throw e;
     }
 
-    // Phase 2: the merged per-domain config reflects DB state, so we must
-    // update the DB row before regenerating. Flow:
-    //   1. Snapshot the pre-update DB row (for rollback).
-    //   2. Backup the merged file for the new domain.
-    //   3. If the domain changed, also backup the merged file for the old
-    //      domain (so we can restore it if the update fails).
-    //   4. Update the DB row.
-    //   5. Regenerate merged config for the new domain (and the old domain,
-    //      if it changed — that rewrite shrinks or unlinks the old file).
-    //   6. caddy adapt + reload; on any failure, roll back everything.
+    // Phase 2b D.14: route-owned state lives on service_http_routes. The
+    // services UPDATE only touches service-level fields; route mutations
+    // go through syncPrimaryRouteFromLegacy which rewrites the primary
+    // route row. Caddy merge paths regenerate from DB state.
     await ensureCaddyStructure();
     const newConfigPath = caddyFilePath(updatedData.domain);
-    const oldConfigPath = caddyFilePath(service.domain);
-    const domainChanged =
-      data.domain && data.domain !== service.domain;
+    const oldConfigPath = preRouteDomain ? caddyFilePath(preRouteDomain) : null;
+    const domainChanged = data.domain && data.domain !== preRouteDomain;
 
     let backupNew = null;
     let backupNewExisted = false;
@@ -1573,7 +1557,7 @@ servicesRouter.put('/:id', async (req, res) => {
 
     let backupOld = null;
     let backupOldExisted = false;
-    if (domainChanged) {
+    if (domainChanged && oldConfigPath) {
       try {
         if (existsSync(oldConfigPath)) {
           backupOld = await readFile(oldConfigPath, 'utf-8');
@@ -1584,36 +1568,32 @@ servicesRouter.put('/:id', async (req, res) => {
       }
     }
 
-    // Snapshot the current row so we can revert on failure.
+    // Snapshot the current row + primary route for rollback.
     const preUpdateRow = { ...service };
+    const preUpdateRoute = primaryRoute ? { ...primaryRoute } : null;
 
-    // Phase 2b D.3: derive updated target_ip from the legacy target for
-    // non-static services (matches the A.3 backfill rule) so the routes
-    // JOIN query picks up the new IP. Static sites keep target_ip = NULL.
+    // Phase 2b D.14: derive updated target_ip from the request's target
+    // for non-static services. Static sites keep target_ip = NULL.
     const updatedTargetIp =
       updatedData.type === 'static' ? null : updatedData.target || null;
 
-    // Update DB row first so regenerateDomainCaddyConfig picks it up.
+    // Update the services row — Phase 2b columns only. Route-owned
+    // columns were dropped by D.14.
     db.prepare(`
       UPDATE services SET
-        name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-        root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
-        force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-        target_ip = ?,
+        name = ?, type = ?, target = ?, target_ip = ?,
+        root_dir = ?, data_dir = ?, container_name = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
-      updatedData.name, updatedData.domain, updatedData.pathPrefix, updatedData.type,
-      updatedData.target, updatedData.port, updatedData.rootDir,
-      updatedData.dataDir, updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
-      updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
-      updatedData.maxUploadSize, updatedTargetIp, req.params.id
+      updatedData.name, updatedData.type, updatedData.target, updatedTargetIp,
+      updatedData.rootDir, updatedData.dataDir, updatedData.containerName,
+      req.params.id
     );
 
-    // Phase 2b D.3: dual-write the primary route to match the new legacy
-    // values. syncPrimaryRouteFromLegacy finds the earliest-created route
-    // owned by this service and updates it in place. Secondary routes
-    // (added via C.2) are left untouched.
+    // Sync the primary route to the new (domain, pathPrefix, port, ssl…)
+    // tuple. If the new tuple collides with another service's route, the
+    // sync throws and we revert the services UPDATE.
     try {
       syncPrimaryRouteFromLegacy(db, req.params.id, {
         domain: updatedData.domain,
@@ -1625,25 +1605,16 @@ servicesRouter.put('/:id', async (req, res) => {
         maxUploadSize: updatedData.maxUploadSize,
       });
     } catch (routeErr) {
-      // Route sync failed (typically a UNIQUE violation from the new
-      // (domain, path_prefix) tuple colliding with another service's
-      // route). Revert the services row and return 400.
       db.prepare(`
         UPDATE services SET
-          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-          root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
-          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-          target_ip = ?,
+          name = ?, type = ?, target = ?, target_ip = ?,
+          root_dir = ?, data_dir = ?, container_name = ?,
           updated_at = ?
         WHERE id = ?
       `).run(
-        preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
-        preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
-        preUpdateRow.root_dir, preUpdateRow.data_dir,
-        preUpdateRow.container_name, preUpdateRow.ssl_enabled,
-        preUpdateRow.force_https, preUpdateRow.websocket_enabled,
-        preUpdateRow.max_upload_size, preUpdateRow.target_ip,
-        preUpdateRow.updated_at, req.params.id
+        preUpdateRow.name, preUpdateRow.type, preUpdateRow.target,
+        preUpdateRow.target_ip, preUpdateRow.root_dir, preUpdateRow.data_dir,
+        preUpdateRow.container_name, preUpdateRow.updated_at, req.params.id
       );
       return res
         .status(400)
@@ -1654,38 +1625,34 @@ servicesRouter.put('/:id', async (req, res) => {
       try {
         db.prepare(`
           UPDATE services SET
-            name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-            root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
-            force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-            target_ip = ?,
+            name = ?, type = ?, target = ?, target_ip = ?,
+            root_dir = ?, data_dir = ?, container_name = ?,
             updated_at = ?
           WHERE id = ?
         `).run(
-          preUpdateRow.name, preUpdateRow.domain, preUpdateRow.path_prefix,
-          preUpdateRow.type, preUpdateRow.target, preUpdateRow.port,
-          preUpdateRow.root_dir, preUpdateRow.data_dir,
-          preUpdateRow.container_name, preUpdateRow.ssl_enabled,
-          preUpdateRow.force_https, preUpdateRow.websocket_enabled,
-          preUpdateRow.max_upload_size, preUpdateRow.target_ip,
-          preUpdateRow.updated_at, req.params.id
+          preUpdateRow.name, preUpdateRow.type, preUpdateRow.target,
+          preUpdateRow.target_ip, preUpdateRow.root_dir, preUpdateRow.data_dir,
+          preUpdateRow.container_name, preUpdateRow.updated_at, req.params.id
         );
       } catch (e) {
         console.error('Rollback: failed to revert service row', e);
       }
-      // Phase 2b D.3: also revert the primary route via the same helper
-      // so the routes table stays consistent with the services row.
-      try {
-        syncPrimaryRouteFromLegacy(db, req.params.id, {
-          domain: preUpdateRow.domain,
-          pathPrefix: preUpdateRow.path_prefix,
-          targetPort: preUpdateRow.port,
-          sslEnabled: !!preUpdateRow.ssl_enabled,
-          forceHttps: !!preUpdateRow.force_https,
-          websocketEnabled: !!preUpdateRow.websocket_enabled,
-          maxUploadSize: preUpdateRow.max_upload_size,
-        });
-      } catch (e) {
-        console.error('Rollback: failed to revert primary route', e);
+      // Revert the primary route via the same helper so the routes table
+      // stays consistent with the services row.
+      if (preUpdateRoute) {
+        try {
+          syncPrimaryRouteFromLegacy(db, req.params.id, {
+            domain: preUpdateRoute.domain,
+            pathPrefix: preUpdateRoute.path_prefix,
+            targetPort: preUpdateRoute.target_port,
+            sslEnabled: !!preUpdateRoute.ssl_enabled,
+            forceHttps: !!preUpdateRoute.force_https,
+            websocketEnabled: !!preUpdateRoute.websocket_enabled,
+            maxUploadSize: preUpdateRoute.max_upload_size,
+          });
+        } catch (e) {
+          console.error('Rollback: failed to revert primary route', e);
+        }
       }
       try {
         if (backupNewExisted && backupNew !== null) {
@@ -1715,8 +1682,8 @@ servicesRouter.put('/:id', async (req, res) => {
     // (if the moved service was the last one on the old domain).
     try {
       await regenerateDomainCaddyConfig(db, updatedData.domain);
-      if (domainChanged) {
-        await regenerateDomainCaddyConfig(db, service.domain);
+      if (domainChanged && preRouteDomain) {
+        await regenerateDomainCaddyConfig(db, preRouteDomain);
       }
     } catch (genErr) {
       await rollbackUpdate();
@@ -1855,33 +1822,38 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       return res.status(403).json({ error: 'Cannot modify admin service' });
     }
 
-    // Snapshot pre-revert row so rollback reverts on UNIQUE violation.
+    // Phase 2b D.14: snapshot the pre-revert services row + primary route
+    // for rollback. Route-owned fields come from service_http_routes, not
+    // the services row (those columns were dropped).
     const preRevertRow = { ...service };
+    const preRevertPrimary = db
+      .prepare(
+        `SELECT id, domain, path_prefix, target_port, websocket_enabled,
+                ssl_enabled, force_https, max_upload_size
+           FROM service_http_routes
+          WHERE service_id = ?
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1`
+      )
+      .get(serviceId);
+    const preRevertDomain = preRevertPrimary?.domain || null;
 
     // Apply the legacy fields from the saved snapshot. Older saved
     // versions may not include pathPrefix / target_ip — fall back to
-    // sensible defaults. The legacy services table still has a
-    // UNIQUE(domain, path_prefix) constraint from Phase 2, so the UPDATE
-    // itself can throw on collision — wrap it so we can surface a
-    // 400 instead of a 500.
+    // sensible defaults.
     const revertedPathPrefix = normalizePathPrefix(config.pathPrefix);
     const revertedTargetIp =
       config.type === 'static' ? null : config.target || null;
     try {
       db.prepare(`
         UPDATE services SET
-          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-          root_dir = ?, container_name = ?, ssl_enabled = ?,
-          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-          target_ip = ?,
+          name = ?, type = ?, target = ?, target_ip = ?,
+          root_dir = ?, container_name = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(
-        config.name, config.domain, revertedPathPrefix, config.type,
-        config.target, config.port, config.rootDir,
-        config.containerName, config.sslEnabled ? 1 : 0,
-        config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
-        config.maxUploadSize, revertedTargetIp, serviceId
+        config.name, config.type, config.target, revertedTargetIp,
+        config.rootDir, config.containerName, serviceId
       );
     } catch (updateErr) {
       return res.status(400).json({
@@ -1889,11 +1861,9 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
       });
     }
 
-    // Phase 2b D.8: propagate the revert into the primary route so the
-    // dual-sourced regenerateDomainCaddyConfig picks up the reverted
-    // values from the routes side. If this fails (typically a UNIQUE
-    // violation because the reverted tuple collides with another row),
-    // revert the services UPDATE and return 400.
+    // Phase 2b D.8: propagate the revert into the primary route. On
+    // UNIQUE violation revert the services UPDATE row-by-row to the
+    // pre-revert snapshot and return 400.
     try {
       syncPrimaryRouteFromLegacy(db, serviceId, {
         domain: config.domain,
@@ -1907,19 +1877,14 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
     } catch (routeErr) {
       db.prepare(`
         UPDATE services SET
-          name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
-          root_dir = ?, container_name = ?, ssl_enabled = ?,
-          force_https = ?, websocket_enabled = ?, max_upload_size = ?,
-          target_ip = ?,
+          name = ?, type = ?, target = ?, target_ip = ?,
+          root_dir = ?, container_name = ?,
           updated_at = ?
         WHERE id = ?
       `).run(
-        preRevertRow.name, preRevertRow.domain, preRevertRow.path_prefix,
-        preRevertRow.type, preRevertRow.target, preRevertRow.port,
-        preRevertRow.root_dir, preRevertRow.container_name,
-        preRevertRow.ssl_enabled, preRevertRow.force_https,
-        preRevertRow.websocket_enabled, preRevertRow.max_upload_size,
-        preRevertRow.target_ip, preRevertRow.updated_at, serviceId
+        preRevertRow.name, preRevertRow.type, preRevertRow.target,
+        preRevertRow.target_ip, preRevertRow.root_dir,
+        preRevertRow.container_name, preRevertRow.updated_at, serviceId
       );
       return res.status(400).json({
         error: 'Failed to sync primary route: ' + routeErr.message,
@@ -1929,11 +1894,11 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
     // Regenerate merged files for the reverted domain AND, if the domain
     // changed, the previous domain so its merged file shrinks or unlinks.
     const domainChanged =
-      config.domain !== preRevertRow.domain && !!preRevertRow.domain;
+      config.domain !== preRevertDomain && !!preRevertDomain;
     try {
       await regenerateDomainCaddyConfig(db, config.domain);
       if (domainChanged) {
-        await regenerateDomainCaddyConfig(db, preRevertRow.domain);
+        await regenerateDomainCaddyConfig(db, preRevertDomain);
       }
     } catch (genErr) {
       console.error('Revert: failed to regenerate merged Caddy config', genErr);
@@ -1982,13 +1947,20 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
 servicesRouter.get('/:id/caddy-config', async (req, res) => {
   try {
     const db = getDb();
-    const service = db.prepare('SELECT domain FROM services WHERE id = ?').get(req.params.id);
-
+    // Phase 2b D.14: fetch the service's primary route domain.
+    const service = db.prepare('SELECT id FROM services WHERE id = ?').get(req.params.id);
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
-
-    const configPath = caddyFilePath(service.domain);
+    const primary = db
+      .prepare(
+        `SELECT domain FROM service_http_routes WHERE service_id = ? ORDER BY created_at ASC, id ASC LIMIT 1`
+      )
+      .get(req.params.id);
+    if (!primary) {
+      return res.status(404).json({ error: 'Service has no routes' });
+    }
+    const configPath = caddyFilePath(primary.domain);
 
     if (!existsSync(configPath)) {
       return res.status(404).json({ error: 'Caddy config not found' });
@@ -2007,13 +1979,22 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
   try {
     const { config } = req.body;
     const db = getDb();
-    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    const service = db.prepare('SELECT id FROM services WHERE id = ?').get(req.params.id);
 
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    const configPath = caddyFilePath(service.domain);
+    // Phase 2b D.14: fetch the service's primary route domain.
+    const primary = db
+      .prepare(
+        `SELECT domain FROM service_http_routes WHERE service_id = ? ORDER BY created_at ASC, id ASC LIMIT 1`
+      )
+      .get(req.params.id);
+    if (!primary) {
+      return res.status(404).json({ error: 'Service has no routes' });
+    }
+    const configPath = caddyFilePath(primary.domain);
 
     // Read and backup current config
     let backupConfig = null;
@@ -2073,7 +2054,7 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
       req.user.id
     );
 
-    logAudit(req.user.id, 'CADDY_CONFIG_EDITED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(req.user.id, 'CADDY_CONFIG_EDITED', 'service', req.params.id, { domain: primary.domain }, req.ip);
 
     res.json({ success: true, message: 'Caddy config saved and reloaded' });
   } catch (error) {
@@ -2988,16 +2969,18 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Phase 2b: audit payload nests every route that was cascaded so a
     // post-hoc audit can replay the full delete without needing the
     // routes table (which may have shrunk by the time the audit is
-    // reviewed). Legacy `{domain, pathPrefix}` tuple is still included
-    // so the Phase 2 audit format stays backward-compatible.
+    // reviewed). Legacy `{domain, pathPrefix}` tuple is synthesized from
+    // the first route (primary) for backward compatibility with the
+    // pre-Phase-2b audit format.
+    const primaryForAudit = routeRows[0] || null;
     logAudit(
       req.user.id,
       'SERVICE_DELETED',
       'service',
       req.params.id,
       {
-        domain: service.domain,
-        pathPrefix: service.path_prefix,
+        domain: primaryForAudit?.domain || null,
+        pathPrefix: primaryForAudit ? normalizePathPrefix(primaryForAudit.path_prefix) : null,
         routes: routeRows.map((r) => ({
           id: r.id,
           domain: r.domain,
@@ -3605,6 +3588,9 @@ servicesRouter.post('/export', async (req, res) => {
         createdAt: r.created_at,
       }));
 
+      // Phase 2b D.14: synthesize legacy top-level fields from the
+      // primary route since the services table no longer carries them.
+      const primary = routes[0];
       const serviceExport = {
         // Phase 2b service-level fields
         name: service.name,
@@ -3620,16 +3606,16 @@ servicesRouter.post('/export', async (req, res) => {
         dataDir: service.data_dir,
         // Phase 2b nested routes — the post-D.14 source of truth
         routes,
-        // Legacy top-level route-owned fields — retained for backward
-        // compatibility with Phase 2 importers. D.10 prefers `routes`
-        // when present.
-        domain: service.domain,
-        pathPrefix: service.path_prefix || '/',
-        port: service.port,
-        sslEnabled: !!service.ssl_enabled,
-        forceHttps: !!service.force_https,
-        websocketEnabled: !!service.websocket_enabled,
-        maxUploadSize: service.max_upload_size,
+        // Legacy top-level route-owned fields — synthesized from the
+        // primary route for backward compatibility with Phase 2 importers.
+        // D.10 prefers `routes` when present.
+        domain: primary?.domain || null,
+        pathPrefix: primary?.pathPrefix || '/',
+        port: primary?.targetPort || null,
+        sslEnabled: primary ? primary.sslEnabled : false,
+        forceHttps: primary ? primary.forceHttps : false,
+        websocketEnabled: primary ? primary.websocketEnabled : false,
+        maxUploadSize: primary?.maxUploadSize || '1G',
         files: [],
       };
 
@@ -3870,26 +3856,19 @@ servicesRouter.post('/import', async (req, res) => {
           }
         }
 
-        // (5) INSERT the services row with legacy columns populated from
-        // the primary route AND with the Phase 2b service-level fields.
+        // (5) Phase 2b D.14: INSERT the services row with Phase 2b
+        // service-level columns only. Route-owned columns were dropped;
+        // all route state goes through syncPrimaryRouteFromLegacy below.
         db.prepare(`
           INSERT INTO services (
             id, name, kind, runtime, type, target, target_ip, lxc_container_name,
-            domain, path_prefix, port, root_dir, container_name,
-            ssl_enabled, force_https, websocket_enabled, max_upload_size,
-            data_dir, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            root_dir, container_name, data_dir, status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         `).run(
           id, serviceData.name, svcKind, svcRuntime,
           serviceData.type || null, serviceData.target || null,
-          svcTargetIp, svcLxcName,
-          primaryRoute.domain, primaryRoute.pathPrefix, primaryRoute.targetPort,
-          rootDir || null, serviceData.containerName || null,
-          primaryRoute.sslEnabled ? 1 : 0,
-          primaryRoute.forceHttps ? 1 : 0,
-          primaryRoute.websocketEnabled ? 1 : 0,
-          primaryRoute.maxUploadSize,
-          dataDir
+          svcTargetIp, svcLxcName, rootDir || null,
+          serviceData.containerName || null, dataDir
         );
 
         // (6) Mirror the primary route into service_http_routes.
@@ -4672,7 +4651,12 @@ servicesRouter.post('/system/secure', async (req, res) => {
 servicesRouter.get('/discover/caddy-sites', async (req, res) => {
   try {
     const db = getDb();
-    const existingDomains = db.prepare('SELECT domain FROM services').all().map(s => s.domain);
+    // Phase 2b D.14: source existing domains from service_http_routes
+    // (legacy services.domain column was dropped).
+    const existingDomains = db
+      .prepare('SELECT DISTINCT domain FROM service_http_routes')
+      .all()
+      .map((r) => r.domain);
 
     const discoveredSites = [];
 
@@ -4850,20 +4834,17 @@ servicesRouter.post('/discover/import', async (req, res) => {
     const svcRuntime = type === 'docker' ? 'docker' : null;
     const svcTargetIp = type === 'static' ? null : target || null;
 
-    // Insert the services row with both the legacy route-owned columns
-    // AND the Phase 2b service-level fields so the dual-source B.3 read
-    // renders this entry immediately.
+    // Phase 2b D.14: INSERT Phase 2b service-level columns only. The
+    // route-owned columns were dropped — all route state goes via
+    // syncPrimaryRouteFromLegacy below.
     db.prepare(`
       INSERT INTO services (
-        id, name, kind, runtime, type, target, target_ip, domain, path_prefix,
-        port, root_dir, container_name, ssl_enabled, force_https,
-        websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        id, name, kind, runtime, type, target, target_ip,
+        root_dir, container_name, data_dir, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
       id, name, svcKind, svcRuntime, type || null, target || null,
-      svcTargetIp, domain, '/', port || null,
-      actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
-      websocketEnabled ? 1 : 0, '1G', dataDir
+      svcTargetIp, actualRootDir, null, dataDir
     );
 
     // Phase 2b D.11: mirror the discovered row into service_http_routes

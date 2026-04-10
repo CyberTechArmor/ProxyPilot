@@ -144,6 +144,14 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add path_prefix column for wildcard/path-based routing
+  // Defaults to '/' so existing services continue to match all paths on their domain.
+  try {
+    db.exec(`ALTER TABLE services ADD COLUMN path_prefix TEXT NOT NULL DEFAULT '/'`);
+  } catch (e) {
+    // Column already exists
+  }
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

@@ -208,6 +208,7 @@ export default function Dashboard() {
   const [formData, setFormData] = useState({
     name: '',
     domain: '',
+    pathPrefix: '/',
     type: '',
     target: '127.0.0.1',
     port: '',
@@ -907,6 +908,7 @@ export default function Dashboard() {
     setFormData({
       name: '',
       domain: '',
+      pathPrefix: '/',
       type: '',
       target: '127.0.0.1',
       port: '',
@@ -1394,6 +1396,7 @@ export default function Dashboard() {
         setFormData({
           name: composeCreateForm.serviceName,
           domain: '',
+          pathPrefix: '/',
           type: 'docker',
           target: '127.0.0.1',
           port: exposedPorts[0] || '',
@@ -2823,7 +2826,32 @@ volumes:
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="domain">Domain</Label>
-                    <Input id="domain" value={formData.domain} onChange={(e) => setFormData({ ...formData, domain: e.target.value })} placeholder="app.example.com" required />
+                    <Input
+                      id="domain"
+                      value={formData.domain}
+                      onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
+                      placeholder="app.example.com or *.example.com"
+                      required
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Use a plain hostname (app.example.com) or a wildcard (*.example.com).
+                      Wildcards require a DNS-01 solver in Caddy for TLS.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pathPrefix">Path Prefix</Label>
+                    <Input
+                      id="pathPrefix"
+                      value={formData.pathPrefix}
+                      onChange={(e) => setFormData({ ...formData, pathPrefix: e.target.value })}
+                      placeholder="/"
+                      pattern="^/(?:[a-zA-Z0-9._~\-]+(?:/[a-zA-Z0-9._~\-]+)*/?)?$"
+                      title="Must start with / and contain only URL-safe characters"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Default <code>/</code> matches all paths. Set <code>/api</code> to scope this
+                      service to <code>/api/*</code> (Caddy strips the prefix before proxying).
+                    </p>
                   </div>
                   {formData.type === 'docker' && (
                     <>
@@ -3390,6 +3418,9 @@ volumes:
               <CardDescription className="flex items-center gap-1">
                 <Globe className="h-3 w-3" />
                 {service.domain}
+                {service.pathPrefix && service.pathPrefix !== '/' && (
+                  <span className="font-mono text-xs text-muted-foreground">{service.pathPrefix}</span>
+                )}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -3680,6 +3711,7 @@ volumes:
                                 setFormData({
                                   name: svc.serviceName || svc.containerName,
                                   domain: '',
+                                  pathPrefix: '/',
                                   type: 'docker',
                                   target: '127.0.0.1',
                                   port: svc.exposedPort.toString(),

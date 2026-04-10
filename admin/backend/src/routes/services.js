@@ -116,10 +116,41 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+// Domain accepts either a plain hostname (example.com) or a wildcard
+// (`*.example.com` — matches any single subdomain level). Bare `*` is rejected.
+const DOMAIN_REGEX = /^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
+
+// Path prefix must begin with `/` and contain only URL-safe characters.
+// `/` means "match all paths on the domain" (legacy behavior).
+const PATH_PREFIX_REGEX = /^\/(?:[a-zA-Z0-9._~\-]+(?:\/[a-zA-Z0-9._~\-]+)*\/?)?$/;
+
+// Normalize a path prefix so lookups and Caddy generation stay consistent:
+//   undefined/empty → '/'
+//   trailing slash (except for root) is stripped: '/api/' → '/api'
+function normalizePathPrefix(value) {
+  if (value === undefined || value === null || value === '') return '/';
+  let p = String(value).trim();
+  if (!p.startsWith('/')) p = '/' + p;
+  if (p.length > 1 && p.endsWith('/')) p = p.replace(/\/+$/, '');
+  return p || '/';
+}
+
+// Convert domain (which may contain a wildcard `*`) into a filesystem-safe
+// name for Caddy site config files. Wildcards become `_wildcard_` so
+// `*.example.com` → `_wildcard_.example.com`.
+function caddyFileName(domain) {
+  return String(domain).replace(/\*/g, '_wildcard_');
+}
+
+function caddyFilePath(domain) {
+  return `${CADDY_SITES_DIR}/${caddyFileName(domain)}`;
+}
+
 // Validation schemas
 const createServiceSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  domain: z.string().regex(/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/, 'Invalid domain'),
+  domain: z.string().regex(DOMAIN_REGEX, 'Invalid domain (use example.com or *.example.com)'),
+  pathPrefix: z.string().regex(PATH_PREFIX_REGEX, 'Path prefix must start with / and contain only URL-safe characters').default('/'),
   type: z.enum(['static', 'docker']),
   target: z.string().optional(),
   port: z.union([z.number().int().min(1).max(65535), z.string(), z.null()]).optional().transform(val => {
@@ -232,6 +263,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
     // Regenerate Caddy config with SSL enabled
     const serviceConfig = {
       domain: service.domain,
+      pathPrefix: service.path_prefix,
       type: service.type,
       target: service.target,
       port: service.port,
@@ -243,7 +275,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
     };
 
     const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    const configPath = caddyFilePath(service.domain);
     await writeCaddyConfig(configPath, caddyConfig);
 
     // Reload Caddy - it will automatically obtain the certificate
@@ -298,6 +330,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     // Regenerate Caddy config without HTTPS
     const serviceConfig = {
       domain: service.domain,
+      pathPrefix: service.path_prefix,
       type: service.type,
       target: service.target,
       port: service.port,
@@ -309,7 +342,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
     };
 
     const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    const configPath = caddyFilePath(service.domain);
     await writeCaddyConfig(configPath, caddyConfig);
 
     // Reload Caddy
@@ -391,6 +424,7 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
     // Build service config object
     const serviceConfig = {
       domain: service.domain,
+      pathPrefix: service.path_prefix,
       type: service.type,
       target: service.target,
       port: service.port,
@@ -403,7 +437,7 @@ servicesRouter.post('/:id/regenerate-config', async (req, res) => {
 
     // Generate and write new Caddy config
     const caddyConfig = generateCaddyConfig(serviceConfig);
-    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    const configPath = caddyFilePath(service.domain);
     await writeCaddyConfig(configPath, caddyConfig);
 
     // Reload Caddy
@@ -471,6 +505,7 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
       try {
         const serviceConfig = {
           domain: service.domain,
+          pathPrefix: service.path_prefix,
           type: service.type,
           target: service.target,
           port: service.port,
@@ -482,7 +517,7 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
         };
 
         const caddyConfig = generateCaddyConfig(serviceConfig);
-        const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+        const configPath = caddyFilePath(service.domain);
 
         // Write config
         await writeCaddyConfig(configPath, caddyConfig);
@@ -585,7 +620,8 @@ servicesRouter.get('/', (req, res) => {
   try {
     const db = getDb();
     const services = db.prepare(`
-      SELECT id, name, domain, type, target, port, root_dir as rootDir,
+      SELECT id, name, domain, path_prefix as pathPrefix, type, target, port,
+             root_dir as rootDir,
              container_name as containerName, ssl_enabled as sslEnabled,
              force_https as forceHttps, websocket_enabled as websocketEnabled,
              max_upload_size as maxUploadSize, status, is_admin as isAdmin,
@@ -619,7 +655,8 @@ servicesRouter.get('/:id', (req, res) => {
   try {
     const db = getDb();
     const service = db.prepare(`
-      SELECT id, name, domain, type, target, port, root_dir as rootDir,
+      SELECT id, name, domain, path_prefix as pathPrefix, type, target, port,
+             root_dir as rootDir,
              container_name as containerName, ssl_enabled as sslEnabled,
              force_https as forceHttps, websocket_enabled as websocketEnabled,
              max_upload_size as maxUploadSize, status, is_admin as isAdmin,
@@ -672,6 +709,9 @@ servicesRouter.post('/:id/favorite', (req, res) => {
 servicesRouter.post('/', async (req, res) => {
   try {
     const data = createServiceSchema.parse(req.body);
+    // Normalize path prefix (strip trailing slashes, default to '/') so the
+    // same canonical value is used across validation, Caddy config, and DB.
+    data.pathPrefix = normalizePathPrefix(data.pathPrefix);
     const db = getDb();
 
     // Check if domain already exists
@@ -760,7 +800,7 @@ services:
 
     // Write Caddy site config file
     await ensureCaddyStructure();
-    const configPath = `${CADDY_SITES_DIR}/${data.domain}`;
+    const configPath = caddyFilePath(data.domain);
     await writeCaddyConfig(configPath, caddyConfig);
 
     // Validate Caddy config
@@ -778,11 +818,11 @@ services:
     // Insert into database
     db.prepare(`
       INSERT INTO services (
-        id, name, domain, type, target, port, root_dir, container_name,
+        id, name, domain, path_prefix, type, target, port, root_dir, container_name,
         ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      id, data.name, data.domain, data.type, data.target || null,
+      id, data.name, data.domain, data.pathPrefix, data.type, data.target || null,
       data.port || null, data.rootDir || null, data.containerName || null,
       data.sslEnabled ? 1 : 0, data.forceHttps ? 1 : 0,
       data.websocketEnabled ? 1 : 0, data.maxUploadSize, dataDir
@@ -878,6 +918,7 @@ servicesRouter.put('/:id', async (req, res) => {
     const updatedData = {
       name: data.name || service.name,
       domain: data.domain || service.domain,
+      pathPrefix: data.pathPrefix !== undefined ? normalizePathPrefix(data.pathPrefix) : normalizePathPrefix(service.path_prefix),
       type: data.type || service.type,
       target: data.target !== undefined ? data.target : service.target,
       port: data.port !== undefined ? data.port : service.port,
@@ -892,11 +933,11 @@ servicesRouter.put('/:id', async (req, res) => {
 
     // Remove old Caddy config if domain changed
     if (data.domain && data.domain !== service.domain) {
-      await unlink(`${CADDY_SITES_DIR}/${service.domain}`).catch(() => {});
+      await unlink(caddyFilePath(service.domain)).catch(() => {});
     }
 
     // Backup existing Caddy config before changes
-    const configPath = `${CADDY_SITES_DIR}/${updatedData.domain}`;
+    const configPath = caddyFilePath(updatedData.domain);
     let backupConfig = null;
     try {
       if (existsSync(configPath)) {
@@ -942,13 +983,13 @@ servicesRouter.put('/:id', async (req, res) => {
     // Update database
     db.prepare(`
       UPDATE services SET
-        name = ?, domain = ?, type = ?, target = ?, port = ?,
+        name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
         root_dir = ?, data_dir = ?, container_name = ?, ssl_enabled = ?,
         force_https = ?, websocket_enabled = ?, max_upload_size = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
-      updatedData.name, updatedData.domain, updatedData.type,
+      updatedData.name, updatedData.domain, updatedData.pathPrefix, updatedData.type,
       updatedData.target, updatedData.port, updatedData.rootDir,
       updatedData.dataDir, updatedData.containerName, updatedData.sslEnabled ? 1 : 0,
       updatedData.forceHttps ? 1 : 0, updatedData.websocketEnabled ? 1 : 0,
@@ -1051,23 +1092,25 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
 
     // Regenerate Caddy config with reverted settings
     const caddyConfig = generateCaddyConfig(config);
-    const configPath = `${CADDY_SITES_DIR}/${config.domain}`;
+    const configPath = caddyFilePath(config.domain);
     await writeCaddyConfig(configPath, caddyConfig);
 
     // Validate and reload Caddy
     await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
     await reloadCaddy();
 
-    // Update database
+    // Update database. Older saved versions may not include pathPrefix —
+    // fall back to the normalized default so reverts from pre-wildcard
+    // history still succeed.
     db.prepare(`
       UPDATE services SET
-        name = ?, domain = ?, type = ?, target = ?, port = ?,
+        name = ?, domain = ?, path_prefix = ?, type = ?, target = ?, port = ?,
         root_dir = ?, container_name = ?, ssl_enabled = ?,
         force_https = ?, websocket_enabled = ?, max_upload_size = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
-      config.name, config.domain, config.type,
+      config.name, config.domain, normalizePathPrefix(config.pathPrefix), config.type,
       config.target, config.port, config.rootDir,
       config.containerName, config.sslEnabled ? 1 : 0,
       config.forceHttps ? 1 : 0, config.websocketEnabled ? 1 : 0,
@@ -1112,7 +1155,7 @@ servicesRouter.get('/:id/caddy-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    const configPath = caddyFilePath(service.domain);
 
     if (!existsSync(configPath)) {
       return res.status(404).json({ error: 'Caddy config not found' });
@@ -1137,7 +1180,7 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    const configPath = `${CADDY_SITES_DIR}/${service.domain}`;
+    const configPath = caddyFilePath(service.domain);
 
     // Read and backup current config
     let backupConfig = null;
@@ -1241,7 +1284,7 @@ servicesRouter.delete('/:id', async (req, res) => {
 
     // Remove Caddy site config
     try {
-      await unlink(`${CADDY_SITES_DIR}/${service.domain}`).catch(() => {});
+      await unlink(caddyFilePath(service.domain)).catch(() => {});
     } catch (e) {
       console.error('Error removing Caddy config file:', e);
     }
@@ -1831,6 +1874,7 @@ servicesRouter.post('/export', async (req, res) => {
       const serviceExport = {
         name: service.name,
         domain: service.domain,
+        pathPrefix: service.path_prefix || '/',
         type: service.type,
         target: service.target,
         port: service.port,
@@ -1913,7 +1957,7 @@ servicesRouter.post('/import', async (req, res) => {
 
         if (existing && overwrite) {
           // Delete existing service first
-          await unlink(`${CADDY_SITES_DIR}/${serviceData.domain}`).catch(() => {});
+          await unlink(caddyFilePath(serviceData.domain)).catch(() => {});
           db.prepare('DELETE FROM services WHERE id = ?').run(existing.id);
         }
 
@@ -1953,20 +1997,22 @@ servicesRouter.post('/import', async (req, res) => {
           }
         }
 
-        // Generate Caddy config
-        const configData = { ...serviceData, rootDir };
+        // Generate Caddy config. Exports created before wildcard routing
+        // support have no pathPrefix — default to '/' to preserve behavior.
+        const importPathPrefix = normalizePathPrefix(serviceData.pathPrefix);
+        const configData = { ...serviceData, rootDir, pathPrefix: importPathPrefix };
         const caddyConfig = generateCaddyConfig(configData);
-        const configPath = `${CADDY_SITES_DIR}/${serviceData.domain}`;
+        const configPath = caddyFilePath(serviceData.domain);
         await writeCaddyConfig(configPath, caddyConfig);
 
         // Insert into database
         db.prepare(`
           INSERT INTO services (
-            id, name, domain, type, target, port, root_dir, container_name,
+            id, name, domain, path_prefix, type, target, port, root_dir, container_name,
             ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         `).run(
-          id, serviceData.name, serviceData.domain, serviceData.type,
+          id, serviceData.name, serviceData.domain, importPathPrefix, serviceData.type,
           serviceData.target || null, serviceData.port || null,
           rootDir || null, serviceData.containerName || null,
           serviceData.sslEnabled ? 1 : 0, serviceData.forceHttps ? 1 : 0,
@@ -2874,14 +2920,16 @@ servicesRouter.post('/discover/import', async (req, res) => {
       dataDir = join(SERVICES_DATA_DIR, safeDir);
     }
 
-    // Insert into database - for imported static sites, data_dir = root_dir (the original path)
+    // Insert into database - for imported static sites, data_dir = root_dir (the original path).
+    // Discovered sites always land on path_prefix '/' — if the original Caddyfile
+    // used handle_path, the operator can refine it after import.
     db.prepare(`
       INSERT INTO services (
-        id, name, domain, type, target, port, root_dir, container_name,
+        id, name, domain, path_prefix, type, target, port, root_dir, container_name,
         ssl_enabled, force_https, websocket_enabled, max_upload_size, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      id, name, domain, type, target || null, port || null,
+      id, name, domain, '/', type, target || null, port || null,
       actualRootDir, null, sslEnabled ? 1 : 0, sslEnabled ? 1 : 0,
       websocketEnabled ? 1 : 0, '1G', dataDir
     );
@@ -2902,7 +2950,7 @@ servicesRouter.post('/discover/import', async (req, res) => {
 
       await ensureCaddyStructure();
       const caddyConfig = generateCaddyConfig(serviceConfig);
-      const configPath = `${CADDY_SITES_DIR}/${domain}`;
+      const configPath = caddyFilePath(domain);
       await writeCaddyConfig(configPath, caddyConfig);
 
       // Validate and reload Caddy
@@ -3078,6 +3126,9 @@ function toCaddySize(size) {
 // Generate Caddy site config based on service type
 function generateCaddyConfig(service) {
   const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
+  const pathPrefix = normalizePathPrefix(service.pathPrefix || service.path_prefix);
+  const hasPathPrefix = pathPrefix !== '/';
+  const isWildcardDomain = typeof domain === 'string' && domain.startsWith('*.');
 
   // Convert container path to host path for Caddy
   // If rootDir starts with SERVICES_DATA_DIR, replace with CADDY_STATIC_ROOT
@@ -3086,19 +3137,34 @@ function generateCaddyConfig(service) {
     caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
 
-  // Caddy auto-handles TLS when domain is used without http:// prefix
-  // Use http:// prefix to disable automatic HTTPS
-  const siteAddress = sslEnabled ? domain : `http://${domain}`;
+  // Caddy auto-handles TLS when domain is used without http:// prefix.
+  // Wildcard domains require a wildcard certificate, which Caddy can obtain
+  // only via a DNS-01 challenge (needs a DNS provider plugin). Fall back to
+  // http:// for wildcards so the admin can still serve traffic without TLS
+  // until a DNS-01 solver is configured. The operator can enable TLS for
+  // wildcards manually by editing the Caddyfile for that domain.
+  let siteAddress;
+  if (!sslEnabled || isWildcardDomain) {
+    siteAddress = `http://${domain}`;
+  } else {
+    siteAddress = domain;
+  }
+
+  // Indent helper so the per-service body can live either at the top level
+  // of a site block (no path prefix) or inside a `handle_path` block
+  // (with path prefix) without repeating the config twice.
+  const baseIndent = hasPathPrefix ? '        ' : '    ';
 
   let lines = [];
   lines.push(`# ProxyPilot Managed Configuration`);
   lines.push(`# Domain: ${domain}`);
+  lines.push(`# Path prefix: ${pathPrefix}`);
   lines.push(`# Type: ${type}`);
   lines.push(`# Generated: ${new Date().toISOString()}`);
   lines.push(``);
   lines.push(`${siteAddress} {`);
 
-  // Request body size limit
+  // Request body size limit (site-level — applies to all matchers below)
   if (maxUploadSize) {
     lines.push(`    request_body {`);
     lines.push(`        max_size ${toCaddySize(maxUploadSize)}`);
@@ -3106,21 +3172,33 @@ function generateCaddyConfig(service) {
     lines.push(``);
   }
 
+  // When a path prefix is set, all of this service's handling is wrapped in
+  // a `handle_path` block so Caddy strips the prefix before proxying. Any
+  // request that does not match the prefix falls through to Caddy's default
+  // 404 — the operator can add more services on the same domain later.
+  if (hasPathPrefix) {
+    lines.push(`    handle_path ${pathPrefix}* {`);
+  }
+
   switch (type) {
     case 'docker':
     case 'proxy':
       // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, and WebSocket
-      lines.push(`    reverse_proxy ${target || '127.0.0.1'}:${port}`);
+      lines.push(`${baseIndent}reverse_proxy ${target || '127.0.0.1'}:${port}`);
       break;
 
     case 'static':
-      lines.push(`    root * ${caddyRootDir}`);
-      lines.push(`    file_server`);
-      lines.push(`    try_files {path} {path}/ /index.html`);
+      lines.push(`${baseIndent}root * ${caddyRootDir}`);
+      lines.push(`${baseIndent}file_server`);
+      lines.push(`${baseIndent}try_files {path} {path}/ /index.html`);
       break;
   }
 
-  // Security headers
+  if (hasPathPrefix) {
+    lines.push(`    }`);
+  }
+
+  // Security headers (site-level so they apply even on 404s)
   lines.push(``);
   lines.push(`    header {`);
   lines.push(`        X-Frame-Options "SAMEORIGIN"`);
@@ -3129,10 +3207,11 @@ function generateCaddyConfig(service) {
   lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
   lines.push(`    }`);
 
-  // Logging
+  // Logging — sanitize the domain so wildcard `*` does not leak into the
+  // log filename. Uses the same sanitizer as the Caddy site config filename.
   lines.push(``);
   lines.push(`    log {`);
-  lines.push(`        output file /var/log/caddy/${domain}.log`);
+  lines.push(`        output file /var/log/caddy/${caddyFileName(domain)}.log`);
   lines.push(`    }`);
 
   lines.push(`}`);

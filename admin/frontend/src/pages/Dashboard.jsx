@@ -2711,7 +2711,7 @@ volumes:
             <Rocket className="h-4 w-4 mr-2" />
             One-Click
           </Button>
-          <div className="relative">
+          <div className="relative hidden md:block">
             <Button
               variant="ghost"
               size="sm"

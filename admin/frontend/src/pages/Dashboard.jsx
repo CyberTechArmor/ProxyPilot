@@ -1180,11 +1180,6 @@ export default function Dashboard() {
     setSubmitting(true);
 
     try {
-      const submitData = { ...formData };
-      if (formData.port) {
-        submitData.port = parseInt(formData.port, 10);
-      }
-
       // Phase 2b H.5: generalized client-side collision guard. The
       // wizard may submit multiple routes at once (via the H.3 routes
       // builder), so the guard walks `formData.routes` and rejects:
@@ -1268,10 +1263,100 @@ export default function Dashboard() {
         }
       }
 
-      await api.createService(submitData);
+      // Phase 2b H.6: build the primary-route submit payload from
+      // routes[0] + the service-level fields, then POST it to D.2's
+      // still-flat endpoint. Any additional routes (routes[1..]) are
+      // fanned out as api.createRoute calls against the freshly
+      // created service id. This is the "Option (b)" approach from
+      // the phase prompt: D.2 keeps the Phase 2 flat contract and
+      // the wizard layers the nested-routes flow on top of it. The
+      // only backend concession is D.2's optional `kind` / `runtime`
+      // / `lxcContainerName` / `targetIp` fields so LXC runtime
+      // metadata can land in one round trip.
+      const primaryRoute = formData.routes[0];
+      const additionalRoutes = formData.routes.slice(1);
+      const submitData = {
+        name: formData.name,
+        domain: primaryRoute.domain,
+        pathPrefix: normalize(primaryRoute.pathPrefix),
+        type: formData.kind === 'static_site' ? 'static' : 'docker',
+        target: formData.targetIp || formData.target || '127.0.0.1',
+        containerName: formData.containerName || undefined,
+        rootDir: formData.rootDir || undefined,
+        sslEnabled: !!primaryRoute.sslEnabled,
+        forceHttps: formData.forceHttps,
+        websocketEnabled: formData.websocketEnabled,
+        maxUploadSize: formData.maxUploadSize,
+        obtainCertificate: formData.obtainCertificate,
+      };
+      // Only container_service rows need a targetPort on the primary
+      // route. Static sites ignore the port entirely.
+      if (formData.kind === 'container_service' && primaryRoute.targetPort) {
+        submitData.port = parseInt(primaryRoute.targetPort, 10);
+      }
+      // Phase 2b H.6: when the operator picked the LXC runtime the
+      // wizard has the container name + cached IP captured in
+      // formData. Forward both through D.2's optional metadata
+      // fields so services.runtime lands as 'lxc' and
+      // services.lxc_container_name is populated for the Refresh IP
+      // button (I.2) and for future LXC-aware features. Docker and
+      // static_site skip these fields so D.2's legacy inference runs
+      // unchanged.
+      if (formData.kind === 'container_service' && formData.runtime === 'lxc') {
+        submitData.kind = 'container_service';
+        submitData.runtime = 'lxc';
+        submitData.lxcContainerName = formData.lxcContainerName;
+        submitData.targetIp = formData.targetIp;
+      }
+
+      const createRes = await api.createService(submitData);
+      const createdServiceId = createRes?.service?.id;
+      if (!createdServiceId) {
+        throw new Error('Service create did not return an id');
+      }
+
+      // Fan out additional routes one at a time. If any fails, stop
+      // and surface the first failure so the operator knows which
+      // route to retry. The already-created service + primary route
+      // remain in place — they will be visible on the next refetch.
+      for (let i = 0; i < additionalRoutes.length; i++) {
+        const r = additionalRoutes[i];
+        const routeBody = {
+          domain: r.domain,
+          pathPrefix: normalize(r.pathPrefix),
+          targetPort:
+            formData.kind === 'container_service' && r.targetPort
+              ? parseInt(r.targetPort, 10)
+              : undefined,
+          sslEnabled: !!r.sslEnabled,
+          forceHttps: formData.forceHttps,
+          websocketEnabled: formData.websocketEnabled,
+          maxUploadSize: formData.maxUploadSize,
+        };
+        try {
+          await api.createRoute(createdServiceId, routeBody);
+        } catch (routeErr) {
+          toast({
+            variant: 'destructive',
+            title: `Route ${i + 2} failed to create`,
+            description: `${r.domain}${normalize(r.pathPrefix)}: ${routeErr.message}`,
+          });
+          // The primary route + service still exist; refresh to
+          // show the partial state so the operator can recover via
+          // the Routes card (I.1).
+          setAddDialogOpen(false);
+          resetForm();
+          fetchServices();
+          return;
+        }
+      }
+
       toast({
         title: 'Success',
-        description: 'Service created successfully',
+        description:
+          formData.routes.length > 1
+            ? `Service created with ${formData.routes.length} routes`
+            : 'Service created successfully',
       });
       setAddDialogOpen(false);
       resetForm();

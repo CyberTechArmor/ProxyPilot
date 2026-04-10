@@ -165,6 +165,20 @@ const createServiceSchema = z.object({
   websocketEnabled: z.boolean().default(false),
   maxUploadSize: z.string().regex(/^[1-9][0-9]*[MG]$/i).default('1G'),
   obtainCertificate: z.boolean().default(true),
+  // Phase 2b H.6: optional Phase 2b service-level metadata. The
+  // Phase 2 flat payload stays the source of truth for the primary
+  // route, and the H.6 wizard still POSTs that flat payload for the
+  // first route + follows up with POST /:id/routes for each
+  // additional route. But to land a proper `runtime='lxc'` service
+  // with a cached container name + IP through this same endpoint,
+  // the wizard may attach these extras; when present they override
+  // the legacy type-inferred values. Omitting them preserves the
+  // pre-H.6 inference exactly so every existing caller (Phase 2
+  // clients, compose-discover pre-fills, etc.) keeps working.
+  kind: z.enum(['static_site', 'container_service']).optional(),
+  runtime: z.enum(['lxc', 'docker']).nullable().optional(),
+  lxcContainerName: z.string().optional(),
+  targetIp: z.string().optional(),
 });
 
 const deleteServiceSchema = z.object({
@@ -1293,20 +1307,38 @@ services:
     //
     // `kind` derives from `type`: static_site for static type, otherwise
     // container_service. `runtime` derives from type='docker' only; proxy
-    // and static leave it NULL (operator can set runtime='lxc' later via
-    // Section H's wizard).
+    // and static leave it NULL.
+    //
+    // Phase 2b H.6: the wizard's H.6 commit may attach optional
+    // `kind`/`runtime`/`lxcContainerName`/`targetIp` fields. When
+    // present they override the legacy inference, which is the only
+    // way a `runtime='lxc'` service with a cached container name
+    // can land through this endpoint without a second round-trip.
+    // When absent, the pre-H.6 inference path runs unchanged so
+    // every existing caller keeps working.
     const inferredKind = data.type === 'static' ? 'static_site' : 'container_service';
     const inferredRuntime = data.type === 'docker' ? 'docker' : null;
+    const finalKind = data.kind || inferredKind;
+    const finalRuntime =
+      data.runtime !== undefined ? data.runtime : inferredRuntime;
+    const finalTargetIp =
+      data.targetIp !== undefined
+        ? data.targetIp || null
+        : data.type !== 'static'
+        ? data.target || null
+        : null;
+    const finalLxcContainerName = data.lxcContainerName || null;
 
     db.prepare(`
       INSERT INTO services (
         id, name, kind, runtime, type, target, target_ip,
-        root_dir, container_name, data_dir, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        lxc_container_name, root_dir, container_name, data_dir, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      id, data.name, inferredKind, inferredRuntime, data.type,
+      id, data.name, finalKind, finalRuntime, data.type,
       data.target || null,
-      data.type !== 'static' ? (data.target || null) : null,
+      finalTargetIp,
+      finalLxcContainerName,
       data.rootDir || null, data.containerName || null, dataDir
     );
 

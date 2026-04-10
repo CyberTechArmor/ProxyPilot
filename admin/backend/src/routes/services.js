@@ -1446,7 +1446,7 @@ servicesRouter.delete('/:id', async (req, res) => {
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
 
-    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain }, req.ip);
+    logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain, pathPrefix: service.path_prefix }, req.ip);
 
     res.json({ success: true });
   } catch (error) {

@@ -140,8 +140,8 @@ admin/frontend/src/lib/api.js                    # (if the client caches by doma
 
 ### D. Backend — Audit log disambiguation
 
-- [ ] `SERVICE_DELETED` audit detail payload (admin/backend/src/routes/services.js:1303)
-      — Change `{ domain: service.domain }` to `{ domain: service.domain, pathPrefix: service.path_prefix }`. `SERVICE_CREATED` already passes the full `data` object (includes `pathPrefix`); `SERVICE_UPDATED` already passes `updatedData` (includes `pathPrefix`). Verify both by re-reading the log after one create + one update in dev.
+- [x] `SERVICE_DELETED` audit detail payload (admin/backend/src/routes/services.js:1380)
+      — Changed `{ domain: service.domain }` to `{ domain: service.domain, pathPrefix: service.path_prefix }`. `SERVICE_CREATED` already passes the full `data` object (which includes `pathPrefix`); `SERVICE_UPDATED` already passes `updatedData` (also includes `pathPrefix`). **Verified:** Express integration test — created two services on `aud.test` (`/` + `/api`), updated `/api`, deleted `/api`, then queried `audit_log` for `SERVICE_*` rows: all four entries (CREATE root, CREATE /api, UPDATE /api, DELETE /api) carry the correct `pathPrefix` in the `details` JSON.
 
 ### E. Frontend — Dashboard wizard UX (mobile-first)
 

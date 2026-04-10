@@ -776,6 +776,163 @@ export default function Dashboard() {
     setWizardStep(1);
   };
 
+  // Phase 2: extracted from the inline `.map` in the services grid so the
+  // grouped renderer can call it. The card body is byte-for-byte identical
+  // to the pre-Phase-2 inline version — only the surrounding control flow
+  // (grouping vs flat) was added.
+  const renderServiceCard = (service) => (
+    <Card
+      key={service.id}
+      draggable
+      onDragStart={(e) => handleServiceDragStart(e, service)}
+      onDragEnd={handleServiceDragEnd}
+      className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''} ${draggedService?.id === service.id ? 'opacity-50' : ''} cursor-grab active:cursor-grabbing`}>
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0">
+            {getServiceIcon(service.type)}
+            <CardTitle className="text-lg truncate">{service.name}</CardTitle>
+          </div>
+          <div className="flex items-center gap-1 flex-wrap justify-end">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={(e) => handleToggleFavorite(service, e)}
+              title={service.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+            >
+              <Star className={`h-4 w-4 ${service.isFavorite ? 'fill-yellow-500 text-yellow-500' : ''}`} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                setSelectedServiceForFolder(service);
+                setFolderDialogOpen(true);
+              }}
+              title="Move to folder"
+            >
+              <Folder className="h-4 w-4" />
+            </Button>
+            {!service.isAdmin && (
+              <>
+                {/* Settings button for all service types */}
+                <Button variant="ghost" size="icon" onClick={() => openSettings(service)} title="Service Settings">
+                  <Server className="h-4 w-4" />
+                </Button>
+                {/* File editor for static sites only */}
+                {service.type === 'static' && (
+                  <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
+                    <FileText className="h-4 w-4" />
+                  </Button>
+                )}
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => openTerminal(getServiceDirectory(service))}
+                    title="Open Terminal"
+                  >
+                    <Terminal className="h-4 w-4" />
+                  </Button>
+                )}
+                <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </>
+            )}
+            {service.isAdmin && <Shield className="h-5 w-5 text-primary" title="Admin Dashboard" />}
+          </div>
+        </div>
+        <CardDescription className="flex items-center gap-1">
+          <Globe className="h-3 w-3" />
+          {service.domain}
+          {service.pathPrefix && service.pathPrefix !== '/' && (
+            <span className="font-mono text-xs text-muted-foreground">{service.pathPrefix}</span>
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Type</span>
+            <span className="capitalize">{service.type}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Location</span>
+            <span className="font-mono text-xs truncate max-w-[150px]">{getServiceLocation(service)}</span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">SSL</span>
+            <span className="flex items-center gap-1">
+              {service.sslEnabled ? (
+                service.sslCertificateExists ? (
+                  <>
+                    <ShieldCheck className="h-3 w-3 text-green-500" />
+                    <span className="text-green-500">Active</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 ml-1 text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                      onClick={(e) => openRemoveCertDialog(service, e)}
+                      title="Remove SSL Certificate"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <ShieldAlert className="h-3 w-3 text-yellow-500" />
+                    <span className="text-yellow-500" title="SSL enabled but certificate not found">Pending</span>
+                    {obtainingCert === service.id ? (
+                      <Loader2 className="h-3 w-3 ml-1 animate-spin" />
+                    ) : (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5 ml-1"
+                          onClick={(e) => handleObtainCertificate(service, e)}
+                          title="Obtain SSL Certificate"
+                        >
+                          <Shield className="h-3 w-3" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5"
+                          onClick={(e) => handleRegenerateConfig(service, e)}
+                          title="Regenerate config"
+                        >
+                          <RefreshCcw className="h-3 w-3" />
+                        </Button>
+                      </>
+                    )}
+                  </>
+                )
+              ) : (
+                <span>Disabled</span>
+              )}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Status</span>
+            <span className={`capitalize ${service.status === 'active' ? 'text-green-500' : 'text-red-500'}`}>{service.status}</span>
+          </div>
+          {/* Folder Badge */}
+          {getServiceFolder(service.id) && (
+            <div className="flex justify-between items-center pt-1 border-t mt-2">
+              <span className="text-muted-foreground">Folder</span>
+              <span className="flex items-center gap-1 text-xs bg-yellow-500/10 text-yellow-600 px-2 py-0.5 rounded">
+                <Folder className="h-3 w-3" />
+                {serviceFolders[getServiceFolder(service.id)]?.name}
+              </span>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+
   const handleAddService = async (e) => {
     e.preventDefault();
     setSubmitting(true);
@@ -3429,158 +3586,45 @@ volumes:
         {/* Services Grid/List */}
         <div className="flex-1">
           <div className={viewMode === 'grid' ? 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
-            {filteredServices.map((service) => (
-          <Card
-            key={service.id}
-            draggable
-            onDragStart={(e) => handleServiceDragStart(e, service)}
-            onDragEnd={handleServiceDragEnd}
-            className={`${service.isAdmin ? 'border-primary' : ''} ${service.isFavorite ? 'ring-1 ring-yellow-500/50' : ''} ${draggedService?.id === service.id ? 'opacity-50' : ''} cursor-grab active:cursor-grabbing`}>
-            <CardHeader className="pb-3">
-              <div className="flex items-start justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2 min-w-0">
-                  {getServiceIcon(service.type)}
-                  <CardTitle className="text-lg truncate">{service.name}</CardTitle>
-                </div>
-                <div className="flex items-center gap-1 flex-wrap justify-end">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={(e) => handleToggleFavorite(service, e)}
-                    title={service.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                  >
-                    <Star className={`h-4 w-4 ${service.isFavorite ? 'fill-yellow-500 text-yellow-500' : ''}`} />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      setSelectedServiceForFolder(service);
-                      setFolderDialogOpen(true);
-                    }}
-                    title="Move to folder"
-                  >
-                    <Folder className="h-4 w-4" />
-                  </Button>
-                  {!service.isAdmin && (
-                    <>
-                      {/* Settings button for all service types */}
-                      <Button variant="ghost" size="icon" onClick={() => openSettings(service)} title="Service Settings">
-                        <Server className="h-4 w-4" />
-                      </Button>
-                      {/* File editor for static sites only */}
-                      {service.type === 'static' && (
-                        <Button variant="ghost" size="icon" onClick={() => openEditor(service)} title="Manage Files">
-                          <FileText className="h-4 w-4" />
-                        </Button>
-                      )}
-                      {isAdmin && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => openTerminal(getServiceDirectory(service))}
-                          title="Open Terminal"
-                        >
-                          <Terminal className="h-4 w-4" />
-                        </Button>
-                      )}
-                      <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => openDeleteDialog(service)} title="Delete Service">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </>
-                  )}
-                  {service.isAdmin && <Shield className="h-5 w-5 text-primary" title="Admin Dashboard" />}
-                </div>
-              </div>
-              <CardDescription className="flex items-center gap-1">
-                <Globe className="h-3 w-3" />
-                {service.domain}
-                {service.pathPrefix && service.pathPrefix !== '/' && (
-                  <span className="font-mono text-xs text-muted-foreground">{service.pathPrefix}</span>
-                )}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Type</span>
-                  <span className="capitalize">{service.type}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Location</span>
-                  <span className="font-mono text-xs truncate max-w-[150px]">{getServiceLocation(service)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-muted-foreground">SSL</span>
-                  <span className="flex items-center gap-1">
-                    {service.sslEnabled ? (
-                      service.sslCertificateExists ? (
-                        <>
-                          <ShieldCheck className="h-3 w-3 text-green-500" />
-                          <span className="text-green-500">Active</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 ml-1 text-red-500 hover:text-red-600 hover:bg-red-500/10"
-                            onClick={(e) => openRemoveCertDialog(service, e)}
-                            title="Remove SSL Certificate"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </Button>
-                        </>
-                      ) : (
-                        <>
-                          <ShieldAlert className="h-3 w-3 text-yellow-500" />
-                          <span className="text-yellow-500" title="SSL enabled but certificate not found">Pending</span>
-                          {obtainingCert === service.id ? (
-                            <Loader2 className="h-3 w-3 ml-1 animate-spin" />
-                          ) : (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-5 w-5 ml-1"
-                                onClick={(e) => handleObtainCertificate(service, e)}
-                                title="Obtain SSL Certificate"
-                              >
-                                <Shield className="h-3 w-3" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-5 w-5"
-                                onClick={(e) => handleRegenerateConfig(service, e)}
-                                title="Regenerate config"
-                              >
-                                <RefreshCcw className="h-3 w-3" />
-                              </Button>
-                            </>
-                          )}
-                        </>
-                      )
-                    ) : (
-                      <span>Disabled</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span className={`capitalize ${service.status === 'active' ? 'text-green-500' : 'text-red-500'}`}>{service.status}</span>
-                </div>
-                {/* Folder Badge */}
-                {getServiceFolder(service.id) && (
-                  <div className="flex justify-between items-center pt-1 border-t mt-2">
-                    <span className="text-muted-foreground">Folder</span>
-                    <span className="flex items-center gap-1 text-xs bg-yellow-500/10 text-yellow-600 px-2 py-0.5 rounded">
-                      <Folder className="h-3 w-3" />
-                      {serviceFolders[getServiceFolder(service.id)]?.name}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-            ))}
+            {/*
+              Phase 2: when sorted by the default favorite view, group
+              services that share a domain and emit a header row above each
+              group with 2+ services so operators see "N services on
+              example.com" together. Single-service domains stay headerless.
+              The grouping preserves the inherited per-group order so the
+              favorite-first sort inside each group still wins.
+            */}
+            {(() => {
+              if (sortBy !== 'favorite') {
+                return filteredServices.map((service) => renderServiceCard(service));
+              }
+              const groups = new Map();
+              for (const s of filteredServices) {
+                const arr = groups.get(s.domain) || [];
+                arr.push(s);
+                groups.set(s.domain, arr);
+              }
+              const out = [];
+              for (const [domain, list] of groups) {
+                if (list.length >= 2) {
+                  out.push(
+                    <div
+                      key={`group-${domain}`}
+                      data-testid="domain-group-header"
+                      className="col-span-1 sm:col-span-2 lg:col-span-3 mt-2 first:mt-0 flex items-center gap-2 text-xs font-medium text-muted-foreground"
+                    >
+                      <Globe className="h-3 w-3" />
+                      <span>
+                        {list.length} services on{' '}
+                        <span className="font-mono">{domain}</span>
+                      </span>
+                    </div>
+                  );
+                }
+                for (const s of list) out.push(renderServiceCard(s));
+              }
+              return out;
+            })()}
 
             {filteredServices.length === 0 && (
               <div className="col-span-full text-center py-12 text-muted-foreground">

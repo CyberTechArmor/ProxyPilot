@@ -346,7 +346,7 @@ export default function Layout() {
                   size="icon"
                   onClick={openNotifications}
                   title="Notifications"
-                  className="relative"
+                  className="relative h-11 w-11 md:h-10 md:w-10"
                 >
                   <Bell className="h-5 w-5" />
                   {unreadCount > 0 && (
@@ -407,6 +407,7 @@ export default function Layout() {
                 size="icon"
                 onClick={logout}
                 title="Logout"
+                className="h-11 w-11 md:h-10 md:w-10"
               >
                 <LogOut className="h-5 w-5" />
               </Button>

@@ -83,7 +83,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `left-0 md:left-64`; wraps content (`flex-wrap`) so text + dismiss button do not push off-screen at 360px.
 - [x] `Layout` notification panel clamping (admin/frontend/src/components/Layout.jsx:320)
       — swap `w-80` for `w-[min(20rem,calc(100vw-2rem))]`; verify at 360px that the panel no longer overflows the viewport.
-- [ ] `Layout` primary user-section icon buttons (admin/frontend/src/components/Layout.jsx:302)
+- [x] `Layout` primary user-section icon buttons (admin/frontend/src/components/Layout.jsx:302)
       — bell and logout `Button size="icon"` instances become `h-11 w-11` on mobile (`h-11 w-11 md:h-10 md:w-10`) so they hit the 44px touch target.
 
 ### B. Dashboard page — Services tab header + chrome

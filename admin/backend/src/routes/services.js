@@ -791,18 +791,54 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
       console.error('Error backing up configs:', e);
     }
 
-    // With merged per-domain configs, we regenerate once per *distinct*
-    // domain — not once per service — so two sibling services on the same
-    // domain don't cause two overlapping writes. Admin service domains are
-    // skipped outright so the installer-owned Caddyfile never gets clobbered.
-    const uniqueDomains = [
-      ...new Set(
-        services.filter((s) => !s.is_admin).map((s) => s.domain)
-      ),
-    ];
+    // Phase 2b D.7: rebuild the unique-domain set from the JOIN of
+    // service_http_routes to services (routes-side, the post-D.14 source
+    // of truth) UNION'd with the legacy services.domain column (transitional
+    // fallback). Admin service domains are skipped outright so the
+    // installer-owned Caddyfile never gets clobbered. The legacy query is
+    // wrapped in a try/catch so post-D.14 (legacy column dropped) the
+    // helper collapses to a routes-only scan without further edits.
+    const uniqueDomainsSet = new Set();
+    try {
+      const routeDomainRows = db
+        .prepare(
+          `SELECT DISTINCT r.domain AS domain
+             FROM service_http_routes r
+             INNER JOIN services s ON s.id = r.service_id
+            WHERE s.is_admin = 0`
+        )
+        .all();
+      for (const row of routeDomainRows) {
+        if (row.domain) uniqueDomainsSet.add(row.domain);
+      }
+    } catch (e) {
+      console.error('Failed to read routes-side domain set', e);
+    }
+    try {
+      const legacyDomainRows = db
+        .prepare(
+          `SELECT DISTINCT domain
+             FROM services
+            WHERE is_admin = 0 AND domain IS NOT NULL`
+        )
+        .all();
+      for (const row of legacyDomainRows) {
+        if (row.domain) uniqueDomainsSet.add(row.domain);
+      }
+    } catch (e) {
+      // Post-D.14 — legacy `domain` column dropped. Routes-side scan is
+      // the only source now; nothing to merge.
+    }
+    const uniqueDomains = [...uniqueDomainsSet];
+
+    // Admin domains are sourced from the legacy services row, which the
+    // installer still populates via a fixed is_admin=1 entry. After D.14
+    // this becomes routes-table-only too, but admin services never have
+    // route rows so the legacy fallback is effectively required.
     const adminDomains = services
       .filter((s) => s.is_admin)
-      .map((s) => s.domain);
+      .map((s) => s.domain)
+      .filter(Boolean);
     for (const adminDomain of new Set(adminDomains)) {
       console.log(`Skipping admin domain: ${adminDomain}`);
       results.success.push(`${adminDomain} (skipped - admin)`);

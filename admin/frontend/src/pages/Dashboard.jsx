@@ -4070,7 +4070,7 @@ volumes:
 
           <div className={`flex ${terminalFullscreen ? 'flex-row' : 'flex-col md:flex-row'} gap-4 flex-1 min-h-0 overflow-hidden`}>
             {/* Left Panel: File Browser + Docker Containers */}
-            <div className={`${terminalFullscreen ? 'w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 ${terminalFullscreen ? '' : 'max-h-64 md:max-h-none'}`}>
+            <div className={`${terminalFullscreen ? 'w-full md:w-72' : 'w-full md:w-64'} shrink-0 flex flex-col gap-2 max-h-48 md:max-h-none`}>
               {/* Current View - File Browser */}
               <div className="border rounded flex flex-col flex-1 min-h-0">
                 <div className="p-2 border-b bg-muted shrink-0 flex items-center justify-between">

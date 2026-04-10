@@ -257,6 +257,20 @@ export function initDatabase() {
     ON service_http_routes(service_id)
   `);
 
+  // Phase 2b data backfill: populate service_http_routes rows from the
+  // legacy Phase 2 services columns and derive the new (kind, runtime,
+  // target_ip) values from the legacy `type` and `target` fields.
+  //
+  // Idempotent — runs silently on every boot and only logs + mutates when
+  // there is actually something to backfill. Must run AFTER:
+  //   (a) the services CREATE TABLE + Phase 2b ALTER TABLEs above, so
+  //       `kind`/`runtime`/`target_ip`/`lxc_container_name` exist on every
+  //       row, and
+  //   (b) the service_http_routes CREATE TABLE directly above, so the
+  //       INSERT has somewhere to write.
+  // Legacy columns on `services` are NOT dropped here — D.14 owns that.
+  migrateServicesToRoutes(db);
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

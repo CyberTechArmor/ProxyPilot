@@ -167,10 +167,23 @@ export function initDatabase() {
 
   // Add path_prefix column for wildcard/path-based routing
   // Defaults to '/' so existing services continue to match all paths on their domain.
+  //
+  // Phase 2b D.14 guard: if the services table no longer has the legacy
+  // `domain` column, it has been rebuilt in post-D.14 shape and path_prefix
+  // was dropped along with it. Do NOT re-add it here — the column now
+  // lives on service_http_routes.
   try {
-    db.exec(`ALTER TABLE services ADD COLUMN path_prefix TEXT NOT NULL DEFAULT '/'`);
+    const colsNow = db
+      .prepare(`PRAGMA table_info(services)`)
+      .all()
+      .map((c) => c.name);
+    if (colsNow.includes('domain') && !colsNow.includes('path_prefix')) {
+      db.exec(
+        `ALTER TABLE services ADD COLUMN path_prefix TEXT NOT NULL DEFAULT '/'`
+      );
+    }
   } catch (e) {
-    // Column already exists
+    // Column already exists or introspection failed — safe to ignore.
   }
 
   // Phase 2 migration: rebuild the services table so UNIQUE(domain) becomes
@@ -268,8 +281,15 @@ export function initDatabase() {
   //       row, and
   //   (b) the service_http_routes CREATE TABLE directly above, so the
   //       INSERT has somewhere to write.
-  // Legacy columns on `services` are NOT dropped here — D.14 owns that.
   migrateServicesToRoutes(db);
+
+  // Phase 2b D.14: drop the legacy route-owned columns from `services`.
+  // Runs AFTER migrateServicesToRoutes so every existing row has been
+  // mirrored into `service_http_routes` before the physical drop. This
+  // call is idempotent — installs already rebuilt on a prior boot are
+  // a no-op. Post-D.14 the legacy columns are gone and the Phase 2b
+  // endpoints read/write only the routes table.
+  dropLegacyRouteColumnsFromServices(db);
 
   // Create file versions table for version control
   db.exec(`
@@ -486,6 +506,18 @@ export function migrateServicesUniqueConstraint(dbInstance) {
     .get();
   if (!row || !row.sql) {
     return; // table does not exist yet — initDatabase will create it fresh
+  }
+
+  // Phase 2b D.14 guard: if the services table no longer has the legacy
+  // `domain` column at all, this Phase 2 rebuild doesn't apply anymore.
+  // Post-D.14 the (domain, path_prefix) UNIQUE constraint lives on
+  // service_http_routes instead.
+  const cols = db
+    .prepare(`PRAGMA table_info(services)`)
+    .all()
+    .map((c) => c.name);
+  if (!cols.includes('domain')) {
+    return;
   }
 
   const currentSql = row.sql;
@@ -708,4 +740,113 @@ export function migrateServicesToRoutes(dbInstance) {
       `Backfilled services → service_http_routes (${insertedRoutes} routes)`
     );
   }
+}
+
+// Phase 2b D.14: drop the legacy route-owned columns from `services`.
+//
+// Runs LAST in the initDatabase() pipeline, after migrateServicesToRoutes
+// has backfilled every existing service into service_http_routes. The
+// rebuild keeps only the Phase 2b canonical column set:
+//   id, name, kind, runtime, type, target, target_ip, lxc_container_name,
+//   root_dir, container_name, data_dir, status, is_admin, is_favorite,
+//   created_at, updated_at
+//
+// Dropped columns: domain, path_prefix, port, ssl_enabled, force_https,
+// websocket_enabled, max_upload_size — all now owned by
+// service_http_routes rows instead. The UNIQUE(domain, path_prefix)
+// constraint on the services table goes with them.
+//
+// Idempotent — inspects the current `services` CREATE TABLE sql and
+// returns early if the legacy columns are already gone.
+export function dropLegacyRouteColumnsFromServices(dbInstance) {
+  const db = dbInstance || getDb();
+
+  const row = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='services'"
+    )
+    .get();
+  if (!row || !row.sql) {
+    return;
+  }
+
+  // Post-drop detection: if the table sql no longer mentions any legacy
+  // route column, the drop has already run. The column names are unique
+  // enough that a substring match is safe here.
+  const legacyMarkers = [
+    ' domain ',
+    ' path_prefix ',
+    ' port ',
+    ' ssl_enabled ',
+    ' force_https ',
+    ' websocket_enabled ',
+    ' max_upload_size ',
+  ];
+  const hasAnyLegacy = legacyMarkers.some((m) => row.sql.includes(m));
+  if (!hasAnyLegacy) {
+    return;
+  }
+
+  console.log(
+    'Phase 2b D.14: dropping legacy route columns from services via table rebuild'
+  );
+
+  const runDrop = db.transaction(() => {
+    // Discover actual column set so we only copy columns that exist on
+    // the deployed install. Any legacy columns on the old table that are
+    // NOT in the Phase 2b canonical set are simply not copied.
+    const existingCols = db.prepare(`PRAGMA table_info(services)`).all();
+    const colNames = new Set(existingCols.map((c) => c.name));
+    const has = (name) => (colNames.has(name) ? name : `NULL AS ${name}`);
+
+    db.exec(`
+      CREATE TABLE services_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'container_service' CHECK(kind IN ('static_site', 'container_service')),
+        runtime TEXT CHECK(runtime IN ('lxc', 'docker') OR runtime IS NULL),
+        type TEXT NOT NULL CHECK(type IN ('proxy', 'static', 'docker')),
+        target TEXT,
+        target_ip TEXT,
+        lxc_container_name TEXT,
+        root_dir TEXT,
+        container_name TEXT,
+        data_dir TEXT,
+        status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'error')),
+        is_admin INTEGER DEFAULT 0,
+        is_favorite INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    db.exec(`
+      INSERT INTO services_new (
+        id, name, kind, runtime, type, target, target_ip, lxc_container_name,
+        root_dir, container_name, data_dir, status, is_admin, is_favorite,
+        created_at, updated_at
+      )
+      SELECT
+        id, name,
+        ${has('kind')},
+        ${has('runtime')},
+        type, target,
+        ${has('target_ip')},
+        ${has('lxc_container_name')},
+        ${has('root_dir')},
+        ${has('container_name')},
+        ${has('data_dir')},
+        ${has('status')},
+        ${has('is_admin')},
+        ${has('is_favorite')},
+        created_at, updated_at
+      FROM services
+    `);
+
+    db.exec(`DROP TABLE services`);
+    db.exec(`ALTER TABLE services_new RENAME TO services`);
+  });
+
+  runDrop();
+  console.log('Phase 2b D.14: services table rebuild complete');
 }

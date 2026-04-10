@@ -70,11 +70,14 @@ export const api = {
 
   logout: () => request('/auth/logout', { method: 'POST' }),
 
-  // Services. Phase 2 audit: api.js holds no per-domain state — services are
-  // identified by (id, domain+pathPrefix) and the only domain reference in
-  // this file is `checkSslStatus(domain)` (a fire-and-forget GET, no cache).
-  // Multiple services can share a domain on different prefixes; nothing in
-  // this client needs to know about the multiplicity.
+  // Services. Phase 2b audit: a service now represents one logical workload
+  // (typically an LXC or Docker container) that can expose multiple HTTP
+  // routes via a nested `routes: [...]` array on every GET response. The
+  // service is identified by `id` alone — (domain, pathPrefix) is now a
+  // property of individual routes in `service_http_routes`, not of the
+  // service itself. The only direct domain reference in this file is
+  // `checkSslStatus(domain)` (a fire-and-forget GET, no cache). Nothing in
+  // this client keys any cache on domain.
   getServices: () => request('/services'),
 
   getService: (id) => request(`/services/${id}`),
@@ -95,6 +98,32 @@ export const api = {
   }),
 
   toggleFavorite: (id) => request(`/services/${id}/favorite`, {
+    method: 'POST',
+  }),
+
+  // Phase 2b G.2: per-service HTTP route CRUD. A service can have multiple
+  // routes; each row carries its own (domain, pathPrefix, targetPort,
+  // sslEnabled, forceHttps, websocketEnabled, maxUploadSize).
+  getServiceRoutes: (serviceId) => request(`/services/${serviceId}/routes`),
+
+  createRoute: (serviceId, route) => request(`/services/${serviceId}/routes`, {
+    method: 'POST',
+    body: JSON.stringify(route),
+  }),
+
+  updateRoute: (serviceId, routeId, route) => request(`/services/${serviceId}/routes/${routeId}`, {
+    method: 'PUT',
+    body: JSON.stringify(route),
+  }),
+
+  deleteRoute: (serviceId, routeId) => request(`/services/${serviceId}/routes/${routeId}`, {
+    method: 'DELETE',
+  }),
+
+  // Phase 2b G.3: refresh the cached LXC container IP for a service.
+  // Re-queries Incus, updates services.target_ip if changed, and
+  // regenerates the merged Caddy config for every affected domain.
+  refreshLxcIp: (serviceId) => request(`/services/${serviceId}/refresh-ip`, {
     method: 'POST',
   }),
 
@@ -374,6 +403,11 @@ export const api = {
   getLxcStatus: () => request('/lxc/status'),
 
   getLxcContainers: () => request('/lxc/containers'),
+
+  // Phase 2b G.1: compact listing used by the Add Service wizard's LXC
+  // dropdown. Returns {containers: [{name, status, ipv4, ipv6}]} with
+  // the `pp-` instance prefix already stripped.
+  getLxcContainersWithIp: () => request('/lxc/containers/with-ip'),
 
   getLxcContainer: (name) => request(`/lxc/containers/${name}`),
 

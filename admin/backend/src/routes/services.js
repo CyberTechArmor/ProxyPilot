@@ -3123,19 +3123,49 @@ function toCaddySize(size) {
   return size.toUpperCase().replace(/^(\d+)G$/i, '$1GB').replace(/^(\d+)M$/i, '$1MB');
 }
 
-// Generate Caddy site config based on service type
-function generateCaddyConfig(service) {
-  const { domain, type, target, port, rootDir, websocketEnabled, forceHttps, maxUploadSize, sslEnabled } = service;
-  const pathPrefix = normalizePathPrefix(service.pathPrefix || service.path_prefix);
-  const hasPathPrefix = pathPrefix !== '/';
-  const isWildcardDomain = typeof domain === 'string' && domain.startsWith('*.');
+// Emit the per-service handler body (the `reverse_proxy` / `root` + `file_server`
+// lines) without any wrapping site block, `handle_path`, or `handle`. The caller
+// decides how to wrap these lines — single-service configs emit them bare inside
+// the site block, multi-service (merged) configs wrap each service's body in its
+// own `handle_path ${prefix}*` or `handle` block.
+//
+// `indent` controls the leading whitespace so the caller can nest the body at the
+// appropriate depth (e.g. '    ' for site-level, '        ' for inside a handle).
+function generateServiceHandlerBody(service, indent = '    ') {
+  const { type, target, port, rootDir } = service;
 
-  // Convert container path to host path for Caddy
-  // If rootDir starts with SERVICES_DATA_DIR, replace with CADDY_STATIC_ROOT
+  // Convert container path to host path for Caddy. If rootDir starts with
+  // SERVICES_DATA_DIR, rewrite to CADDY_STATIC_ROOT (same translation the
+  // single-service path has always done).
   let caddyRootDir = rootDir;
   if (rootDir && rootDir.startsWith(SERVICES_DATA_DIR)) {
     caddyRootDir = rootDir.replace(SERVICES_DATA_DIR, CADDY_STATIC_ROOT);
   }
+
+  const lines = [];
+  switch (type) {
+    case 'docker':
+    case 'proxy':
+      // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For,
+      // X-Forwarded-Proto, and WebSocket upgrades.
+      lines.push(`${indent}reverse_proxy ${target || '127.0.0.1'}:${port}`);
+      break;
+
+    case 'static':
+      lines.push(`${indent}root * ${caddyRootDir}`);
+      lines.push(`${indent}file_server`);
+      lines.push(`${indent}try_files {path} {path}/ /index.html`);
+      break;
+  }
+  return lines;
+}
+
+// Generate Caddy site config based on service type
+function generateCaddyConfig(service) {
+  const { domain, type, maxUploadSize, sslEnabled } = service;
+  const pathPrefix = normalizePathPrefix(service.pathPrefix || service.path_prefix);
+  const hasPathPrefix = pathPrefix !== '/';
+  const isWildcardDomain = typeof domain === 'string' && domain.startsWith('*.');
 
   // Caddy auto-handles TLS when domain is used without http:// prefix.
   // Wildcard domains require a wildcard certificate, which Caddy can obtain
@@ -3149,11 +3179,6 @@ function generateCaddyConfig(service) {
   } else {
     siteAddress = domain;
   }
-
-  // Indent helper so the per-service body can live either at the top level
-  // of a site block (no path prefix) or inside a `handle_path` block
-  // (with path prefix) without repeating the config twice.
-  const baseIndent = hasPathPrefix ? '        ' : '    ';
 
   let lines = [];
   lines.push(`# ProxyPilot Managed Configuration`);
@@ -3178,24 +3203,10 @@ function generateCaddyConfig(service) {
   // 404 — the operator can add more services on the same domain later.
   if (hasPathPrefix) {
     lines.push(`    handle_path ${pathPrefix}* {`);
-  }
-
-  switch (type) {
-    case 'docker':
-    case 'proxy':
-      // Caddy automatically handles Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, and WebSocket
-      lines.push(`${baseIndent}reverse_proxy ${target || '127.0.0.1'}:${port}`);
-      break;
-
-    case 'static':
-      lines.push(`${baseIndent}root * ${caddyRootDir}`);
-      lines.push(`${baseIndent}file_server`);
-      lines.push(`${baseIndent}try_files {path} {path}/ /index.html`);
-      break;
-  }
-
-  if (hasPathPrefix) {
+    lines.push(...generateServiceHandlerBody(service, '        '));
     lines.push(`    }`);
+  } else {
+    lines.push(...generateServiceHandlerBody(service, '    '));
   }
 
   // Security headers (site-level so they apply even on 404s)

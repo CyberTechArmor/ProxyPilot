@@ -79,7 +79,7 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — sidebar becomes `fixed … -translate-x-full md:translate-x-0` + transition; open state slides in. Add a `md:hidden` backdrop (`fixed inset-0 bg-black/50 z-40`) that closes the drawer on click (outside-click close).
 - [x] `Layout` main content padding (admin/frontend/src/components/Layout.jsx:378)
       — replace `pl-64` with `pl-0 md:pl-64`; add `pt-14 md:pt-0` when mobile top bar is visible so content is not under the bar. Inner wrapper becomes `p-4 md:p-8` so pages breathe on 360px without wasting space.
-- [ ] `Layout` update banner positioning (admin/frontend/src/components/Layout.jsx:229)
+- [x] `Layout` update banner positioning (admin/frontend/src/components/Layout.jsx:229)
       — `left-0 md:left-64`; wraps content (`flex-wrap`) so text + dismiss button do not push off-screen at 360px.
 - [ ] `Layout` notification panel clamping (admin/frontend/src/components/Layout.jsx:320)
       — swap `w-80` for `w-[min(20rem,calc(100vw-2rem))]`; verify at 360px that the panel no longer overflows the viewport.

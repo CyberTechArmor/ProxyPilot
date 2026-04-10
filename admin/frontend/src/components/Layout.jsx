@@ -252,19 +252,19 @@ export default function Layout() {
 
       {/* Update Banner */}
       {showUpdateBanner && updateInfo?.updateAvailable && (
-        <div className="fixed top-0 left-64 right-0 z-50 bg-primary text-primary-foreground px-4 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Download className="h-4 w-4" />
+        <div className="fixed top-14 md:top-0 left-0 md:left-64 right-0 z-30 bg-primary text-primary-foreground px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <Download className="h-4 w-4 shrink-0" />
             <span className="text-sm">
               Update available: v{updateInfo.latestVersion} (current: v{version})
-              {' '}<span className="opacity-75">- Update via command line: git pull && npm run build</span>
+              {' '}<span className="opacity-75 hidden sm:inline">- Update via command line: git pull && npm run build</span>
             </span>
           </div>
           <Button
             size="sm"
             variant="ghost"
             onClick={handleDismiss}
-            className="text-primary-foreground hover:bg-primary/80"
+            className="text-primary-foreground hover:bg-primary/80 shrink-0"
             title="Dismiss"
           >
             <X className="h-4 w-4" />

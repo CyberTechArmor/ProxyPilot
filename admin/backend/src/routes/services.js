@@ -1356,11 +1356,18 @@ servicesRouter.delete('/:id', async (req, res) => {
       }
     }
 
-    // Remove Caddy site config
+    // Delete from database first so regenerateDomainCaddyConfig picks up
+    // the remaining siblings (or an empty list if this was the last one).
+    db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
+
+    // Regenerate the merged Caddy config for the domain. If this was the
+    // last service on the domain, regenerateDomainCaddyConfig unlinks the
+    // file. Otherwise it rewrites it without the deleted row so siblings
+    // stay reachable.
     try {
-      await unlink(caddyFilePath(service.domain)).catch(() => {});
+      await regenerateDomainCaddyConfig(db, service.domain);
     } catch (e) {
-      console.error('Error removing Caddy config file:', e);
+      console.error('Error regenerating merged Caddy config after delete:', e);
     }
 
     // Reload Caddy
@@ -1370,9 +1377,6 @@ servicesRouter.delete('/:id', async (req, res) => {
 
     // Optionally remove data directory (keep files by default for safety)
     // To enable: await rm(service.data_dir, { recursive: true, force: true }).catch(() => {});
-
-    // Delete from database
-    db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
 
     logAudit(req.user.id, 'SERVICE_DELETED', 'service', req.params.id, { domain: service.domain }, req.ip);
 

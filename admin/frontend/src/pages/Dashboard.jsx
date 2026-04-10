@@ -3836,7 +3836,7 @@ volumes:
 
       {/* Docker Compose Destroy Dialog */}
       <Dialog open={destroyDialogOpen} onOpenChange={setDestroyDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
             <DialogTitle className="text-red-500 flex items-center gap-2">
               <Trash2 className="h-5 w-5" />

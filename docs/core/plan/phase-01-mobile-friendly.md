@@ -127,8 +127,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
 
 - [x] `Dashboard` delete confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3759)
       — `DialogContent` gets `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`.
-- [ ] `Dashboard` destroy compose confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3783)
-      — same: `max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg`; TOTP input fits at 360px.
+- [x] `Dashboard` destroy compose confirmation dialog (admin/frontend/src/pages/Dashboard.jsx:3783)
+      — same: `max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg`; TOTP input fits at 360px.
 - [ ] `Dashboard` docker compose create dialog (admin/frontend/src/pages/Dashboard.jsx:3897)
       — `max-w-4xl h-[90vh]` → `max-w-full h-full rounded-none sm:max-w-4xl sm:h-[90vh] sm:rounded-lg`; CodeMirror editor height stays `flex-1 min-h-0`; env-var rows wrap (`flex-wrap`) so key/value inputs stack on phones.
 - [ ] `Dashboard` terminal dialog gating on mobile (admin/frontend/src/pages/Dashboard.jsx:4019)

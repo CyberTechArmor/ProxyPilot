@@ -212,8 +212,8 @@ admin/frontend/tailwind.config.js                # Confirm default breakpoints a
       — `space-y-6 max-w-2xl` stays. *Verified: `max-w-2xl` is a max-width cap; on a 360px viewport the container takes 360px minus Layout padding (now `p-4 md:p-8`). No horizontal scroll.*
 - [x] `Profile` TOTP QR code image (admin/frontend/src/pages/Profile.jsx:717)
       — `w-48 h-48` → `w-48 max-w-full h-auto`; keeps the 192px preferred size on desktop but shrinks to the parent width (with aspect ratio preserved) on sub-192px containers. Flex center wrapper unchanged.
-- [ ] `Profile` device list rows (admin/frontend/src/pages/Profile.jsx:820)
-      — `flex items-center justify-between p-3 border rounded-lg` → `flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 border rounded-lg`; IP/last-used meta wraps (`flex-wrap gap-x-4`).
+- [x] `Profile` device list rows (admin/frontend/src/pages/Profile.jsx:820)
+      — device rows now stack on `<sm`; IP/last-used meta wraps via `flex-wrap gap-x-4`. Revoke icon button bumped to `h-11 w-11 sm:h-9 sm:w-9` to meet 44px touch target on mobile.
 - [ ] `Profile` revoke-device dialog (admin/frontend/src/pages/Profile.jsx:852)
       — bare `<DialogContent>` → `className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg"`.
 - [ ] `Profile` revoke-all-devices dialog (admin/frontend/src/pages/Profile.jsx:889)

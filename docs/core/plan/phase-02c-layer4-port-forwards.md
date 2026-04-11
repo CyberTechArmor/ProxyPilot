@@ -9,6 +9,49 @@
 
 **Step 1 research task (blocking, runs before the function-by-function checklist is populated):** the executing session must verify experimentally whether `caddy-l4` supports UDP port ranges natively (e.g., `udp/:16384-32768 { route { proxy udp/10.0.0.42:16384-32768 } }`). Build Caddy locally via `xcaddy build --with github.com/mholt/caddy-l4`, stand up a minimal test config with the range listener + a toy UDP echo backend, and confirm (a) Caddy binds the whole range, (b) UDP packets forward correctly, (c) the range syntax survives a `caddy adapt` round-trip. Document the finding in the phase spec before populating the checklist. If ranges work, the schema below includes `host_port_range` / `target_port_range` text columns. If they do not, the schema caps at single-port rows, the wizard surfaces a "port ranges need nftables — see Phase 10" notice, and BBB-style dynamic-port services are explicitly out of scope until Phase 10 lands. **Do not populate the function-by-function checklist until this research is done.**
 
+### Step 1 research finding (2026-04-11) — Shape B with a caveat
+
+**Environment:** Caddy v2.11.2 built via `xcaddy v0.4.5 build --with github.com/mholt/caddy-l4` on Go 1.24.7, Linux amd64. Modules confirmed via `caddy list-modules`: `caddy.listeners.layer4`, `layer4`, `layer4.handlers.proxy`, `layer4.handlers.tls`, the full `layer4.matchers.*` set. UDP backend for forwarding tests was a small Python `socket.SOCK_DGRAM` echo server on `127.0.0.1`.
+
+**Configs exercised (all four adapted cleanly; only two loaded at runtime):**
+
+1. `udp/:16384 { route { proxy udp/127.0.0.1:26384 } }` — single-port baseline.
+2. `udp/:16384-16390 { route { proxy udp/127.0.0.1:26384 } }` — **listener range → single upstream**.
+3. `udp/:16384-16390 { route { proxy udp/127.0.0.1:26384-26390 } }` — **listener range → upstream range** (the spec's canonical example).
+4. `:17384-17390 { route { proxy 127.0.0.1:27384-27390 } }` — **TCP listener range → upstream range**.
+
+**Finding (a): Listener port ranges — FULLY SUPPORTED at runtime.**
+- Config 2 started cleanly. `cat /proc/net/udp{,6}` showed Caddy bound all seven ports 16384, 16385, 16386, 16387, 16388, 16389, 16390 on `0.0.0.0`.
+- UDP probes against `127.0.0.1:16384`, `:16387`, and `:16390` each round-tripped through Caddy to the single echo backend on 26384 and came back as `echo:hi-16384`, `echo:hi-16387`, `echo:hi-16390`. Every port in the declared range forwards traffic.
+- Mechanism: `caddy-l4`'s server loop iterates the range in `Server.Serve` and opens one listening socket per port; all listeners feed the same `routes` pipeline.
+
+**Finding (b): Upstream (proxy target) port ranges — NOT SUPPORTED at runtime.**
+- Config 3 (UDP range→range) failed at `caddy run` load time with:
+  `provision layer4.handlers.proxy: upstream 0: udp/127.0.0.1:26384-26390: port ranges not currently supported`
+- Config 4 (TCP range→range) failed identically (same error string, no `udp/` prefix on the upstream).
+- Root cause: `caddy-l4`'s proxy-handler `Provision()` parses a dial-list string but the upstream expander explicitly rejects range syntax with that fixed error string. This is a plugin gap, not a Caddyfile-syntax bug — the adapter happily emits the range into JSON and the provisioner refuses to consume it.
+
+**Finding (c): Range syntax survives `caddy adapt` round-trip — YES, but it's a trap.**
+- `caddy adapt --config … --adapter caddyfile` preserves every range string verbatim on both sides of every config tested. JSON output shows `"listen":["udp/:16384-16390"]` and `"dial":["udp/127.0.0.1:26384-26390"]` exactly as written; there is no silent collapse and no adapt-time validation of the upstream shape.
+- **Operational consequence:** a `caddy adapt`-only validation gate (which is what Phase 2's merged-file pipeline uses) will **accept** a config that then fails at load. ProxyPilot cannot rely on `caddy adapt` to catch upstream-range mistakes. It must reject upstream ranges at the schema layer AND add a post-adapt confirmation step (either `caddy validate` on the merged directory, or a dry `caddy run --config … --dry-run` on a side process, or simply disallow upstream ranges in the DB shape so the config generator never emits one).
+
+**Schema decision: Shape B (single-port columns).**
+
+Strict Shape A is not achievable because the spec's canonical example depends on *both* sides of the proxy being ranges at runtime, and Finding (b) shows upstream ranges are rejected. Shape B (single-port rows, `UNIQUE(host_port, protocol)`, bulk-add explodes ranges into N rows) is what `caddy-l4` can reliably express today — every forward in ProxyPilot becomes one row in `service_port_forwards` and one `{:port}` / `udp/:port` stanza in the generated `_layer4.conf` file. This is the safe, correctness-first answer.
+
+**Optimization retained as a documented future opportunity, not scoped into Phase 2c:**
+Finding (a) proves listener-side ranges DO work, so a future optimization pass can detect contiguous `(service_id, protocol, target_ip, target_port)`-identical rows and collapse them into a single `udp/:lo-hi { proxy udp/ip:target }` stanza — i.e., the "listener range to a single upstream port" shape. That shape only helps when every row in the contiguous range forwards to the *same* upstream port (unusual for a typical game server, common for a sharded gateway fronting one backend). It would not help BBB-style "port 16384 must land on backend 16384, 16385 on 16385, …" patterns because caddy-l4 still cannot express the per-port 1:1 upstream mapping as a range. The optimization lands cleanly on top of Shape B because the DB row count and the conflict model do not change; only `buildLayer4Block` gets smarter. Out of scope for Phase 2c — tracked as a follow-up candidate in a post-phase notes section.
+
+**BBB-style dynamic-port workloads remain out of scope** for Phase 2c even under Shape B. A 16384-port range exploded into 16385 rows would bloat the DB, the merged config, and the dashboard. The wizard surfaces the N > 50 warning the spec already describes (tunable via `APP_PORT_FORWARD_BULK_WARN` env var, default 50) and the warning text names Phase 10 as the long-term path: once nftables DNAT lands, the same `service_port_forwards` rows will render to an nftables ruleset instead of a caddy-l4 config and per-port 1:1 mapping becomes trivial.
+
+**Implications for the function-by-function checklist (populated in Step 2 below):**
+- Schema items use the Shape B column list verbatim.
+- `buildLayer4Block` emits one block per row — no range collapsing in Phase 2c.
+- The conflict-detection walker is per-port (not per range) because every row is already a single port.
+- The wizard accepts a host-port-range / target-port-range pair as **input** but explodes it into N `service_port_forwards` rows at save time, ticks the spec's N > 50 warning, and rejects the operator's input entirely when N > `APP_PORT_FORWARD_BULK_HARD_MAX` (default 500).
+- A defensive guard in the row validator rejects any `host_port` or `target_port` value that looks like a range (e.g., containing `-`) so an operator manually crafting JSON can never sneak an upstream range into a row.
+- The spec's existing "validation via `caddy adapt`" bullet in Phase 2's gate needs to be augmented: after adapt succeeds, run `caddy validate --config ... --adapter caddyfile` (which does load-time provisioning without starting the server) so an upstream-range-like mistake in a hand-edited file is caught before reload.
+
 **Files to edit:**
 ```
 admin/backend/src/db.js                          # New service_port_forwards table; columns depend on Step 1 research result (single port vs range-capable)

@@ -182,7 +182,7 @@ before writing code.
     tests touch the discover flow, account for it.
 
 11. **The J.1 favorite-sort grouping has an "Unrouted services"
-    fallback bucket.** A post-Phase-2b commit (`1ed21d0`) made the
+    fallback bucket.** A post-Phase-2b commit (`dea64f6`) made the
     grouping defensive so services with no domain bucket render
     under that header instead of disappearing. If your Phase 2c
     work creates a service that shouldn't be visible in the favorite
@@ -190,7 +190,7 @@ before writing code.
     fallback header.
 
 12. **Snapshot endpoints in `lxc.js` no longer use `2>&1`.** A
-    post-Phase-2b commit (`6ed0552`) dropped the trailing `2>&1`
+    post-Phase-2b commit (`64eb683`) dropped the trailing `2>&1`
     from `incus snapshot create/restore/delete` so error.stderr is
     populated naturally. If you add new incus shell-outs, follow
     the same pattern: no `2>&1`, and read `error.stderr ||
@@ -202,9 +202,10 @@ After cutting the branch, verify the environment in three small bash
 calls (NOT one long script):
 
 1. `git log --oneline -8` — confirm you branched from the right point.
-   You should see the four post-Phase-2b commits at the top:
-   `8216277` (four-tile picker), `1ed21d0` (J.1 orphan rendering),
-   `6ed0552` (snapshot error reporting), `af50caa` (K.6 bookkeeping).
+   You should see the five post-Phase-2b commits at the top:
+   `2babf6c` (next-session prompt retarget), `8630a76` (four-tile
+   picker), `dea64f6` (J.1 orphan rendering), `64eb683` (snapshot
+   error reporting), `28a39ed` (K.6 bookkeeping).
 2. Check `node_modules` exists in `admin/backend` and
    `admin/frontend`. If missing, run `npm install` in each in the
    background (`run_in_background: true`) and check status with

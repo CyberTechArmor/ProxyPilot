@@ -4465,7 +4465,14 @@ volumes:
               // two routes on the same domain contributes once to
               // that domain's bucket — we de-dupe per-service inside
               // the same domain to match "distinct services" counting.
+              // Services that contribute zero domains (e.g. a row in
+              // the services table with no rows in service_http_routes
+              // and no synthesized top-level `domain` after D.14)
+              // are tracked in `unplaced` and rendered in a fallback
+              // bucket at the end so they can never silently disappear
+              // from the grid.
               const groups = new Map();
+              const unplaced = [];
               for (const s of filteredServices) {
                 const svcDomains = new Set();
                 if (Array.isArray(s.routes) && s.routes.length > 0) {
@@ -4476,6 +4483,10 @@ volumes:
                 }
                 if (svcDomains.size === 0 && s.domain) {
                   svcDomains.add(normalize(s.domain));
+                }
+                if (svcDomains.size === 0) {
+                  unplaced.push(s);
+                  continue;
                 }
                 for (const d of svcDomains) {
                   const arr = groups.get(d) || [];
@@ -4528,6 +4539,33 @@ volumes:
                       </Fragment>
                     );
                   }
+                }
+              }
+              // Orphan pass: any service that contributed zero domain
+              // buckets above (no routes, no fallback `s.domain`)
+              // renders here under an "Unrouted" header. Without this
+              // pass these services would be in `filteredServices` (so
+              // the counter ticks them up) but never appear in the
+              // grid — invisible to the operator.
+              if (unplaced.length > 0) {
+                out.push(
+                  <div
+                    key="group-unrouted"
+                    data-testid="domain-group-header"
+                    className="col-span-1 sm:col-span-2 lg:col-span-3 mt-2 first:mt-0 flex items-center gap-2 text-xs font-medium text-muted-foreground"
+                  >
+                    <Globe className="h-3 w-3" />
+                    <span>
+                      {unplaced.length} unrouted service{unplaced.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                );
+                for (const s of unplaced) {
+                  out.push(
+                    <Fragment key={`card-unrouted-${s.id}`}>
+                      {renderServiceCard(s)}
+                    </Fragment>
+                  );
                 }
               }
               return out;

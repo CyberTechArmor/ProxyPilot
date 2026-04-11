@@ -1363,7 +1363,7 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot create ${incusName} ${snapshotName} 2>&1`);
+    await execOnHost(`incus snapshot create ${incusName} ${snapshotName}`);
     // Set description if note provided
     if (note) {
       await execOnHost(`incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`).catch(() => {});
@@ -1375,8 +1375,8 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to create snapshot for container '${name}': ${(error.stderr || error.message || '').trim()}`,
-      details: error.stderr || error.message,
+      error: `Failed to create snapshot for container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
+      details: error.stderr || error.stdout || error.message,
     });
   }
 });
@@ -1401,7 +1401,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot restore ${incusName} ${snapshotName} 2>&1`);
+    await execOnHost(`incus snapshot restore ${incusName} ${snapshotName}`);
     res.json({
       success: true,
       message: `Snapshot '${snapshotName}' restored for container '${name}'.`,
@@ -1409,8 +1409,8 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to restore snapshot for container '${name}': ${(error.stderr || error.message || '').trim()}`,
-      details: error.stderr || error.message,
+      error: `Failed to restore snapshot for container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
+      details: error.stderr || error.stdout || error.message,
     });
   }
 });
@@ -1435,7 +1435,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName} 2>&1`);
+    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`);
     // Clean up notes for deleted snapshot
     try {
       const db = getDb();
@@ -1448,8 +1448,8 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: `Failed to delete snapshot from container '${name}': ${(error.stderr || error.message || '').trim()}`,
-      details: error.stderr || error.message,
+      error: `Failed to delete snapshot from container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
+      details: error.stderr || error.stdout || error.message,
     });
   }
 });

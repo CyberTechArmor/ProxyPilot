@@ -1030,6 +1030,59 @@ export default function Dashboard() {
     setWizardStep(1);
   };
 
+  // Phase 2b post-H.1 follow-up: four-tile Step 0 picker that pre-fills
+  // both `kind` and `runtime` in one click, restoring the at-a-glance
+  // discoverability of the original four-choice picker (Static / Docker
+  // / LXC / Compose) while keeping the H.2-H.6 backend wiring intact.
+  // The H.2 sub-step still exists as a fallback for any code path that
+  // lands on Step 1 with kind=container_service AND runtime=null, but
+  // the four-tile flow always pre-fills both so the sub-step is
+  // effectively skipped.
+  //
+  // tile values:
+  //   - 'static_site' → reuses handleKindSelect's static path
+  //   - 'docker'      → kind=container_service, runtime=docker
+  //   - 'lxc'         → kind=container_service, runtime=lxc + LXC fetch
+  //   - 'compose'     → closes the dialog and switches to the Compose tab
+  const handleStep0Tile = async (tile) => {
+    if (tile === 'compose') {
+      setAddDialogOpen(false);
+      setDashboardTab('compose');
+      return;
+    }
+    if (tile === 'static_site') {
+      handleKindSelect('static_site');
+      return;
+    }
+    // 'docker' or 'lxc'
+    const runtime = tile;
+    setFormData((f) => ({
+      ...f,
+      kind: 'container_service',
+      runtime,
+      // Both runtimes map to the legacy 'docker' type since D.2's
+      // Phase 2 schema only knows 'static'|'docker'.
+      type: 'docker',
+      lxcContainerName: '',
+      targetIp: runtime === 'docker' ? (f.target || '127.0.0.1') : '',
+      containerName: runtime === 'docker' ? f.containerName : '',
+    }));
+    setWizardStep(1);
+    if (runtime === 'lxc') {
+      setLxcWizardLoading(true);
+      setLxcWizardError('');
+      try {
+        const { containers } = await api.getLxcContainersWithIp();
+        setLxcWizardContainers(containers || []);
+      } catch (err) {
+        setLxcWizardError(err.message || 'Failed to load LXC containers');
+        setLxcWizardContainers([]);
+      } finally {
+        setLxcWizardLoading(false);
+      }
+    }
+  };
+
   // Phase 2: extracted from the inline `.map` in the services grid so the
   // grouped renderer can call it. The card body is byte-for-byte identical
   // to the pre-Phase-2 inline version — only the surrounding control flow
@@ -3545,21 +3598,24 @@ volumes:
 
               {wizardStep === 0 ? (
                 /*
-                 * Phase 2b H.1: the picker collapses from four tiles (Static
-                 * Site / Proxy Container / Docker Compose / LXC Container) to
-                 * two top-level kinds. Runtime (LXC vs Docker) becomes a
-                 * sub-choice inside Container Service, handled in Step 1 by
-                 * H.2. The Docker Compose and LXC-container-creation entry
-                 * points live on the dedicated Compose and LXC tabs in the
-                 * dashboard — the Add Service dialog is now exclusively for
-                 * creating HTTP-reverse-proxy services backed by a container
-                 * or a local static directory.
+                 * Phase 2b post-H.1 follow-up: four-tile Step 0 picker
+                 * restoring the at-a-glance choice of the original
+                 * pre-H.1 picker (Static Site / Docker Container / LXC
+                 * Container / Docker Compose). Each tile pre-fills both
+                 * `kind` and `runtime` via handleStep0Tile so the H.2
+                 * runtime sub-step is skipped on the normal path; the
+                 * sub-step still exists in Step 1 as a defensive fallback
+                 * for any flow that lands there with runtime=null. The
+                 * Compose tile closes the dialog and switches to the
+                 * Compose tab — compose stack creation lives there, not
+                 * inside Add Service, since Phase 2b's data model treats
+                 * a service as one container + N HTTP routes.
                  */
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-4">
                   <Card
-                    data-testid="wizard-kind-static-site"
+                    data-testid="wizard-tile-static-site"
                     className="cursor-pointer hover:border-primary transition-colors"
-                    onClick={() => handleKindSelect('static_site')}
+                    onClick={() => handleStep0Tile('static_site')}
                   >
                     <CardHeader className="text-center pb-2">
                       <FolderOpen className="h-12 w-12 mx-auto text-primary" />
@@ -3572,17 +3628,47 @@ volumes:
                     </CardContent>
                   </Card>
                   <Card
-                    data-testid="wizard-kind-container-service"
+                    data-testid="wizard-tile-docker"
                     className="cursor-pointer hover:border-primary transition-colors"
-                    onClick={() => handleKindSelect('container_service')}
+                    onClick={() => handleStep0Tile('docker')}
                   >
                     <CardHeader className="text-center pb-2">
                       <Container className="h-12 w-12 mx-auto text-primary" />
-                      <CardTitle className="text-lg">Container Service</CardTitle>
+                      <CardTitle className="text-lg">Docker Container</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <CardDescription className="text-center">
-                        Reverse-proxy HTTP routes to a Docker or LXC container. Pick the runtime next.
+                        Reverse-proxy HTTP routes to a Docker container by IP and port.
+                      </CardDescription>
+                    </CardContent>
+                  </Card>
+                  <Card
+                    data-testid="wizard-tile-lxc"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleStep0Tile('lxc')}
+                  >
+                    <CardHeader className="text-center pb-2">
+                      <Server className="h-12 w-12 mx-auto text-primary" />
+                      <CardTitle className="text-lg">LXC Container</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <CardDescription className="text-center">
+                        Reverse-proxy HTTP routes to an existing Incus / LXC container.
+                      </CardDescription>
+                    </CardContent>
+                  </Card>
+                  <Card
+                    data-testid="wizard-tile-compose"
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => handleStep0Tile('compose')}
+                  >
+                    <CardHeader className="text-center pb-2">
+                      <Boxes className="h-12 w-12 mx-auto text-primary" />
+                      <CardTitle className="text-lg">Docker Compose</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <CardDescription className="text-center">
+                        Manage compose stacks in the Compose tab. Click to jump there.
                       </CardDescription>
                     </CardContent>
                   </Card>
@@ -3592,11 +3678,19 @@ volumes:
                   <div className="flex items-center gap-2 p-2 bg-muted rounded mb-4">
                     {formData.kind === 'static_site' ? (
                       <FolderOpen className="h-5 w-5 text-primary" />
+                    ) : formData.runtime === 'lxc' ? (
+                      <Server className="h-5 w-5 text-primary" />
                     ) : (
                       <Container className="h-5 w-5 text-primary" />
                     )}
                     <span className="font-medium">
-                      {formData.kind === 'static_site' ? 'Static Site' : 'Container Service'}
+                      {formData.kind === 'static_site'
+                        ? 'Static Site'
+                        : formData.runtime === 'lxc'
+                          ? 'LXC Container'
+                          : formData.runtime === 'docker'
+                            ? 'Docker Container'
+                            : 'Container Service'}
                     </span>
                     <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => setWizardStep(0)}>Change</Button>
                   </div>
@@ -4465,7 +4559,14 @@ volumes:
               // two routes on the same domain contributes once to
               // that domain's bucket — we de-dupe per-service inside
               // the same domain to match "distinct services" counting.
+              // Services that contribute zero domains (e.g. a row in
+              // the services table with no rows in service_http_routes
+              // and no synthesized top-level `domain` after D.14)
+              // are tracked in `unplaced` and rendered in a fallback
+              // bucket at the end so they can never silently disappear
+              // from the grid.
               const groups = new Map();
+              const unplaced = [];
               for (const s of filteredServices) {
                 const svcDomains = new Set();
                 if (Array.isArray(s.routes) && s.routes.length > 0) {
@@ -4476,6 +4577,10 @@ volumes:
                 }
                 if (svcDomains.size === 0 && s.domain) {
                   svcDomains.add(normalize(s.domain));
+                }
+                if (svcDomains.size === 0) {
+                  unplaced.push(s);
+                  continue;
                 }
                 for (const d of svcDomains) {
                   const arr = groups.get(d) || [];
@@ -4528,6 +4633,33 @@ volumes:
                       </Fragment>
                     );
                   }
+                }
+              }
+              // Orphan pass: any service that contributed zero domain
+              // buckets above (no routes, no fallback `s.domain`)
+              // renders here under an "Unrouted" header. Without this
+              // pass these services would be in `filteredServices` (so
+              // the counter ticks them up) but never appear in the
+              // grid — invisible to the operator.
+              if (unplaced.length > 0) {
+                out.push(
+                  <div
+                    key="group-unrouted"
+                    data-testid="domain-group-header"
+                    className="col-span-1 sm:col-span-2 lg:col-span-3 mt-2 first:mt-0 flex items-center gap-2 text-xs font-medium text-muted-foreground"
+                  >
+                    <Globe className="h-3 w-3" />
+                    <span>
+                      {unplaced.length} unrouted service{unplaced.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                );
+                for (const s of unplaced) {
+                  out.push(
+                    <Fragment key={`card-unrouted-${s.id}`}>
+                      {renderServiceCard(s)}
+                    </Fragment>
+                  );
                 }
               }
               return out;

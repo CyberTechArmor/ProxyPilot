@@ -8,7 +8,7 @@ import { existsSync } from 'fs';
 import { join, basename, resolve } from 'path';
 import os from 'os';
 import * as OTPAuth from 'otpauth';
-import { getDb, logAudit } from '../db.js';
+import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
@@ -837,14 +837,13 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
     }
     const uniqueDomains = [...uniqueDomainsSet];
 
-    // Admin domains are sourced from the legacy services row, which the
-    // installer still populates via a fixed is_admin=1 entry. After D.14
-    // this becomes routes-table-only too, but admin services never have
-    // route rows so the legacy fallback is effectively required.
-    const adminDomains = services
-      .filter((s) => s.is_admin)
-      .map((s) => s.domain)
-      .filter(Boolean);
+    // Admin domains are sourced via getAdminDomain(), which falls back
+    // through services.domain (pre-D.14) → app_settings.admin_domain
+    // (post-D.14 snapshot) → process.env.DOMAIN. Admin services never get
+    // route rows, so this fallback is the only thing keeping the admin
+    // dashboard reachable after D.14 dropped services.domain.
+    const adminDomainRaw = getAdminDomain();
+    const adminDomains = adminDomainRaw ? [adminDomainRaw] : [];
     for (const adminDomain of new Set(adminDomains)) {
       console.log(`Skipping admin domain: ${adminDomain}`);
       results.success.push(`${adminDomain} (skipped - admin)`);

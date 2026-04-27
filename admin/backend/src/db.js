@@ -491,6 +491,33 @@ export function getSetting(key) {
   return row ? row.value : null;
 }
 
+// Returns the admin service's domain, falling back through:
+//   1. services.domain on the admin row (pre-D.14)
+//   2. app_settings.admin_domain (post-D.14, written by the D.14 patch)
+//   3. process.env.DOMAIN (final fallback for fresh installs)
+// Used by Caddy regeneration and the discover endpoint so admin keeps
+// working after the legacy services.domain column is dropped.
+export function getAdminDomain() {
+  const db = getDb();
+  try {
+    const cols = db
+      .prepare(`PRAGMA table_info(services)`)
+      .all()
+      .map((c) => c.name);
+    if (cols.includes('domain')) {
+      const row = db
+        .prepare(
+          `SELECT domain FROM services WHERE is_admin = 1 AND domain IS NOT NULL LIMIT 1`
+        )
+        .get();
+      if (row && row.domain) return row.domain;
+    }
+  } catch { /* fall through */ }
+  const fromSettings = getSetting('admin_domain');
+  if (fromSettings) return fromSettings;
+  return process.env.DOMAIN || null;
+}
+
 export function setSetting(key, value) {
   const db = getDb();
   db.prepare(`
@@ -802,6 +829,36 @@ export function dropLegacyRouteColumnsFromServices(dbInstance) {
   console.log(
     'Phase 2b D.14: dropping legacy route columns from services via table rebuild'
   );
+
+  // D.14 patch: capture the admin service's domain into app_settings before
+  // the column is dropped. The admin service is intentionally excluded from
+  // the routes backfill (it bypasses the route-driven Caddy generator), so
+  // without this snapshot the admin domain is lost forever after the drop.
+  // Idempotent: only writes if app_settings.admin_domain is empty.
+  try {
+    const existing = db
+      .prepare(`SELECT value FROM app_settings WHERE key = 'admin_domain'`)
+      .get();
+    if (!existing || !existing.value) {
+      const adminRow = db
+        .prepare(
+          `SELECT domain FROM services WHERE is_admin = 1 AND domain IS NOT NULL LIMIT 1`
+        )
+        .get();
+      if (adminRow && adminRow.domain) {
+        db.prepare(
+          `INSERT INTO app_settings (key, value, updated_at)
+           VALUES ('admin_domain', ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`
+        ).run(adminRow.domain);
+        console.log(
+          `D.14 patch: captured admin domain '${adminRow.domain}' into app_settings`
+        );
+      }
+    }
+  } catch (e) {
+    console.error('D.14 patch: failed to capture admin domain', e);
+  }
 
   const runDrop = db.transaction(() => {
     // Discover actual column set so we only copy columns that exist on

@@ -694,13 +694,36 @@ services:
       dockerfile: Dockerfile
     container_name: proxypilot-admin
     restart: always
-    privileged: true
+    # ProxyPilot needs to nsenter into the host PID namespace to run
+    # caddy / incus / docker / git / npm commands on the host. That
+    # requires pid:host plus CAP_SYS_ADMIN and CAP_SYS_PTRACE for
+    # nsenter to attach to host namespaces. We drop every other
+    # capability (cap_drop: ALL) and forbid privilege escalation
+    # within the container (no-new-privileges) to reduce the blast
+    # radius if the app is compromised.
+    #
+    # SECURITY CAVEAT: a container with pid:host + SYS_ADMIN can still
+    # reach host root via nsenter — this configuration is fundamentally
+    # privileged. The defense-in-depth layers above only constrain what
+    # else the container can do (no raw sockets, no SUID escalation,
+    # no module loading, no time tampering). If full container
+    # isolation is required, ProxyPilot must be redesigned with a
+    # host-side agent that the container talks to over a restricted
+    # Unix socket — that is out of scope for the current release.
     pid: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${port}:${port}"
     volumes:
       - ./data:/data
       - /etc/caddy/sites:/etc/caddy/sites
+      - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
     environment:

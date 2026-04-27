@@ -136,9 +136,34 @@ const setupStatusLimiter = rateLimit({
 });
 app.use('/api/auth/setup-status', setupStatusLimiter);
 
-// Body parsing - increased limit for file uploads (base64-encoded files)
-app.use(express.json({ limit: '55mb' }));
-app.use(express.urlencoded({ extended: true, limit: '55mb' }));
+// Body parsing. Default limit is tight (1mb) to shrink the unauth and
+// admin-action attack surface. Routes that legitimately accept large
+// payloads — base64 file upload/import on the services router — get a
+// dedicated express.json() with the 55mb cap mounted in front of the
+// services router below. LXC routes (lxc.js) use multer for uploads,
+// which has its own 2GB limit and does not flow through express.json.
+const DEFAULT_BODY_LIMIT = '1mb';
+const UPLOAD_BODY_LIMIT = '55mb';
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
+
+// Larger body limit only on the routes that need it. Order matters:
+// these handlers run before the servicesRouter in the chain because
+// express middleware is matched in registration order and we install
+// these BEFORE the router below.
+const uploadJson = express.json({ limit: UPLOAD_BODY_LIMIT });
+const uploadPaths = [
+  '/api/services/:id/upload/*',
+  '/api/services/:id/files/*',
+  '/api/services/:id/import-files',
+  '/api/services/import',
+  '/api/services/terminal/upload-file',
+  '/api/services/docker/volumes/import',
+  '/api/services/discover/import',
+];
+for (const p of uploadPaths) {
+  app.use(p, uploadJson);
+}
 
 // Initialize database
 initDatabase();

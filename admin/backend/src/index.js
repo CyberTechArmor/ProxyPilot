@@ -138,21 +138,18 @@ const setupStatusLimiter = rateLimit({
 });
 app.use('/api/auth/setup-status', setupStatusLimiter);
 
-// Body parsing. Default limit is tight (1mb) to shrink the unauth and
-// admin-action attack surface. Routes that legitimately accept large
-// payloads — base64 file upload/import on the services router — get a
-// dedicated express.json() with the 55mb cap mounted in front of the
-// services router below. LXC routes (lxc.js) use multer for uploads,
-// which has its own 2GB limit and does not flow through express.json.
+// Body parsing. Routes that legitimately accept large payloads (base64
+// file upload/import on the services router) get the 55mb limit
+// mounted FIRST on their specific paths. The global default (1mb)
+// runs after — Express middleware runs in registration order, and
+// once a path-specific parser has populated req.body the default is a
+// no-op for that request. This shrinks the unauth and CRUD attack
+// surface without breaking the upload endpoints.
+//
+// LXC routes (lxc.js) use multer for uploads, which has its own 2GB
+// limit and does not flow through express.json regardless of order.
 const DEFAULT_BODY_LIMIT = '1mb';
 const UPLOAD_BODY_LIMIT = '55mb';
-app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
-app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
-
-// Larger body limit only on the routes that need it. Order matters:
-// these handlers run before the servicesRouter in the chain because
-// express middleware is matched in registration order and we install
-// these BEFORE the router below.
 const uploadJson = express.json({ limit: UPLOAD_BODY_LIMIT });
 const uploadPaths = [
   '/api/services/:id/upload/*',
@@ -166,6 +163,8 @@ const uploadPaths = [
 for (const p of uploadPaths) {
   app.use(p, uploadJson);
 }
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
 
 // Cookie parsing — needed for the httpOnly JWT cookie + the CSRF
 // double-submit cookie. Must be installed before any route or

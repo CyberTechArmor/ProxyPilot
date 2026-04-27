@@ -87,6 +87,73 @@ find_command() {
     return 1
 }
 
+resolve_env_path() {
+    # Find the deployed .env. Same search order as resolve_db_path.
+    for candidate in \
+        "/opt/proxypilot/.env" \
+        "$SCRIPT_DIR/.env" \
+        "$(dirname "$SCRIPT_DIR")/.env"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo ""
+}
+
+# Compare keys in .env.example (the canonical set) against the deployed
+# .env. Any key in the example but missing from the deployed file is
+# appended with a TODO placeholder and surfaced to the operator. The
+# deployed file is never overwritten — only appended — so existing
+# values are preserved.
+sync_env_keys() {
+    local example="$SCRIPT_DIR/.env.example"
+    local deployed
+    deployed="$(resolve_env_path)"
+
+    if [ ! -f "$example" ]; then
+        log_verbose ".env.example not present in this version — skipping env sync"
+        return 0
+    fi
+    if [ -z "$deployed" ]; then
+        log_verbose "No deployed .env found — skipping env sync (fresh install will create one)"
+        return 0
+    fi
+
+    local missing_keys=()
+    while IFS= read -r line; do
+        # Skip comments and blank lines; pull KEY from KEY=VALUE.
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        local key="${line%%=*}"
+        key="${key// }"
+        [ -z "$key" ] && continue
+        if ! grep -qE "^[[:space:]]*${key}=" "$deployed"; then
+            missing_keys+=("$key")
+        fi
+    done < "$example"
+
+    if [ ${#missing_keys[@]} -eq 0 ]; then
+        log_verbose "Env keys are in sync"
+        return 0
+    fi
+
+    log "${YELLOW}New environment variables introduced in this version:${NC}"
+    {
+        echo ""
+        echo "# === Added by update.sh on $(date '+%Y-%m-%d %H:%M:%S') ==="
+        echo "# Fill these in before restarting ProxyPilot. Defaults from .env.example:"
+        for key in "${missing_keys[@]}"; do
+            local default_line
+            default_line=$(grep -E "^[[:space:]]*${key}=" "$example" | head -1)
+            log "  - ${key} (TODO: review in $deployed)"
+            echo "${default_line}  # TODO: review"
+        done
+    } >> "$deployed"
+    log "${YELLOW}Appended ${#missing_keys[@]} placeholder(s) to ${deployed}.${NC}"
+    log "${YELLOW}Review them, set real values, and re-run update.sh if any are required.${NC}"
+}
+
 resolve_db_path() {
     # Prefer DATABASE_PATH if set in env. Otherwise look in known install
     # locations. Returns the path on stdout, empty string if nothing found.
@@ -276,6 +343,11 @@ else
         exit 1
     fi
 fi
+
+# After pulling, sync .env against the new version's .env.example. Any
+# newly-introduced keys are appended to the deployed .env with a TODO
+# marker so the operator notices them before the next restart.
+sync_env_keys
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

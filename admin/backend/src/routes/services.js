@@ -17,6 +17,12 @@ export const servicesRouter = Router();
 
 const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
 const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';
+// Operator-owned directory. ProxyPilot creates it, drops a README, and
+// imports it from the main Caddyfile but never writes site files here —
+// any *.caddy file in this directory is the operator's to maintain.
+// Lets operators extend the proxy without their changes being clobbered
+// on the next regenerate.
+const CADDY_CUSTOM_DIR = process.env.CADDY_CUSTOM_DIR || '/etc/caddy/custom';
 const SERVICES_DATA_DIR = process.env.SERVICES_DATA_DIR || '/data/services';
 // CADDY_STATIC_ROOT is the host path that Caddy uses to serve static files
 // This may differ from SERVICES_DATA_DIR when running in Docker
@@ -57,7 +63,41 @@ async function ensureCaddyStructure() {
   // Ensure sites directory exists
   await mkdir(CADDY_SITES_DIR, { recursive: true }).catch(() => {});
 
-  // Ensure main Caddyfile exists with global options and import directive
+  // Ensure operator-owned custom directory exists with a README explaining
+  // the contract. ProxyPilot does not enumerate or rewrite files here.
+  await mkdir(CADDY_CUSTOM_DIR, { recursive: true }).catch(() => {});
+  const readmePath = `${CADDY_CUSTOM_DIR}/README.md`;
+  if (!existsSync(readmePath)) {
+    await writeFile(
+      readmePath,
+      `# ProxyPilot — Operator Custom Caddy Snippets
+
+Files in this directory are imported into the main Caddyfile but
+**never touched by ProxyPilot**. Use this directory to add Caddy
+configuration that ProxyPilot's UI cannot express:
+
+- one-off route exceptions
+- experimental Caddy modules
+- imports from other config trees
+- snippet definitions reused across services
+
+ProxyPilot regenerates files in \`${CADDY_SITES_DIR}\` on every service
+edit. Anything you put there will be lost. Put your hand-written
+config here instead.
+
+After editing files in this directory, validate and reload Caddy:
+
+    caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null
+    caddy reload --config ${CADDY_CONFIG_FILE}
+
+If \`caddy adapt\` fails, your edits will not take effect — Caddy
+keeps the previously-loaded config until a valid one is supplied.
+`
+    ).catch(() => {});
+  }
+
+  // Ensure main Caddyfile exists with global options and BOTH import
+  // directives (sites + custom).
   if (!existsSync(CADDY_CONFIG_FILE)) {
     const acmeEmail = process.env.ACME_EMAIL || '';
     const emailLine = acmeEmail ? `\n    email ${acmeEmail}` : '';
@@ -66,8 +106,25 @@ async function ensureCaddyStructure() {
 }
 
 import ${CADDY_SITES_DIR}/*
+import ${CADDY_CUSTOM_DIR}/*
 `;
     await writeFile(CADDY_CONFIG_FILE, mainConfig);
+    return;
+  }
+
+  // Existing Caddyfile — append the custom-import line if missing. We do
+  // not rewrite anything else; if the operator has customized the main
+  // Caddyfile heavily, this single appended line is harmless.
+  try {
+    const current = await readFile(CADDY_CONFIG_FILE, 'utf-8');
+    if (!current.includes(`import ${CADDY_CUSTOM_DIR}/`)) {
+      const appended =
+        (current.endsWith('\n') ? current : `${current}\n`) +
+        `import ${CADDY_CUSTOM_DIR}/*\n`;
+      await writeFile(CADDY_CONFIG_FILE, appended);
+    }
+  } catch (e) {
+    console.error('Failed to ensure custom-import in main Caddyfile:', e);
   }
 }
 

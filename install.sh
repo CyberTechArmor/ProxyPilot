@@ -656,6 +656,7 @@ DATABASE_PATH=/data/proxypilot.db
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
+CADDY_CUSTOM_DIR=/etc/caddy/custom
 ACME_EMAIL=${ACME_EMAIL}
 EOF
 

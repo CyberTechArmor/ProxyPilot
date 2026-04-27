@@ -10,6 +10,11 @@ BACKEND_DIR="$SCRIPT_DIR/admin/backend"
 FRONTEND_DIR="$SCRIPT_DIR/admin/frontend"
 LOG_FILE="/tmp/proxypilot-update.log"
 
+# Pre-update DB backup state (populated by backup_db, consumed by restore_db on failure)
+DB_BACKUP_FILE=""
+DB_BACKUP_SOURCE=""
+BACKUPS_TO_KEEP=5
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -82,6 +87,83 @@ find_command() {
     return 1
 }
 
+resolve_db_path() {
+    # Prefer DATABASE_PATH if set in env. Otherwise look in known install
+    # locations. Returns the path on stdout, empty string if nothing found.
+    if [ -n "${DATABASE_PATH:-}" ] && [ -f "$DATABASE_PATH" ]; then
+        echo "$DATABASE_PATH"
+        return
+    fi
+    for candidate in \
+        "/opt/proxypilot/data/proxypilot.db" \
+        "$SCRIPT_DIR/data/proxypilot.db" \
+        "$(dirname "$SCRIPT_DIR")/data/proxypilot.db"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo ""
+}
+
+backup_db() {
+    local db_path="$1"
+    if [ -z "$db_path" ] || [ ! -f "$db_path" ]; then
+        log_verbose "No existing database found — skipping backup"
+        return 0
+    fi
+    local backup_dir
+    backup_dir="$(dirname "$db_path")/backups"
+    mkdir -p "$backup_dir"
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    local backup_file="${backup_dir}/proxypilot.db.pre-update-${ts}"
+
+    # Copy main DB plus WAL/SHM if present so we can restore the exact state.
+    cp "$db_path" "$backup_file"
+    [ -f "${db_path}-wal" ] && cp "${db_path}-wal" "${backup_file}-wal"
+    [ -f "${db_path}-shm" ] && cp "${db_path}-shm" "${backup_file}-shm"
+    chmod 600 "$backup_file" "${backup_file}-wal" "${backup_file}-shm" 2>/dev/null || true
+
+    DB_BACKUP_FILE="$backup_file"
+    DB_BACKUP_SOURCE="$db_path"
+    log "${GREEN}Database backed up to: ${backup_file}${NC}"
+
+    # Rotate: keep most recent BACKUPS_TO_KEEP
+    if command -v ls &>/dev/null; then
+        ls -t "${backup_dir}"/proxypilot.db.pre-update-* 2>/dev/null \
+            | grep -v '\-wal$\|\-shm$' \
+            | tail -n +$((BACKUPS_TO_KEEP + 1)) \
+            | while read -r old; do
+                rm -f "$old" "${old}-wal" "${old}-shm"
+                log_verbose "Pruned old backup: $old"
+            done
+    fi
+}
+
+restore_db() {
+    if [ -z "$DB_BACKUP_FILE" ] || [ ! -f "$DB_BACKUP_FILE" ]; then
+        log_verbose "No backup to restore"
+        return 0
+    fi
+    if [ -z "$DB_BACKUP_SOURCE" ]; then
+        log_verbose "No source path recorded — cannot restore"
+        return 0
+    fi
+    log "${YELLOW}Restoring database from: ${DB_BACKUP_FILE}${NC}"
+    cp "$DB_BACKUP_FILE" "$DB_BACKUP_SOURCE"
+    [ -f "${DB_BACKUP_FILE}-wal" ] && cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal"
+    [ -f "${DB_BACKUP_FILE}-shm" ] && cp "${DB_BACKUP_FILE}-shm" "${DB_BACKUP_SOURCE}-shm"
+    log "${YELLOW}Database restored. Operator should investigate the failure before retrying.${NC}"
+}
+
+on_error() {
+    local exit_code=$?
+    log "${RED}Update failed (exit ${exit_code}). Attempting database restore...${NC}"
+    restore_db
+    exit "$exit_code"
+}
+
 echo ""
 log "${BLUE}========================================${NC}"
 log "${BLUE}       ProxyPilot Update Script        ${NC}"
@@ -149,6 +231,15 @@ if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
         exit 1
     fi
 fi
+
+# Backup the database before any code changes. From this point on, any
+# error triggers on_error which restores the backup so a half-applied
+# migration cannot brick the install.
+DB_PATH_FOUND="$(resolve_db_path)"
+log "${BLUE}[0/7] Backing up database...${NC}"
+backup_db "$DB_PATH_FOUND"
+trap 'on_error' ERR
+trap 'log "${YELLOW}Update interrupted${NC}"; restore_db; exit 130' INT TERM
 
 # Fetch latest changes
 log "${BLUE}[1/7] Fetching latest changes...${NC}"
@@ -460,5 +551,14 @@ else
     log "${GREEN}ProxyPilot restart complete!${NC}"
 fi
 
+# Update succeeded — disarm the restore trap. The backup is kept on disk
+# (subject to rotation) so the operator can roll back manually if a
+# regression surfaces after the fact.
+trap - ERR INT TERM
+
 log ""
 log "Update log saved to: $LOG_FILE"
+if [ -n "$DB_BACKUP_FILE" ]; then
+    log "Database backup retained at: $DB_BACKUP_FILE"
+    log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+fi

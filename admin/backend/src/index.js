@@ -51,16 +51,46 @@ const possibleFrontendPaths = [
 const FRONTEND_PATH = possibleFrontendPaths.find(p => existsSync(p)) || possibleFrontendPaths[0];
 console.log('Frontend path:', FRONTEND_PATH, '- exists:', existsSync(FRONTEND_PATH));
 
-// Security middleware - relaxed CSP for production
+// Security middleware. CSP previously disabled wholesale; replaced with
+// a real policy that closes the obvious XSS vectors:
+//   * default-src 'self'  — no remote anything by default
+//   * script-src 'self'   — no inline JS, no remote JS
+//   * style-src 'self' 'unsafe-inline' — Tailwind + React runtime styles
+//     need inline style attributes; this is the standard concession
+//   * img-src 'self' data: — TOTP setup renders QR codes as data: URIs
+//   * connect-src 'self' — fetch only to same-origin (the backend)
+//   * frame-ancestors 'none' — prevents clickjacking via iframe embed
+//   * object-src 'none' — no Flash/PDF plugin embeds
+//   * base-uri 'self' — locks <base> to defeat one XSS pivot
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP to avoid blocking frontend
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      fontSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
+  hsts: process.env.NODE_ENV === 'production'
+    ? { maxAge: 60 * 60 * 24 * 365, includeSubDomains: true, preload: false }
+    : false,
 }));
 
-// CORS configuration
+// CORS configuration. In production, only allow the configured DOMAIN
+// over HTTPS — the http:// alias was a development crutch and accepting
+// it in production lets a downgrade attack on the user's network slip
+// the same-origin assumption.
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? [`https://${process.env.DOMAIN}`, `http://${process.env.DOMAIN}`]
+    ? [`https://${process.env.DOMAIN}`]
     : ['http://localhost:5173', 'http://localhost:3000'],
   credentials: true,
 }));

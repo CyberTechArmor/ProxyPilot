@@ -89,8 +89,10 @@ export default function Login() {
     try {
       const result = await api.initialSetup({ username, newPassword, confirmPassword });
 
-      // Store the token for TOTP setup
-      localStorage.setItem('token', result.token);
+      // Backend has set the pp_token httpOnly cookie. We keep the
+      // token in component state only so the next-step API call (TOTP
+      // setup) can pass it explicitly if the cookie isn't yet
+      // cross-route-visible during the transition click.
       setSetupToken(result.token);
 
       // Move to TOTP setup step
@@ -126,8 +128,8 @@ export default function Login() {
         registerDevice: rememberDevice,
       });
 
-      // Login complete
-      localStorage.setItem('token', result.token);
+      // Login complete — backend has set the pp_token + pp_csrf
+      // cookies. Cache user metadata for fast initial render.
       localStorage.setItem('user', JSON.stringify(result.user));
       toast({ title: 'Setup complete!', description: 'Welcome to ProxyPilot.' });
       window.location.href = '/';

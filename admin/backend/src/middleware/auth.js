@@ -4,8 +4,15 @@ import { getDb } from '../db.js';
 const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-change-in-production';
 
 export function authenticateToken(req, res, next) {
+  // Prefer the httpOnly cookie set by the login flow; fall back to the
+  // Authorization header so non-browser clients (curl, scripts that
+  // POSTed /api/auth/login and grabbed the token from the response)
+  // continue to work for now. Cookie is the canonical path for browsers
+  // because it can't be exfiltrated by XSS.
+  const cookieToken = req.cookies?.pp_token;
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const headerToken = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const token = cookieToken || headerToken;
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required' });

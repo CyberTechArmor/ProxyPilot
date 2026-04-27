@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -12,6 +13,7 @@ import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
 import { authenticateToken } from './middleware/auth.js';
+import { csrfProtection } from './middleware/csrf.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -164,6 +166,18 @@ const uploadPaths = [
 for (const p of uploadPaths) {
   app.use(p, uploadJson);
 }
+
+// Cookie parsing — needed for the httpOnly JWT cookie + the CSRF
+// double-submit cookie. Must be installed before any route or
+// middleware reads req.cookies.
+app.use(cookieParser());
+
+// CSRF protection on every state-changing request. GET/HEAD/OPTIONS
+// and the unauthenticated auth endpoints are exempt; everything else
+// must echo the pp_csrf cookie via X-CSRF-Token. Mounted before the
+// API routers but after rate limiters so abusive callers still get
+// throttled.
+app.use('/api/', csrfProtection);
 
 // Initialize database
 initDatabase();

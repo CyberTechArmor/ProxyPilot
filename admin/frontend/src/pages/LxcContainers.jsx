@@ -407,9 +407,8 @@ function ContainerFiles({ containerName }) {
 
   const handleDownload = (filePath) => {
     const url = api.getContainerFileDownloadUrl(containerName, filePath);
-    const token = localStorage.getItem('token');
-    // Fetch with auth and trigger download
-    fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    // Fetch with auth via the httpOnly cookie and trigger download.
+    fetch(url, { credentials: 'include' })
       .then(res => res.blob())
       .then(blob => {
         const a = document.createElement('a');
@@ -909,8 +908,7 @@ export default function LxcContainers() {
     toast({ title: 'Exporting...', description: `Exporting ${selectedContainer.name} — this may take a while.` });
     try {
       const url = `/api/lxc/containers/${selectedContainer.name}/export`;
-      const token = localStorage.getItem('token');
-      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      const res = await fetch(url, { credentials: 'include' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Export failed');

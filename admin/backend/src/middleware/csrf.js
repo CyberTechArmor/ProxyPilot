@@ -1,0 +1,39 @@
+// Double-submit-cookie CSRF protection. Backend sets two cookies on
+// login: pp_token (HttpOnly, session JWT) and pp_csrf (NOT HttpOnly,
+// readable by JS). Frontend echoes pp_csrf back as the X-CSRF-Token
+// header on every state-changing request. This middleware compares
+// the header to the cookie — if they match, the request was made by
+// JS that can read same-origin cookies, i.e. our own frontend.
+//
+// SameSite=Strict on the cookies already prevents most cross-site
+// abuse; CSRF check is defense in depth for browsers that don't
+// honor SameSite or for misconfigured deployments.
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// Routes that legitimately receive state-changing POSTs without an
+// established session — initial login flow, password setup, TOTP
+// enrolment. They have no pp_csrf cookie yet so we can't enforce.
+// All of these are also covered by the per-endpoint rate-limiters
+// in index.js to limit pre-auth abuse.
+const CSRF_EXEMPT_PREFIXES = [
+  '/api/auth/login',
+  '/api/auth/initial-setup',
+  '/api/auth/complete-totp-setup',
+  '/api/auth/setup-status',
+];
+
+export function csrfProtection(req, res, next) {
+  if (SAFE_METHODS.has(req.method)) return next();
+  for (const prefix of CSRF_EXEMPT_PREFIXES) {
+    if (req.path.startsWith(prefix)) return next();
+  }
+
+  const cookieValue = req.cookies?.pp_csrf;
+  const headerValue = req.headers['x-csrf-token'];
+
+  if (!cookieValue || !headerValue || cookieValue !== headerValue) {
+    return res.status(403).json({ error: 'CSRF token missing or invalid' });
+  }
+  next();
+}

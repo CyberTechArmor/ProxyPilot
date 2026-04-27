@@ -8,6 +8,41 @@ import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 
+// Cookie defaults shared by login/setup/logout. HttpOnly on pp_token
+// prevents XSS-driven theft; SameSite=Strict prevents cross-site
+// abuse; Secure is required in production where HTTPS is enforced.
+function authCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/',
+    maxAge: 24 * 60 * 60 * 1000, // 24h, matches JWT TTL
+  };
+}
+
+// CSRF cookie is intentionally NOT httpOnly so the frontend JS can
+// read it and echo via X-CSRF-Token (double-submit pattern).
+function csrfCookieOptions() {
+  return {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/',
+    maxAge: 24 * 60 * 60 * 1000,
+  };
+}
+
+function setAuthCookies(res, token) {
+  res.cookie('pp_token', token, authCookieOptions());
+  res.cookie('pp_csrf', crypto.randomBytes(32).toString('hex'), csrfCookieOptions());
+}
+
+function clearAuthCookies(res) {
+  res.clearCookie('pp_token', { path: '/' });
+  res.clearCookie('pp_csrf', { path: '/' });
+}
+
 export const authRouter = Router();
 
 // Generate a device fingerprint from request headers
@@ -91,10 +126,14 @@ authRouter.post('/initial-setup', async (req, res) => {
 
     // Generate token so user is logged in immediately (still needs TOTP setup)
     const token = generateToken(user);
+    setAuthCookies(res, token);
 
     res.json({
       success: true,
       message: 'Password set successfully. Please set up two-factor authentication.',
+      // token still returned in body for one transition release so
+      // existing non-browser clients keep working. Browser clients
+      // ignore it and use the httpOnly cookie set above.
       token,
       user: {
         id: user.id,
@@ -185,6 +224,7 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
     // Generate fresh token with updated user info
     const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     const token = generateToken(freshUser);
+    setAuthCookies(res, token);
 
     res.json({
       success: true,
@@ -266,8 +306,9 @@ authRouter.post('/login', async (req, res) => {
           WHERE id = ?
         `).run(req.ip, trustedDevice.id);
 
-        // Generate token
+        // Generate token + set cookies (canonical browser path)
         const token = generateToken(user);
+        setAuthCookies(res, token);
         logAudit(user.id, 'LOGIN_SUCCESS_TRUSTED_DEVICE', 'user', user.id, { deviceName: trustedDevice.device_name }, req.ip);
 
         return res.json({
@@ -398,8 +439,9 @@ authRouter.post('/login', async (req, res) => {
       }
     }
 
-    // Generate token
+    // Generate token + set cookies (canonical browser path)
     const token = generateToken(user);
+    setAuthCookies(res, token);
 
     logAudit(user.id, 'LOGIN_SUCCESS', 'user', user.id, {}, req.ip);
 
@@ -444,8 +486,12 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
   });
 });
 
-// Logout (just for audit logging, token invalidation is client-side)
+// Logout — clears the auth cookies on the browser side. JWT itself is
+// not server-revoked (no session table); the 24h TTL bounds replay if
+// a leaked token is exfiltrated despite httpOnly. Future hardening:
+// add a server-side denylist keyed by jti.
 authRouter.post('/logout', authenticateToken, (req, res) => {
   logAudit(req.user.id, 'LOGOUT', 'user', req.user.id, {}, req.ip);
+  clearAuthCookies(res);
   res.json({ success: true });
 });

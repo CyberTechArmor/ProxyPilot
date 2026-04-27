@@ -9,18 +9,40 @@ class ApiError extends Error {
   }
 }
 
-async function request(endpoint, options = {}) {
-  const token = localStorage.getItem('token');
+// Read a cookie value from document.cookie. Used for the pp_csrf
+// cookie which is intentionally not HttpOnly so JS can echo it.
+function readCookie(name) {
+  const match = document.cookie.match(
+    new RegExp('(?:^|; )' + name.replace(/[.$?*|{}()[\]\\/+^]/g, '\\$&') + '=([^;]*)')
+  );
+  return match ? decodeURIComponent(match[1]) : null;
+}
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+async function request(endpoint, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
   const headers = {
     'Content-Type': 'application/json',
-    ...(token && { Authorization: `Bearer ${token}` }),
     ...options.headers,
   };
+
+  // Echo the CSRF cookie back as a header on state-changing requests.
+  // Backend's CSRF middleware compares the two — same value means the
+  // request came from JS that can read same-origin cookies (i.e. our
+  // own frontend). GETs are exempt.
+  if (!SAFE_METHODS.has(method)) {
+    const csrf = readCookie('pp_csrf');
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+  }
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     headers,
+    // Send the httpOnly pp_token cookie on every request — this is
+    // how the browser carries the session post-B4. Required for
+    // same-origin to pick up cookies.
+    credentials: 'include',
   });
 
   const data = await response.json();
@@ -34,7 +56,9 @@ async function request(endpoint, options = {}) {
     if (window.location.pathname === '/login') {
       throw new ApiError(data.error || 'Invalid credentials', 401, data);
     }
-    localStorage.removeItem('token');
+    // Cookie was rejected/expired — clear cached user metadata and
+    // bounce to login. The backend's logout endpoint clears the
+    // httpOnly cookies; a 401 here means it's already gone.
     localStorage.removeItem('user');
     window.location.href = '/login';
     throw new ApiError('Session expired', 401);
@@ -507,12 +531,13 @@ export const api = {
 
   // Container exec and file management
   execInContainer: (name, command, cwd, signal) => {
-    const token = localStorage.getItem('token');
+    const csrf = readCookie('pp_csrf');
     return fetch(`${API_BASE}/lxc/containers/${name}/exec`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
       },
       body: JSON.stringify({ command, cwd }),
       ...(signal ? { signal } : {}),
@@ -525,13 +550,14 @@ export const api = {
   }),
 
   importContainer: async (name, file) => {
-    const token = localStorage.getItem('token');
+    const csrf = readCookie('pp_csrf');
     const formData = new FormData();
     formData.append('name', name);
     formData.append('backup', file);
     const response = await fetch(`${API_BASE}/lxc/containers/import`, {
       method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : {},
       body: formData,
     });
     const data = await response.json();
@@ -544,12 +570,13 @@ export const api = {
   getContainerFileDownloadUrl: (name, path) => `${API_BASE}/lxc/containers/${name}/files/download?path=${encodeURIComponent(path)}`,
 
   uploadFileToContainer: async (name, destPath, file) => {
-    const token = localStorage.getItem('token');
+    const csrf = readCookie('pp_csrf');
     const formData = new FormData();
     formData.append('file', file);
     const response = await fetch(`${API_BASE}/lxc/containers/${name}/files/upload?path=${encodeURIComponent(destPath)}`, {
       method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : {},
       body: formData,
     });
     const data = await response.json();

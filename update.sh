@@ -218,9 +218,16 @@ restore_db() {
         return 0
     fi
     log "${YELLOW}Restoring database from: ${DB_BACKUP_FILE}${NC}"
-    cp "$DB_BACKUP_FILE" "$DB_BACKUP_SOURCE"
-    [ -f "${DB_BACKUP_FILE}-wal" ] && cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal"
-    [ -f "${DB_BACKUP_FILE}-shm" ] && cp "${DB_BACKUP_FILE}-shm" "${DB_BACKUP_SOURCE}-shm"
+    # Guard each cp explicitly. If the restore itself fails, surface
+    # the path the operator must hand-restore from rather than letting
+    # the trap exit silently.
+    if ! cp "$DB_BACKUP_FILE" "$DB_BACKUP_SOURCE"; then
+        log "${RED}!! Restore failed copying ${DB_BACKUP_FILE} -> ${DB_BACKUP_SOURCE}${NC}"
+        log "${RED}!! Hand-restore: cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\"${NC}"
+        return 1
+    fi
+    [ -f "${DB_BACKUP_FILE}-wal" ] && cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal" || true
+    [ -f "${DB_BACKUP_FILE}-shm" ] && cp "${DB_BACKUP_FILE}-shm" "${DB_BACKUP_SOURCE}-shm" || true
     log "${YELLOW}Database restored. Operator should investigate the failure before retrying.${NC}"
 }
 
@@ -518,17 +525,53 @@ else
         $DC_CMD build --no-cache
         $DC_CMD up -d
 
-        # Wait and show container logs
-        sleep 5
+        # docker compose up -d returns 0 once the daemon accepts the
+        # request, even if the container immediately crash-loops. Poll
+        # the health endpoint to confirm the new build is actually
+        # serving — without this, a bad migration ships silently.
+        # NOTE: this block runs in the script's top-level scope (not a
+        # function), so `local` would be a syntax error in strict bash —
+        # use plain assignments.
+        HEALTH_PORT=3001
+        if [ -f "${INSTALL_DIR}/.env" ]; then
+            ENV_PORT=$(grep -E '^PORT=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+            [ -n "$ENV_PORT" ] && HEALTH_PORT="$ENV_PORT"
+        fi
+
+        log "Waiting for ProxyPilot to become healthy on port ${HEALTH_PORT}..."
+        HEALTHY=false
+        for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/api/health" >/dev/null 2>&1; then
+                HEALTHY=true
+                break
+            fi
+            sleep 2
+        done
+
+        if [ "$HEALTHY" != "true" ]; then
+            log "${RED}Container did not become healthy within 60s. Last 50 log lines:${NC}"
+            docker logs proxypilot-admin --tail 50 2>&1 || true
+            log "${RED}Update will be rolled back via the ERR trap.${NC}"
+            # Exit non-zero so the trap fires and restore_db runs.
+            exit 1
+        fi
+
         log "Container logs:"
         docker logs proxypilot-admin --tail 20 2>&1 || true
 
-        log "${GREEN}Docker container rebuilt and restarted${NC}"
+        log "${GREEN}Docker container rebuilt and restarted (healthy)${NC}"
         log ""
         log "${GREEN}========================================${NC}"
         log "${GREEN}       Restart completed!               ${NC}"
         log "${GREEN}========================================${NC}"
         log ""
+        # Disarm the trap before the early exit (the trap-disarm at
+        # the bottom of the script is unreachable on the Docker path).
+        trap - ERR INT TERM
+        if [ -n "$DB_BACKUP_FILE" ]; then
+            log "Database backup retained at: $DB_BACKUP_FILE"
+            log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+        fi
         exit 0
     fi
 

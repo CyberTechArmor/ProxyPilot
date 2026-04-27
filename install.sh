@@ -247,10 +247,39 @@ install_caddy() {
         log_success "Caddy installed successfully"
     fi
 
-    # Create directories with correct ownership for caddy user
+    # Create directories with correct ownership for caddy user.
+    # /etc/caddy/sites is the ProxyPilot-managed dir (regenerated on
+    # every service edit). /etc/caddy/custom is the operator-owned
+    # extension dir — ProxyPilot creates it but never rewrites files
+    # in it. Both get imported by the main Caddyfile.
     mkdir -p /etc/caddy/sites
+    mkdir -p /etc/caddy/custom
     mkdir -p /var/log/caddy
     chown caddy:caddy /var/log/caddy 2>/dev/null || true
+
+    # Drop a one-time README into /etc/caddy/custom so the operator
+    # discovers the extension pattern. Backend's ensureCaddyStructure()
+    # would also create this, but doing it at install time means a
+    # fresh deploy is correct from boot 1.
+    if [ ! -f /etc/caddy/custom/README.md ]; then
+        cat > /etc/caddy/custom/README.md <<'CUSTOMEOF'
+# ProxyPilot — Operator Custom Caddy Snippets
+
+Files in this directory are imported into the main Caddyfile but
+**never touched by ProxyPilot**. Use this directory for one-off
+route exceptions, experimental Caddy modules, or imports from other
+config trees.
+
+ProxyPilot regenerates files in `/etc/caddy/sites` on every service
+edit. Anything you put there will be lost. Put hand-written config
+here instead.
+
+After editing, validate and reload:
+
+    caddy adapt --config /etc/caddy/Caddyfile > /dev/null
+    caddy reload --config /etc/caddy/Caddyfile
+CUSTOMEOF
+    fi
 
     # Create main Caddyfile
     log_info "Configuring Caddyfile..."
@@ -261,6 +290,7 @@ install_caddy() {
 }
 
 import /etc/caddy/sites/*
+import /etc/caddy/custom/*
 CADDYEOF
 
     # Enable Caddy but don't start yet - will start after site config is written
@@ -495,11 +525,14 @@ create_proxypilot_caddy_config() {
     log_info "Creating Caddy site configuration for ProxyPilot..."
 
     mkdir -p /etc/caddy/sites
+    mkdir -p /etc/caddy/custom
     mkdir -p /var/log/caddy
 
-    # Update the global Caddyfile with ACME email for automatic TLS
+    # Update the global Caddyfile with ACME email for automatic TLS.
     # Caddy stores certs in its default data dir: /var/lib/caddy/.local/share/caddy/
-    # This persists across ProxyPilot reinstalls since cleanup.sh preserves /var/lib/caddy
+    # This persists across ProxyPilot reinstalls since cleanup.sh preserves /var/lib/caddy.
+    # The custom-import line is identical to the docker-path Caddyfile above
+    # (operator-owned snippets that ProxyPilot never rewrites).
     cat > /etc/caddy/Caddyfile <<GLOBALEOF
 # ProxyPilot Caddy Configuration
 {
@@ -508,6 +541,7 @@ create_proxypilot_caddy_config() {
 }
 
 import /etc/caddy/sites/*
+import /etc/caddy/custom/*
 GLOBALEOF
 
     cat > "/etc/caddy/sites/${domain}" <<EOF
@@ -627,15 +661,33 @@ create_env_file() {
     local admin_pass=$4
     local totp_secret=$5
     local domain=$6
-    local jwt_secret=$(generate_password 64)
-    local session_secret=$(generate_password 64)
+    # Preserve existing secrets if .env already exists. Re-running
+    # install.sh on top of an existing deployment must NOT regenerate
+    # JWT_SECRET / SESSION_SECRET / TOTP_ENCRYPTION_KEY — the last of
+    # those, in particular, is the only thing keeping existing TOTP
+    # secrets decryptable. Losing it forces every user to re-enroll.
+    local jwt_secret=""
+    local session_secret=""
+    local totp_encryption_key=""
+    if [ -f "${install_dir}/.env" ]; then
+        log_info "Existing .env detected — preserving secrets"
+        # shellcheck disable=SC1090
+        jwt_secret=$(grep -E '^JWT_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+        session_secret=$(grep -E '^SESSION_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+        totp_encryption_key=$(grep -E '^TOTP_ENCRYPTION_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+    fi
+
+    [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)
+    [ -z "$session_secret" ] && session_secret=$(generate_password 64)
     # 32 bytes = 64 hex chars. AES-256-GCM key for at-rest secrets.
-    # If openssl is unavailable, fall back to /dev/urandom.
-    local totp_encryption_key
-    if command -v openssl &>/dev/null; then
-        totp_encryption_key=$(openssl rand -hex 32)
-    else
-        totp_encryption_key=$(head -c 32 /dev/urandom | xxd -p -c 64)
+    # Fallback to od if openssl is missing (xxd is not part of base
+    # Debian; od is in coreutils so always present).
+    if [ -z "$totp_encryption_key" ]; then
+        if command -v openssl &>/dev/null; then
+            totp_encryption_key=$(openssl rand -hex 32)
+        else
+            totp_encryption_key=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        fi
     fi
 
     log_info "Creating environment configuration..."

@@ -40,8 +40,143 @@ export function getDb() {
   return db;
 }
 
+// Schema-migrations registry. Every named migration registers its
+// version + name here; runMigration() consults the schema_migrations
+// table to decide whether to execute. New phases MUST add their
+// migrations to this registry — do not call CREATE TABLE / ALTER
+// TABLE / table-rebuild helpers directly from initDatabase() without
+// a version row, otherwise existing installs cannot tell whether the
+// migration has run.
+//
+// Reserved version numbers:
+//   1   Phase 2  — UNIQUE(domain) → UNIQUE(domain, path_prefix)
+//   2   Phase 2b — services → service_http_routes backfill (A.3)
+//   3   Phase 2b — drop legacy route-owned columns from services (D.14)
+//   4   Phase 2b — D.14 admin-domain snapshot (post-D.14 hotfix)
+//   100 reserved start of Phase 2c migrations (port forwards)
+const SCHEMA_MIGRATIONS = [];
+
+function ensureSchemaMigrationsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      run_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+// Backfill version markers for installs that pre-date this framework.
+// Detects already-applied migrations by inspecting the live schema
+// state, then records them so the runMigration() guards correctly skip
+// them. Idempotent: only writes rows that don't already exist.
+function backfillSchemaMigrations(db) {
+  const insertIfMissing = db.prepare(
+    `INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)`
+  );
+
+  // Version 1: Phase 2 unique-constraint rebuild. Detected by the
+  // services table's CREATE statement carrying the (domain, path_prefix)
+  // tuple — fresh installs and migrated installs both have it.
+  try {
+    const row = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='services'`)
+      .get();
+    if (row && row.sql && /UNIQUE\s*\(\s*domain\s*,\s*path_prefix/.test(row.sql)) {
+      insertIfMissing.run(1, 'phase2_services_unique_domain_path');
+    }
+  } catch { /* tolerate */ }
+
+  // Version 2: Phase 2b A.3 — service_http_routes table exists.
+  try {
+    const row = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='service_http_routes'`)
+      .get();
+    if (row) {
+      insertIfMissing.run(2, 'phase2b_services_to_routes_backfill');
+    }
+  } catch { /* tolerate */ }
+
+  // Version 3: Phase 2b D.14 — services table no longer has the legacy
+  // route-owned `domain` column.
+  try {
+    const cols = db
+      .prepare(`PRAGMA table_info(services)`)
+      .all()
+      .map((c) => c.name);
+    if (cols.length > 0 && !cols.includes('domain')) {
+      insertIfMissing.run(3, 'phase2b_drop_legacy_route_columns');
+    }
+  } catch { /* tolerate */ }
+
+  // Version 4: D.14 admin-domain snapshot. Detected by app_settings
+  // having the admin_domain key OR the column being absent (which
+  // implies the snapshot path either ran or was unnecessary).
+  try {
+    const row = db
+      .prepare(`SELECT value FROM app_settings WHERE key = 'admin_domain'`)
+      .get();
+    if (row && row.value) {
+      insertIfMissing.run(4, 'phase2b_d14_admin_domain_snapshot');
+    }
+  } catch { /* tolerate */ }
+}
+
+// Public API for future migrations. Wraps a migration function in the
+// version guard. Returns true if the migration ran, false if it was
+// already recorded as applied.
+//
+// Usage from a phase-specific helper:
+//
+//     runMigration(db, 100, 'phase2c_service_port_forwards', (d) => {
+//       d.exec('CREATE TABLE service_port_forwards (...)');
+//     });
+//
+// Pass { disableFks: true } for migrations that rebuild a parent table
+// via DROP/RENAME — without it, ON DELETE CASCADE on dependent tables
+// will cascade-delete during the DROP. PRAGMA foreign_keys can only be
+// set outside any transaction, so the toggle has to happen in the
+// wrapper, not inside the migration body.
+//
+// The registered fn must be idempotent in case run_at recording fails
+// after the SQL succeeds; SQLite's PRIMARY KEY conflict catches the
+// double-insert case automatically.
+export function runMigration(db, version, name, fn, opts = {}) {
+  ensureSchemaMigrationsTable(db);
+  const existing = db
+    .prepare(`SELECT 1 FROM schema_migrations WHERE version = ?`)
+    .get(version);
+  if (existing) return false;
+
+  let fkWasOn = false;
+  if (opts.disableFks) {
+    fkWasOn = !!db.pragma('foreign_keys', { simple: true });
+    if (fkWasOn) db.pragma('foreign_keys = OFF');
+  }
+  try {
+    const tx = db.transaction(() => {
+      fn(db);
+      db.prepare(
+        `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`
+      ).run(version, name);
+    });
+    tx();
+  } finally {
+    if (opts.disableFks && fkWasOn) {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+  console.log(`Applied schema migration ${version}: ${name}`);
+  return true;
+}
+
 export function initDatabase() {
   const db = getDb();
+
+  // Bootstrap the migrations registry first so backfill + future
+  // runMigration() calls have somewhere to write.
+  ensureSchemaMigrationsTable(db);
+  backfillSchemaMigrations(db);
 
   // Create users table
   db.exec(`
@@ -199,10 +334,19 @@ export function initDatabase() {
   }
 
   // Phase 2 migration: rebuild the services table so UNIQUE(domain) becomes
-  // UNIQUE(domain, path_prefix). Idempotent — skipped on fresh installs (the
-  // CREATE TABLE above already carries the new constraint) and on already-
-  // migrated existing installs.
-  migrateServicesUniqueConstraint(db);
+  // UNIQUE(domain, path_prefix). Wrapped in runMigration so the version row
+  // is recorded after the first successful run; backfillSchemaMigrations
+  // inserts the version row for already-migrated installs at boot.
+  // disableFks: this migration DROPs the services table, which would
+  // cascade-delete every dependent row. The flag turns FKs off for the
+  // duration so the rebuild is non-destructive.
+  runMigration(
+    db,
+    1,
+    'phase2_services_unique_domain_path',
+    (d) => migrateServicesUniqueConstraint(d),
+    { disableFks: true }
+  );
 
   // Phase 2b additive columns — MUST run AFTER migrateServicesUniqueConstraint
   // because that helper does a table rebuild with a hardcoded canonical column
@@ -254,9 +398,14 @@ export function initDatabase() {
   // create/update endpoints (section D) will insert rows as the operator
   // adds routes.
   //
-  // FK to services(id) is declared but not enforced at the SQLite level —
-  // this app does not `PRAGMA foreign_keys = ON`. The service-level DELETE
-  // handler (C.5) walks child rows explicitly before deleting the parent.
+  // FK to services(id) IS enforced — better-sqlite3 enables
+  // `PRAGMA foreign_keys = ON` by default, and ON DELETE CASCADE means
+  // deleting a service automatically removes its routes. Table-rebuild
+  // migrations (migrateServicesUniqueConstraint, dropLegacyRouteColumnsFromServices)
+  // must use `PRAGMA defer_foreign_keys = ON` so the intermediate
+  // DROP/RENAME does not cascade-delete this table's rows. The service
+  // DELETE handler (C.5) still walks child rows explicitly to log them
+  // for audit before the cascade fires.
   db.exec(`
     CREATE TABLE IF NOT EXISTS service_http_routes (
       id TEXT PRIMARY KEY,
@@ -293,15 +442,25 @@ export function initDatabase() {
   //       row, and
   //   (b) the service_http_routes CREATE TABLE directly above, so the
   //       INSERT has somewhere to write.
-  migrateServicesToRoutes(db);
+  runMigration(db, 2, 'phase2b_services_to_routes_backfill', (d) => {
+    migrateServicesToRoutes(d);
+  });
 
   // Phase 2b D.14: drop the legacy route-owned columns from `services`.
-  // Runs AFTER migrateServicesToRoutes so every existing row has been
-  // mirrored into `service_http_routes` before the physical drop. This
-  // call is idempotent — installs already rebuilt on a prior boot are
-  // a no-op. Post-D.14 the legacy columns are gone and the Phase 2b
-  // endpoints read/write only the routes table.
-  dropLegacyRouteColumnsFromServices(db);
+  // Runs AFTER the routes backfill so every existing row has been mirrored
+  // into `service_http_routes` before the physical drop. The wrapped
+  // helper also captures the admin row's domain into app_settings before
+  // dropping (B6 fix), so admin keeps a discoverable domain post-D.14.
+  // disableFks: same reason as migration 1 — this rebuilds the services
+  // table and would cascade-wipe service_http_routes (and other child
+  // tables) on the DROP TABLE step without the FK toggle.
+  runMigration(
+    db,
+    3,
+    'phase2b_drop_legacy_route_columns',
+    (d) => dropLegacyRouteColumnsFromServices(d),
+    { disableFks: true }
+  );
 
   // Create file versions table for version control
   db.exec(`
@@ -532,12 +691,17 @@ export function setSetting(key, value) {
 // that already carries the new constraint is left alone. Runs inside a
 // transaction so a crash mid-rebuild does not corrupt the DB.
 //
-// SQLite FKs are not enforced in this app (no `PRAGMA foreign_keys = ON`),
-// so child tables (user_service_access, file_versions, service_config_versions)
-// keep their service_id values across the DROP/RENAME without cascading.
-// Their indexes live on the child tables and are unaffected by this rebuild;
-// we explicitly (re)create idx_services_domain_path on the rebuilt table so
-// lookups on the new tuple stay fast.
+// IMPORTANT: better-sqlite3 enables `PRAGMA foreign_keys = ON` by default,
+// and child tables (service_http_routes, user_service_access, file_versions,
+// service_config_versions) declare ON DELETE CASCADE foreign keys to
+// services(id). DROP TABLE services would therefore wipe every dependent
+// row. We use `PRAGMA defer_foreign_keys = ON` for the duration of the
+// rebuild transaction so FK checks happen at COMMIT — by which time the
+// new services table has been RENAMEd into place and the FKs are valid
+// again. (defer_foreign_keys auto-resets at end-of-transaction.)
+//
+// We explicitly (re)create idx_services_domain_path on the rebuilt table
+// so lookups on the new tuple stay fast.
 export function migrateServicesUniqueConstraint(dbInstance) {
   const db = dbInstance || getDb();
   const row = db
@@ -649,6 +813,11 @@ export function migrateServicesUniqueConstraint(dbInstance) {
     );
   });
 
+  // foreign_keys MUST be off when this runs — see comment block above.
+  // The runMigration() wrapper in initDatabase() passes
+  // { disableFks: true } for migration version 1 so the toggle happens
+  // outside any transaction (PRAGMA foreign_keys is a no-op inside a
+  // transaction in SQLite).
   runMigration();
   console.log('Services table migration complete');
 }
@@ -835,7 +1004,17 @@ export function dropLegacyRouteColumnsFromServices(dbInstance) {
   // the routes backfill (it bypasses the route-driven Caddy generator), so
   // without this snapshot the admin domain is lost forever after the drop.
   // Idempotent: only writes if app_settings.admin_domain is empty.
+  //
+  // Ensure app_settings exists first — the canonical CREATE for this table
+  // lives later in initDatabase() but D.14 runs ahead of that ordering.
   try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     const existing = db
       .prepare(`SELECT value FROM app_settings WHERE key = 'admin_domain'`)
       .get();
@@ -916,6 +1095,11 @@ export function dropLegacyRouteColumnsFromServices(dbInstance) {
     db.exec(`ALTER TABLE services_new RENAME TO services`);
   });
 
+  // FKs must be off during the rebuild — runMigration's { disableFks:
+  // true } flag for migration version 3 toggles them outside the
+  // transaction (PRAGMA foreign_keys is a no-op inside a transaction).
+  // Without that toggle, DROP TABLE services cascade-deletes every
+  // service_http_routes row.
   runDrop();
   console.log('Phase 2b D.14: services table rebuild complete');
 }

@@ -827,9 +827,19 @@ main() {
     install_incus
     install_dependencies
 
-    # Create installation directory
+    # Create installation directory. The data dir holds the SQLite DB,
+    # WAL/SHM files, and pre-update backups — restrict it to root so the
+    # contents (password hashes, TOTP secrets) are not world-readable on
+    # the host. The container's process runs as root inside its namespace
+    # but the bind-mounted files inherit host UID/perms.
     log_info "Creating installation directory..."
     mkdir -p "$INSTALL_DIR/data/services"
+    chmod 700 "$INSTALL_DIR/data" 2>/dev/null || true
+    if [ -f "$INSTALL_DIR/data/proxypilot.db" ]; then
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db-wal" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db-shm" 2>/dev/null || true
+    fi
 
     # Restore service data from backup if available (from previous cleanup)
     if [[ -d "/var/lib/proxypilot/services-backup" ]] && [[ -n "$(ls -A /var/lib/proxypilot/services-backup 2>/dev/null)" ]]; then

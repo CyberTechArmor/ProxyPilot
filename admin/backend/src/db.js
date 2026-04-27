@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -17,13 +17,25 @@ let db;
 
 export function getDb() {
   if (!db) {
-    // Ensure the directory exists
+    // Ensure the directory exists with restrictive perms (0700). The data
+    // directory holds the SQLite DB plus pre-update backups; nothing in it
+    // should be world-readable.
     const dbDir = dirname(dbPath);
     if (!existsSync(dbDir)) {
-      mkdirSync(dbDir, { recursive: true });
+      mkdirSync(dbDir, { recursive: true, mode: 0o700 });
+    } else {
+      try { chmodSync(dbDir, 0o700); } catch { /* best effort */ }
     }
     db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
+    // Lock the DB file (and WAL/SHM if present) to 0600 every boot. The DB
+    // contains password hashes, JWT-issuing material via SESSION_SECRET
+    // joins, and TOTP secrets — leaking it = full account compromise.
+    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (existsSync(f)) {
+        try { chmodSync(f, 0o600); } catch { /* best effort */ }
+      }
+    }
   }
   return db;
 }

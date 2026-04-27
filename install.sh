@@ -629,6 +629,14 @@ create_env_file() {
     local domain=$6
     local jwt_secret=$(generate_password 64)
     local session_secret=$(generate_password 64)
+    # 32 bytes = 64 hex chars. AES-256-GCM key for at-rest secrets.
+    # If openssl is unavailable, fall back to /dev/urandom.
+    local totp_encryption_key
+    if command -v openssl &>/dev/null; then
+        totp_encryption_key=$(openssl rand -hex 32)
+    else
+        totp_encryption_key=$(head -c 32 /dev/urandom | xxd -p -c 64)
+    fi
 
     log_info "Creating environment configuration..."
 
@@ -644,6 +652,11 @@ DOMAIN=${domain}
 # Authentication
 JWT_SECRET=${jwt_secret}
 SESSION_SECRET=${session_secret}
+
+# DB-at-rest encryption key for TOTP secrets. WARNING: losing this key
+# means existing TOTP secrets cannot be decrypted — every user will need
+# to re-enroll their authenticator. Back this up alongside your DB.
+TOTP_ENCRYPTION_KEY=${totp_encryption_key}
 
 # Admin User (hashed on first run)
 ADMIN_USERNAME=${admin_user}

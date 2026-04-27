@@ -9,6 +9,7 @@ import { join, basename, resolve } from 'path';
 import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
+import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
@@ -525,7 +526,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -3271,7 +3272,7 @@ servicesRouter.delete('/:id', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -4697,7 +4698,7 @@ servicesRouter.post('/docker/compose/destroy', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -4978,7 +4979,7 @@ servicesRouter.post('/system/secure', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });

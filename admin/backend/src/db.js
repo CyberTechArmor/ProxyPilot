@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
+import { migrateUnencryptedTotpSecrets, assertEncryptionKey } from './lib/secrets.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -53,6 +54,7 @@ export function getDb() {
 //   2   Phase 2b — services → service_http_routes backfill (A.3)
 //   3   Phase 2b — drop legacy route-owned columns from services (D.14)
 //   4   Phase 2b — D.14 admin-domain snapshot (post-D.14 hotfix)
+//   5   B5 — encrypt plaintext totp_secret rows at rest
 //   100 reserved start of Phase 2c migrations (port forwards)
 const SCHEMA_MIGRATIONS = [];
 
@@ -172,6 +174,12 @@ export function runMigration(db, version, name, fn, opts = {}) {
 
 export function initDatabase() {
   const db = getDb();
+
+  // Fail-loud startup check: in production, TOTP_ENCRYPTION_KEY must be
+  // set or the secrets module will crash on first TOTP write. Trip the
+  // guard here so the server refuses to boot rather than silently
+  // running until something tries to encrypt.
+  assertEncryptionKey();
 
   // Bootstrap the migrations registry first so backfill + future
   // runMigration() calls have somewhere to write.
@@ -461,6 +469,14 @@ export function initDatabase() {
     (d) => dropLegacyRouteColumnsFromServices(d),
     { disableFks: true }
   );
+
+  // B5: encrypt any plaintext totp_secret rows that pre-date the
+  // at-rest-encryption module. Idempotent — already-encrypted rows
+  // are skipped. New TOTP writes go through encryptSecret() at the
+  // route layer.
+  runMigration(db, 5, 'b5_encrypt_totp_secrets_at_rest', (d) => {
+    migrateUnencryptedTotpSecrets(d);
+  });
 
   // Create file versions table for version control
   db.exec(`

@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
+import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 
 export const authRouter = Router();
 
@@ -158,9 +159,9 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
       return res.status(401).json({ error: 'Invalid TOTP code. Please try again.' });
     }
 
-    // Save TOTP secret
+    // Save TOTP secret (encrypted at rest)
     db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-      .run(totpSecret, user.id);
+      .run(encryptSecret(totpSecret), user.id);
 
     logAudit(user.id, 'TOTP_SETUP', 'user', user.id, {}, req.ip);
 
@@ -298,7 +299,7 @@ authRouter.post('/login', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -377,9 +378,9 @@ authRouter.post('/login', async (req, res) => {
         });
       }
 
-      // Save the TOTP secret to the user
+      // Save the TOTP secret to the user (encrypted at rest)
       db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ?')
-        .run(totpSetupSecret, user.id);
+        .run(encryptSecret(totpSetupSecret), user.id);
 
       logAudit(user.id, 'TOTP_SETUP', 'user', user.id, {}, req.ip);
 

@@ -10,6 +10,11 @@ BACKEND_DIR="$SCRIPT_DIR/admin/backend"
 FRONTEND_DIR="$SCRIPT_DIR/admin/frontend"
 LOG_FILE="/tmp/proxypilot-update.log"
 
+# Pre-update DB backup state (populated by backup_db, consumed by restore_db on failure)
+DB_BACKUP_FILE=""
+DB_BACKUP_SOURCE=""
+BACKUPS_TO_KEEP=5
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -82,6 +87,157 @@ find_command() {
     return 1
 }
 
+resolve_env_path() {
+    # Find the deployed .env. Same search order as resolve_db_path.
+    for candidate in \
+        "/opt/proxypilot/.env" \
+        "$SCRIPT_DIR/.env" \
+        "$(dirname "$SCRIPT_DIR")/.env"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo ""
+}
+
+# Compare keys in .env.example (the canonical set) against the deployed
+# .env. Any key in the example but missing from the deployed file is
+# appended with a TODO placeholder and surfaced to the operator. The
+# deployed file is never overwritten — only appended — so existing
+# values are preserved.
+sync_env_keys() {
+    local example="$SCRIPT_DIR/.env.example"
+    local deployed
+    deployed="$(resolve_env_path)"
+
+    if [ ! -f "$example" ]; then
+        log_verbose ".env.example not present in this version — skipping env sync"
+        return 0
+    fi
+    if [ -z "$deployed" ]; then
+        log_verbose "No deployed .env found — skipping env sync (fresh install will create one)"
+        return 0
+    fi
+
+    local missing_keys=()
+    while IFS= read -r line; do
+        # Skip comments and blank lines; pull KEY from KEY=VALUE.
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        local key="${line%%=*}"
+        key="${key// }"
+        [ -z "$key" ] && continue
+        if ! grep -qE "^[[:space:]]*${key}=" "$deployed"; then
+            missing_keys+=("$key")
+        fi
+    done < "$example"
+
+    if [ ${#missing_keys[@]} -eq 0 ]; then
+        log_verbose "Env keys are in sync"
+        return 0
+    fi
+
+    log "${YELLOW}New environment variables introduced in this version:${NC}"
+    {
+        echo ""
+        echo "# === Added by update.sh on $(date '+%Y-%m-%d %H:%M:%S') ==="
+        echo "# Fill these in before restarting ProxyPilot. Defaults from .env.example:"
+        for key in "${missing_keys[@]}"; do
+            local default_line
+            default_line=$(grep -E "^[[:space:]]*${key}=" "$example" | head -1)
+            log "  - ${key} (TODO: review in $deployed)"
+            echo "${default_line}  # TODO: review"
+        done
+    } >> "$deployed"
+    log "${YELLOW}Appended ${#missing_keys[@]} placeholder(s) to ${deployed}.${NC}"
+    log "${YELLOW}Review them, set real values, and re-run update.sh if any are required.${NC}"
+}
+
+resolve_db_path() {
+    # Prefer DATABASE_PATH if set in env. Otherwise look in known install
+    # locations. Returns the path on stdout, empty string if nothing found.
+    if [ -n "${DATABASE_PATH:-}" ] && [ -f "$DATABASE_PATH" ]; then
+        echo "$DATABASE_PATH"
+        return
+    fi
+    for candidate in \
+        "/opt/proxypilot/data/proxypilot.db" \
+        "$SCRIPT_DIR/data/proxypilot.db" \
+        "$(dirname "$SCRIPT_DIR")/data/proxypilot.db"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo ""
+}
+
+backup_db() {
+    local db_path="$1"
+    if [ -z "$db_path" ] || [ ! -f "$db_path" ]; then
+        log_verbose "No existing database found — skipping backup"
+        return 0
+    fi
+    local backup_dir
+    backup_dir="$(dirname "$db_path")/backups"
+    mkdir -p "$backup_dir"
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    local backup_file="${backup_dir}/proxypilot.db.pre-update-${ts}"
+
+    # Copy main DB plus WAL/SHM if present so we can restore the exact state.
+    cp "$db_path" "$backup_file"
+    [ -f "${db_path}-wal" ] && cp "${db_path}-wal" "${backup_file}-wal"
+    [ -f "${db_path}-shm" ] && cp "${db_path}-shm" "${backup_file}-shm"
+    chmod 600 "$backup_file" "${backup_file}-wal" "${backup_file}-shm" 2>/dev/null || true
+
+    DB_BACKUP_FILE="$backup_file"
+    DB_BACKUP_SOURCE="$db_path"
+    log "${GREEN}Database backed up to: ${backup_file}${NC}"
+
+    # Rotate: keep most recent BACKUPS_TO_KEEP
+    if command -v ls &>/dev/null; then
+        ls -t "${backup_dir}"/proxypilot.db.pre-update-* 2>/dev/null \
+            | grep -v '\-wal$\|\-shm$' \
+            | tail -n +$((BACKUPS_TO_KEEP + 1)) \
+            | while read -r old; do
+                rm -f "$old" "${old}-wal" "${old}-shm"
+                log_verbose "Pruned old backup: $old"
+            done
+    fi
+}
+
+restore_db() {
+    if [ -z "$DB_BACKUP_FILE" ] || [ ! -f "$DB_BACKUP_FILE" ]; then
+        log_verbose "No backup to restore"
+        return 0
+    fi
+    if [ -z "$DB_BACKUP_SOURCE" ]; then
+        log_verbose "No source path recorded — cannot restore"
+        return 0
+    fi
+    log "${YELLOW}Restoring database from: ${DB_BACKUP_FILE}${NC}"
+    # Guard each cp explicitly. If the restore itself fails, surface
+    # the path the operator must hand-restore from rather than letting
+    # the trap exit silently.
+    if ! cp "$DB_BACKUP_FILE" "$DB_BACKUP_SOURCE"; then
+        log "${RED}!! Restore failed copying ${DB_BACKUP_FILE} -> ${DB_BACKUP_SOURCE}${NC}"
+        log "${RED}!! Hand-restore: cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\"${NC}"
+        return 1
+    fi
+    [ -f "${DB_BACKUP_FILE}-wal" ] && cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal" || true
+    [ -f "${DB_BACKUP_FILE}-shm" ] && cp "${DB_BACKUP_FILE}-shm" "${DB_BACKUP_SOURCE}-shm" || true
+    log "${YELLOW}Database restored. Operator should investigate the failure before retrying.${NC}"
+}
+
+on_error() {
+    local exit_code=$?
+    log "${RED}Update failed (exit ${exit_code}). Attempting database restore...${NC}"
+    restore_db
+    exit "$exit_code"
+}
+
 echo ""
 log "${BLUE}========================================${NC}"
 log "${BLUE}       ProxyPilot Update Script        ${NC}"
@@ -150,6 +306,15 @@ if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
     fi
 fi
 
+# Backup the database before any code changes. From this point on, any
+# error triggers on_error which restores the backup so a half-applied
+# migration cannot brick the install.
+DB_PATH_FOUND="$(resolve_db_path)"
+log "${BLUE}[0/7] Backing up database...${NC}"
+backup_db "$DB_PATH_FOUND"
+trap 'on_error' ERR
+trap 'log "${YELLOW}Update interrupted${NC}"; restore_db; exit 130' INT TERM
+
 # Fetch latest changes
 log "${BLUE}[1/7] Fetching latest changes...${NC}"
 log_verbose "Running: $GIT_CMD fetch origin main"
@@ -185,6 +350,11 @@ else
         exit 1
     fi
 fi
+
+# After pulling, sync .env against the new version's .env.example. Any
+# newly-introduced keys are appended to the deployed .env with a TODO
+# marker so the operator notices them before the next restart.
+sync_env_keys
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
@@ -355,17 +525,53 @@ else
         $DC_CMD build --no-cache
         $DC_CMD up -d
 
-        # Wait and show container logs
-        sleep 5
+        # docker compose up -d returns 0 once the daemon accepts the
+        # request, even if the container immediately crash-loops. Poll
+        # the health endpoint to confirm the new build is actually
+        # serving — without this, a bad migration ships silently.
+        # NOTE: this block runs in the script's top-level scope (not a
+        # function), so `local` would be a syntax error in strict bash —
+        # use plain assignments.
+        HEALTH_PORT=3001
+        if [ -f "${INSTALL_DIR}/.env" ]; then
+            ENV_PORT=$(grep -E '^PORT=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+            [ -n "$ENV_PORT" ] && HEALTH_PORT="$ENV_PORT"
+        fi
+
+        log "Waiting for ProxyPilot to become healthy on port ${HEALTH_PORT}..."
+        HEALTHY=false
+        for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/api/health" >/dev/null 2>&1; then
+                HEALTHY=true
+                break
+            fi
+            sleep 2
+        done
+
+        if [ "$HEALTHY" != "true" ]; then
+            log "${RED}Container did not become healthy within 60s. Last 50 log lines:${NC}"
+            docker logs proxypilot-admin --tail 50 2>&1 || true
+            log "${RED}Update will be rolled back via the ERR trap.${NC}"
+            # Exit non-zero so the trap fires and restore_db runs.
+            exit 1
+        fi
+
         log "Container logs:"
         docker logs proxypilot-admin --tail 20 2>&1 || true
 
-        log "${GREEN}Docker container rebuilt and restarted${NC}"
+        log "${GREEN}Docker container rebuilt and restarted (healthy)${NC}"
         log ""
         log "${GREEN}========================================${NC}"
         log "${GREEN}       Restart completed!               ${NC}"
         log "${GREEN}========================================${NC}"
         log ""
+        # Disarm the trap before the early exit (the trap-disarm at
+        # the bottom of the script is unreachable on the Docker path).
+        trap - ERR INT TERM
+        if [ -n "$DB_BACKUP_FILE" ]; then
+            log "Database backup retained at: $DB_BACKUP_FILE"
+            log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+        fi
         exit 0
     fi
 
@@ -460,5 +666,14 @@ else
     log "${GREEN}ProxyPilot restart complete!${NC}"
 fi
 
+# Update succeeded — disarm the restore trap. The backup is kept on disk
+# (subject to rotation) so the operator can roll back manually if a
+# regression surfaces after the fact.
+trap - ERR INT TERM
+
 log ""
 log "Update log saved to: $LOG_FILE"
+if [ -n "$DB_BACKUP_FILE" ]; then
+    log "Database backup retained at: $DB_BACKUP_FILE"
+    log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+fi

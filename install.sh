@@ -247,10 +247,39 @@ install_caddy() {
         log_success "Caddy installed successfully"
     fi
 
-    # Create directories with correct ownership for caddy user
+    # Create directories with correct ownership for caddy user.
+    # /etc/caddy/sites is the ProxyPilot-managed dir (regenerated on
+    # every service edit). /etc/caddy/custom is the operator-owned
+    # extension dir — ProxyPilot creates it but never rewrites files
+    # in it. Both get imported by the main Caddyfile.
     mkdir -p /etc/caddy/sites
+    mkdir -p /etc/caddy/custom
     mkdir -p /var/log/caddy
     chown caddy:caddy /var/log/caddy 2>/dev/null || true
+
+    # Drop a one-time README into /etc/caddy/custom so the operator
+    # discovers the extension pattern. Backend's ensureCaddyStructure()
+    # would also create this, but doing it at install time means a
+    # fresh deploy is correct from boot 1.
+    if [ ! -f /etc/caddy/custom/README.md ]; then
+        cat > /etc/caddy/custom/README.md <<'CUSTOMEOF'
+# ProxyPilot — Operator Custom Caddy Snippets
+
+Files in this directory are imported into the main Caddyfile but
+**never touched by ProxyPilot**. Use this directory for one-off
+route exceptions, experimental Caddy modules, or imports from other
+config trees.
+
+ProxyPilot regenerates files in `/etc/caddy/sites` on every service
+edit. Anything you put there will be lost. Put hand-written config
+here instead.
+
+After editing, validate and reload:
+
+    caddy adapt --config /etc/caddy/Caddyfile > /dev/null
+    caddy reload --config /etc/caddy/Caddyfile
+CUSTOMEOF
+    fi
 
     # Create main Caddyfile
     log_info "Configuring Caddyfile..."
@@ -261,6 +290,7 @@ install_caddy() {
 }
 
 import /etc/caddy/sites/*
+import /etc/caddy/custom/*
 CADDYEOF
 
     # Enable Caddy but don't start yet - will start after site config is written
@@ -495,11 +525,14 @@ create_proxypilot_caddy_config() {
     log_info "Creating Caddy site configuration for ProxyPilot..."
 
     mkdir -p /etc/caddy/sites
+    mkdir -p /etc/caddy/custom
     mkdir -p /var/log/caddy
 
-    # Update the global Caddyfile with ACME email for automatic TLS
+    # Update the global Caddyfile with ACME email for automatic TLS.
     # Caddy stores certs in its default data dir: /var/lib/caddy/.local/share/caddy/
-    # This persists across ProxyPilot reinstalls since cleanup.sh preserves /var/lib/caddy
+    # This persists across ProxyPilot reinstalls since cleanup.sh preserves /var/lib/caddy.
+    # The custom-import line is identical to the docker-path Caddyfile above
+    # (operator-owned snippets that ProxyPilot never rewrites).
     cat > /etc/caddy/Caddyfile <<GLOBALEOF
 # ProxyPilot Caddy Configuration
 {
@@ -508,6 +541,7 @@ create_proxypilot_caddy_config() {
 }
 
 import /etc/caddy/sites/*
+import /etc/caddy/custom/*
 GLOBALEOF
 
     cat > "/etc/caddy/sites/${domain}" <<EOF
@@ -627,8 +661,34 @@ create_env_file() {
     local admin_pass=$4
     local totp_secret=$5
     local domain=$6
-    local jwt_secret=$(generate_password 64)
-    local session_secret=$(generate_password 64)
+    # Preserve existing secrets if .env already exists. Re-running
+    # install.sh on top of an existing deployment must NOT regenerate
+    # JWT_SECRET / SESSION_SECRET / TOTP_ENCRYPTION_KEY — the last of
+    # those, in particular, is the only thing keeping existing TOTP
+    # secrets decryptable. Losing it forces every user to re-enroll.
+    local jwt_secret=""
+    local session_secret=""
+    local totp_encryption_key=""
+    if [ -f "${install_dir}/.env" ]; then
+        log_info "Existing .env detected — preserving secrets"
+        # shellcheck disable=SC1090
+        jwt_secret=$(grep -E '^JWT_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+        session_secret=$(grep -E '^SESSION_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+        totp_encryption_key=$(grep -E '^TOTP_ENCRYPTION_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+    fi
+
+    [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)
+    [ -z "$session_secret" ] && session_secret=$(generate_password 64)
+    # 32 bytes = 64 hex chars. AES-256-GCM key for at-rest secrets.
+    # Fallback to od if openssl is missing (xxd is not part of base
+    # Debian; od is in coreutils so always present).
+    if [ -z "$totp_encryption_key" ]; then
+        if command -v openssl &>/dev/null; then
+            totp_encryption_key=$(openssl rand -hex 32)
+        else
+            totp_encryption_key=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        fi
+    fi
 
     log_info "Creating environment configuration..."
 
@@ -645,6 +705,11 @@ DOMAIN=${domain}
 JWT_SECRET=${jwt_secret}
 SESSION_SECRET=${session_secret}
 
+# DB-at-rest encryption key for TOTP secrets. WARNING: losing this key
+# means existing TOTP secrets cannot be decrypted — every user will need
+# to re-enroll their authenticator. Back this up alongside your DB.
+TOTP_ENCRYPTION_KEY=${totp_encryption_key}
+
 # Admin User (hashed on first run)
 ADMIN_USERNAME=${admin_user}
 ADMIN_PASSWORD=${admin_pass}
@@ -656,6 +721,7 @@ DATABASE_PATH=/data/proxypilot.db
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
+CADDY_CUSTOM_DIR=/etc/caddy/custom
 ACME_EMAIL=${ACME_EMAIL}
 EOF
 
@@ -680,13 +746,36 @@ services:
       dockerfile: Dockerfile
     container_name: proxypilot-admin
     restart: always
-    privileged: true
+    # ProxyPilot needs to nsenter into the host PID namespace to run
+    # caddy / incus / docker / git / npm commands on the host. That
+    # requires pid:host plus CAP_SYS_ADMIN and CAP_SYS_PTRACE for
+    # nsenter to attach to host namespaces. We drop every other
+    # capability (cap_drop: ALL) and forbid privilege escalation
+    # within the container (no-new-privileges) to reduce the blast
+    # radius if the app is compromised.
+    #
+    # SECURITY CAVEAT: a container with pid:host + SYS_ADMIN can still
+    # reach host root via nsenter — this configuration is fundamentally
+    # privileged. The defense-in-depth layers above only constrain what
+    # else the container can do (no raw sockets, no SUID escalation,
+    # no module loading, no time tampering). If full container
+    # isolation is required, ProxyPilot must be redesigned with a
+    # host-side agent that the container talks to over a restricted
+    # Unix socket — that is out of scope for the current release.
     pid: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${port}:${port}"
     volumes:
       - ./data:/data
       - /etc/caddy/sites:/etc/caddy/sites
+      - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -827,9 +916,19 @@ main() {
     install_incus
     install_dependencies
 
-    # Create installation directory
+    # Create installation directory. The data dir holds the SQLite DB,
+    # WAL/SHM files, and pre-update backups — restrict it to root so the
+    # contents (password hashes, TOTP secrets) are not world-readable on
+    # the host. The container's process runs as root inside its namespace
+    # but the bind-mounted files inherit host UID/perms.
     log_info "Creating installation directory..."
     mkdir -p "$INSTALL_DIR/data/services"
+    chmod 700 "$INSTALL_DIR/data" 2>/dev/null || true
+    if [ -f "$INSTALL_DIR/data/proxypilot.db" ]; then
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db-wal" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/proxypilot.db-shm" 2>/dev/null || true
+    fi
 
     # Restore service data from backup if available (from previous cleanup)
     if [[ -d "/var/lib/proxypilot/services-backup" ]] && [[ -n "$(ls -A /var/lib/proxypilot/services-backup 2>/dev/null)" ]]; then

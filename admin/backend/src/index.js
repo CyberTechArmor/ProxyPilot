@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -12,6 +13,7 @@ import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
 import { authenticateToken } from './middleware/auth.js';
+import { csrfProtection } from './middleware/csrf.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -51,16 +53,46 @@ const possibleFrontendPaths = [
 const FRONTEND_PATH = possibleFrontendPaths.find(p => existsSync(p)) || possibleFrontendPaths[0];
 console.log('Frontend path:', FRONTEND_PATH, '- exists:', existsSync(FRONTEND_PATH));
 
-// Security middleware - relaxed CSP for production
+// Security middleware. CSP previously disabled wholesale; replaced with
+// a real policy that closes the obvious XSS vectors:
+//   * default-src 'self'  — no remote anything by default
+//   * script-src 'self'   — no inline JS, no remote JS
+//   * style-src 'self' 'unsafe-inline' — Tailwind + React runtime styles
+//     need inline style attributes; this is the standard concession
+//   * img-src 'self' data: — TOTP setup renders QR codes as data: URIs
+//   * connect-src 'self' — fetch only to same-origin (the backend)
+//   * frame-ancestors 'none' — prevents clickjacking via iframe embed
+//   * object-src 'none' — no Flash/PDF plugin embeds
+//   * base-uri 'self' — locks <base> to defeat one XSS pivot
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP to avoid blocking frontend
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      fontSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
+  hsts: process.env.NODE_ENV === 'production'
+    ? { maxAge: 60 * 60 * 24 * 365, includeSubDomains: true, preload: false }
+    : false,
 }));
 
-// CORS configuration
+// CORS configuration. In production, only allow the configured DOMAIN
+// over HTTPS — the http:// alias was a development crutch and accepting
+// it in production lets a downgrade attack on the user's network slip
+// the same-origin assumption.
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? [`https://${process.env.DOMAIN}`, `http://${process.env.DOMAIN}`]
+    ? [`https://${process.env.DOMAIN}`]
     : ['http://localhost:5173', 'http://localhost:3000'],
   credentials: true,
 }));
@@ -75,7 +107,7 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for auth endpoints
+// Stricter rate limit for credential-bearing auth endpoints
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -83,9 +115,68 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/login', authLimiter);
 
-// Body parsing - increased limit for file uploads (base64-encoded files)
-app.use(express.json({ limit: '55mb' }));
-app.use(express.urlencoded({ extended: true, limit: '55mb' }));
+// First-time setup endpoints — even tighter cap. These are only used once
+// per install but are unauthenticated, so brute-forcing them must be
+// expensive. Both the password-set and the TOTP-confirm steps are
+// covered.
+const setupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many setup attempts, please try again later.' },
+});
+app.use('/api/auth/initial-setup', setupLimiter);
+app.use('/api/auth/complete-totp-setup', setupLimiter);
+
+// setup-status is polled by the frontend on every page load to decide
+// whether to show the setup wizard, so it needs a higher ceiling than
+// the credential endpoints. Still rate-limited to prevent enumeration
+// at scale.
+const setupStatusLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api/auth/setup-status', setupStatusLimiter);
+
+// Body parsing. Routes that legitimately accept large payloads (base64
+// file upload/import on the services router) get the 55mb limit
+// mounted FIRST on their specific paths. The global default (1mb)
+// runs after — Express middleware runs in registration order, and
+// once a path-specific parser has populated req.body the default is a
+// no-op for that request. This shrinks the unauth and CRUD attack
+// surface without breaking the upload endpoints.
+//
+// LXC routes (lxc.js) use multer for uploads, which has its own 2GB
+// limit and does not flow through express.json regardless of order.
+const DEFAULT_BODY_LIMIT = '1mb';
+const UPLOAD_BODY_LIMIT = '55mb';
+const uploadJson = express.json({ limit: UPLOAD_BODY_LIMIT });
+const uploadPaths = [
+  '/api/services/:id/upload/*',
+  '/api/services/:id/files/*',
+  '/api/services/:id/import-files',
+  '/api/services/import',
+  '/api/services/terminal/upload-file',
+  '/api/services/docker/volumes/import',
+  '/api/services/discover/import',
+];
+for (const p of uploadPaths) {
+  app.use(p, uploadJson);
+}
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
+
+// Cookie parsing — needed for the httpOnly JWT cookie + the CSRF
+// double-submit cookie. Must be installed before any route or
+// middleware reads req.cookies.
+app.use(cookieParser());
+
+// CSRF protection on every state-changing request. GET/HEAD/OPTIONS
+// and the unauthenticated auth endpoints are exempt; everything else
+// must echo the pp_csrf cookie via X-CSRF-Token. Mounted before the
+// API routers but after rate limiters so abusive callers still get
+// throttled.
+app.use('/api/', csrfProtection);
 
 // Initialize database
 initDatabase();

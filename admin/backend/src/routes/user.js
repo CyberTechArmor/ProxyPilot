@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
@@ -226,7 +227,7 @@ userRouter.post('/change-password', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -334,11 +335,11 @@ userRouter.post('/totp/verify', async (req, res) => {
       return res.status(401).json({ error: 'Invalid TOTP code' });
     }
 
-    // Save the new secret
+    // Save the new secret (encrypted at rest)
     db.prepare(`
       UPDATE users SET totp_secret = ?, totp_enabled = 1, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(secret, req.user.id);
+    `).run(encryptSecret(secret), req.user.id);
 
     logAudit(req.user.id, 'TOTP_UPDATED', 'user', req.user.id, {}, req.ip);
 
@@ -401,7 +402,7 @@ userRouter.delete('/devices/:deviceId', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -444,7 +445,7 @@ userRouter.post('/devices/revoke-all', async (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(user.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
       });
 
       const delta = totp.validate({ token: totpCode, window: 1 });
@@ -679,7 +680,7 @@ userRouter.delete('/users/:id', requireAdmin, (req, res) => {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(adminUser.totp_secret),
+        secret: OTPAuth.Secret.fromBase32(decryptSecret(adminUser.totp_secret)),
       });
       const delta = totp.validate({ token: totpCode, window: 1 });
       if (delta === null) {

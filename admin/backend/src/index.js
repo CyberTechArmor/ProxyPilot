@@ -75,13 +75,36 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for auth endpoints
+// Stricter rate limit for credential-bearing auth endpoints
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many login attempts, please try again later.' },
 });
 app.use('/api/auth/login', authLimiter);
+
+// First-time setup endpoints — even tighter cap. These are only used once
+// per install but are unauthenticated, so brute-forcing them must be
+// expensive. Both the password-set and the TOTP-confirm steps are
+// covered.
+const setupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many setup attempts, please try again later.' },
+});
+app.use('/api/auth/initial-setup', setupLimiter);
+app.use('/api/auth/complete-totp-setup', setupLimiter);
+
+// setup-status is polled by the frontend on every page load to decide
+// whether to show the setup wizard, so it needs a higher ceiling than
+// the credential endpoints. Still rate-limited to prevent enumeration
+// at scale.
+const setupStatusLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api/auth/setup-status', setupStatusLimiter);
 
 // Body parsing - increased limit for file uploads (base64-encoded files)
 app.use(express.json({ limit: '55mb' }));

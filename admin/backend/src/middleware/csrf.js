@@ -25,8 +25,15 @@ const CSRF_EXEMPT_PREFIXES = [
 
 export function csrfProtection(req, res, next) {
   if (SAFE_METHODS.has(req.method)) return next();
+
+  // Use req.originalUrl rather than req.path: this middleware is
+  // mounted on '/api/' in index.js, which means Express strips the
+  // mount prefix from req.path. The exempt list above carries the
+  // full '/api/...' paths so the comparison must be against the full
+  // original URL. (req.originalUrl includes query strings; startsWith
+  // on a path prefix is unaffected by them.)
   for (const prefix of CSRF_EXEMPT_PREFIXES) {
-    if (req.path.startsWith(prefix)) return next();
+    if (req.originalUrl.startsWith(prefix)) return next();
   }
 
   const cookieValue = req.cookies?.pp_csrf;

@@ -77,7 +77,7 @@ function formatSize(bytes) {
 }
 
 // File manager component for browsing, uploading, and downloading files
-function ContainerFiles({ containerName }) {
+function ContainerFiles({ containerName, onOpenTerminal }) {
   const { toast } = useToast();
   const [currentPath, setCurrentPath] = useState('/root');
   const [files, setFiles] = useState([]);
@@ -172,6 +172,17 @@ function ContainerFiles({ containerName }) {
         <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => fetchFiles(currentPath)}>
           <RefreshCw className="h-3 w-3 mr-1" />Refresh
         </Button>
+        {onOpenTerminal && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => onOpenTerminal(currentPath)}
+            title={`Open terminal in ${currentPath}`}
+          >
+            <Terminal className="h-3 w-3 mr-1" />Open terminal here
+          </Button>
+        )}
         <div className="flex-1" />
         <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" />
         <Button
@@ -265,6 +276,7 @@ export default function LxcContainers() {
   const [createOpen, setCreateOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoDefaultTab, setInfoDefaultTab] = useState('details');
+  const [terminalCwd, setTerminalCwd] = useState('');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resizeOpen, setResizeOpen] = useState(false);
 
@@ -505,6 +517,7 @@ export default function LxcContainers() {
     setAddServiceForm({ domain: '', port: '', obtainCert: true });
     setEditingService(null);
     setInfoDefaultTab(tab);
+    setTerminalCwd('');
     setInfoOpen(true);
     try {
       const [stateRes, snapRes] = await Promise.all([
@@ -1673,12 +1686,21 @@ export default function LxcContainers() {
 
               {/* Terminal Tab — live PTY via WebSocket */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <InteractiveTerminal wsPath={`/api/terminal/lxc/${selectedContainer.name}`} />
+                <InteractiveTerminal
+                  wsPath={`/api/terminal/lxc/${selectedContainer.name}`}
+                  initialCwd={terminalCwd}
+                />
               </TabsContent>
 
               {/* Files Tab */}
               <TabsContent value="files" className="flex-1 flex flex-col min-h-0 overflow-y-auto">
-                <ContainerFiles containerName={selectedContainer.name} />
+                <ContainerFiles
+                  containerName={selectedContainer.name}
+                  onOpenTerminal={(path) => {
+                    setTerminalCwd(path);
+                    setInfoDefaultTab('terminal');
+                  }}
+                />
               </TabsContent>
             </Tabs>
           )}

@@ -422,10 +422,16 @@ export default function Layout() {
       <main
         className={cn(
           "pl-0 md:pl-64 pt-14 md:pt-0",
+          // Fill the viewport so pages that opt into a flex layout
+          // (HostShell, LxcContainers terminal tab) can size their
+          // children with flex-1. Pages with normal stacked content
+          // are unaffected — they just get a tall main area instead
+          // of an auto-sized one.
+          "min-h-screen flex flex-col",
           showUpdateBanner && updateInfo?.updateAvailable && "md:pt-10"
         )}
       >
-        <div className="p-4 md:p-8">
+        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0">
           <Outlet />
         </div>
       </main>

@@ -171,6 +171,43 @@ export function generateToken(user, { ip, userAgent } = {}) {
   );
 }
 
+// requireSudo — destructive endpoints mount this AFTER authenticateToken.
+// Reads sudo_until from req.session (populated by authenticateToken)
+// and 401s with `{ error: 'sudo_required', sudo_required: true }` if
+// the grant is missing or expired. The frontend useSudo hook (K.5)
+// recognises that envelope, prompts the user for password+TOTP, posts
+// to /api/auth/sudo, and replays the original request.
+//
+// On success, slides sudo_until = NOW + SUDO_GRANT_HOURS so a user
+// in active destructive work isn't asked to re-auth every 4h on the
+// dot — they get a fresh window every sudo-protected action. This
+// matches the operator-requested "looser, sliding 4h" behaviour.
+const SUDO_GRANT_HOURS_FOR_SLIDE = parseFloat(process.env.SUDO_GRANT_HOURS || '4');
+
+export function requireSudo(req, res, next) {
+  if (!req.session) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  const nowMs = Date.now();
+  const sudoUntilMs = req.session.sudo_until ? Date.parse(req.session.sudo_until) : 0;
+  if (!Number.isFinite(sudoUntilMs) || sudoUntilMs <= nowMs) {
+    return res.status(401).json({
+      error: 'sudo_required',
+      sudo_required: true,
+      message: 'This action requires sudo re-authentication.',
+    });
+  }
+  // Slide the window.
+  try {
+    const newUntil = new Date(nowMs + SUDO_GRANT_HOURS_FOR_SLIDE * 60 * 60 * 1000).toISOString();
+    getDb().prepare(
+      `UPDATE sessions SET sudo_until = ? WHERE id = ? AND revoked_at IS NULL`
+    ).run(newUntil, req.session.id);
+    req.session.sudo_until = newUntil;
+  } catch { /* best effort */ }
+  next();
+}
+
 // Middleware to require admin role
 export function requireAdmin(req, res, next) {
   if (!req.user) {

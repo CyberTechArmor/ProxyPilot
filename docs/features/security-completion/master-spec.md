@@ -589,3 +589,177 @@ the trust boundary; treat it that way.
 
 When G.V1-V5 pass, mark Phase G ✅. The host-side-agent rewrite is
 complete.
+
+---
+
+## Phase H — Backup automation
+
+**Goal.** Daily DB + secrets + Caddy state backup with offsite sync.
+Today, only pre-update snapshots exist — disk failure = total loss.
+
+**Deliverables.**
+
+* `deploy/backup/proxypilot-backup.sh` — script run by cron:
+  * Locks via `flock /var/lock/proxypilot-backup.lock`.
+  * `sqlite3 /opt/proxypilot/data/proxypilot.db ".backup '/var/backups/proxypilot/db-<ts>.db'"` — produces a consistent snapshot via SQLite's online backup API.
+  * Bundles the DB + `.env` (the only file holding `TOTP_ENCRYPTION_KEY`, `JWT_SECRET`, `SESSION_SECRET`) + `/etc/caddy/sites/` + `/etc/caddy/custom/` + `/var/lib/caddy/.local/share/caddy/` (cert store) into a tarball.
+  * gpg-encrypts the tarball with the operator's public key (ID set in `BACKUP_GPG_RECIPIENT` env var). Without a key set: tarball is uploaded unencrypted but with a loud warning in the install.
+  * Uploads to a configured destination via rclone:
+    * `BACKUP_REMOTE=s3:bucket/path` or `BACKUP_REMOTE=b2:bucket/path` etc.
+    * If `BACKUP_REMOTE` is unset, only local `/var/backups/proxypilot/` retention.
+  * Local retention: last 7 days. Remote retention: configurable, default 30 days.
+* `deploy/backup/proxypilot-backup.cron` — installed at
+  `/etc/cron.d/proxypilot-backup`, runs at 03:00 daily.
+* `install.sh` — installs the script, prompts the operator for
+  `BACKUP_GPG_RECIPIENT` and `BACKUP_REMOTE` (skippable for homelab).
+* `update.sh` — re-installs the cron and script if missing.
+* `docs/features/security-completion/USAGE.md` adds a "Restoring
+  from backup" runbook.
+
+**Acceptance tests.**
+
+- [ ] H.V1 — `proxypilot-backup.sh` run manually produces a valid `.tar.gz.gpg` (or `.tar.gz` if no GPG key configured).
+- [ ] H.V2 — Tarball restoration: extract on a fresh Debian VM, `cp` files to expected paths, run install.sh → ProxyPilot boots with the original DB intact, including users, services, audit log.
+- [ ] H.V3 — Cron runs at 03:00, log entry at `/var/log/proxypilot-backup.log`.
+- [ ] H.V4 — Local retention: 8th day's backup pushes the 1st day's out.
+- [ ] H.V5 — rclone upload succeeds if configured, no-op if not.
+
+When H.V1-V5 pass, mark Phase H ✅.
+
+---
+
+## Phase I — External monitoring + paging
+
+**Goal.** Get paged when the dashboard is down. `/api/health` exists
+already; nothing watches it.
+
+**Deliverables.**
+
+* `docs/features/security-completion/USAGE.md` adds a "Setting up
+  external monitoring" section:
+  * Recommended: Healthchecks.io (free tier covers single-tenant)
+  * Alt: UptimeRobot, BetterUptime
+  * The endpoint to monitor: `https://<DOMAIN>/api/health`
+  * Expected response: `200` with `{"status":"ok",...}` JSON
+  * Suggested alerting: 2 consecutive failures over 5 minutes
+* `deploy/monitoring/healthchecks-cron.sh` — optional helper that
+  pings a Healthchecks.io URL after `update.sh` completes
+  successfully, so backups + updates show up as "fresh" in the
+  dashboard.
+* New audit-log filter: dashboards-page can show "5xx error rate
+  per hour" computed from access_log. (Existing access_log table
+  is queried, no schema change.)
+
+**Acceptance tests.**
+
+- [ ] I.V1 — Operator configures Healthchecks.io against the dashboard's `/api/health`. After 5 minutes of successful checks, status shows green.
+- [ ] I.V2 — Stop the proxypilot container. Within 5 minutes, Healthchecks.io alerts the operator's email/Slack.
+- [ ] I.V3 — Restart. Within 5 minutes, Healthchecks alerts "back up".
+- [ ] I.V4 — `update.sh` completes → optional Healthchecks ping shows the update timestamp.
+
+When I.V1-V4 pass, mark Phase I ✅.
+
+---
+
+## Phase J — Account lockout per-user
+
+**Goal.** Today's rate limiter is per-IP. An attacker rotating IPs
+sees no lockout. Add per-user lockout on top.
+
+**Deliverables.**
+
+* New columns on `users` (migration version 6):
+  ```sql
+  ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD COLUMN locked_until TEXT;  -- ISO-8601, NULL when not locked
+  ```
+* `routes/auth.js` `/login`:
+  * Before bcrypt compare: if `locked_until` is in the future,
+    return 429 with the unlock time. No password check happens.
+  * On failed password: increment `failed_login_count`. If it
+    reaches `LOCKOUT_THRESHOLD` (default 10), set `locked_until` to
+    NOW + `LOCKOUT_DURATION_MIN` (default 15 min) and log
+    `ACCOUNT_LOCKED` audit event.
+  * On success: reset `failed_login_count` to 0, clear `locked_until`.
+* New env vars in `.env.example`: `LOCKOUT_THRESHOLD=10`,
+  `LOCKOUT_DURATION_MIN=15`.
+* Admin UI: Users page shows lockout state per user. Admin can
+  manually unlock by clearing `locked_until` (audit event
+  `ACCOUNT_UNLOCKED`).
+* `proxypilot unlock-user <username>` CLI on the host (or via the
+  dashboard) for the case where admin gets locked out themselves.
+
+**Acceptance tests.**
+
+- [ ] J.V1 — 11 failed login attempts on the same username from different IPs locks the user. 12th attempt returns 429, no bcrypt cost paid.
+- [ ] J.V2 — `locked_until` expires → user can log in again with correct credentials.
+- [ ] J.V3 — Successful login resets `failed_login_count` to 0.
+- [ ] J.V4 — Admin can unlock another user. Audit log records who unlocked whom.
+- [ ] J.V5 — `proxypilot unlock-user thomas` works from the host shell.
+
+When J.V1-V5 pass, mark Phase J ✅.
+
+---
+
+## Phase K — Sudo-mode for destructive ops
+
+**Goal.** Once you've cleared TOTP at login, you stay authenticated
+for 24h for ANYTHING — including delete-all-services. Sensitive
+operations should require a fresh TOTP code.
+
+**Deliverables.**
+
+* New middleware `requireFreshTotp` in `admin/backend/src/middleware/auth.js`:
+  * Reads `pp_sudo_until` cookie (httpOnly, SameSite=Strict).
+  * If absent or expired, returns 403 with `{ error: "sudo_required" }`.
+  * Frontend interprets that as "show TOTP prompt, then retry".
+* New endpoint `POST /api/auth/sudo` — accepts `{ totpCode }`,
+  validates, sets `pp_sudo_until` cookie with 5-minute expiry.
+* Operations that get `requireFreshTotp`:
+  * DELETE /api/services/:id
+  * DELETE /api/lxc/containers/:name
+  * DELETE /api/users/:id
+  * POST /api/services/caddy/regenerate-all
+  * POST /api/auth/rotate-jwt-secret (Phase O)
+  * POST /api/auth/rotate-totp-key (Phase N)
+  * Any future irreversible op
+* Frontend: `useSudo()` hook that wraps any action button —
+  intercepts 403 sudo_required, opens a TOTP-prompt modal, posts
+  to `/api/auth/sudo`, retries the original action.
+
+**Acceptance tests.**
+
+- [ ] K.V1 — Logged in as admin, click "Delete service" → TOTP prompt appears. Wrong code → action blocked. Right code → service deleted.
+- [ ] K.V2 — After successful sudo, deleting a SECOND service within 5 minutes does NOT re-prompt.
+- [ ] K.V3 — After 5+ minutes, deleting another service prompts again.
+- [ ] K.V4 — Sudo cookie has SameSite=Strict + HttpOnly + Secure (in prod).
+- [ ] K.V5 — `pp_sudo_until` is cleared on logout.
+
+When K.V1-V5 pass, mark Phase K ✅.
+
+---
+
+## Phase L — Inactivity timeout + sliding sessions
+
+**Goal.** JWT expires 24h hard. Should be sliding window: each
+authenticated request bumps expiry, 30-min inactivity = expired.
+
+**Deliverables.**
+
+* JWT TTL drops to 30 minutes. Each authenticated request in
+  `authenticateToken` middleware re-signs the token with a fresh
+  30-min expiry IF the existing token is < 5 min from expiry, and
+  sets the new cookie. Avoids re-signing on every request (cost).
+* On idle ≥ 30 min → cookie expires, next request returns 401, frontend redirects to login.
+* `INACTIVITY_TIMEOUT_MIN` env var (default 30) configurable.
+* Documented in USAGE.md: "Sessions auto-expire after 30 minutes
+  of inactivity. Set INACTIVITY_TIMEOUT_MIN to adjust."
+
+**Acceptance tests.**
+
+- [ ] L.V1 — Login, sit idle for 31 minutes, click anything → bounced to login.
+- [ ] L.V2 — Login, click around every 5 minutes → session stays alive indefinitely.
+- [ ] L.V3 — `pp_token` cookie's `Expires` attribute updates only when re-signed (≤ 5 min from old expiry).
+- [ ] L.V4 — `INACTIVITY_TIMEOUT_MIN=120` extends to 2 hours.
+
+When L.V1-V4 pass, mark Phase L ✅.

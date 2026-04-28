@@ -18,21 +18,22 @@ Do not re-implement anything from the MVP; build on top of it.
 
 ## Branch
 
-The MVP lives on `claude/terminal-mvp-<suffix>` and may already be
-merged to `main` by the operator. Cut a fresh branch from whichever
-ref carries the MVP:
+The terminal MVP work, like every other feature in ProxyPilot, lands
+on `main` via PR. Cut a fresh branch from main:
 
-    git fetch origin
-    # Either main if the MVP is merged, or the MVP branch if not:
-    git checkout main   # or claude/terminal-mvp-<suffix>
+    git fetch origin main
+    git checkout main
     git pull origin main
     git checkout -b claude/terminal-production-<your-session-suffix>
 
-Confirm with `git log --oneline -10` that you see the
-`docs(terminal): mark MVP complete` commit at or near the top before
-proceeding.
+Confirm with `git log --oneline -15` that you see a
+`docs(terminal): mark MVP complete` commit (or the MVP merge commit)
+at or near the top before proceeding. If you don't, the MVP hasn't
+landed on main yet and you've started this session too early — STOP
+and ask the operator to confirm the MVP merge before continuing.
 
-Push to the new branch throughout the session.
+Push to the new branch throughout the session. Do not push to main
+directly — the operator handles merges via PR.
 
 ## Step 0 — Read operator feedback FIRST (mandatory)
 

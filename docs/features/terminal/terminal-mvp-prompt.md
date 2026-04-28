@@ -19,18 +19,18 @@ work and this feature are parallel concerns.
 
 ## Branch
 
-Cut a fresh branch from the latest hardening branch. The 15 hardening
-commits (versioned migrations, B5 TOTP encryption, B4 cookie auth,
-B1 cap-drop, body-limit fix, install/update validation) live on
-claude/proxypilot-progress-review-E6iNc.
+The hardening work (versioned migrations, B5 TOTP encryption, B4
+cookie auth, B1 cap-drop, body-limit fix, install/update validation,
+deploy regressions fix) is merged to `main`. Cut a fresh branch from
+the latest main:
 
-    git fetch origin claude/proxypilot-progress-review-E6iNc
-    git checkout claude/proxypilot-progress-review-E6iNc
-    git pull origin claude/proxypilot-progress-review-E6iNc
+    git fetch origin main
+    git checkout main
+    git pull origin main
     git checkout -b claude/terminal-mvp-<your-session-suffix>
 
-Push to that new branch throughout the session. Do not push to the
-hardening branch — it is in an operator-review state.
+Push to that new branch throughout the session. Do not push to main
+directly — the operator handles merges via PR.
 
 ## Hard segmentation rules (the harness will hang otherwise)
 
@@ -142,15 +142,20 @@ context. Do NOT read docs/core/plan/* — phase work is unrelated.
 After cutting the branch, verify the environment in three small bash
 calls (NOT one long script):
 
-1. `git log --oneline -8` — confirm you branched from the right point.
-   You should see `6a1b86f` (body-limit fix) at the top and the
-   B-series commits underneath.
+1. `git log --oneline -15` — confirm you branched from a main that
+   includes all of the hardening work. You should see (in any order
+   among the recent commits) the deploy-regression fix `cad4e46`
+   ("env corruption + Caddy README parse"), `6a1b86f` (body-limit
+   ordering), `ab488ac` (B4 cookie auth), `0d6a859` (B5 TOTP
+   encryption), `1352d42` (U2+B2 versioned migrations), and the
+   merge commit that landed them all on main. If any of these are
+   missing, you've branched from a stale main — pull and try again.
 2. Check `node_modules` exists in `admin/backend` and `admin/frontend`.
    If missing, run `npm install` in each in the background and check
    status with BashOutput later.
 3. Check that the existing dev environment can boot the backend cleanly:
    `cd admin/backend && node --check src/index.js`. Exit code 0
-   confirms no syntax regressions on top of the hardening branch.
+   confirms no syntax regressions on top of main.
 
 Checkpoint via TodoWrite after each step.
 
@@ -233,9 +238,11 @@ When every V.x box is ticked:
 - Never mark a verification item complete unless it actually passed
   — type-checks and builds verify code correctness, not feature
   correctness.
-- Never skip V.15 or V.16. The hardening branch's deploy story is
-  the foundation everything else stands on; if your changes break
-  install.sh / update.sh, the whole branch is unsafe to merge.
+- Never skip V.15 or V.16. Main's deploy story (install.sh +
+  update.sh + the DB-backup/restore trap + the `/api/health`
+  post-up gate) is the foundation everything else stands on; if
+  your changes break install.sh / update.sh, the whole branch is
+  unsafe to merge.
 - Do not create a pull request — the operator handles merges.
 - Ask before any destructive action (rebases, force pushes, deletes).
 

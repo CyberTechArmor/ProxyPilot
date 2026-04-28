@@ -29,6 +29,7 @@ import {
   X, Shield, FlaskConical
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
+import InteractiveTerminal from '@/components/InteractiveTerminal';
 
 const STATUS_COLORS = {
   Running: 'bg-green-500',
@@ -1977,40 +1978,7 @@ export default function LxcContainers() {
 
               {/* Terminal Beta Tab - Interactive WebSocket Terminal (Placeholder) */}
               <TabsContent value="terminal-beta" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <div className="flex-1 flex flex-col items-center justify-center bg-black/90 rounded-lg border border-border/50 p-8">
-                  <div className="text-center space-y-4 max-w-md">
-                    <div className="flex items-center justify-center gap-2 mb-2">
-                      <FlaskConical className="h-8 w-8 text-cyan-500" />
-                      <span className="text-xs font-medium bg-cyan-500/20 text-cyan-500 px-2 py-0.5 rounded-full">BETA</span>
-                    </div>
-                    <h3 className="text-lg font-semibold text-white">Interactive Terminal</h3>
-                    <p className="text-sm text-gray-400 leading-relaxed">
-                      A full interactive WebSocket-based terminal is coming soon. This will provide a real PTY session
-                      with proper shell support, tab completion, colors, and interactive programs like <code className="text-cyan-400">vim</code>, <code className="text-cyan-400">htop</code>, and <code className="text-cyan-400">nano</code>.
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 text-xs text-gray-500">
-                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
-                        <Terminal className="h-4 w-4 text-green-500" />
-                        <span>Full PTY support</span>
-                      </div>
-                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
-                        <span className="text-green-500 font-mono text-sm">$_</span>
-                        <span>Interactive programs</span>
-                      </div>
-                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
-                        <Wifi className="h-4 w-4 text-blue-500" />
-                        <span>WebSocket streaming</span>
-                      </div>
-                      <div className="flex items-center gap-2 p-2 rounded border border-gray-800">
-                        <Settings className="h-4 w-4 text-yellow-500" />
-                        <span>Resize support</span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-gray-600 pt-2">
-                      Use the standard Terminal tab for command execution in the meantime.
-                    </p>
-                  </div>
-                </div>
+                <InteractiveTerminal wsPath={`/api/terminal/lxc/${selectedContainer.name}`} />
               </TabsContent>
 
               {/* Files Tab */}

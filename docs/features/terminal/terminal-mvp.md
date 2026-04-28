@@ -79,7 +79,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 **Verification checklist** — every item must pass on a real deploy before MVP is declared done:
 
 - [x] **V.1** `npm install` in `admin/backend` succeeds; `node-pty` native build completes in the Alpine container build (`backend-builder` stage already has python3 / make / g++ — confirm). _Evidence: clean reinstall in admin/backend/ produced `node-pty/build/Release/pty.node`; spawning a PTY and reading `echo native_build_ok` round-trip succeeded._
-- [ ] **V.2** `npm install` in `admin/frontend` succeeds; `npm run build` produces `dist/` with no CSP-violation imports.
+- [x] **V.2** `npm install` in `admin/frontend` succeeds; `npm run build` produces `dist/` with no CSP-violation imports. _Evidence: clean reinstall + `npx vite build` in admin/frontend/ produced `dist/` (1588 modules transformed, gzip totals: vendor 53kB, ui 30kB, index 214kB, editor 194kB). Imports stay same-origin; xterm pulls only its own CSS (`xterm/css/xterm.css`) which the existing CSP `style-src 'self' 'unsafe-inline'` already permits._
 - [ ] **V.3** Login → navigate to a container's "Terminal Beta" tab → terminal connects within 2s, prompt visible.
 - [ ] **V.4** Run `vim /tmp/x`, type, save, quit. PTY mode confirmed (vim relies on raw mode + alternate screen).
 - [ ] **V.5** Run `htop` for 10s. Cursor positioning + screen updates render correctly. Quit with `q`.

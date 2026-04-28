@@ -26,7 +26,7 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote, PackagePlus,
-  X, Shield, FlaskConical
+  X, Shield
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -1546,14 +1546,9 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
+              <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
-                <TabsTrigger value="terminal-beta" className="flex items-center gap-1">
-                  <FlaskConical className="h-3 w-3" />
-                  Terminal
-                  <span className="text-[9px] font-medium bg-cyan-500/20 text-cyan-500 px-1 rounded">BETA</span>
-                </TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
               </TabsList>
 
@@ -1971,13 +1966,8 @@ export default function LxcContainers() {
                 </div>
               </TabsContent>
 
-              {/* Terminal Tab */}
+              {/* Terminal Tab — live PTY via WebSocket */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <ContainerTerminal containerName={selectedContainer.name} />
-              </TabsContent>
-
-              {/* Terminal Beta Tab - Interactive WebSocket Terminal (Placeholder) */}
-              <TabsContent value="terminal-beta" className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <InteractiveTerminal wsPath={`/api/terminal/lxc/${selectedContainer.name}`} />
               </TabsContent>
 

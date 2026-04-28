@@ -1,7 +1,32 @@
 import jwt from 'jsonwebtoken';
 import { getDb } from '../db.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-change-in-production';
+const DEV_JWT_FALLBACK = 'development-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || DEV_JWT_FALLBACK;
+
+// Boot-time assertion: refuse to run in production with a missing,
+// default, or weak JWT_SECRET. install.sh and update.sh both generate
+// a 64-byte random secret on a fresh deploy or on first .env sync,
+// so the only ways to trip this are (a) operator deleted the line by
+// hand, (b) operator copied a dev .env into prod. Either way crash
+// loud rather than silently accept forged tokens.
+//
+// Called from index.js *after* dotenv has loaded but *before* server.listen.
+export function assertJwtSecret() {
+  if (process.env.NODE_ENV !== 'production') return;
+  const value = process.env.JWT_SECRET;
+  const problems = [];
+  if (!value) problems.push('not set');
+  else if (value === DEV_JWT_FALLBACK) problems.push('left at the development fallback');
+  else if (value.length < 32) problems.push(`only ${value.length} chars (need >= 32)`);
+  if (problems.length === 0) return;
+  console.error(
+    `FATAL: JWT_SECRET is ${problems.join(' and ')}. ` +
+    `Refusing to start in production with a forgeable token-signing key. ` +
+    `Generate one with \`openssl rand -base64 64\` and put it in /opt/proxypilot/.env.`
+  );
+  process.exit(1);
+}
 
 export function authenticateToken(req, res, next) {
   // Prefer the httpOnly cookie set by the login flow; fall back to the

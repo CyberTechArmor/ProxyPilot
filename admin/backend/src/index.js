@@ -13,7 +13,7 @@ import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
-import { authenticateToken } from './middleware/auth.js';
+import { authenticateToken, assertJwtSecret } from './middleware/auth.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -42,6 +42,12 @@ if (!envLoaded) {
   // Fallback: let dotenv try default paths
   config();
 }
+
+// Boot-time guard: in production NODE_ENV the server refuses to start
+// with a missing, default, or weak JWT_SECRET. Must run AFTER dotenv
+// has loaded the .env, BEFORE any code path that signs or verifies a
+// token. Dev environments are allowed to fall through with a warning.
+assertJwtSecret();
 
 const app = express();
 const PORT = process.env.PORT || 3001;

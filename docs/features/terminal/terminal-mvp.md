@@ -111,7 +111,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 ## Function-by-Function Checklist (to be ticked by the executing session)
 
 - [x] **B.1** Add `ws` and `node-pty` to `admin/backend/package.json`. Run `npm install` in the backend dir. Verify `node-pty` builds (`require('node-pty')` in a smoke script does not throw).
-- [ ] **B.2** Add `xterm`, `xterm-addon-fit`, `xterm-addon-web-links` to `admin/frontend/package.json`. Run `npm install` in the frontend dir.
+- [x] **B.2** Add `xterm`, `xterm-addon-fit`, `xterm-addon-web-links` to `admin/frontend/package.json`. Run `npm install` in the frontend dir.
 - [ ] **B.3** Create `admin/backend/src/middleware/wsAuth.js` with `verifyWsUpgrade(req)`. Unit-test by calling it with a forged `Cookie: pp_token=<valid jwt>` header and confirming `{ user }` is returned; with a missing or invalid cookie, confirm it throws.
 - [ ] **B.4** Create `admin/backend/src/lib/pty.js` with `spawnTerminalPty({ kind, target })`. Smoke-test in a one-shot Node script: spawn a `kind:'host'` PTY, write `echo hello\n`, read the response, verify `hello` is in the output.
 - [ ] **B.5** Create `admin/backend/src/routes/terminal-ws.js` with `attachTerminalServer(httpServer)`. Compose the WebSocket server, the upgrade handler, the per-session lifecycle. Add `TERMINAL_SESSION_START` / `TERMINAL_SESSION_END` to the audit event taxonomy.

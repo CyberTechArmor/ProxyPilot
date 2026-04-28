@@ -11,8 +11,11 @@ const __dbDirname = dirname(__dbFilename);
 // Project root is 3 levels up from src/db.js (src -> backend -> admin -> root)
 const PROJECT_ROOT = resolve(__dbDirname, '..', '..', '..');
 
-// Resolve DATABASE_PATH: if relative, resolve against project root (not CWD)
-const rawDbPath = process.env.DATABASE_PATH || './data/proxypilot.db';
+// Resolve DATABASE_PATH: if relative, resolve against project root (not CWD).
+// The DB lives in its own dedicated subdirectory (data/db/) so that
+// chmod'ing the dir to 0700 below cannot accidentally lock other content
+// (Caddy-served files under data/services/) away from the caddy user.
+const rawDbPath = process.env.DATABASE_PATH || './data/db/proxypilot.db';
 const dbPath = rawDbPath.startsWith('/') ? rawDbPath : resolve(PROJECT_ROOT, rawDbPath);
 let db;
 

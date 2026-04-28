@@ -39,7 +39,7 @@ RUN mkdir -p /data && chown -R proxypilot:proxypilot /data
 
 # Set environment
 ENV NODE_ENV=production
-ENV DATABASE_PATH=/data/proxypilot.db
+ENV DATABASE_PATH=/data/db/proxypilot.db
 
 # Expose port
 EXPOSE 3001

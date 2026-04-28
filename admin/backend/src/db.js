@@ -650,6 +650,14 @@ export function initDatabase() {
   console.log('Database initialized');
 }
 
+// Audit event names for the streaming-terminal feature. Other
+// callers still pass raw string actions to logAudit (LOGIN_SUCCESS,
+// PASSWORD_CHANGED, etc.) — exporting these two as constants is a
+// soft guardrail so the WebSocket handler and any later log reader
+// reference the same identifiers.
+export const AUDIT_TERMINAL_SESSION_START = 'TERMINAL_SESSION_START';
+export const AUDIT_TERMINAL_SESSION_END = 'TERMINAL_SESSION_END';
+
 export function logAudit(userId, action, resourceType, resourceId, details, ipAddress) {
   const db = getDb();
   const id = uuidv4();

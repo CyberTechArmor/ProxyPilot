@@ -397,3 +397,195 @@ unnecessary — Phase F removes it.
 - [ ] D.V6 — Flag ON: command with denied pattern (`--privileged` in docker.exec) is rejected.
 
 When D.V1-V6 pass, mark Phase D ✅.
+
+---
+
+## Phase E — Host-side agent: misc methods (git / npm / systemd)
+
+**Goal.** Cover the remaining nsenter calls. Mostly used by the
+self-update flow in the dashboard's "Settings → Update" page.
+
+**Methods.**
+
+| Method | Params | Result |
+|---|---|---|
+| `git.pull` | `{ install_dir, branch? }` | `{ ok, output, error? }` |
+| `git.fetch` | `{ install_dir, ref? }` | `{ ok, output, error? }` |
+| `git.status` | `{ install_dir }` | `{ clean: bool, files: string[] }` |
+| `git.rev_parse` | `{ install_dir, ref }` | `{ sha: string }` |
+| `npm.install` | `{ directory }` | `{ ok, output, error? }` |
+| `npm.run` | `{ directory, script }` | `{ ok, output, error? }` |
+| `npm.ci` | `{ directory }` | `{ ok, output, error? }` |
+| `systemd.reload` | `{ unit }` | `{ ok, error? }` |
+| `systemd.restart` | `{ unit }` | `{ ok, error? }` |
+| `systemd.status` | `{ unit }` | `{ active: bool, status: string }` |
+
+**Input validation.**
+
+* `install_dir` / `directory` allowlisted as in Docker phase.
+* `branch` / `ref` matches `^[A-Za-z0-9._/-]{1,200}$` — no `..`, no shell metachars.
+* `script` is one of an allowlist read from the directory's
+  `package.json` `scripts` keys (the agent reads the file and
+  validates against it). No arbitrary npm scripts.
+* `unit` matches `^proxypilot[a-z0-9-]*\.service$` — only
+  ProxyPilot's own units, never anything else on the host.
+
+**Files.**
+
+```
+cmd/agent/methods/git.go
+cmd/agent/methods/npm.go
+cmd/agent/methods/systemd.go
+admin/backend/src/routes/user.js               Migrate git+npm calls in the version-update flow
+docs/features/security-completion/host-side-agent-spec.md
+```
+
+**Feature flag.** `PROXYPILOT_USE_AGENT_FOR_MISC=false` default.
+
+**Acceptance tests.**
+
+- [ ] E.V1 — Flag ON: `Settings → Update` triggers `git fetch` + `git pull` via the agent. Update completes successfully on the disposable VM.
+- [ ] E.V2 — Flag ON: `npm install` and `npm run build` invoked by the same flow run via the agent.
+- [ ] E.V3 — Flag ON: attempt to call `npm.run` with a script not in package.json — agent rejects.
+- [ ] E.V4 — Flag ON: attempt to call `systemd.restart` on a non-proxypilot unit (e.g., `nginx.service`) — agent rejects.
+
+When E.V1-V4 pass, mark Phase E ✅.
+
+---
+
+## Phase F — Drop `privileged: true`
+
+**Goal.** Switch the ProxyPilot container to unprivileged. The agent
+is now the only path for host operations. After Phase F, container
+compromise is bounded by the agent's protocol — the original B1
+intent is realized.
+
+**Pre-conditions** (block Phase F if any are unmet):
+
+* Phases A-E all ✅
+* All four feature flags (CADDY, INCUS, DOCKER, MISC) have been
+  flipped to ON in production for at least 7 days
+* The operator has run an end-to-end smoke (Add Service, Incus
+  page, Docker page, Settings → Update) on production with the
+  flags ON, no nsenter calls observed in the last week's logs
+
+**Files to modify.**
+
+* `install.sh` — rewrite `create_docker_compose()`:
+  * Remove `privileged: true`
+  * Remove `pid: host`
+  * Remove `cap_drop`, `cap_add`, `security_opt` if any are present
+  * Remove `/var/run/docker.sock` bind-mount (the agent owns Docker now)
+  * Keep:
+    * `/etc/caddy/sites:/etc/caddy/sites` (read by the container too)
+    * `/etc/caddy/custom:/etc/caddy/custom`
+    * `/etc/caddy/Caddyfile:/etc/caddy/Caddyfile`
+    * `./data:/data` (the SQLite + secrets dir)
+    * `/run/proxypilot-agent.sock:/run/proxypilot-agent.sock:ro` (the agent socket)
+  * `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
+    `read_only: true` with `tmpfs: [/tmp]` for ephemeral writes,
+    `user: proxypilot` (the Dockerfile's existing non-root user)
+
+* `update.sh` — full migration step:
+  * Detect `privileged: true` in the deployed compose file
+  * Confirm all feature flags have been ON in `.env`
+  * Block the migration with a clear error if any flag is OFF
+  * Replace privileged config with the unprivileged shape
+  * Run a post-up health check that exercises every category of
+    operation: Caddy reload, Incus list, Docker ps, git fetch.
+    Any failure → roll back to the privileged compose, surface
+    the error, exit 1.
+
+* All `nsenter` based `execOnHost` helpers in `admin/backend/src/`
+  are deleted in this phase. Search for `nsenter` and remove every
+  match.
+
+* The four feature flag default values flip to `true`. The flags
+  themselves stay (so they can be disabled in an emergency by
+  setting them to `false` in `.env`), but the dual-track is gone.
+
+**Acceptance tests.**
+
+- [ ] F.V1 — `docker inspect proxypilot-admin --format '{{.HostConfig.Privileged}}'` returns `false`.
+- [ ] F.V2 — `docker exec proxypilot-admin nsenter -t 1 -- ls /` fails with EACCES (no `pid: host`).
+- [ ] F.V3 — Add Service, Incus page, Docker page, Settings → Update — all functional via the agent.
+- [ ] F.V4 — Audit log on the agent side shows EVERY method call from the dashboard during the smoke test.
+- [ ] F.V5 — `update.sh` migration on an existing privileged install completes successfully and passes the post-migration health check.
+- [ ] F.V6 — All four `PROXYPILOT_USE_AGENT_FOR_*` env vars default to `true` in `.env.example`. Existing installs with explicit OFF values STILL work as long as nsenter is no longer the path — but the OFF case effectively disables the feature category. Documented in the README.
+
+When F.V1-V6 pass, **B1 is closed.** This is the moment ProxyPilot's
+production-readiness statement loses the privileged-equivalent caveat.
+
+---
+
+## Phase G — Agent hardening + audit + rate limiting
+
+**Goal.** Operationally harden the agent. After Phase F the agent IS
+the trust boundary; treat it that way.
+
+**Deliverables.**
+
+* **Per-method audit log on the agent side.** New SQLite DB at
+  `/var/lib/proxypilot-agent/audit.db` (mode 0600, owned by
+  proxypilot-agent). Schema:
+  ```sql
+  CREATE TABLE method_calls (
+    id INTEGER PRIMARY KEY,
+    ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    method TEXT NOT NULL,
+    caller_pid INTEGER, caller_uid INTEGER, caller_gid INTEGER,
+    params_hash TEXT,    -- SHA-256 of the JSON params (no sensitive data in plaintext)
+    duration_ms INTEGER,
+    result_code TEXT,    -- 'ok', 'validation_error', 'method_error', 'timeout'
+    error_message TEXT
+  );
+  ```
+
+* **Per-method rate limiting** in the agent. Token bucket per method:
+  * `caddy.reload`: 10/min
+  * `caddy.adapt`: 30/min
+  * `incus.exec`: 60/min
+  * `docker.compose.up`: 1/5min
+  * `docker.compose.build`: 1/10min
+  * Default for unspecified: 30/min
+  * Limits configurable via `/etc/proxypilot-agent/rate-limits.toml`.
+
+* **Deny-list of dangerous arg patterns.** Centralized in
+  `cmd/agent/methods/denylist.go`. Patterns:
+  * `--privileged`, `--cap-add`, `--cap-drop`
+  * `--pid=host`, `--ipc=host`, `--net=host`
+  * `--mount`, `--volume` outside whitelisted paths
+  * `chroot`, `unshare`, `nsenter`
+  * `mount.cifs`, `mount.nfs`
+  * Any path containing `..`
+  * Any path under `/proc/`, `/sys/`, `/dev/` (read-only access via `/dev/null`, `/dev/zero` exempt)
+  * Tested via table-driven unit tests.
+
+* **Agent health endpoint.** HTTP-over-Unix-socket at the same
+  socket: `GET /health` returns `{"status":"ok","uptime_s":N}`.
+  Used by an external uptime check (Phase I).
+
+* **Documentation.**
+  * `docs/features/security-completion/USAGE.md` — operator-facing:
+    how to inspect agent state, read audit log, tune rate limits,
+    disable a method category in an emergency.
+  * `docs/features/security-completion/TROUBLESHOOTING.md` — debug
+    runbook: agent not starting, socket permission errors, method
+    rejected unexpectedly, audit log growing too large.
+  * `docs/features/security-completion/ARCHITECTURE.md` — the
+    design rationale, kept up to date as Phase G lands.
+
+* **Audit log retention.** Cron-like cleanup inside the agent:
+  delete rows older than `AUDIT_RETENTION_DAYS` (default 90).
+  Vacuum the DB monthly.
+
+**Acceptance tests.**
+
+- [ ] G.V1 — Every method call from the dashboard appears in `/var/lib/proxypilot-agent/audit.db` with caller PID + duration + result code.
+- [ ] G.V2 — Rapid-fire 100 `caddy.reload` calls — first 10 succeed, rest return `rate_limit_exceeded`. Audit log records all 100.
+- [ ] G.V3 — Method call with denied arg pattern returns `validation_error`, no shellout occurs. Verified via `strace -f -p $(pidof proxypilot-agent)` showing no `execve` for the rejected request.
+- [ ] G.V4 — `curl --unix-socket /run/proxypilot-agent.sock http://localhost/health` returns `{"status":"ok","uptime_s":N}`.
+- [ ] G.V5 — Audit log retention: insert a row dated 100 days ago, run cleanup, row gone. Vacuum runs without error.
+
+When G.V1-V5 pass, mark Phase G ✅. The host-side-agent rewrite is
+complete.

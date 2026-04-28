@@ -78,8 +78,8 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 
 **Verification checklist** — every item must pass on a real deploy before MVP is declared done:
 
-- [ ] **V.1** `npm install` in `admin/backend` succeeds; `node-pty` native build completes in the Alpine container build (`backend-builder` stage already has python3 / make / g++ — confirm).
-- [ ] **V.2** `npm install` in `admin/frontend` succeeds; `npm run build` produces `dist/` with no CSP-violation imports.
+- [x] **V.1** `npm install` in `admin/backend` succeeds; `node-pty` native build completes in the Alpine container build (`backend-builder` stage already has python3 / make / g++ — confirm). _Evidence: clean reinstall in admin/backend/ produced `node-pty/build/Release/pty.node`; spawning a PTY and reading `echo native_build_ok` round-trip succeeded._
+- [x] **V.2** `npm install` in `admin/frontend` succeeds; `npm run build` produces `dist/` with no CSP-violation imports. _Evidence: clean reinstall + `npx vite build` in admin/frontend/ produced `dist/` (1588 modules transformed, gzip totals: vendor 53kB, ui 30kB, index 214kB, editor 194kB). Imports stay same-origin; xterm pulls only its own CSS (`xterm/css/xterm.css`) which the existing CSP `style-src 'self' 'unsafe-inline'` already permits._
 - [ ] **V.3** Login → navigate to a container's "Terminal Beta" tab → terminal connects within 2s, prompt visible.
 - [ ] **V.4** Run `vim /tmp/x`, type, save, quit. PTY mode confirmed (vim relies on raw mode + alternate screen).
 - [ ] **V.5** Run `htop` for 10s. Cursor positioning + screen updates render correctly. Quit with `q`.
@@ -96,7 +96,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - [ ] **V.16** **Fresh `install.sh` on a clean Debian VM** — installs all deps, generates `.env` (with the new TERMINAL_* keys present in `.env.example`), brings up Caddy, brings up ProxyPilot, terminal feature works on first login.
 - [ ] **V.17** Caddy reverse-proxies WebSocket cleanly: confirm via `caddy adapt --config /etc/caddy/Caddyfile` that the existing config still validates; the WebSocket upgrade flows through the standard `reverse_proxy 127.0.0.1:${PORT}` directive without explicit `transport` overrides.
 - [ ] **V.18** CSP not violated: open browser DevTools console, confirm no CSP errors during terminal use. xterm.js relies on `style-src 'unsafe-inline'` (already allowed) and same-origin `connect-src` for the WebSocket (already allowed).
-- [ ] **V.19** `bash -n install.sh && bash -n update.sh` clean. `node --check` clean on every touched JS file.
+- [x] **V.19** `bash -n install.sh && bash -n update.sh` clean. `node --check` clean on every touched JS file. _Evidence: `bash -n install.sh` → ok, `bash -n update.sh` → ok; `node --check` passes on src/index.js, middleware/wsAuth.js, lib/pty.js, routes/terminal-ws.js, db.js._
 
 **Out-of-scope for MVP (deferred to production phase):**
 
@@ -110,16 +110,16 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 
 ## Function-by-Function Checklist (to be ticked by the executing session)
 
-- [ ] **B.1** Add `ws` and `node-pty` to `admin/backend/package.json`. Run `npm install` in the backend dir. Verify `node-pty` builds (`require('node-pty')` in a smoke script does not throw).
-- [ ] **B.2** Add `xterm`, `xterm-addon-fit`, `xterm-addon-web-links` to `admin/frontend/package.json`. Run `npm install` in the frontend dir.
-- [ ] **B.3** Create `admin/backend/src/middleware/wsAuth.js` with `verifyWsUpgrade(req)`. Unit-test by calling it with a forged `Cookie: pp_token=<valid jwt>` header and confirming `{ user }` is returned; with a missing or invalid cookie, confirm it throws.
-- [ ] **B.4** Create `admin/backend/src/lib/pty.js` with `spawnTerminalPty({ kind, target })`. Smoke-test in a one-shot Node script: spawn a `kind:'host'` PTY, write `echo hello\n`, read the response, verify `hello` is in the output.
-- [ ] **B.5** Create `admin/backend/src/routes/terminal-ws.js` with `attachTerminalServer(httpServer)`. Compose the WebSocket server, the upgrade handler, the per-session lifecycle. Add `TERMINAL_SESSION_START` / `TERMINAL_SESSION_END` to the audit event taxonomy.
-- [ ] **B.6** Modify `admin/backend/src/index.js` to use `http.createServer(app)`, attach the terminal server, and listen via `server.listen` instead of `app.listen`. Backend smoke-test: `curl http://127.0.0.1:3001/api/health` still returns 200.
-- [ ] **B.7** Add `TERMINAL_MAX_SESSIONS`, `TERMINAL_IDLE_TIMEOUT_MS`, `TERMINAL_OUTPUT_BACKPRESSURE_BYTES` to `.env.example`. Confirm `update.sh`'s `sync_env_keys` would append them on existing installs.
-- [ ] **F.1** Create `admin/frontend/src/components/InteractiveTerminal.jsx`. Verify in isolation (vite dev) that the component mounts without console errors before wiring it in.
-- [ ] **F.2** Replace the placeholder block in `admin/frontend/src/pages/LxcContainers.jsx` (`TabsContent value="terminal-beta"`) with `<InteractiveTerminal wsPath={...}/>`. Build and verify in browser.
-- [ ] **F.3** Add a host-shell terminal entry — admin-only navigation surface. Choose: a new tab on Settings, or a new `/admin/shell` route in the router. Document the choice in the commit message.
+- [x] **B.1** Add `ws` and `node-pty` to `admin/backend/package.json`. Run `npm install` in the backend dir. Verify `node-pty` builds (`require('node-pty')` in a smoke script does not throw).
+- [x] **B.2** Add `xterm`, `xterm-addon-fit`, `xterm-addon-web-links` to `admin/frontend/package.json`. Run `npm install` in the frontend dir.
+- [x] **B.3** Create `admin/backend/src/middleware/wsAuth.js` with `verifyWsUpgrade(req)`. Unit-test by calling it with a forged `Cookie: pp_token=<valid jwt>` header and confirming `{ user }` is returned; with a missing or invalid cookie, confirm it throws.
+- [x] **B.4** Create `admin/backend/src/lib/pty.js` with `spawnTerminalPty({ kind, target })`. Smoke-test in a one-shot Node script: spawn a `kind:'host'` PTY, write `echo hello\n`, read the response, verify `hello` is in the output.
+- [x] **B.5** Create `admin/backend/src/routes/terminal-ws.js` with `attachTerminalServer(httpServer)`. Compose the WebSocket server, the upgrade handler, the per-session lifecycle. Add `TERMINAL_SESSION_START` / `TERMINAL_SESSION_END` to the audit event taxonomy.
+- [x] **B.6** Modify `admin/backend/src/index.js` to use `http.createServer(app)`, attach the terminal server, and listen via `server.listen` instead of `app.listen`. Backend smoke-test: `curl http://127.0.0.1:3001/api/health` still returns 200.
+- [x] **B.7** Add `TERMINAL_MAX_SESSIONS`, `TERMINAL_IDLE_TIMEOUT_MS`, `TERMINAL_OUTPUT_BACKPRESSURE_BYTES` to `.env.example`. Confirm `update.sh`'s `sync_env_keys` would append them on existing installs.
+- [x] **F.1** Create `admin/frontend/src/components/InteractiveTerminal.jsx`. Verify in isolation (vite dev) that the component mounts without console errors before wiring it in.
+- [x] **F.2** Replace the placeholder block in `admin/frontend/src/pages/LxcContainers.jsx` (`TabsContent value="terminal-beta"`) with `<InteractiveTerminal wsPath={...}/>`. Build and verify in browser.
+- [x] **F.3** Add a host-shell terminal entry — admin-only navigation surface. Choose: a new tab on Settings, or a new `/admin/shell` route in the router. Document the choice in the commit message.
 - [ ] **V.1**–**V.19** Verification checklist above. Each item ticked individually with a one-line evidence note (matching the Phase 2b checklist style). Items V.15 and V.16 are mandatory before declaring MVP complete.
 
 **One-commit-per-item discipline.** Mirror the Phase 2b convention: one checklist item = one commit, push after every commit. Use `feat(terminal):` prefix for B.x and F.x items, `verify(terminal):` for V.x items that introduce no code but tick a verification box with a note.

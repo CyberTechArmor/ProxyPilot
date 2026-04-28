@@ -476,6 +476,62 @@ userRouter.post('/devices/revoke-all', async (req, res) => {
   }
 });
 
+// List the current user's active sessions. The current request's
+// session is flagged in the response so the UI can render "this
+// device" alongside the others. Revoked rows are filtered out.
+userRouter.get('/sessions', (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT id, created_at, expires_at, last_used_at, ip, user_agent, sudo_until
+       FROM sessions
+      WHERE user_id = ? AND revoked_at IS NULL
+        AND datetime(expires_at) > datetime('now')
+      ORDER BY last_used_at DESC`
+  ).all(req.user.id);
+  const currentJti = req.user?.jti;
+  res.json({
+    sessions: rows.map((r) => ({ ...r, current: r.id === currentJti })),
+  });
+});
+
+// Revoke a specific session by id. Operator-facing UX: clicking
+// "log out" on one row in the sessions list. Refuses to revoke a
+// session belonging to a different user.
+userRouter.post('/sessions/:id/revoke', (req, res) => {
+  const db = getDb();
+  const row = db.prepare(`SELECT user_id FROM sessions WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Session not found' });
+  if (row.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+  db.prepare(
+    `UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND revoked_at IS NULL`
+  ).run(req.params.id);
+  logAudit(req.user.id, 'SESSION_REVOKED', 'session', req.params.id, {}, req.ip);
+  res.json({ success: true });
+});
+
+// Revoke every session for the current user EXCEPT the one making
+// the request. Lets the operator nuke a stolen / leaked cookie from
+// a known-good device without logging themselves out.
+userRouter.post('/sessions/revoke-all-others', (req, res) => {
+  const db = getDb();
+  const currentJti = req.user?.jti || '';
+  const result = db.prepare(
+    `UPDATE sessions
+        SET revoked_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND revoked_at IS NULL AND id <> ?`
+  ).run(req.user.id, currentJti);
+  logAudit(
+    req.user.id,
+    'SESSION_REVOKED',
+    'session',
+    'all-others',
+    { revoked_count: result.changes, kept_jti: currentJti },
+    req.ip,
+  );
+  res.json({ success: true, revoked_count: result.changes });
+});
+
 // Get audit log for current user
 userRouter.get('/audit-log', (req, res) => {
   try {

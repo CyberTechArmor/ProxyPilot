@@ -15,6 +15,25 @@ DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
 BACKUPS_TO_KEEP=5
 
+# Globally-set during the restart phase so on_error can attempt docker
+# compose up -d on the existing image after a failed rebuild.
+INSTALL_DIR=""
+
+# Concurrent-run guard. Two update.sh invocations will race on the DB
+# backup, the git pull, and the docker rebuild. flock is in util-linux
+# on every Debian/Ubuntu we support; if it's missing we just warn and
+# continue.
+LOCK_FILE="/var/lock/proxypilot-update.lock"
+if command -v flock &>/dev/null; then
+    exec 200>"$LOCK_FILE" 2>/dev/null || true
+    if ! flock -n 200 2>/dev/null; then
+        echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
+        echo "If you're sure no other process is running:"
+        echo "  rm $LOCK_FILE && retry"
+        exit 1
+    fi
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -281,8 +300,28 @@ restore_db() {
 
 on_error() {
     local exit_code=$?
-    log "${RED}Update failed (exit ${exit_code}). Attempting database restore...${NC}"
+    log "${RED}Update failed (exit ${exit_code}). Attempting recovery...${NC}"
     restore_db
+
+    # If we got far enough to set INSTALL_DIR (i.e. past npm install/build
+    # and into the docker rebuild phase) AND there's a docker-compose.yml,
+    # try to bring the OLD container back online. `docker compose build`
+    # with --no-cache does NOT replace the existing image until the new
+    # build succeeds, so on a build failure the previous image is still
+    # tagged and `up -d` will restart with it.
+    #
+    # This closes the gap where a failed rebuild left the user actively
+    # offline: down had succeeded, build failed, up -d never ran, and the
+    # script just exited.
+    if [ -n "${INSTALL_DIR:-}" ] && [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
+        log "${YELLOW}Attempting to restart with the existing (pre-update) docker image...${NC}"
+        local DC_CMD="docker compose"
+        if ! docker compose version &>/dev/null; then
+            DC_CMD="docker-compose"
+        fi
+        (cd "$INSTALL_DIR" && $DC_CMD up -d 2>&1 | tee -a "$LOG_FILE") || \
+            log "${RED}Could not auto-restart. Manual: cd $INSTALL_DIR && $DC_CMD up -d${NC}"
+    fi
     exit "$exit_code"
 }
 
@@ -529,8 +568,9 @@ else
     log "${BLUE}[7/7] Restarting ProxyPilot...${NC}"
     log ""
 
-    # Check if running via Docker - check multiple possible locations
-    INSTALL_DIR=""
+    # Check if running via Docker - check multiple possible locations.
+    # INSTALL_DIR is a global (declared near the top) so on_error can see
+    # it and attempt to restart the old container after a failed rebuild.
     for candidate in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
         if [[ -f "${candidate}/docker-compose.yml" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -q proxypilot-admin; then
             INSTALL_DIR="$candidate"
@@ -582,7 +622,9 @@ else
         # use plain assignments.
         HEALTH_PORT=3001
         if [ -f "${INSTALL_DIR}/.env" ]; then
-            ENV_PORT=$(grep -E '^PORT=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+            # Strip inline `# comment` and any whitespace before parsing —
+            # `PORT=3001 # default` would otherwise become `3001#default`.
+            ENV_PORT=$(grep -E '^PORT=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | sed 's/#.*$//' | tr -d '[:space:]')
             [ -n "$ENV_PORT" ] && HEALTH_PORT="$ENV_PORT"
         fi
 
@@ -667,13 +709,15 @@ else
         set -e
     fi
 
-    # Ensure DATABASE_PATH is absolute (relative paths break when CWD differs)
-    if [ -n "$DATABASE_PATH" ] && [[ "$DATABASE_PATH" != /* ]]; then
+    # Ensure DATABASE_PATH is absolute (relative paths break when CWD
+    # differs). Defensive ${DATABASE_PATH:-} guards against an
+    # unset/sourced-as-empty .env so a future `set -u` doesn't kill us.
+    if [ -n "${DATABASE_PATH:-}" ] && [[ "${DATABASE_PATH:-}" != /* ]]; then
         export DATABASE_PATH="$SCRIPT_DIR/$DATABASE_PATH"
         log_verbose "Resolved DATABASE_PATH to: $DATABASE_PATH"
     fi
     # Default DATABASE_PATH if not set
-    if [ -z "$DATABASE_PATH" ]; then
+    if [ -z "${DATABASE_PATH:-}" ]; then
         export DATABASE_PATH="$SCRIPT_DIR/data/proxypilot.db"
         log_verbose "Using default DATABASE_PATH: $DATABASE_PATH"
     fi
@@ -694,11 +738,9 @@ else
         NEW_PID=$!
         sleep 3
 
-        # Verify it started
-        if kill -0 $NEW_PID 2>/dev/null; then
-            log "${GREEN}Started in background (PID: $NEW_PID)${NC}"
-            log "Logs: /tmp/proxypilot.log"
-        else
+        # First gate: did the process even survive long enough to be
+        # observed by kill -0? Catches immediate import / syntax errors.
+        if ! kill -0 $NEW_PID 2>/dev/null; then
             log "${RED}Failed to start backend${NC}"
             log ""
             log "${YELLOW}Last 20 lines from /tmp/proxypilot.log:${NC}"
@@ -708,6 +750,39 @@ else
             log "  cd $BACKEND_DIR && source $ENV_FILE && node src/index.js"
             exit 1
         fi
+        log "${GREEN}Process alive (PID: $NEW_PID), polling /api/health...${NC}"
+    fi
+
+    # Second gate: poll /api/health to confirm the server actually
+    # started serving — not just that the process didn't immediately
+    # die. A backend that crashes during initDatabase() (for example,
+    # the assertEncryptionKey() guard, a migration error, a missing
+    # native module) would survive `kill -0` for the 3-second sleep
+    # but never bind the port. Without this second gate the script
+    # would report success and the operator would only find out later
+    # that the dashboard is dead.
+    log "Waiting for ProxyPilot to become healthy on port ${PORT_TO_FREE}..."
+    HEALTHY=false
+    for i in $(seq 1 30); do
+        if curl -fsS "http://127.0.0.1:${PORT_TO_FREE}/api/health" >/dev/null 2>&1; then
+            HEALTHY=true
+            break
+        fi
+        sleep 2
+    done
+    if [ "$HEALTHY" != "true" ]; then
+        log "${RED}Backend did not respond to /api/health within 60s.${NC}"
+        log "${YELLOW}Last 30 lines from /tmp/proxypilot.log:${NC}"
+        tail -30 /tmp/proxypilot.log 2>/dev/null || log "  (no log output)"
+        log "${RED}Update will be rolled back via the ERR trap.${NC}"
+        exit 1
+    fi
+    log "${GREEN}Backend is healthy on port ${PORT_TO_FREE}${NC}"
+
+    if command -v pm2 &> /dev/null; then
+        : # PM2 path already logged "Started with PM2" above
+    else
+        log "Logs: /tmp/proxypilot.log"
     fi
 
     log ""

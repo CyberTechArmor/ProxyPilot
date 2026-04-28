@@ -17,7 +17,7 @@ function HostShell() {
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 h-full overflow-hidden p-4 gap-3">
+    <div className="flex flex-col flex-1 min-h-0 gap-3">
       <div className="flex items-center gap-2 shrink-0">
         <TerminalSquare className="h-5 w-5 text-cyan-500" />
         <h1 className="text-lg font-semibold">Host Shell</h1>
@@ -29,7 +29,7 @@ function HostShell() {
         Live root shell on the ProxyPilot host. Every command is audited; the
         session is killed after 15 minutes of inactivity.
       </p>
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 flex flex-col">
         <InteractiveTerminal wsPath="/api/terminal/host" />
       </div>
     </div>

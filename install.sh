@@ -675,10 +675,17 @@ create_env_file() {
     local totp_encryption_key=""
     if [ -f "${install_dir}/.env" ]; then
         log_info "Existing .env detected — preserving secrets"
+        # `|| true` on each pipe: install.sh runs under `set -euo pipefail`,
+        # so if grep finds no match the pipe exits non-zero and pipefail
+        # propagates it through the assignment, killing the install. This
+        # bites when an operator hand-edits an .env that previously got
+        # poisoned by the (now-fixed) sync_env_keys log-pollution bug —
+        # they may have removed a key entirely. Defensive guards make the
+        # missing-key path fall through to the regenerate-below logic.
         # shellcheck disable=SC1090
-        jwt_secret=$(grep -E '^JWT_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
-        session_secret=$(grep -E '^SESSION_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
-        totp_encryption_key=$(grep -E '^TOTP_ENCRYPTION_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2-)
+        jwt_secret=$(grep -E '^JWT_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        session_secret=$(grep -E '^SESSION_SECRET=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        totp_encryption_key=$(grep -E '^TOTP_ENCRYPTION_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
     fi
 
     [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)

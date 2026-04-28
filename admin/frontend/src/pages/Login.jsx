@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, Smartphone, KeyRound, Eye, EyeOff } from 'lucide-react';
+import QRCode from 'qrcode';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -54,13 +55,23 @@ export default function Login() {
     }
   };
 
-  // Generate QR code when TOTP setup is needed
+  // Generate the QR code locally as a data: URL via the qrcode npm
+  // package. Previously this used api.qrserver.com, which the B4 CSP
+  // (img-src 'self' data:) correctly blocks — Profile.jsx already
+  // does it the right way, this brings Login.jsx into line.
   useEffect(() => {
-    if (totpSetup?.uri || totpSetup?.totpUri) {
-      const uri = totpSetup.uri || totpSetup.totpUri;
-      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(uri)}`;
-      setQrCodeUrl(qrUrl);
-    }
+    const uri = totpSetup?.uri || totpSetup?.totpUri;
+    if (!uri) return;
+    let cancelled = false;
+    QRCode.toDataURL(uri, { width: 200, margin: 1 })
+      .then((dataUrl) => {
+        if (!cancelled) setQrCodeUrl(dataUrl);
+      })
+      .catch((err) => {
+        console.error('Failed to generate TOTP QR code:', err);
+        if (!cancelled) setQrCodeUrl('');
+      });
+    return () => { cancelled = true; };
   }, [totpSetup]);
 
   const copySecret = () => {

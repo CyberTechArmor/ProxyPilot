@@ -719,8 +719,9 @@ ADMIN_USERNAME=${admin_user}
 ADMIN_PASSWORD=${admin_pass}
 ADMIN_TOTP_SECRET=${totp_secret}
 
-# Database
-DATABASE_PATH=/data/proxypilot.db
+# Database — lives in a dedicated subdirectory so the surrounding
+# data/ directory can stay world-traversable for Caddy.
+DATABASE_PATH=/data/db/proxypilot.db
 
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
@@ -920,18 +921,21 @@ main() {
     install_incus
     install_dependencies
 
-    # Create installation directory. The data dir holds the SQLite DB,
-    # WAL/SHM files, and pre-update backups — restrict it to root so the
-    # contents (password hashes, TOTP secrets) are not world-readable on
-    # the host. The container's process runs as root inside its namespace
-    # but the bind-mounted files inherit host UID/perms.
+    # Create installation directory layout. Sensitive content (SQLite DB,
+    # WAL/SHM, pre-update backups) lives in `data/db/` and is locked to
+    # 0700 root:root. Caddy-served content lives in `data/services/` and
+    # must stay world-traversable so the `caddy` user can reach it. The
+    # parent `data/` is therefore 0755 — the security-sensitive material
+    # is gated by the inner `db/` dir, not by the parent.
     log_info "Creating installation directory..."
-    mkdir -p "$INSTALL_DIR/data/services"
-    chmod 700 "$INSTALL_DIR/data" 2>/dev/null || true
-    if [ -f "$INSTALL_DIR/data/proxypilot.db" ]; then
-        chmod 600 "$INSTALL_DIR/data/proxypilot.db" 2>/dev/null || true
-        chmod 600 "$INSTALL_DIR/data/proxypilot.db-wal" 2>/dev/null || true
-        chmod 600 "$INSTALL_DIR/data/proxypilot.db-shm" 2>/dev/null || true
+    mkdir -p "$INSTALL_DIR/data/db" "$INSTALL_DIR/data/services"
+    chmod 755 "$INSTALL_DIR/data" 2>/dev/null || true
+    chmod 700 "$INSTALL_DIR/data/db" 2>/dev/null || true
+    chmod 755 "$INSTALL_DIR/data/services" 2>/dev/null || true
+    if [ -f "$INSTALL_DIR/data/db/proxypilot.db" ]; then
+        chmod 600 "$INSTALL_DIR/data/db/proxypilot.db" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/db/proxypilot.db-wal" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/data/db/proxypilot.db-shm" 2>/dev/null || true
     fi
 
     # Restore service data from backup if available (from previous cleanup)

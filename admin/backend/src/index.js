@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -14,6 +15,7 @@ import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
 import { authenticateToken } from './middleware/auth.js';
 import { csrfProtection } from './middleware/csrf.js';
+import { attachTerminalServer } from './routes/terminal-ws.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -219,7 +221,14 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// Build the underlying HTTP server explicitly so the WebSocket
+// upgrade handler can attach to it. attachTerminalServer registers
+// an 'upgrade' listener that matches /api/terminal/* — it must be
+// installed BEFORE server.listen() so no early upgrade slips past.
+const server = http.createServer(app);
+attachTerminalServer(server);
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);

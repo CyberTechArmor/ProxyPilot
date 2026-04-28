@@ -518,9 +518,19 @@ fi
 # Backup the database before any code changes. From this point on, any
 # error triggers on_error which restores the backup so a half-applied
 # migration cannot brick the install.
-DB_PATH_FOUND="$(resolve_db_path)"
-log "${BLUE}[0/7] Backing up database...${NC}"
-backup_db "$DB_PATH_FOUND"
+#
+# When this run was re-exec'd by the self-update bootstrap below, the
+# pre-pull process already created the backup. Inherit its state via
+# env vars instead of cutting a second backup.
+if [ -n "${PROXYPILOT_DB_BACKUP_FILE:-}" ]; then
+    DB_BACKUP_FILE="$PROXYPILOT_DB_BACKUP_FILE"
+    DB_BACKUP_SOURCE="$PROXYPILOT_DB_BACKUP_SOURCE"
+    log_verbose "Inherited DB backup state from pre-pull process: $DB_BACKUP_FILE"
+else
+    DB_PATH_FOUND="$(resolve_db_path)"
+    log "${BLUE}[0/7] Backing up database...${NC}"
+    backup_db "$DB_PATH_FOUND"
+fi
 trap 'on_error' ERR
 trap 'log "${YELLOW}Update interrupted${NC}"; restore_db; exit 130' INT TERM
 
@@ -557,6 +567,22 @@ else
     if ! $GIT_CMD pull origin main 2>&1 | tee -a "$LOG_FILE"; then
         log "${RED}Error: Failed to pull from remote${NC}"
         exit 1
+    fi
+
+    # Self-update bootstrap. bash reads update.sh from disk in chunks;
+    # any logic past this point that the git pull just changed (e.g.
+    # the Docker-detection block at [4/7]) may still come from the
+    # pre-pull copy in bash's read buffer. Re-exec the freshly-pulled
+    # script so the new logic runs in the current session instead of
+    # waiting for the operator's next manual run. Pass through the
+    # backup state and force --rebuild so the re-exec'd run doesn't
+    # bail on LOCAL==REMOTE or duplicate the DB backup.
+    if [ -z "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
+        export PROXYPILOT_UPDATE_REEXEC=1
+        export PROXYPILOT_DB_BACKUP_FILE="$DB_BACKUP_FILE"
+        export PROXYPILOT_DB_BACKUP_SOURCE="$DB_BACKUP_SOURCE"
+        log_verbose "Re-executing update.sh with the freshly-pulled version"
+        exec bash "$SCRIPT_DIR/update.sh" --rebuild "$@"
     fi
 fi
 

@@ -23,6 +23,27 @@ export default function Login() {
   const [rememberDevice, setRememberDevice] = useState(false);
   const [deviceFingerprint, setDeviceFingerprint] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  // Account lockout state — populated when the login API returns 429
+  // with a `lockedUntil` ISO timestamp. The banner below ticks down
+  // every second and clears itself when the lock window elapses.
+  const [lockedUntil, setLockedUntil] = useState(null);
+  const [lockoutRemaining, setLockoutRemaining] = useState(0);
+
+  useEffect(() => {
+    if (!lockedUntil) return undefined;
+    const tick = () => {
+      const ms = Date.parse(lockedUntil) - Date.now();
+      if (ms <= 0) {
+        setLockedUntil(null);
+        setLockoutRemaining(0);
+      } else {
+        setLockoutRemaining(Math.ceil(ms / 1000));
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [lockedUntil]);
 
   // Initial setup state
   const [setupMode, setSetupMode] = useState(false);
@@ -203,6 +224,16 @@ export default function Login() {
         toast({
           title: 'TOTP Required',
           description: 'Please enter your 6-digit authenticator code',
+        });
+      } else if (error.lockedUntil || error.retryAfterSec) {
+        // Account locked by J.2 lockout enforcement. Render the
+        // countdown inline; banner clears itself when the lock window
+        // elapses so the user can retry without reloading.
+        setLockedUntil(error.lockedUntil || new Date(Date.now() + (error.retryAfterSec || 0) * 1000).toISOString());
+        toast({
+          variant: 'destructive',
+          title: 'Account locked',
+          description: error.message || 'Too many failed login attempts.',
         });
       } else {
         toast({
@@ -451,6 +482,15 @@ export default function Login() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {lockedUntil && lockoutRemaining > 0 && (
+            <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              <div className="font-medium">Account temporarily locked</div>
+              <div className="opacity-90">
+                Too many failed attempts. Try again in {' '}
+                {Math.floor(lockoutRemaining / 60)}m {lockoutRemaining % 60}s.
+              </div>
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Username/Password fields - hidden during TOTP steps */}
             {!totpRequired && !totpSetup && (

@@ -58,6 +58,8 @@ export function getDb() {
 //   3   Phase 2b — drop legacy route-owned columns from services (D.14)
 //   4   Phase 2b — D.14 admin-domain snapshot (post-D.14 hotfix)
 //   5   B5 — encrypt plaintext totp_secret rows at rest
+//   6   M  — sessions table (revocable JWT jti, sliding last_used_at, sudo_until)
+//   7   J  — user lockout columns (failed_attempts, last_failed_at, locked_until)
 //   100 reserved start of Phase 2c migrations (port forwards)
 const SCHEMA_MIGRATIONS = [];
 
@@ -479,6 +481,54 @@ export function initDatabase() {
   // route layer.
   runMigration(db, 5, 'b5_encrypt_totp_secrets_at_rest', (d) => {
     migrateUnencryptedTotpSecrets(d);
+  });
+
+  // Version 7: J — account lockout columns on users. Tracks failed
+  // login attempts and computes a lockout window. Storing on the user
+  // row (not a separate login_attempts table) keeps the lockout check
+  // a single primary-key lookup; the audit_log table already keeps
+  // every LOGIN_FAILED row if forensics needs the full per-attempt
+  // history.
+  runMigration(db, 7, 'j_user_lockout_columns', (d) => {
+    // SQLite ALTER TABLE ADD COLUMN is non-destructive; safe on installs
+    // that already have the columns from a manual hand-fix.
+    const cols = d.prepare(`PRAGMA table_info(users)`).all().map((c) => c.name);
+    if (!cols.includes('failed_attempts')) {
+      d.exec(`ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!cols.includes('last_failed_at')) {
+      d.exec(`ALTER TABLE users ADD COLUMN last_failed_at TEXT`);
+    }
+    if (!cols.includes('locked_until')) {
+      d.exec(`ALTER TABLE users ADD COLUMN locked_until TEXT`);
+    }
+  });
+
+  // Version 6: M — JWT session table (revocable sessions backing the
+  // jti claim in issued tokens). Each successful login inserts a row;
+  // authenticateToken refuses any token whose jti has no active row,
+  // is past expires_at, has revoked_at set, or has been idle longer
+  // than the inactivity window. The K-phase sudo grant lives in the
+  // same row so a single session lookup answers both "is this token
+  // still valid?" and "is sudo currently granted?".
+  runMigration(db, 6, 'm_sessions_table', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TEXT,
+        sudo_until TEXT,
+        ip TEXT,
+        user_agent TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_revoked_at ON sessions(revoked_at);`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_last_used_at ON sessions(last_used_at);`);
   });
 
   // Create file versions table for version control

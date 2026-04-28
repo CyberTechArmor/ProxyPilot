@@ -5,7 +5,7 @@ import { writeFile, readdir, readFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import multer from 'multer';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -1212,7 +1212,7 @@ lxcRouter.post('/containers/:name/resize', async (req, res) => {
 });
 
 // DELETE /containers/:name - Delete a container
-lxcRouter.delete('/containers/:name', async (req, res) => {
+lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
   const { name } = req.params;
 
   if (!validateName(name)) {

@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { validateSession } from './auth.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-change-in-production';
 
@@ -43,12 +44,25 @@ export function verifyWsUpgrade(req) {
     throw err;
   }
 
+  let decoded;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    return { user: decoded };
+    decoded = jwt.verify(token, JWT_SECRET);
   } catch (e) {
     const err = new Error(e.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token');
     err.statusCode = e.name === 'TokenExpiredError' ? 401 : 403;
     throw err;
   }
+
+  // Same session lookup as the HTTP path. A revoked session must
+  // not be able to open a new WebSocket — without this check the
+  // logout / revoke-all-others flow would leave any open WS pinhole
+  // unaffected, and a stolen pre-revocation cookie could still
+  // upgrade.
+  const result = validateSession(decoded.jti);
+  if (!result.ok) {
+    const err = new Error(result.error);
+    err.statusCode = result.status;
+    throw err;
+  }
+  return { user: decoded, session: result.session };
 }

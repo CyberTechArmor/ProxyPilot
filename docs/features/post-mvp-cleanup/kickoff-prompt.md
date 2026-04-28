@@ -309,3 +309,15 @@ After each task ships, run the relevant manual check:
 - 2026-04-28 — Task 1 cleanup: detect Docker deploy early in `update.sh`
   and skip the host-side backend `npm install`; node-pty gyp noise is
   silenced on Docker hosts. Frontend install + vite build untouched.
+- 2026-04-28 — Task 2 audit: backend `uuid` 9 → 14, frontend `vite`
+  5 → 6.4.2 (transitively fixes esbuild) + `postcss` patch.
+  `npm audit` reports 0 vulnerabilities on both trees. Residuals
+  documented in `docs/features/post-mvp-cleanup/known-vulnerabilities.md`
+  (currently empty).
+- 2026-04-28 — Task 3 terminal-v2: `InteractiveTerminal` gained an
+  `initialCwd` prop (T.1); the LxcContainers "Terminal" tab uses the
+  live PTY, "Terminal Beta" is gone (T.2); the legacy
+  `ContainerTerminal` and the dead `api.execInContainer` /
+  `api.tabComplete` helpers are deleted (T.3); the Files browser has
+  an "Open terminal here" button that hands off into a Terminal tab
+  pre-cd'd to the current folder (T.4); MVP spec updated (T.7).

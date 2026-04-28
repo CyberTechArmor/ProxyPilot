@@ -14,7 +14,7 @@ This directory plans that work in two phases — **MVP** first, then
 | File | Purpose |
 |---|---|
 | `terminal-mvp.md` | Spec for the MVP slice (LXC + host shell, no recording, no Docker, no mobile polish). Includes file list, deliverables, verification checklist, function-by-function breakdown. |
-| `terminal-mvp-prompt.md` | Copy-paste prompt for the next Claude Code session. Self-contained kickoff that branches off the hardening branch and walks the MVP checklist. |
+| `terminal-mvp-prompt.md` | Copy-paste prompt for the next Claude Code session. Self-contained kickoff that branches off `main` and walks the MVP checklist. |
 | `terminal-production.md` | Spec for production hardening (Docker, asciinema recording, replay UI, reconnect grace, mobile, ACL, settings UI). Contains a `## Post-MVP Use Notes` section the operator fills in BEFORE the next session runs. |
 | `terminal-production-prompt.md` | Copy-paste prompt for the production session. Reads operator feedback first, refuses to proceed if the feedback section is empty. |
 
@@ -58,9 +58,10 @@ operator actually needs rather than what the spec writer guessed at.
 
 ## Branch base
 
-Both phases branch from `claude/proxypilot-progress-review-E6iNc` (the 15-commit
-hardening branch) — every prerequisite (cookie + CSRF auth, encrypted secrets,
-versioned migrations, tightened CSP, rate limiting, body limits, B1 cap-drop,
-deploy validation) is already in place there. The terminal feature does not
-require any of the planned phases (Phase 2c, Phase 22, Phase 3+) and does not
-block them either.
+Both phases branch from `main`. The hardening prerequisites — cookie + CSRF
+auth, encrypted-at-rest TOTP secrets, versioned migrations, tightened CSP,
+rate limiting on auth endpoints, scoped body limits, B1 cap-drop with
+`no-new-privileges`, install/update deploy validation with DB backup +
+auto-restore on failure, and the `cad4e46` deploy-regression fixes — are
+all merged. The terminal feature does not require any of the planned phases
+(Phase 2c, Phase 22, Phase 3+) and does not block them either.

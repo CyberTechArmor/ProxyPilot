@@ -552,6 +552,77 @@ authRouter.post('/login', async (req, res) => {
   }
 });
 
+// Sudo-mode re-auth. Caller must already be authenticated AND must
+// re-prove password + TOTP. On success we set sudo_until on the
+// current session row to NOW + SUDO_GRANT_HOURS (default 4h). The
+// requireSudo middleware (next commit) checks this column on every
+// destructive endpoint; expiry is sliding because that middleware
+// re-arms sudo_until on every successful sudo-protected call.
+//
+// Failures here count toward the J.2 lockout machinery just like a
+// regular login fail — same threat model (an attacker who got a
+// session token still has to clear password + TOTP to take a
+// destructive action).
+const SUDO_GRANT_HOURS = parseFloat(process.env.SUDO_GRANT_HOURS || '4');
+
+authRouter.post('/sudo', authenticateToken, async (req, res) => {
+  try {
+    const { password, totpCode } = req.body || {};
+    if (!password || !totpCode) {
+      return res.status(400).json({ error: 'password and totpCode are required' });
+    }
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    const lockState = checkLockout(user);
+    if (lockState.locked) {
+      return res
+        .status(429)
+        .set('Retry-After', String(lockState.retryAfterSec))
+        .json({
+          error: 'Account temporarily locked due to repeated failed sudo attempts.',
+          lockedUntil: lockState.until,
+          retryAfterSec: lockState.retryAfterSec,
+        });
+    }
+
+    const passwordValid = await bcrypt.compare(password, user.password_hash);
+    if (!passwordValid) {
+      recordLoginFailure(db, user, req);
+      logAudit(req.user.id, 'SUDO_DENIED', 'user', req.user.id, { reason: 'Invalid password' }, req.ip);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const totp = new OTPAuth.TOTP({
+      issuer: 'ProxyPilot',
+      label: user.username,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
+    });
+    const delta = totp.validate({ token: totpCode, window: 1 });
+    if (delta === null) {
+      recordLoginFailure(db, user, req);
+      logAudit(req.user.id, 'SUDO_DENIED', 'user', req.user.id, { reason: 'Invalid TOTP' }, req.ip);
+      return res.status(401).json({ error: 'Invalid TOTP code' });
+    }
+
+    resetLoginFailures(db, user.id);
+    const sudoUntilISO = new Date(Date.now() + SUDO_GRANT_HOURS * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `UPDATE sessions SET sudo_until = ? WHERE id = ? AND revoked_at IS NULL`
+    ).run(sudoUntilISO, req.user.jti);
+    logAudit(req.user.id, 'SUDO_GRANTED', 'session', req.user.jti, { sudo_until: sudoUntilISO }, req.ip);
+
+    res.json({ success: true, sudoUntil: sudoUntilISO });
+  } catch (e) {
+    console.error('sudo error:', e);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 // Verify token endpoint
 authRouter.get('/verify', authenticateToken, (req, res) => {
   const db = getDb();

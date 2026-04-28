@@ -125,7 +125,7 @@ authRouter.post('/initial-setup', async (req, res) => {
     logAudit(user.id, 'INITIAL_PASSWORD_SET', 'user', user.id, {}, req.ip);
 
     // Generate token so user is logged in immediately (still needs TOTP setup)
-    const token = generateToken(user);
+    const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
     setAuthCookies(res, token);
 
     res.json({
@@ -223,7 +223,7 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
 
     // Generate fresh token with updated user info
     const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    const token = generateToken(freshUser);
+    const token = generateToken(freshUser, { ip: req.ip, userAgent: req.headers["user-agent"] });
     setAuthCookies(res, token);
 
     res.json({
@@ -307,7 +307,7 @@ authRouter.post('/login', async (req, res) => {
         `).run(req.ip, trustedDevice.id);
 
         // Generate token + set cookies (canonical browser path)
-        const token = generateToken(user);
+        const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
         setAuthCookies(res, token);
         logAudit(user.id, 'LOGIN_SUCCESS_TRUSTED_DEVICE', 'user', user.id, { deviceName: trustedDevice.device_name }, req.ip);
 
@@ -440,7 +440,7 @@ authRouter.post('/login', async (req, res) => {
     }
 
     // Generate token + set cookies (canonical browser path)
-    const token = generateToken(user);
+    const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
     setAuthCookies(res, token);
 
     logAudit(user.id, 'LOGIN_SUCCESS', 'user', user.id, {}, req.ip);

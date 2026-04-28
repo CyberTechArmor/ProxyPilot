@@ -13,7 +13,7 @@ import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
-import { authenticateToken, assertJwtSecret } from './middleware/auth.js';
+import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -226,6 +226,12 @@ app.use((err, req, res, next) => {
       : err.message,
   });
 });
+
+// Stale-session sweeper: reap revoked/expired session rows older than
+// SESSION_RETENTION_DAYS so the sessions table stays bounded under
+// long-running deployments. Once on boot, then every 6 hours.
+sweepStaleSessions();
+setInterval(sweepStaleSessions, 6 * 60 * 60 * 1000).unref();
 
 // Wrap the express app in an http.Server so we can attach a WebSocket
 // upgrade handler on the same port. The streaming-terminal route uses

@@ -13,6 +13,12 @@ const JWT_SECRET = process.env.JWT_SECRET || DEV_JWT_FALLBACK;
 const SESSION_TTL_HOURS = parseInt(process.env.SESSION_TTL_HOURS || '24', 10);
 const SESSION_IDLE_HOURS = parseFloat(process.env.SESSION_IDLE_HOURS || '4');
 
+// Stale-row retention: rows revoked or expired more than this many
+// days ago are deleted by sweepStaleSessions(). 30 days is enough for
+// post-hoc forensics ("when was that session revoked?") without
+// letting the table grow without bound.
+const SESSION_RETENTION_DAYS = parseInt(process.env.SESSION_RETENTION_DAYS || '30', 10);
+
 // Boot-time assertion: refuse to run in production with a missing,
 // default, or weak JWT_SECRET. install.sh and update.sh both generate
 // a 64-byte random secret on a fresh deploy or on first .env sync,
@@ -35,6 +41,26 @@ export function assertJwtSecret() {
     `Generate one with \`openssl rand -base64 64\` and put it in /opt/proxypilot/.env.`
   );
   process.exit(1);
+}
+
+// Delete session rows whose expires_at OR revoked_at is older than
+// SESSION_RETENTION_DAYS. Idempotent; intended to run on backend
+// boot and on a 6h interval. Returns the number of rows deleted so
+// the caller can log it. Errors are swallowed — a transient sweep
+// failure must not crash the long-lived backend process.
+export function sweepStaleSessions() {
+  try {
+    const db = getDb();
+    const result = db.prepare(
+      `DELETE FROM sessions
+        WHERE (revoked_at  IS NOT NULL AND datetime(revoked_at) < datetime('now', '-' || ? || ' days'))
+           OR (revoked_at  IS NULL     AND datetime(expires_at) < datetime('now', '-' || ? || ' days'))`
+    ).run(SESSION_RETENTION_DAYS, SESSION_RETENTION_DAYS);
+    return result.changes;
+  } catch (e) {
+    console.error('sweepStaleSessions failed:', e?.message || e);
+    return 0;
+  }
 }
 
 // Look up a session by its JWT jti claim and validate it against the

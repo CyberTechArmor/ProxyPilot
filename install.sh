@@ -265,14 +265,18 @@ install_caddy() {
         cat > /etc/caddy/custom/README.md <<'CUSTOMEOF'
 # ProxyPilot — Operator Custom Caddy Snippets
 
-Files in this directory are imported into the main Caddyfile but
-**never touched by ProxyPilot**. Use this directory for one-off
-route exceptions, experimental Caddy modules, or imports from other
-config trees.
+Files matching `*.caddy` in this directory are imported into the main
+Caddyfile but never touched by ProxyPilot. Use this directory for
+one-off route exceptions, experimental Caddy modules, or imports from
+other config trees.
 
-ProxyPilot regenerates files in `/etc/caddy/sites` on every service
-edit. Anything you put there will be lost. Put hand-written config
-here instead.
+ProxyPilot regenerates files in /etc/caddy/sites on every service
+edit; anything placed there is lost. Put hand-written config here
+instead.
+
+IMPORTANT: only files with the `.caddy` extension are imported.
+README.md, .bak files, and editor swap files are ignored. Name your
+snippets with a `.caddy` extension — for example, `mycustom.caddy`.
 
 After editing, validate and reload:
 
@@ -290,7 +294,7 @@ CUSTOMEOF
 }
 
 import /etc/caddy/sites/*
-import /etc/caddy/custom/*
+import /etc/caddy/custom/*.caddy
 CADDYEOF
 
     # Enable Caddy but don't start yet - will start after site config is written
@@ -541,7 +545,7 @@ create_proxypilot_caddy_config() {
 }
 
 import /etc/caddy/sites/*
-import /etc/caddy/custom/*
+import /etc/caddy/custom/*.caddy
 GLOBALEOF
 
     cat > "/etc/caddy/sites/${domain}" <<EOF

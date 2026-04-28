@@ -106,7 +106,12 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - Mobile virtual-keyboard helper buttons (Tab / Esc / Ctrl / Alt).
 - Per-service `canWriteService()` ACL check on container terminals.
 - Operator-configurable settings UI for the terminal limits.
-- Removing the legacy request-response `ContainerTerminal` component.
+- ~~Removing the legacy request-response `ContainerTerminal` component.~~
+  Done in the post-MVP cleanup PR — the "Terminal" tab on
+  LxcContainers now uses `InteractiveTerminal` exclusively, the
+  "Terminal Beta" tab is gone, the legacy component is deleted, and
+  the Files browser hands a starting cwd to the new terminal via an
+  `initialCwd` prop on `InteractiveTerminal`.
 
 ## Function-by-Function Checklist (to be ticked by the executing session)
 

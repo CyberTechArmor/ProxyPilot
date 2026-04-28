@@ -8,6 +8,74 @@ import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 
+// Account lockout knobs. Defaults: after 10 failed login attempts
+// inside a 30-minute window the user is locked for 30 minutes. The
+// rate limiter on /api/auth/login (10 req / 15 min) is the first
+// line of defence; lockout is the second, so distributed brute-force
+// against a single account hits a real wall even with a botnet.
+const LOGIN_MAX_FAILURES = parseInt(process.env.LOGIN_MAX_FAILURES || '10', 10);
+const LOGIN_FAILURE_WINDOW_MIN = parseInt(process.env.LOGIN_FAILURE_WINDOW_MIN || '30', 10);
+const LOGIN_LOCKOUT_MIN = parseInt(process.env.LOGIN_LOCKOUT_MIN || '30', 10);
+
+// Returns { locked: true, retryAfterSec } if user.locked_until is in
+// the future, else { locked: false }. Pass `null` for users that
+// don't exist (typo'd usernames) — safe no-op.
+function checkLockout(user) {
+  if (!user || !user.locked_until) return { locked: false };
+  const untilMs = Date.parse(user.locked_until);
+  if (!Number.isFinite(untilMs) || untilMs <= Date.now()) return { locked: false };
+  return { locked: true, retryAfterSec: Math.ceil((untilMs - Date.now()) / 1000), until: user.locked_until };
+}
+
+// Record a failed login. Increments failed_attempts, refreshes
+// last_failed_at, and — if the new count crosses the threshold and
+// the previous failure was inside the window — sets locked_until.
+// If the previous failure was OUTSIDE the window, resets the counter
+// to 1 (fresh streak) before re-checking.
+function recordLoginFailure(db, user, req) {
+  if (!user) return;
+  const now = Date.now();
+  const prevFailedAt = user.last_failed_at ? Date.parse(user.last_failed_at) : 0;
+  const windowMs = LOGIN_FAILURE_WINDOW_MIN * 60 * 1000;
+  let newCount = (user.failed_attempts || 0) + 1;
+  if (prevFailedAt && now - prevFailedAt > windowMs) {
+    newCount = 1; // start a fresh streak
+  }
+
+  let lockedUntil = null;
+  if (newCount >= LOGIN_MAX_FAILURES) {
+    lockedUntil = new Date(now + LOGIN_LOCKOUT_MIN * 60 * 1000).toISOString();
+  }
+
+  db.prepare(
+    `UPDATE users
+        SET failed_attempts = ?,
+            last_failed_at  = CURRENT_TIMESTAMP,
+            locked_until    = ?
+      WHERE id = ?`
+  ).run(newCount, lockedUntil, user.id);
+
+  if (lockedUntil) {
+    logAudit(
+      null,
+      'LOGIN_LOCKOUT',
+      'user',
+      user.id,
+      { failed_attempts: newCount, locked_until: lockedUntil },
+      req.ip,
+    );
+  }
+}
+
+// Reset failed_attempts on a clean win.
+function resetLoginFailures(db, userId) {
+  db.prepare(
+    `UPDATE users
+        SET failed_attempts = 0, last_failed_at = NULL, locked_until = NULL
+      WHERE id = ?`
+  ).run(userId);
+}
+
 // Cookie defaults shared by login/setup/logout. HttpOnly on pp_token
 // prevents XSS-driven theft; SameSite=Strict prevents cross-site
 // abuse; Secure is required in production where HTTPS is enforced.
@@ -271,6 +339,20 @@ authRouter.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // Lockout check — runs BEFORE password compare so a locked account
+    // doesn't reveal whether the password was correct via timing.
+    const lockState = checkLockout(user);
+    if (lockState.locked) {
+      return res
+        .status(429)
+        .set('Retry-After', String(lockState.retryAfterSec))
+        .json({
+          error: 'Account temporarily locked due to repeated failed login attempts.',
+          lockedUntil: lockState.until,
+          retryAfterSec: lockState.retryAfterSec,
+        });
+    }
+
     // Check if user needs initial setup (empty password)
     if (!user.password_hash) {
       return res.status(401).json({
@@ -282,6 +364,7 @@ authRouter.post('/login', async (req, res) => {
     // Verify password
     const passwordValid = await bcrypt.compare(password, user.password_hash);
     if (!passwordValid) {
+      recordLoginFailure(db, user, req);
       logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid password' }, req.ip);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -307,6 +390,7 @@ authRouter.post('/login', async (req, res) => {
         `).run(req.ip, trustedDevice.id);
 
         // Generate token + set cookies (canonical browser path)
+        resetLoginFailures(db, user.id);
         const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
         setAuthCookies(res, token);
         logAudit(user.id, 'LOGIN_SUCCESS_TRUSTED_DEVICE', 'user', user.id, { deviceName: trustedDevice.device_name }, req.ip);
@@ -345,6 +429,7 @@ authRouter.post('/login', async (req, res) => {
 
       const delta = totp.validate({ token: totpCode, window: 1 });
       if (delta === null) {
+        recordLoginFailure(db, user, req);
         logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid TOTP' }, req.ip);
         return res.status(401).json({
           error: 'Invalid TOTP code',
@@ -409,6 +494,7 @@ authRouter.post('/login', async (req, res) => {
 
       const delta = totp.validate({ token: totpCode, window: 1 });
       if (delta === null) {
+        recordLoginFailure(db, user, req);
         logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid TOTP setup code' }, req.ip);
         return res.status(401).json({
           error: 'Invalid TOTP code. Please scan the QR code and try again.',
@@ -440,6 +526,7 @@ authRouter.post('/login', async (req, res) => {
     }
 
     // Generate token + set cookies (canonical browser path)
+    resetLoginFailures(db, user.id);
     const token = generateToken(user, { ip: req.ip, userAgent: req.headers["user-agent"] });
     setAuthCookies(res, token);
 

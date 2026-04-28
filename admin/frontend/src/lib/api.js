@@ -1,3 +1,5 @@
+import { requestSudo } from './sudo.js';
+
 const API_BASE = '/api';
 
 class ApiError extends Error {
@@ -20,7 +22,7 @@ function readCookie(name) {
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-async function request(endpoint, options = {}) {
+async function request(endpoint, options = {}, _retryOnSudo = true) {
   const method = (options.method || 'GET').toUpperCase();
   const headers = {
     'Content-Type': 'application/json',
@@ -48,6 +50,18 @@ async function request(endpoint, options = {}) {
   const data = await response.json();
 
   if (response.status === 401) {
+    // Sudo gate: backend wants password+TOTP re-auth before letting
+    // this destructive request through. Trigger the global modal,
+    // wait for the user to clear sudo, then retry the original call
+    // exactly once. Only retry if we're not already inside a retry.
+    if (data.sudo_required && _retryOnSudo) {
+      try {
+        await requestSudo();
+      } catch {
+        throw new ApiError('Sudo cancelled', 401, data);
+      }
+      return request(endpoint, options, false);
+    }
     // Don't redirect if this is a login/setup attempt with special flow flags
     if (data.totpRequired || data.totpSetupRequired || data.setupRequired) {
       throw new ApiError(data.error || 'Authentication step required', 401, data);
@@ -93,6 +107,16 @@ export const api = {
   verify: () => request('/auth/verify'),
 
   logout: () => request('/auth/logout', { method: 'POST' }),
+
+  // Sudo re-auth (K.2). Always passes _retryOnSudo=false so that a
+  // failed sudo (bad password / bad TOTP) doesn't recursively prompt
+  // the user back into the same modal — the modal handles the error
+  // inline.
+  sudo: ({ password, totpCode }) =>
+    request('/auth/sudo', {
+      method: 'POST',
+      body: JSON.stringify({ password, totpCode }),
+    }, false),
 
   // Services. Phase 2b audit: a service now represents one logical workload
   // (typically an LXC or Docker container) that can expose multiple HTTP

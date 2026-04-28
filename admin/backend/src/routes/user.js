@@ -4,7 +4,7 @@ import * as OTPAuth from 'otpauth';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
@@ -513,7 +513,7 @@ userRouter.post('/sessions/:id/revoke', (req, res) => {
 // Revoke every session for the current user EXCEPT the one making
 // the request. Lets the operator nuke a stolen / leaked cookie from
 // a known-good device without logging themselves out.
-userRouter.post('/sessions/revoke-all-others', (req, res) => {
+userRouter.post('/sessions/revoke-all-others', requireSudo, (req, res) => {
   const db = getDb();
   const currentJti = req.user?.jti || '';
   const result = db.prepare(
@@ -605,7 +605,7 @@ const createUserSchema = z.object({
 });
 
 // Create new user
-userRouter.post('/users', requireAdmin, async (req, res) => {
+userRouter.post('/users', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { username, displayName, role } = createUserSchema.parse(req.body);
     const db = getDb();
@@ -657,7 +657,7 @@ const updateUserSchema = z.object({
 });
 
 // Update user
-userRouter.put('/users/:id', requireAdmin, async (req, res) => {
+userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { id } = req.params;
     const { displayName, role, resetPassword } = updateUserSchema.parse(req.body);
@@ -721,7 +721,7 @@ userRouter.put('/users/:id', requireAdmin, async (req, res) => {
 });
 
 // Delete user
-userRouter.delete('/users/:id', requireAdmin, (req, res) => {
+userRouter.delete('/users/:id', requireAdmin, requireSudo, (req, res) => {
   try {
     const { id } = req.params;
     const { totpCode } = req.body;
@@ -1272,7 +1272,7 @@ function findNpm() {
 }
 
 // Perform update (Admin only)
-userRouter.post('/version/update', requireAdmin, async (req, res) => {
+userRouter.post('/version/update', requireAdmin, requireSudo, async (req, res) => {
   try {
     // Check if update is already running
     if (updateProgress.status === 'running') {

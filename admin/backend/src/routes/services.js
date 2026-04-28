@@ -10,7 +10,7 @@ import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { decryptSecret } from '../lib/secrets.js';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, requireSudo } from '../middleware/auth.js';
 
 const execAsync = promisify(exec);
 
@@ -3268,7 +3268,7 @@ servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
 });
 
 // Delete service (requires TOTP)
-servicesRouter.delete('/:id', async (req, res) => {
+servicesRouter.delete('/:id', requireSudo, async (req, res) => {
   try {
     const { totpCode } = deleteServiceSchema.parse(req.body);
     const db = getDb();

@@ -763,3 +763,243 @@ authenticated request bumps expiry, 30-min inactivity = expired.
 - [ ] L.V4 — `INACTIVITY_TIMEOUT_MIN=120` extends to 2 hours.
 
 When L.V1-V4 pass, mark Phase L ✅.
+
+---
+
+## Phase M — JWT revocation via DB-backed denylist
+
+**Goal.** Logout currently is browser-side only. Server can't revoke
+a leaked token. Add a denylist keyed by JWT `jti` claim.
+
+**Deliverables.**
+
+* Migration version 7: new table
+  ```sql
+  CREATE TABLE jwt_denylist (
+    jti TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    revoked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL,
+    reason TEXT
+  );
+  CREATE INDEX idx_jwt_denylist_expires ON jwt_denylist(expires_at);
+  ```
+* `generateToken()` in `middleware/auth.js` adds a random `jti`
+  (UUID) to every token.
+* `authenticateToken` checks `SELECT 1 FROM jwt_denylist WHERE jti = ?`
+  before accepting a token.
+* `/api/auth/logout` inserts the current `jti` into `jwt_denylist`
+  with `expires_at = decoded.exp` and `reason = 'logout'`.
+* Admin endpoint `POST /api/admin/users/:id/revoke-sessions` —
+  inserts denylist rows for every active token tied to that user.
+  Best-effort (we don't have a token registry, only revoke after-
+  the-fact when we see the token). For now: revoke the user's
+  CURRENT cookie (we know its jti) and set
+  `users.revoke_before` = now; auth checks reject any token issued
+  before that timestamp regardless of jti. Two-pronged.
+* Cleanup job: every 24h, delete denylist rows where
+  `expires_at < now()` (the token has naturally expired anyway,
+  the row is no longer useful).
+
+**Acceptance tests.**
+
+- [ ] M.V1 — Login, copy the cookie via browser devtools. Logout. Try to use the copied cookie — auth rejects with 401.
+- [ ] M.V2 — Two browsers logged in as same user. Admin clicks "Revoke all sessions for thomas". Both browsers next-request 401.
+- [ ] M.V3 — Cleanup job runs after 24h, expired denylist rows pruned.
+- [ ] M.V4 — Performance: 1000 expired tokens in the denylist, the SELECT WHERE jti = ? lookup uses the PRIMARY KEY index, < 1ms.
+
+When M.V1-V4 pass, mark Phase M ✅.
+
+---
+
+## Phase N — TOTP_ENCRYPTION_KEY rotation tooling
+
+**Goal.** Today: lose the key = every user re-enrolls. Need an
+admin command that re-encrypts every `users.totp_secret` under a
+new key while supporting both old + new key during the rotation
+window.
+
+**Deliverables.**
+
+* Two env vars supported:
+  * `TOTP_ENCRYPTION_KEY` — the active key (used for new writes)
+  * `TOTP_ENCRYPTION_KEY_PREVIOUS` — the previous key (decrypt-only fallback)
+* `decryptSecret()` in `lib/secrets.js`: if decrypt with current
+  key fails, retry with previous key. Audit-log
+  `TOTP_DECRYPT_FALLBACK` events for visibility.
+* New CLI: `proxypilot rotate-totp-key` (a small Node script
+  invoked as `node admin/backend/scripts/rotate-totp-key.js`):
+  * Prompts (or reads from stdin) for the new key.
+  * Validates: 64 hex chars.
+  * For every `users.totp_secret`: decrypt with current key, encrypt
+    with new key, UPDATE.
+  * Writes both keys to `.env`: PREVIOUS = the old current,
+    current = the new one.
+  * Reports counts: `migrated N rows`. Fails loud on any decrypt
+    error, leaves DB unchanged in that case.
+* The dashboard's Settings page gets an admin-only "Rotate TOTP
+  encryption key" action that triggers the same flow via the
+  agent (so the flow runs on the host, not inside the container).
+  Gated by Phase K's sudo-mode.
+* After rotation, after a configurable delay (default 24h, env
+  `TOTP_PREVIOUS_KEY_RETENTION_HOURS`), an automated cleanup
+  removes `TOTP_ENCRYPTION_KEY_PREVIOUS` from `.env`. Operator
+  can rerun rotation if they want a longer window.
+
+**Acceptance tests.**
+
+- [ ] N.V1 — Run rotation. Every user can still log in with their existing TOTP authenticator (no re-enrollment).
+- [ ] N.V2 — Inspect DB: `users.totp_secret` values changed (new ciphertext) but decrypt to the same plaintext base32 as before.
+- [ ] N.V3 — `.env` has both keys present.
+- [ ] N.V4 — After 24h cleanup, only the current key remains in `.env`.
+- [ ] N.V5 — Rotation flow gated by sudo-mode (Phase K).
+
+When N.V1-V5 pass, mark Phase N ✅.
+
+---
+
+## Phase O — JWT_SECRET rotation with old-key fallback
+
+**Goal.** Rotating `JWT_SECRET` today logs everyone out. Should
+support a rotation window where old tokens validate against the
+previous secret.
+
+**Deliverables.**
+
+* Two env vars: `JWT_SECRET` (signs new), `JWT_SECRET_PREVIOUS` (verify-only fallback).
+* `authenticateToken`: try verify with current secret; on `jwt.verify` failure, retry with previous secret. Set a header `X-Token-Previous-Secret: 1` on the response so the frontend can refresh the cookie via `/api/auth/refresh`.
+* `/api/auth/refresh` — accepts the old-secret-signed token, re-signs with the new secret, returns the new cookie.
+* CLI + dashboard action `rotate-jwt-secret`:
+  * Generates a new 64-char secret.
+  * Moves current to PREVIOUS, sets new as current.
+  * Increments a global counter that triggers `/api/auth/refresh` for every authenticated request via the X-header signal above.
+* After 30 minutes (longer than the inactivity timeout in Phase L),
+  remove `JWT_SECRET_PREVIOUS` automatically. Tokens still signed
+  by the previous secret then become invalid (forcing re-login).
+
+**Acceptance tests.**
+
+- [ ] O.V1 — Run rotation. Currently-logged-in users keep working — their next request silently refreshes their cookie.
+- [ ] O.V2 — A user idle past the rotation window (30+ min) gets bounced to login on next click.
+- [ ] O.V3 — Rotation flow gated by sudo-mode.
+- [ ] O.V4 — Audit log records `JWT_SECRET_ROTATED` event with the operator's user_id.
+
+When O.V1-V4 pass, mark Phase O ✅.
+
+---
+
+## Phase P — Password breach check (HIBP k-anonymity)
+
+**Goal.** 12-char minimum doesn't catch reused leaked passwords. On
+password set/change, check against haveibeenpwned.com using their
+k-anonymity API (only first 5 chars of SHA-1 hash sent over the
+wire — privacy-preserving).
+
+**Deliverables.**
+
+* New helper `lib/passwordCheck.js`:
+  * `isPasswordPwned(plaintext) → Promise<{ pwned: bool, count?: number }>`
+  * Hashes with SHA-1, sends first 5 hex chars to
+    `https://api.pwnedpasswords.com/range/<5chars>`, parses
+    response, checks for the rest of the hash. Returns count
+    of breaches if pwned.
+* Endpoints `/api/auth/initial-setup`, `/api/user/change-password`,
+  `/api/users` (admin-create-user) use the helper.
+* Behavior on pwned password:
+  * Default: warn, don't block (operator can override with
+    `PASSWORD_PWNED_BEHAVIOR=block`).
+  * In block mode: return 400 with clear message.
+* Network failure handling: HIBP API unreachable → log a warning,
+  let the password through (don't take down auth because of an
+  external dependency).
+* Frontend: surface the warning (or block) clearly.
+
+**Acceptance tests.**
+
+- [ ] P.V1 — Set password to `password123` (commonly pwned) — warning appears.
+- [ ] P.V2 — Set `PASSWORD_PWNED_BEHAVIOR=block`, retry — blocked.
+- [ ] P.V3 — Set a strong password (e.g., `correct horse battery staple something something`) — accepted, no warning.
+- [ ] P.V4 — Block HIBP API at the firewall, set a password — accepted with warning logged.
+
+When P.V1-V4 pass, mark Phase P ✅.
+
+---
+
+## Phase Q — Audit log integrity (hash chain)
+
+**Goal.** An attacker with DB write access can edit `audit_log`
+freely today. Add a hash chain so tampering is detectable.
+
+**Deliverables.**
+
+* Migration version 8: `audit_log` gains
+  ```sql
+  ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;
+  ALTER TABLE audit_log ADD COLUMN row_hash TEXT;
+  ```
+* `logAudit()` updated to:
+  * `prev_hash` = the most recent row's `row_hash` (or empty string for the first row)
+  * `row_hash` = `SHA-256(prev_hash || id || ts || user_id || action || resource_type || resource_id || JSON(details))`
+* New endpoint `GET /api/admin/audit/verify`:
+  * Walks the chain from oldest to newest.
+  * Recomputes each `row_hash` and compares.
+  * Returns `{ valid: bool, broken_at_id?: string }`.
+* Dashboard "Audit Log" page gets a "Verify Integrity" button (admin-only).
+* Migration step for existing audit_log rows: backfill `prev_hash`
+  + `row_hash` linearly. Anchor commit recorded as the "trust
+  anchor" — anything before this point is grandfathered.
+
+**Acceptance tests.**
+
+- [ ] Q.V1 — Fresh install: every new audit_log row has prev_hash + row_hash populated.
+- [ ] Q.V2 — `GET /api/admin/audit/verify` returns `{valid: true}`.
+- [ ] Q.V3 — Manually edit one `audit_log.details` field via sqlite3 CLI. Verify endpoint returns `{valid: false, broken_at_id: <the row>}`.
+- [ ] Q.V4 — Existing install with audit history: migration backfills hashes, verify passes from the migration anchor onward.
+
+When Q.V1-V4 pass, mark Phase Q ✅.
+
+---
+
+## Phase R — Real e2e deploy CI
+
+**Goal.** A disposable Debian VM that gets `install.sh` run + a
+puppeteer flow that creates a service / opens a terminal / verifies
+Caddy reload. Pre-merge gate. Would have caught all five regressions
+on this branch on the first push.
+
+**Deliverables.**
+
+* `.github/workflows/e2e-deploy.yml` — GitHub Actions workflow:
+  * Spins up a Debian 13 ephemeral VM (via Vagrant + libvirt OR
+    via a self-hosted runner with KVM access — the latter is
+    faster and avoids public CI rate limits on container-based runners).
+  * Clones the PR branch.
+  * Runs `install.sh` non-interactively (env vars provide DOMAIN,
+    ADMIN_USERNAME, etc.).
+  * Runs a puppeteer flow:
+    * Navigate to https://<test-domain>/
+    * Complete first-time setup (password + TOTP via OTPAuth lib)
+    * Add Service → Static Site → confirm route appears
+    * Open Incus page → confirm renders
+    * Settings → check version (should match package.json)
+  * Runs `update.sh` (with the latest changes already pulled)
+    against the same VM.
+  * Verifies post-update health.
+* The puppeteer flow uses the same auth-bypass pattern documented
+  in `docs/core/plan/NEXT-SESSION-PROMPT.md` lessons section.
+* Required CI status check on `main` so PRs can't merge red.
+* Documentation in
+  `docs/features/security-completion/CI.md` for setting up the
+  self-hosted runner if the operator wants to host it.
+
+**Acceptance tests.**
+
+- [ ] R.V1 — Open a PR with a deliberately-broken change (e.g., introduce a typo in a Caddyfile generator). CI fails.
+- [ ] R.V2 — Open a PR with a clean change. CI passes within 15 minutes.
+- [ ] R.V3 — `update.sh` step in CI verifies the upgrade-from-current-main path works.
+- [ ] R.V4 — Branch protection on main enforces the CI status check.
+
+When R.V1-V4 pass, mark Phase R ✅.
+
+**After R: every security gap I called out as production-blocking is
+closed. The honest production-readiness statement loses every caveat.**

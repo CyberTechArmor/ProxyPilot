@@ -66,6 +66,8 @@ async function ensureCaddyStructure() {
 
   // Ensure operator-owned custom directory exists with a README explaining
   // the contract. ProxyPilot does not enumerate or rewrite files here.
+  // The Caddyfile imports only `*.caddy` files from this dir so the README
+  // (and any other non-Caddy files) are ignored by Caddy's config parser.
   await mkdir(CADDY_CUSTOM_DIR, { recursive: true }).catch(() => {});
   const readmePath = `${CADDY_CUSTOM_DIR}/README.md`;
   if (!existsSync(readmePath)) {
@@ -73,20 +75,20 @@ async function ensureCaddyStructure() {
       readmePath,
       `# ProxyPilot — Operator Custom Caddy Snippets
 
-Files in this directory are imported into the main Caddyfile but
-**never touched by ProxyPilot**. Use this directory to add Caddy
-configuration that ProxyPilot's UI cannot express:
-
-- one-off route exceptions
-- experimental Caddy modules
-- imports from other config trees
-- snippet definitions reused across services
+Files matching \`*.caddy\` in this directory are imported into the main
+Caddyfile but never touched by ProxyPilot. Use this directory for
+one-off route exceptions, experimental Caddy modules, imports from
+other config trees, or snippet definitions reused across services.
 
 ProxyPilot regenerates files in \`${CADDY_SITES_DIR}\` on every service
-edit. Anything you put there will be lost. Put your hand-written
-config here instead.
+edit; anything placed there is lost. Put hand-written config here
+instead.
 
-After editing files in this directory, validate and reload Caddy:
+IMPORTANT: only files with the \`.caddy\` extension are imported.
+README.md, .bak files, and editor swap files are ignored. Name your
+snippets with a \`.caddy\` extension — for example, \`mycustom.caddy\`.
+
+After editing, validate and reload Caddy:
 
     caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null
     caddy reload --config ${CADDY_CONFIG_FILE}
@@ -97,8 +99,9 @@ keeps the previously-loaded config until a valid one is supplied.
     ).catch(() => {});
   }
 
-  // Ensure main Caddyfile exists with global options and BOTH import
-  // directives (sites + custom).
+  // Ensure main Caddyfile exists with global options and both imports.
+  // Note the .caddy glob on custom — Caddy's import directive uses
+  // shell-style globs and `*` would match the README.md, breaking parse.
   if (!existsSync(CADDY_CONFIG_FILE)) {
     const acmeEmail = process.env.ACME_EMAIL || '';
     const emailLine = acmeEmail ? `\n    email ${acmeEmail}` : '';
@@ -107,21 +110,37 @@ keeps the previously-loaded config until a valid one is supplied.
 }
 
 import ${CADDY_SITES_DIR}/*
-import ${CADDY_CUSTOM_DIR}/*
+import ${CADDY_CUSTOM_DIR}/*.caddy
 `;
     await writeFile(CADDY_CONFIG_FILE, mainConfig);
     return;
   }
 
-  // Existing Caddyfile — append the custom-import line if missing. We do
-  // not rewrite anything else; if the operator has customized the main
-  // Caddyfile heavily, this single appended line is harmless.
+  // Existing Caddyfile — append the custom-import line if missing, and
+  // upgrade an old `*` glob to `*.caddy` if a previous version of this
+  // helper wrote it (defensive: an install that was upgraded between
+  // glob-versions would otherwise have a parse-breaking import line).
   try {
-    const current = await readFile(CADDY_CONFIG_FILE, 'utf-8');
-    if (!current.includes(`import ${CADDY_CUSTOM_DIR}/`)) {
+    let current = await readFile(CADDY_CONFIG_FILE, 'utf-8');
+    const oldGlob = `import ${CADDY_CUSTOM_DIR}/*`;
+    const newGlob = `import ${CADDY_CUSTOM_DIR}/*.caddy`;
+
+    // Upgrade buggy `*` glob written by an earlier helper version.
+    // Use a regex with line-end anchor so `*.caddy` lines aren't matched.
+    const oldGlobLine = new RegExp(
+      `^${oldGlob.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
+      'm'
+    );
+    if (oldGlobLine.test(current)) {
+      current = current.replace(oldGlobLine, newGlob);
+      await writeFile(CADDY_CONFIG_FILE, current);
+      return;
+    }
+
+    if (!current.includes(newGlob)) {
       const appended =
         (current.endsWith('\n') ? current : `${current}\n`) +
-        `import ${CADDY_CUSTOM_DIR}/*\n`;
+        `${newGlob}\n`;
       await writeFile(CADDY_CONFIG_FILE, appended);
     }
   } catch (e) {

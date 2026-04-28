@@ -103,9 +103,11 @@ resolve_env_path() {
 
 # Compare keys in .env.example (the canonical set) against the deployed
 # .env. Any key in the example but missing from the deployed file is
-# appended with a TODO placeholder and surfaced to the operator. The
-# deployed file is never overwritten — only appended — so existing
-# values are preserved.
+# appended; existing values are preserved. For known secret keys
+# (TOTP_ENCRYPTION_KEY, JWT_SECRET, SESSION_SECRET) with placeholder
+# defaults, a real value is auto-generated rather than appended as
+# CHANGE_ME — the placeholder would be parsed by the app's startup
+# guards and crash boot.
 sync_env_keys() {
     local example="$SCRIPT_DIR/.env.example"
     local deployed
@@ -138,20 +140,66 @@ sync_env_keys() {
         return 0
     fi
 
-    log "${YELLOW}New environment variables introduced in this version:${NC}"
+    # Build the appended block in a tmp file rather than a brace-group
+    # redirect — log() inside `{ ... } >> "$deployed"` would write its
+    # own output into the .env file, corrupting it. (Caught the hard
+    # way: a poisoned .env crashed `docker compose` parse and required
+    # operator intervention to recover.)
+    local tmp_block
+    tmp_block=$(mktemp)
+    local key default_line value generated_keys=() todo_keys=()
     {
         echo ""
         echo "# === Added by update.sh on $(date '+%Y-%m-%d %H:%M:%S') ==="
-        echo "# Fill these in before restarting ProxyPilot. Defaults from .env.example:"
         for key in "${missing_keys[@]}"; do
-            local default_line
             default_line=$(grep -E "^[[:space:]]*${key}=" "$example" | head -1)
-            log "  - ${key} (TODO: review in $deployed)"
-            echo "${default_line}  # TODO: review"
+            value="${default_line#*=}"
+            case "$key" in
+                TOTP_ENCRYPTION_KEY)
+                    if [[ "$value" == CHANGE_ME* ]] || [ -z "$value" ]; then
+                        if command -v openssl &>/dev/null; then
+                            value=$(openssl rand -hex 32)
+                        else
+                            value=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+                        fi
+                        echo "${key}=${value}"
+                        generated_keys+=("$key")
+                    else
+                        echo "${default_line}"
+                    fi
+                    ;;
+                JWT_SECRET|SESSION_SECRET)
+                    if [[ "$value" == CHANGE_ME* ]] || [ -z "$value" ]; then
+                        value=$(openssl rand -base64 48 | tr -dc 'a-zA-Z0-9!@#$%^&*' | head -c 64)
+                        echo "${key}=${value}"
+                        generated_keys+=("$key")
+                    else
+                        echo "${default_line}"
+                    fi
+                    ;;
+                *)
+                    # Non-secret: copy the example line verbatim with a TODO marker.
+                    echo "${default_line}  # TODO: review"
+                    todo_keys+=("$key")
+                    ;;
+            esac
         done
-    } >> "$deployed"
-    log "${YELLOW}Appended ${#missing_keys[@]} placeholder(s) to ${deployed}.${NC}"
-    log "${YELLOW}Review them, set real values, and re-run update.sh if any are required.${NC}"
+    } > "$tmp_block"
+
+    cat "$tmp_block" >> "$deployed"
+    rm -f "$tmp_block"
+
+    log "${YELLOW}Synced ${#missing_keys[@]} new environment variable(s) into ${deployed}:${NC}"
+    if [ ${#generated_keys[@]} -gt 0 ]; then
+        for key in "${generated_keys[@]}"; do
+            log "  - ${key} (auto-generated secret)"
+        done
+    fi
+    if [ ${#todo_keys[@]} -gt 0 ]; then
+        for key in "${todo_keys[@]}"; do
+            log "  - ${key} (placeholder — review before next restart)"
+        done
+    fi
 }
 
 resolve_db_path() {

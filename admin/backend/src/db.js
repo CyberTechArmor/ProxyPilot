@@ -636,15 +636,39 @@ export function initDatabase() {
     }
 
     console.log('Admin user created');
+  }
 
-    // Mark the admin dashboard service
-    if (process.env.DOMAIN) {
+  // Seed the admin service row if missing. Decoupled from the admin-user
+  // seed above because Phase 2b D.14 dropped the columns the original
+  // INSERT referenced (domain, port, ssl_enabled, force_https). On a
+  // truly fresh install, the old INSERT throws "table services has no
+  // column named domain" and crashes the server mid-seed — the user row
+  // committed first, but the service row never landed. Subsequent boots
+  // saw the admin user already present and skipped the entire if-block,
+  // leaving the install with a user but no admin service forever.
+  //
+  // Now: gate on `is_admin = 1` instead of `!adminUser`, so installs
+  // already in the broken state self-heal on next boot. Use only
+  // post-D.14 columns. Capture process.env.DOMAIN into
+  // app_settings.admin_domain so getAdminDomain() resolves correctly
+  // — this also covers the (B6 patch) post-migration snapshot path
+  // when the admin row pre-dates D.14.
+  if (process.env.DOMAIN) {
+    const adminService = db
+      .prepare('SELECT id FROM services WHERE is_admin = 1 LIMIT 1')
+      .get();
+    if (!adminService) {
       const serviceId = uuidv4();
       db.prepare(`
-        INSERT OR IGNORE INTO services (id, name, domain, type, target, port, ssl_enabled, force_https, is_admin)
-        VALUES (?, 'ProxyPilot Admin', ?, 'proxy', '127.0.0.1', ?, 1, 1, 1)
-      `).run(serviceId, process.env.DOMAIN, process.env.PORT || 3001);
+        INSERT INTO services (id, name, type, target, is_admin)
+        VALUES (?, 'ProxyPilot Admin', 'proxy', '127.0.0.1', 1)
+      `).run(serviceId);
+      console.log('Admin service row seeded (post-D.14 schema)');
     }
+    // Idempotent UPSERT — if admin_domain is already set, this just
+    // refreshes it from the current process.env.DOMAIN. The .env is
+    // authoritative for the admin's reachable domain.
+    setSetting('admin_domain', process.env.DOMAIN);
   }
 
   console.log('Database initialized');

@@ -765,14 +765,22 @@ services:
     # within the container (no-new-privileges) to reduce the blast
     # radius if the app is compromised.
     #
-    # SECURITY CAVEAT: a container with pid:host + SYS_ADMIN can still
-    # reach host root via nsenter — this configuration is fundamentally
-    # privileged. The defense-in-depth layers above only constrain what
-    # else the container can do (no raw sockets, no SUID escalation,
-    # no module loading, no time tampering). If full container
-    # isolation is required, ProxyPilot must be redesigned with a
-    # host-side agent that the container talks to over a restricted
-    # Unix socket — that is out of scope for the current release.
+    # apparmor:unconfined is required because Docker's default
+    # AppArmor profile (docker-default) denies access to /proc/$pid/ns/*
+    # for non-privileged containers regardless of capabilities. Without
+    # this, every nsenter call fails with "can't open '/proc/1/ns/ipc':
+    # Permission denied" — which breaks Caddy reload, incus exec,
+    # docker management, and effectively every meaningful action the
+    # dashboard performs. Disabling AppArmor here is what `privileged:
+    # true` was implicitly doing for us before the cap-drop refactor.
+    #
+    # SECURITY CAVEAT: a container with pid:host + SYS_ADMIN +
+    # apparmor:unconfined + the Docker socket mount is functionally
+    # privileged-equivalent — a compromise of this container reaches
+    # host root. cap_drop:ALL removes raw sockets / SUID escalation /
+    # kernel module loading / time tampering, which is something but
+    # not much. The only real fix is the host-side-agent rewrite,
+    # which is out of scope for the current release.
     pid: host
     cap_drop:
       - ALL
@@ -781,6 +789,7 @@ services:
       - SYS_PTRACE
     security_opt:
       - no-new-privileges:true
+      - apparmor:unconfined
     ports:
       - "127.0.0.1:${port}:${port}"
     volumes:

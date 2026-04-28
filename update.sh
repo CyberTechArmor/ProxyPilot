@@ -592,6 +592,23 @@ else
             cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
         fi
 
+        # In-place migration of the deployed docker-compose.yml: an
+        # earlier version of install.sh shipped a security_opt block
+        # missing `apparmor:unconfined`, which made Docker's default
+        # AppArmor profile deny /proc/$pid/ns/* access — every nsenter
+        # call (caddy reload, incus exec, docker management) failed
+        # with "Permission denied". Existing installs need the line
+        # added; install.sh now writes it for fresh installs. The sed
+        # is idempotent — runs only when the marker is missing.
+        COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
+        if [ -f "$COMPOSE_FILE" ] && ! grep -q "apparmor:unconfined" "$COMPOSE_FILE"; then
+            if grep -q "no-new-privileges:true" "$COMPOSE_FILE"; then
+                log "${YELLOW}Patching docker-compose.yml: adding apparmor:unconfined to security_opt...${NC}"
+                sed -i '/no-new-privileges:true/a\      - apparmor:unconfined' "$COMPOSE_FILE"
+                log "${GREEN}docker-compose.yml patched. Container will pick up on rebuild.${NC}"
+            fi
+        fi
+
         # Rebuild frontend at the install location
         log "Rebuilding frontend..."
         cd "${INSTALL_DIR}/admin/frontend"

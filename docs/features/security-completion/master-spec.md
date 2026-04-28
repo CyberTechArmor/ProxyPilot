@@ -262,3 +262,138 @@ Phase F flips the default to `true`.
 - [ ] B.V5 — `update.sh` picks up the new methods on an existing deploy without operator intervention.
 
 When B.V1-V5 pass, mark Phase B ✅. Operator approves Phase C.
+
+---
+
+## Phase C — Host-side agent: Incus methods
+
+**Goal.** Migrate every `incus` shellout to the agent. This is the
+biggest single migration in the project — Incus drives container
+lifecycle, snapshots, networking, profiles, images.
+
+**Methods to implement.**
+
+| Method | Params | Result |
+|---|---|---|
+| `incus.version` | `{}` | `{ client: string, server: string }` |
+| `incus.list` | `{ project?: string }` | `{ containers: [{ name, status, ipv4, type, ... }] }` |
+| `incus.exec` | `{ name, command, env?, cwd?, timeout_ms? }` | `{ stdout, stderr, exit_code }` |
+| `incus.create` | `{ name, image, profile?, config? }` | `{ ok, error? }` |
+| `incus.start` / `incus.stop` / `incus.restart` | `{ name }` | `{ ok, error? }` |
+| `incus.delete` | `{ name, force?: bool }` | `{ ok, error? }` |
+| `incus.snapshot.create` | `{ name, snapshot_name, stateful?: bool }` | `{ ok, error? }` |
+| `incus.snapshot.restore` | `{ name, snapshot_name }` | `{ ok, error? }` |
+| `incus.snapshot.delete` | `{ name, snapshot_name }` | `{ ok, error? }` |
+| `incus.snapshot.list` | `{ name }` | `{ snapshots: [...] }` |
+| `incus.network.list` | `{}` | `{ networks: [...] }` |
+| `incus.network.show` | `{ name }` | `{ network: {...} }` |
+| `incus.profile.list` | `{}` | `{ profiles: [...] }` |
+| `incus.profile.show` | `{ name }` | `{ profile: {...} }` |
+| `incus.storage.list` | `{}` | `{ pools: [...] }` |
+| `incus.image.list` | `{}` | `{ images: [...] }` |
+| `incus.config.set` | `{ name, key, value }` | `{ ok, error? }` |
+| `incus.file.push` | `{ name, dest_path, content_b64, mode?, owner? }` | `{ ok }` |
+| `incus.file.pull` | `{ name, src_path, max_bytes? }` | `{ content_b64 }` |
+
+**Input validation (CRITICAL — this is the agent's main job).**
+
+* `name` must match `^[a-z][a-z0-9-]{0,62}$`.
+* `command` length cap: 16 KB.
+* `command` deny-list checked AFTER allowlist normalization (no
+  `--privileged`, no `--cap-add`, no `nsenter`, no `chroot`, no
+  `mount` outside the container's own bind paths).
+* `env` keys match `^[A-Z_][A-Z0-9_]*$`, values bounded.
+* `timeout_ms` capped at 600_000 (10 min).
+* `dest_path` / `src_path` for file methods must be inside the
+  container's filesystem (no `..`, no `/proc`, no `/sys`).
+* `content_b64` size cap: 100 MB (push), 100 MB (pull max_bytes).
+
+**Files.**
+
+```
+cmd/agent/methods/incus.go                     All incus.* methods
+cmd/agent/methods/incus_validation.go          Allowlist + deny-list helpers
+cmd/agent/methods/incus_test.go                Unit + integration tests
+admin/backend/src/routes/lxc.js                Migrate every execOnHost('incus ...') behind PROXYPILOT_USE_AGENT_FOR_INCUS
+admin/backend/src/routes/services.js           Migrate any incus refs
+docs/features/security-completion/host-side-agent-spec.md   Per-method protocol rows
+```
+
+**Feature flag.** `PROXYPILOT_USE_AGENT_FOR_INCUS=false` default.
+Flip in Phase F.
+
+**Acceptance tests (operator on disposable VM with at least 2 LXC containers).**
+
+- [ ] C.V1 — Flag OFF: Incus page works as today (via nsenter).
+- [ ] C.V2 — Flag ON: Incus page populates from agent. Networks, storage, profiles, images all visible. No errors in the dashboard or agent journalctl.
+- [ ] C.V3 — Flag ON: create a new LXC container from the wizard. Container appears in Incus, ProxyPilot lists it as a service.
+- [ ] C.V4 — Flag ON: open the legacy terminal (request-response) on a running container, run `whoami` — succeeds. (The interactive WS terminal is a separate feature, out of scope here.)
+- [ ] C.V5 — Flag ON: take a snapshot, restore from it, delete it. Each shows a clear success/failure in the audit log.
+- [ ] C.V6 — Flag ON: invalid container name (`../../../etc/passwd`) is rejected by the agent's validation BEFORE any incus call runs. Audit shows the rejection.
+- [ ] C.V7 — Flag ON: command with denied pattern (`incus.exec` with `--privileged` in args) is rejected.
+
+When C.V1-V7 pass, mark Phase C ✅.
+
+---
+
+## Phase D — Host-side agent: Docker methods
+
+**Goal.** Migrate every Docker shellout to the agent. Smaller surface
+than Incus but politically important: the Docker socket bind-mount
+into the container is what Phase F removes, so Docker MUST flow
+through the agent before that happens.
+
+**Methods to implement.**
+
+| Method | Params | Result |
+|---|---|---|
+| `docker.version` | `{}` | `{ client, server, compose }` |
+| `docker.ps` | `{ all?: bool, filter?: object }` | `{ containers: [...] }` |
+| `docker.logs` | `{ container, tail?, since? }` | `{ logs: string }` |
+| `docker.exec` | `{ container, command, env?, timeout_ms? }` | `{ stdout, stderr, exit_code }` |
+| `docker.compose.up` | `{ install_dir, options?: { build?, no_cache? } }` | `{ ok, error? }` |
+| `docker.compose.down` | `{ install_dir, remove_orphans?: bool }` | `{ ok, error? }` |
+| `docker.compose.build` | `{ install_dir, options?: { no_cache? } }` | `{ ok, error? }` |
+| `docker.compose.ps` | `{ install_dir }` | `{ services: [...] }` |
+| `docker.image.list` | `{}` | `{ images: [...] }` |
+| `docker.network.list` | `{}` | `{ networks: [...] }` |
+
+**Input validation.**
+
+* `container` matches container-name regex.
+* `command` deny-list mirrors incus.exec — no `--privileged`,
+  `--cap-add`, `--pid=host`, `--mount`, etc.
+* `install_dir` must be under `/opt/proxypilot/` or
+  `/var/lib/proxypilot-services/<service-name>/`. No `..` traversal.
+* `tail` capped at 10000 lines, `since` parsed as ISO-8601 or duration.
+
+**Files.**
+
+```
+cmd/agent/methods/docker.go                    All docker.* methods
+cmd/agent/methods/docker_validation.go         Path + arg validation
+cmd/agent/methods/docker_test.go               Unit tests
+admin/backend/src/routes/services.js           Migrate `docker compose` calls
+admin/backend/src/routes/lxc.js                Any docker refs there too
+docs/features/security-completion/host-side-agent-spec.md   Per-method spec rows
+```
+
+**Feature flag.** `PROXYPILOT_USE_AGENT_FOR_DOCKER=false` default.
+
+**Note on the Docker socket.** The agent runs on the host and uses
+the host's Docker socket directly (`/var/run/docker.sock`, owned by
+root or the docker group). The agent's systemd unit's
+`SupplementaryGroups=docker` adds it to the docker group. The
+ProxyPilot container's `/var/run/docker.sock` bind-mount becomes
+unnecessary — Phase F removes it.
+
+**Acceptance tests.**
+
+- [ ] D.V1 — Flag OFF: Docker dashboard pages work as today.
+- [ ] D.V2 — Flag ON: Docker container list populates from agent.
+- [ ] D.V3 — Flag ON: `docker compose up` from the dashboard rebuilds a docker-compose service correctly.
+- [ ] D.V4 — Flag ON: Volume import / export feature still works.
+- [ ] D.V5 — Flag ON: invalid `install_dir` (`/etc/passwd`) is rejected by validation.
+- [ ] D.V6 — Flag ON: command with denied pattern (`--privileged` in docker.exec) is rejected.
+
+When D.V1-V6 pass, mark Phase D ✅.

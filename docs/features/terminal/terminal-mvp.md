@@ -119,7 +119,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - [x] **B.7** Add `TERMINAL_MAX_SESSIONS`, `TERMINAL_IDLE_TIMEOUT_MS`, `TERMINAL_OUTPUT_BACKPRESSURE_BYTES` to `.env.example`. Confirm `update.sh`'s `sync_env_keys` would append them on existing installs.
 - [x] **F.1** Create `admin/frontend/src/components/InteractiveTerminal.jsx`. Verify in isolation (vite dev) that the component mounts without console errors before wiring it in.
 - [x] **F.2** Replace the placeholder block in `admin/frontend/src/pages/LxcContainers.jsx` (`TabsContent value="terminal-beta"`) with `<InteractiveTerminal wsPath={...}/>`. Build and verify in browser.
-- [ ] **F.3** Add a host-shell terminal entry — admin-only navigation surface. Choose: a new tab on Settings, or a new `/admin/shell` route in the router. Document the choice in the commit message.
+- [x] **F.3** Add a host-shell terminal entry — admin-only navigation surface. Choose: a new tab on Settings, or a new `/admin/shell` route in the router. Document the choice in the commit message.
 - [ ] **V.1**–**V.19** Verification checklist above. Each item ticked individually with a one-line evidence note (matching the Phase 2b checklist style). Items V.15 and V.16 are mandatory before declaring MVP complete.
 
 **One-commit-per-item discipline.** Mirror the Phase 2b convention: one checklist item = one commit, push after every commit. Use `feat(terminal):` prefix for B.x and F.x items, `verify(terminal):` for V.x items that introduce no code but tick a verification box with a note.

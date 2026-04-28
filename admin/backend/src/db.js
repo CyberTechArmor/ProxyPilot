@@ -650,6 +650,12 @@ export function initDatabase() {
   console.log('Database initialized');
 }
 
+// Audit event taxonomy. Action strings flow through `logAudit()` as the
+// `action` column; constants here document the recognised values for
+// the streaming-terminal feature so callers don't drift on spelling.
+export const AUDIT_TERMINAL_SESSION_START = 'TERMINAL_SESSION_START';
+export const AUDIT_TERMINAL_SESSION_END = 'TERMINAL_SESSION_END';
+
 export function logAudit(userId, action, resourceType, resourceId, details, ipAddress) {
   const db = getDb();
   const id = uuidv4();

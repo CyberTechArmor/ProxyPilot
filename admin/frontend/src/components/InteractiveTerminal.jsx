@@ -1,0 +1,172 @@
+import { useEffect, useRef, useState } from 'react';
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import { WebLinksAddon } from 'xterm-addon-web-links';
+import 'xterm/css/xterm.css';
+
+// InteractiveTerminal — xterm.js + WebSocket front-end for the
+// streaming-terminal route. Mounts a Terminal into a sized container,
+// dials the upgrade endpoint via cookie auth (browser sends pp_token
+// automatically), and pipes stdin/stdout in both directions.
+//
+// Props:
+//   wsPath    — path under the same origin, e.g. `/api/terminal/lxc/foo`
+//               or `/api/terminal/host`. The component derives the
+//               ws[s]:// URL from window.location.
+//
+// Lifecycle:
+//   - mount   : create Terminal, FitAddon, WebLinksAddon. Open ws.
+//   - data    : term.onData → ws.send {type:'input',data}.
+//   - resize  : ResizeObserver on the container → fit.fit() →
+//               ws.send {type:'resize',cols,rows}.
+//   - message : binary or string PTY output → term.write.
+//   - close   : ws.close(), term.dispose(), observer.disconnect().
+function InteractiveTerminal({ wsPath }) {
+  const containerRef = useRef(null);
+  const termRef = useRef(null);
+  const fitRef = useRef(null);
+  const wsRef = useRef(null);
+  const [status, setStatus] = useState('connecting');
+  const [errorText, setErrorText] = useState('');
+
+  useEffect(() => {
+    if (!containerRef.current || !wsPath) return undefined;
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 14,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      theme: {
+        background: '#0b0b0b',
+        foreground: '#e5e7eb',
+        cursor: '#22d3ee',
+        selectionBackground: '#334155',
+      },
+      allowProposedApi: true,
+    });
+    const fit = new FitAddon();
+    const links = new WebLinksAddon();
+    term.loadAddon(fit);
+    term.loadAddon(links);
+    term.open(containerRef.current);
+    try { fit.fit(); } catch { /* container may not be sized yet */ }
+    termRef.current = term;
+    fitRef.current = fit;
+
+    const wsUrl = `${window.location.origin.replace(/^http/, 'ws')}${wsPath}`;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
+
+    const sendResize = () => {
+      if (!fit || !term || ws.readyState !== WebSocket.OPEN) return;
+      try { fit.fit(); } catch { return; }
+      const cols = term.cols;
+      const rows = term.rows;
+      try {
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      } catch { /* socket closing */ }
+    };
+
+    ws.onopen = () => {
+      setStatus('connected');
+      setErrorText('');
+      sendResize();
+      term.focus();
+    };
+
+    ws.onmessage = (ev) => {
+      const data = ev.data;
+      if (data instanceof ArrayBuffer) {
+        term.write(new Uint8Array(data));
+        return;
+      }
+      if (typeof data === 'string') {
+        // Server may send `{type:'closed',reason:'idle'}` JSON envelopes
+        // alongside raw bytes; surface the reason in the status banner
+        // when we recognise one.
+        if (data.length > 0 && data.charCodeAt(0) === 0x7b /* { */) {
+          try {
+            const msg = JSON.parse(data);
+            if (msg && msg.type === 'closed') {
+              setStatus(msg.reason === 'idle' ? 'idle-closed' : 'closed');
+              setErrorText(msg.reason || '');
+              return;
+            }
+          } catch { /* fall through and write as text */ }
+        }
+        term.write(data);
+      }
+    };
+
+    ws.onerror = () => {
+      setStatus('error');
+      setErrorText('WebSocket error');
+    };
+
+    ws.onclose = (ev) => {
+      setStatus((s) => (s === 'idle-closed' ? s : 'closed'));
+      if (ev && ev.code !== 1000 && ev.code !== 1005) {
+        // 4xx / 5xx mapped onto WS close codes by the server's
+        // rejectUpgrade() reach the client as 1006 with no reason.
+        // Surface what we have.
+        setErrorText((t) => t || ev.reason || `WebSocket closed (code ${ev.code})`);
+      }
+    };
+
+    const onDataDisp = term.onData((data) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ type: 'input', data }));
+      } catch { /* socket closing */ }
+    });
+
+    let resizeRaf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(sendResize);
+    });
+    ro.observe(containerRef.current);
+
+    return () => {
+      try { ro.disconnect(); } catch { /* ignore */ }
+      cancelAnimationFrame(resizeRaf);
+      try { onDataDisp.dispose(); } catch { /* ignore */ }
+      try { ws.close(); } catch { /* ignore */ }
+      try { term.dispose(); } catch { /* ignore */ }
+      termRef.current = null;
+      fitRef.current = null;
+      wsRef.current = null;
+    };
+  }, [wsPath]);
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0 h-full overflow-hidden">
+      <StatusBanner status={status} errorText={errorText} />
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 overflow-hidden bg-black rounded-b-lg"
+        style={{ padding: '6px' }}
+      />
+    </div>
+  );
+}
+
+function StatusBanner({ status, errorText }) {
+  const map = {
+    connecting: { label: 'Connecting…', cls: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
+    connected: { label: 'Connected', cls: 'bg-green-500/15 text-green-400 border-green-500/30' },
+    'idle-closed': { label: 'Closed (idle)', cls: 'bg-orange-500/15 text-orange-400 border-orange-500/30' },
+    closed: { label: 'Disconnected', cls: 'bg-gray-500/15 text-gray-300 border-gray-500/30' },
+    error: { label: 'Error', cls: 'bg-red-500/15 text-red-400 border-red-500/30' },
+  };
+  const info = map[status] || map.closed;
+  return (
+    <div className={`text-[11px] font-mono px-2 py-1 border rounded-t-lg ${info.cls}`}>
+      <span>{info.label}</span>
+      {errorText ? <span className="ml-2 opacity-80">— {errorText}</span> : null}
+    </div>
+  );
+}
+
+export default InteractiveTerminal;

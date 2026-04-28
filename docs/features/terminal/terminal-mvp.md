@@ -96,7 +96,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - [ ] **V.16** **Fresh `install.sh` on a clean Debian VM** — installs all deps, generates `.env` (with the new TERMINAL_* keys present in `.env.example`), brings up Caddy, brings up ProxyPilot, terminal feature works on first login.
 - [ ] **V.17** Caddy reverse-proxies WebSocket cleanly: confirm via `caddy adapt --config /etc/caddy/Caddyfile` that the existing config still validates; the WebSocket upgrade flows through the standard `reverse_proxy 127.0.0.1:${PORT}` directive without explicit `transport` overrides.
 - [ ] **V.18** CSP not violated: open browser DevTools console, confirm no CSP errors during terminal use. xterm.js relies on `style-src 'unsafe-inline'` (already allowed) and same-origin `connect-src` for the WebSocket (already allowed).
-- [ ] **V.19** `bash -n install.sh && bash -n update.sh` clean. `node --check` clean on every touched JS file.
+- [x] **V.19** `bash -n install.sh && bash -n update.sh` clean. `node --check` clean on every touched JS file. _Evidence: `bash -n install.sh` → ok, `bash -n update.sh` → ok; `node --check` passes on src/index.js, middleware/wsAuth.js, lib/pty.js, routes/terminal-ws.js, db.js._
 
 **Out-of-scope for MVP (deferred to production phase):**
 

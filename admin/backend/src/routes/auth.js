@@ -486,12 +486,21 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
   });
 });
 
-// Logout — clears the auth cookies on the browser side. JWT itself is
-// not server-revoked (no session table); the 24h TTL bounds replay if
-// a leaked token is exfiltrated despite httpOnly. Future hardening:
-// add a server-side denylist keyed by jti.
+// Logout — revokes the current session row server-side AND clears the
+// auth cookies on the browser side. After M.2, JWT verification fails
+// the moment revoked_at is set, so even if the token is exfiltrated
+// (despite httpOnly + SameSite=Strict) it cannot be replayed past this
+// point. Idempotent: a missing or already-revoked row is a no-op.
 authRouter.post('/logout', authenticateToken, (req, res) => {
-  logAudit(req.user.id, 'LOGOUT', 'user', req.user.id, {}, req.ip);
+  const db = getDb();
+  if (req.user?.jti) {
+    db.prepare(
+      `UPDATE sessions
+          SET revoked_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND revoked_at IS NULL`
+    ).run(req.user.jti);
+  }
+  logAudit(req.user.id, 'LOGOUT', 'user', req.user.id, { jti: req.user.jti }, req.ip);
   clearAuthCookies(res);
   res.json({ success: true });
 });

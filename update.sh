@@ -641,13 +641,31 @@ REPOEOF
 fi
 log ""
 
+# Detect Docker deployment so we can skip the host-side backend npm
+# install. node-pty's prebuild falls back to node-gyp rebuild on hosts
+# without make/g++, which prints a noisy gyp ERR! block even though the
+# Dockerfile's alpine builder does its own `npm install --omit=dev`
+# with python3+make+g++ available. Frontend deps still install on the
+# host because vite build runs there.
+IS_DOCKER_DEPLOY=false
+for candidate in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
+    if [[ -f "${candidate}/docker-compose.yml" ]] && grep -q proxypilot "${candidate}/docker-compose.yml" 2>/dev/null; then
+        IS_DOCKER_DEPLOY=true
+        break
+    fi
+done
+
 # Install backend dependencies
 log "${BLUE}[4/7] Installing backend dependencies...${NC}"
-cd "$BACKEND_DIR"
-log_verbose "Running: $NPM_CMD install in $BACKEND_DIR"
-if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
-    log "${RED}Error: Failed to install backend dependencies${NC}"
-    exit 1
+if [ "$IS_DOCKER_DEPLOY" = "true" ]; then
+    log "Docker deployment detected — skipping host-side backend npm install (Dockerfile installs deps in alpine builder)"
+else
+    cd "$BACKEND_DIR"
+    log_verbose "Running: $NPM_CMD install in $BACKEND_DIR"
+    if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
+        log "${RED}Error: Failed to install backend dependencies${NC}"
+        exit 1
+    fi
 fi
 
 # Install frontend dependencies

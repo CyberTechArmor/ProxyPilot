@@ -306,4 +306,6 @@ After each task ships, run the relevant manual check:
 
 ## Status
 
-(To be filled in by the executing session.)
+- 2026-04-28 — Task 1 cleanup: detect Docker deploy early in `update.sh`
+  and skip the host-side backend `npm install`; node-pty gyp noise is
+  silenced on Docker hosts. Frontend install + vite build untouched.

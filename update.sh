@@ -224,11 +224,17 @@ sync_env_keys() {
 resolve_db_path() {
     # Prefer DATABASE_PATH if set in env. Otherwise look in known install
     # locations. Returns the path on stdout, empty string if nothing found.
+    # Both new (data/db/proxypilot.db) and legacy (data/proxypilot.db)
+    # layouts are checked so resolve_db_path stays useful before AND
+    # after migrate_db_layout has run.
     if [ -n "${DATABASE_PATH:-}" ] && [ -f "$DATABASE_PATH" ]; then
         echo "$DATABASE_PATH"
         return
     fi
     for candidate in \
+        "/opt/proxypilot/data/db/proxypilot.db" \
+        "$SCRIPT_DIR/data/db/proxypilot.db" \
+        "$(dirname "$SCRIPT_DIR")/data/db/proxypilot.db" \
         "/opt/proxypilot/data/proxypilot.db" \
         "$SCRIPT_DIR/data/proxypilot.db" \
         "$(dirname "$SCRIPT_DIR")/data/proxypilot.db"; do
@@ -238,6 +244,122 @@ resolve_db_path() {
         fi
     done
     echo ""
+}
+
+# Migrate from the legacy `data/proxypilot.db` layout to the new
+# `data/db/proxypilot.db` layout. Idempotent: returns 0 immediately
+# when nothing to do.
+#
+# The legacy layout chmod'd `data/` to 0700 (db.js getDb), which blocks
+# Caddy (uid != root) from traversing into `data/services/<svc>/` — every
+# static service site returns 403. Separating the DB into its own
+# subdir lets `data/` go back to 0755 while `data/db/` stays 0700.
+#
+# Order:
+#   1. Detect legacy layout (DB file directly under data/, no data/db/).
+#   2. Make data/db/, set 0700.
+#   3. Move DB + WAL + SHM into data/db/ (atomic per-file mv on the
+#      same filesystem — open file descriptors held by the running
+#      backend follow the inode, so this is safe even if the backend
+#      hasn't been stopped yet).
+#   4. Rewrite DATABASE_PATH in the deployed .env to the new path.
+#   5. Loosen `data/` to 0755 so Caddy can traverse to services/.
+#
+# On failure between steps the originals stay where they were —
+# DATABASE_PATH is rewritten LAST, so if anything before that fails
+# the next backend boot still finds the DB at the legacy path.
+migrate_db_layout() {
+    local install_dir
+    if [ -d "/opt/proxypilot" ] && [ -f "/opt/proxypilot/.env" ]; then
+        install_dir="/opt/proxypilot"
+    elif [ -f "$SCRIPT_DIR/.env" ]; then
+        install_dir="$SCRIPT_DIR"
+    elif [ -f "$(dirname "$SCRIPT_DIR")/.env" ]; then
+        install_dir="$(dirname "$SCRIPT_DIR")"
+    else
+        log_verbose "migrate_db_layout: no deployed .env found, skipping"
+        return 0
+    fi
+
+    local data_dir="$install_dir/data"
+    local legacy_db="$data_dir/proxypilot.db"
+    local new_dir="$data_dir/db"
+    local new_db="$new_dir/proxypilot.db"
+    local deployed_env="$install_dir/.env"
+
+    # Already migrated, nothing to do.
+    if [ -f "$new_db" ] && [ ! -f "$legacy_db" ]; then
+        log_verbose "migrate_db_layout: already on new layout"
+        return 0
+    fi
+
+    # Fresh install with neither DB present — let db.js create it in
+    # the new location.
+    if [ ! -f "$legacy_db" ]; then
+        log_verbose "migrate_db_layout: no legacy DB at $legacy_db, nothing to migrate"
+        return 0
+    fi
+
+    # Both files present means a partial migration on a previous run.
+    # Refuse to clobber the new DB; require operator intervention.
+    if [ -f "$legacy_db" ] && [ -f "$new_db" ]; then
+        log "${RED}migrate_db_layout: BOTH ${legacy_db} and ${new_db} exist.${NC}"
+        log "${RED}This usually means a previous migration crashed mid-run.${NC}"
+        log "${RED}Inspect both DB files; keep the newer one; delete the other; re-run update.sh.${NC}"
+        return 1
+    fi
+
+    log "${BLUE}[migrate] Separating SQLite DB from served-content directory${NC}"
+    log "  Old: $legacy_db"
+    log "  New: $new_db"
+
+    mkdir -p "$new_dir" || { log "${RED}migrate_db_layout: mkdir $new_dir failed${NC}"; return 1; }
+    chmod 0700 "$new_dir" 2>/dev/null || true
+
+    if ! mv "$legacy_db" "$new_db"; then
+        log "${RED}migrate_db_layout: failed to move $legacy_db -> $new_db${NC}"
+        return 1
+    fi
+    [ -f "${legacy_db}-wal" ] && mv "${legacy_db}-wal" "${new_db}-wal" || true
+    [ -f "${legacy_db}-shm" ] && mv "${legacy_db}-shm" "${new_db}-shm" || true
+
+    # Migrate any pre-update DB backups that lived alongside the legacy
+    # file (e.g. "proxypilot.db.backup-*") into the new dir as well —
+    # they hold copies of full DB state and shouldn't end up world-
+    # readable when we relax `data/` below.
+    for backup in "$data_dir"/proxypilot.db.backup-*; do
+        [ -f "$backup" ] || continue
+        mv "$backup" "$new_dir/" 2>/dev/null || log_verbose "could not move $backup"
+    done
+
+    # Update DATABASE_PATH in the deployed .env. Whatever the existing
+    # value (likely /data/proxypilot.db, possibly absolute), rewrite
+    # the line to point at /data/db/proxypilot.db inside the container.
+    if [ -f "$deployed_env" ]; then
+        local tmp_env
+        tmp_env=$(mktemp)
+        # Preserve a sentinel so the awk script can tell whether the
+        # key existed at all and append it if missing.
+        awk '
+          BEGIN { found = 0 }
+          /^[[:space:]]*DATABASE_PATH=/ { print "DATABASE_PATH=/data/db/proxypilot.db"; found = 1; next }
+          { print }
+          END { if (!found) print "DATABASE_PATH=/data/db/proxypilot.db" }
+        ' "$deployed_env" > "$tmp_env"
+        cat "$tmp_env" > "$deployed_env"
+        rm -f "$tmp_env"
+        chmod 600 "$deployed_env" 2>/dev/null || true
+        log "  Rewrote DATABASE_PATH in $deployed_env"
+    else
+        log "${YELLOW}migrate_db_layout: no .env at $deployed_env to update — backend may need DATABASE_PATH set manually${NC}"
+    fi
+
+    # Relax `data/` so Caddy can traverse it. The DB now lives in
+    # `data/db/` which stays 0700; the live DB FILE itself is locked
+    # to 0600 by db.js on every backend boot.
+    chmod 0755 "$data_dir" 2>/dev/null || true
+
+    log "${GREEN}migrate_db_layout: complete${NC}"
 }
 
 backup_db() {
@@ -655,6 +777,15 @@ PYEOF
         fi
 
         $DC_CMD down --remove-orphans 2>/dev/null || true
+
+        # Backend is now stopped — safe window to relocate the SQLite
+        # DB into its own subdirectory if this install is on the legacy
+        # layout. Idempotent, no-op on already-migrated installs.
+        if ! migrate_db_layout; then
+            log "${RED}DB layout migration failed — aborting before rebuild${NC}"
+            exit 1
+        fi
+
         log "Building with --no-cache..."
         $DC_CMD build --no-cache
         $DC_CMD up -d

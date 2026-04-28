@@ -87,7 +87,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - [ ] **V.7** Resize the browser window. `tput cols && tput lines` inside the terminal reflects the new dimensions.
 - [ ] **V.8** Backpressure: run `yes` for 5s. Browser remains responsive (PTY paused via the `bufferedAmount` guard). Send Ctrl-C; terminal recovers.
 - [ ] **V.9** Idle timeout: leave the terminal idle for 16 minutes (or temporarily lower `TERMINAL_IDLE_TIMEOUT_MS=10000` for the test). Backend closes the session with `{reason:'idle'}`. Frontend status banner reflects it.
-- [ ] **V.10** Concurrent session cap: open 4 terminals from the same user. The 4th refuses to upgrade with a clear error message.
+- [x] **V.10** Concurrent session cap: open 4 terminals from the same user. The 4th refuses to upgrade with a clear error message. _Evidence (TERMINAL_MAX_SESSIONS=2 for the test): same admin opened 2 baseline sessions cleanly, the 3rd upgrade returned `429 Too many terminal sessions (max 2 per user)`, and after closing one of the originals a fresh upgrade succeeded again — counter decrement works._
 - [ ] **V.11** Audit log shows `TERMINAL_SESSION_START` and `TERMINAL_SESSION_END` rows for every session, with non-zero duration + byte counts on END.
 - [ ] **V.12** Disconnect (close tab) → confirm via `ps -ef | grep nsenter` on the host that the PTY child process is reaped within 2s. No zombie sessions.
 - [x] **V.13** Host-shell terminal at `/api/terminal/host`: visible only to admin role; non-admin users get 401 on upgrade. _Evidence (raw HTTP upgrade against a local test backend with seeded admin + non-admin users): admin cookie -> 101; non-admin cookie -> 403; missing cookie -> 401._

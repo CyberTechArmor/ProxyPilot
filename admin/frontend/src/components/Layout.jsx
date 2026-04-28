@@ -27,6 +27,7 @@ import {
   RefreshCw,
   Bell,
   Menu,
+  TerminalSquare,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -223,6 +224,7 @@ export default function Layout() {
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
+    { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];

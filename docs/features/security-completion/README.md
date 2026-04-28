@@ -2,13 +2,14 @@
 
 This directory plans every remaining security item between "where the
 hardening branch left ProxyPilot" and "honest production-ready for
-single-tenant use." Two kickoff prompts and one running spec live here:
+single-tenant use." One running spec, one master kickoff prompt:
 
 | File | Purpose |
 |---|---|
-| `restore-dashboard-prompt.md` | **Run this FIRST.** Reverts today's broken docker-compose security_opt changes back to `privileged: true` so the dashboard works again. ~1 hour wall-clock including operator deploy + test. |
-| `host-side-agent-prompt.md` | The real B1 fix. Multi-week, multi-phase. Builds a host-side RPC agent so the container can become unprivileged without breaking nsenter-driven features. |
-| `host-side-agent-spec.md` | Created by the first agent-prompt session. The running spec for Phases A-G with ✅ markers as each phase verifies. |
+| **`master-prompt.md`** | **The single entry point.** Copy-paste into a fresh Claude Code session. The session reads the spec, finds the next unticked phase (0 → A-G → H-R), does it, marks it ✅, stops. Re-paste the same prompt into a new session to continue. |
+| **`master-spec.md`** | The running spec covering Phases 0 + A-R: file lists, deliverables, acceptance tests, commit message templates. Sessions update the status column as phases complete. The single source of truth — every prompt consults it. |
+| `restore-dashboard-prompt.md` | (Superseded by `master-prompt.md`.) Standalone kickoff for just Phase 0. Kept for reference; new sessions should use `master-prompt.md` which covers Phase 0 + everything after. |
+| `host-side-agent-prompt.md` | (Superseded by `master-prompt.md`.) Standalone kickoff for just Phases A-G. Kept for reference. |
 
 ## Why this directory exists
 
@@ -136,15 +137,26 @@ team you trust," this is what production-ready looks like once the
 restore-dashboard work is merged. The agent rewrite raises the
 ceiling on who you can grant dashboard access to.
 
-## Status tracker (updated as work lands)
+## Status tracker
 
-* `restore-dashboard-prompt.md` — created, awaiting first run
-* `host-side-agent-prompt.md` — created, awaiting first run
-* `host-side-agent-spec.md` — not yet created (Phase A creates it)
-* Phase A (design + scaffolding) — ⏳ pending
-* Phase B (Caddy methods) — ⏳ pending
-* Phase C (Incus methods) — ⏳ pending
-* Phase D (Docker methods) — ⏳ pending
-* Phase E (misc methods) — ⏳ pending
-* Phase F (drop privileged) — ⏳ pending
-* Phase G (hardening + audit) — ⏳ pending
+Live status lives in `master-spec.md` — the table at the top of that
+file is the canonical view. Don't duplicate it here.
+
+Right now (before any phase has run):
+
+* Phase 0 — Restore working dashboard — ⏳
+* Phases A-G — Host-side agent (B1 real fix) — ⏳
+* Phases H-R — Backups, monitoring, lockout, sudo-mode, sliding sessions, JWT revocation, key rotation, password breach check, audit log integrity, e2e CI — ⏳
+
+After Phase R: every production-blocking caveat is closed.
+
+## How to start
+
+1. Open a fresh Claude Code session.
+2. Open `master-prompt.md`, copy the fenced block (between the triple-backticks), paste as the first message.
+3. The session does Phase 0 first (mandatory — the dashboard is currently down). Operator runs the acceptance tests on production.
+4. After confirmation, the session marks Phase 0 ✅. Operator merges.
+5. Open a new session, paste the same prompt. Session sees Phase 0 ✅ in the spec and starts Phase A.
+6. Repeat through Phase R.
+
+Per-phase wall-clock: 1-3 sessions of session-work + 1-3 days of operator deploy/test cadence. End-to-end: 5-12 weeks. The discipline of the operator gate is what protects against the kind of regression cluster that bit the prior branch.

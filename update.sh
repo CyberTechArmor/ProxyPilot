@@ -592,19 +592,48 @@ else
             cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
         fi
 
-        # In-place migration of the deployed docker-compose.yml: an
-        # earlier version of install.sh shipped a security_opt block
-        # missing `apparmor:unconfined`, which made Docker's default
-        # AppArmor profile deny /proc/$pid/ns/* access — every nsenter
-        # call (caddy reload, incus exec, docker management) failed
-        # with "Permission denied". Existing installs need the line
-        # added; install.sh now writes it for fresh installs. The sed
-        # is idempotent — runs only when the marker is missing.
+        # In-place migration of the deployed docker-compose.yml: the
+        # B1 cap-drop refactor (cap_drop:ALL + cap_add:[SYS_ADMIN,
+        # SYS_PTRACE] + security_opt) didn't actually reduce the
+        # attack surface (pid:host + docker.sock = privileged-
+        # equivalent regardless) and surfaced a long tail of
+        # AppArmor/seccomp edge cases that broke nsenter on real
+        # deploys. Restore `privileged: true` for installs that have
+        # the buggy block. Idempotent: skips if `privileged: true` is
+        # already present.
         COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
-        if [ -f "$COMPOSE_FILE" ] && ! grep -q "apparmor:unconfined" "$COMPOSE_FILE"; then
-            if grep -q "no-new-privileges:true" "$COMPOSE_FILE"; then
-                log "${YELLOW}Patching docker-compose.yml: adding apparmor:unconfined to security_opt...${NC}"
-                sed -i '/no-new-privileges:true/a\      - apparmor:unconfined' "$COMPOSE_FILE"
+        if [ -f "$COMPOSE_FILE" ] && ! grep -q "^[[:space:]]*privileged: true" "$COMPOSE_FILE"; then
+            if grep -qE "cap_drop:|cap_add:|security_opt:" "$COMPOSE_FILE"; then
+                log "${YELLOW}Patching docker-compose.yml: replacing cap-drop block with privileged: true${NC}"
+                # Strip the cap_drop / cap_add / security_opt blocks
+                # added by B1, replace with a single `privileged: true`
+                # line right after `restart: always`.
+                python3 - "$COMPOSE_FILE" <<'PYEOF' || true
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+# Drop the three blocks B1 added (each is a key followed by indented
+# list items). Match the key line plus all immediately-following lines
+# whose indent is deeper than the key's.
+def strip_block(text, key):
+    pat = re.compile(
+        rf"(?m)^([ \t]+){re.escape(key)}:[ \t]*\n((?:\1[ \t]+- .*\n)+)"
+    )
+    return pat.sub("", text)
+for k in ("cap_drop", "cap_add", "security_opt"):
+    text = strip_block(text, k)
+# Ensure `privileged: true` appears once, right after `restart:` line.
+if "privileged: true" not in text:
+    text = re.sub(
+        r"(?m)^([ \t]+)(restart:\s*\S+)\s*\n",
+        lambda m: f"{m.group(0)}{m.group(1)}privileged: true\n",
+        text,
+        count=1,
+    )
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
                 log "${GREEN}docker-compose.yml patched. Container will pick up on rebuild.${NC}"
             fi
         fi

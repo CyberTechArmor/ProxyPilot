@@ -757,39 +757,27 @@ services:
       dockerfile: Dockerfile
     container_name: proxypilot-admin
     restart: always
-    # ProxyPilot needs to nsenter into the host PID namespace to run
-    # caddy / incus / docker / git / npm commands on the host. That
-    # requires pid:host plus CAP_SYS_ADMIN and CAP_SYS_PTRACE for
-    # nsenter to attach to host namespaces. We drop every other
-    # capability (cap_drop: ALL) and forbid privilege escalation
-    # within the container (no-new-privileges) to reduce the blast
-    # radius if the app is compromised.
+    # ProxyPilot drives caddy / incus / docker / git / npm on the host
+    # via `nsenter -t 1` from inside this container. That requires
+    # crossing every namespace barrier the host kernel enforces — PID
+    # (covered by pid:host), then mnt/uts/net/ipc (covered by setns
+    # syscalls), plus reading /proc/1/ns/* (gated by AppArmor + ptrace).
+    # The kernel-level requirement is CAP_SYS_ADMIN; the userspace-
+    # policy requirements are NO AppArmor profile and NO seccomp filter.
     #
-    # apparmor:unconfined is required because Docker's default
-    # AppArmor profile (docker-default) denies access to /proc/$pid/ns/*
-    # for non-privileged containers regardless of capabilities. Without
-    # this, every nsenter call fails with "can't open '/proc/1/ns/ipc':
-    # Permission denied" — which breaks Caddy reload, incus exec,
-    # docker management, and effectively every meaningful action the
-    # dashboard performs. Disabling AppArmor here is what `privileged:
-    # true` was implicitly doing for us before the cap-drop refactor.
-    #
-    # SECURITY CAVEAT: a container with pid:host + SYS_ADMIN +
-    # apparmor:unconfined + the Docker socket mount is functionally
-    # privileged-equivalent — a compromise of this container reaches
-    # host root. cap_drop:ALL removes raw sockets / SUID escalation /
-    # kernel module loading / time tampering, which is something but
-    # not much. The only real fix is the host-side-agent rewrite,
-    # which is out of scope for the current release.
+    # `privileged: true` grants all of the above in one switch. We
+    # tried a finer-grained cap_drop:ALL + cap_add:[SYS_ADMIN, SYS_PTRACE]
+    # + security_opt:[no-new-privileges, apparmor:unconfined] approach
+    # and it surfaced edge after edge (default seccomp blocks setns
+    # under some conditions, AppArmor differs by distro, etc.) without
+    # actually reducing the attack surface — pid:host plus the Docker
+    # socket mount means a container compromise still reaches host
+    # root. Restoring privileged:true gives the bulletproof posture
+    # Docker has tested for a decade; the only real isolation win
+    # comes from a future host-side-agent architecture that removes
+    # the nsenter-from-container model entirely (out of scope today).
+    privileged: true
     pid: host
-    cap_drop:
-      - ALL
-    cap_add:
-      - SYS_ADMIN
-      - SYS_PTRACE
-    security_opt:
-      - no-new-privileges:true
-      - apparmor:unconfined
     ports:
       - "127.0.0.1:${port}:${port}"
     volumes:

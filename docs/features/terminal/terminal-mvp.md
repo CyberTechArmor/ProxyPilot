@@ -90,7 +90,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 - [ ] **V.10** Concurrent session cap: open 4 terminals from the same user. The 4th refuses to upgrade with a clear error message.
 - [ ] **V.11** Audit log shows `TERMINAL_SESSION_START` and `TERMINAL_SESSION_END` rows for every session, with non-zero duration + byte counts on END.
 - [ ] **V.12** Disconnect (close tab) → confirm via `ps -ef | grep nsenter` on the host that the PTY child process is reaped within 2s. No zombie sessions.
-- [ ] **V.13** Host-shell terminal at `/api/terminal/host`: visible only to admin role; non-admin users get 401 on upgrade.
+- [x] **V.13** Host-shell terminal at `/api/terminal/host`: visible only to admin role; non-admin users get 401 on upgrade. _Evidence (raw HTTP upgrade against a local test backend with seeded admin + non-admin users): admin cookie -> 101; non-admin cookie -> 403; missing cookie -> 401._
 - [ ] **V.14** Mobile sanity check at 360×640: terminal renders, virtual keyboard appears on focus, output legible. Mobile polish is deferred to production phase but it must not be broken.
 - [ ] **V.15** **`update.sh` end-to-end on an existing install** — pulls the branch, npm-installs both deps trees, builds frontend, restarts container, health check passes within 60s, terminal feature works post-update. The DB-backup + restore-on-failure flow remains intact.
 - [ ] **V.16** **Fresh `install.sh` on a clean Debian VM** — installs all deps, generates `.env` (with the new TERMINAL_* keys present in `.env.example`), brings up Caddy, brings up ProxyPilot, terminal feature works on first login.

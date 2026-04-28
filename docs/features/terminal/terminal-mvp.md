@@ -78,7 +78,7 @@ TERMINAL_OUTPUT_BACKPRESSURE_BYTES=1000000   # WS buffer high-water mark before 
 
 **Verification checklist** — every item must pass on a real deploy before MVP is declared done:
 
-- [ ] **V.1** `npm install` in `admin/backend` succeeds; `node-pty` native build completes in the Alpine container build (`backend-builder` stage already has python3 / make / g++ — confirm).
+- [x] **V.1** `npm install` in `admin/backend` succeeds; `node-pty` native build completes in the Alpine container build (`backend-builder` stage already has python3 / make / g++ — confirm). _Evidence: clean reinstall in admin/backend/ produced `node-pty/build/Release/pty.node`; spawning a PTY and reading `echo native_build_ok` round-trip succeeded._
 - [ ] **V.2** `npm install` in `admin/frontend` succeeds; `npm run build` produces `dist/` with no CSP-violation imports.
 - [ ] **V.3** Login → navigate to a container's "Terminal Beta" tab → terminal connects within 2s, prompt visible.
 - [ ] **V.4** Run `vim /tmp/x`, type, save, quit. PTY mode confirmed (vim relies on raw mode + alternate screen).

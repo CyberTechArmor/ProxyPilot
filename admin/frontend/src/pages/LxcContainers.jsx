@@ -25,8 +25,8 @@ import {
   Server, Play, Square, RefreshCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
-  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote, PackagePlus,
-  X, Shield, FlaskConical
+  Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
+  X, Shield
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -76,303 +76,8 @@ function formatSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// Terminal component with streaming output, cd persistence, tab completion
-function ContainerTerminal({ containerName }) {
-  const [command, setCommand] = useState('');
-  const [history, setHistory] = useState([]);
-  const [running, setRunning] = useState(false);
-  const [cmdHistory, setCmdHistory] = useState([]);
-  const [historyIdx, setHistoryIdx] = useState(-1);
-  const [cwd, setCwd] = useState('/root');
-  const [elapsed, setElapsed] = useState(0);
-  const [bgMode, setBgMode] = useState(false);
-  const [hasBgLog, setHasBgLog] = useState(false);
-  const outputRef = useRef(null);
-  const inputRef = useRef(null);
-  const abortRef = useRef(null);
-  const timerRef = useRef(null);
-
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }, 30);
-  };
-
-  // Clean up timer on unmount
-  useEffect(() => {
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, []);
-
-  const cancelCommand = () => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    setHistory(prev => [...prev, { type: 'stderr', text: '^C Cancelled' }]);
-    setRunning(false);
-    scrollToBottom();
-    setTimeout(() => inputRef.current?.focus(), 50);
-  };
-
-  const runCommand = async (directCmd) => {
-    const cmd = (typeof directCmd === 'string' ? directCmd : command).trim();
-    if (!cmd || running) return;
-    setRunning(true);
-    setCommand('');
-    setElapsed(0);
-    if (typeof directCmd !== 'string') {
-      setCmdHistory(prev => [cmd, ...prev]);
-      setHistoryIdx(-1);
-    }
-
-    setHistory(prev => [...prev, { type: 'input', text: `${cwd}$ ${cmd}` }]);
-    scrollToBottom();
-
-    // Start elapsed timer
-    const startTime = Date.now();
-    timerRef.current = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTime) / 1000));
-    }, 1000);
-
-    // Create abort controller for cancellation
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Handle cd locally to track cwd
-    const cdMatch = cmd.match(/^cd\s+(.*)/);
-
-    // Background mode: wrap with nohup and a done marker, reset toggle after use
-    let wasBg = false;
-    let execCmd = cmd;
-    if (bgMode) {
-      wasBg = true;
-      // Use { } group so the done marker appends after the command finishes.
-      // Avoid $! and $? which get expanded by intermediate shells.
-      execCmd = `{ ${cmd}; echo "=== BG COMMAND FINISHED ==="; } > /tmp/pp-bg-cmd.log 2>&1 &`;
-      setBgMode(false);
-    }
-
-    try {
-      const response = await api.execInContainer(containerName, execCmd, cwd, controller.signal);
-      const result = await response.json();
-
-      if (!response.ok || !result.success) {
-        setHistory(prev => [...prev, { type: 'stderr', text: result.error || `Command failed (HTTP ${response.status})` }]);
-        scrollToBottom();
-        return;
-      }
-
-      const outputEntries = [];
-      if (result.stdout) outputEntries.push({ type: 'stdout', text: result.stdout });
-      if (result.stderr) outputEntries.push({ type: 'stderr', text: result.stderr });
-      if (result.timedOut) {
-        outputEntries.push({ type: 'stderr', text: '--- Command timed out after 60s (process was killed). Use BG mode for long-running commands. ---' });
-      }
-      if (wasBg) {
-        setHasBgLog(true);
-        outputEntries.push({ type: 'stdout', text: 'Started in background. Use "View Log" button or run: tail -50 /tmp/pp-bg-cmd.log' });
-        outputEntries.push({ type: 'stdout', text: 'Look for "=== BG COMMAND FINISHED ===" at the end to confirm completion.' });
-      }
-
-      if (outputEntries.length > 0) {
-        setHistory(prev => [...prev, ...outputEntries]);
-      }
-
-      // Update cwd if cd was successful
-      if (cdMatch && result.exitCode === 0) {
-        const target = cdMatch[1].trim().replace(/^['"]|['"]$/g, '');
-        if (target.startsWith('/')) {
-          setCwd(target);
-        } else if (target === '~' || target === '') {
-          setCwd('/root');
-        } else if (target === '..') {
-          setCwd(prev => prev.split('/').slice(0, -1).join('/') || '/');
-        } else {
-          setCwd(prev => (prev === '/' ? `/${target}` : `${prev}/${target}`));
-        }
-      }
-
-      scrollToBottom();
-    } catch (err) {
-      if (err.name !== 'AbortError') {
-        setHistory(prev => [...prev, { type: 'stderr', text: err.message }]);
-      }
-    } finally {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      abortRef.current = null;
-      setRunning(false);
-      scrollToBottom();
-      // Delay focus until after React re-renders and removes disabled attr
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  };
-
-  const handleKeyDown = async (e) => {
-    if (e.key === 'Enter') {
-      runCommand();
-    } else if (e.key === 'c' && e.ctrlKey && running) {
-      e.preventDefault();
-      cancelCommand();
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      const parts = command.split(/\s+/);
-      const partial = parts[parts.length - 1] || '';
-      if (!partial) return;
-      try {
-        const res = await api.tabComplete(containerName, partial, cwd);
-        if (res.completions?.length === 1) {
-          parts[parts.length - 1] = partial.includes('/')
-            ? partial.substring(0, partial.lastIndexOf('/') + 1) + res.completions[0]
-            : res.completions[0];
-          setCommand(parts.join(' '));
-        } else if (res.completions?.length > 1) {
-          setHistory(prev => [...prev, { type: 'stdout', text: res.completions.join('  ') }]);
-          scrollToBottom();
-        }
-      } catch {}
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (cmdHistory.length > 0) {
-        const newIdx = Math.min(historyIdx + 1, cmdHistory.length - 1);
-        setHistoryIdx(newIdx);
-        setCommand(cmdHistory[newIdx]);
-      }
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (historyIdx > 0) {
-        setHistoryIdx(historyIdx - 1);
-        setCommand(cmdHistory[historyIdx - 1]);
-      } else {
-        setHistoryIdx(-1);
-        setCommand('');
-      }
-    }
-  };
-
-  const handlePaste = (e) => {
-    const text = e.clipboardData?.getData('text') || '';
-    if (text.includes('\n')) {
-      e.preventDefault();
-      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-      setCommand(prev => prev + (lines.length > 1 ? lines.join(' && ') : lines[0]));
-    }
-  };
-
-  const formatElapsed = (s) => {
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    return `${m}m ${s % 60}s`;
-  };
-
-  return (
-    <div className="flex flex-col gap-2 flex-1 min-h-0 h-full overflow-hidden">
-      <div className="flex items-center justify-between shrink-0">
-        <span className="text-xs text-muted-foreground font-mono">{cwd}</span>
-        <div className="flex items-center gap-2">
-          {running && (
-            <span className="text-xs text-yellow-500 font-mono">{formatElapsed(elapsed)}</span>
-          )}
-          {history.length > 0 && (
-            <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => setHistory([])}>
-              Clear
-            </Button>
-          )}
-        </div>
-      </div>
-      <div
-        ref={outputRef}
-        className="bg-black rounded-lg p-3 flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-relaxed"
-        onClick={() => inputRef.current?.focus()}
-      >
-        <div className="text-green-500 mb-2">Connected to {containerName}</div>
-        {history.map((entry, i) => (
-          <div key={i} className={`whitespace-pre-wrap break-all ${
-            entry.type === 'input' ? 'text-cyan-400' :
-            entry.type === 'stderr' ? 'text-red-400' :
-            'text-gray-300'
-          }`}>
-            {entry.text}
-          </div>
-        ))}
-        {running && (
-          <div className="flex items-center gap-1 text-yellow-500">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Running...</span>
-          </div>
-        )}
-      </div>
-      <div className="flex gap-2 shrink-0">
-        <div className="flex-1 flex items-center bg-black rounded-lg px-3 font-mono text-xs">
-          <span className="text-green-500 mr-1 shrink-0">$</span>
-          <input
-            ref={inputRef}
-            type="text"
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder="Enter command..."
-            disabled={running}
-            className="flex-1 bg-transparent border-none outline-none text-gray-300 py-2 text-xs font-mono placeholder:text-gray-600"
-            autoFocus
-          />
-        </div>
-        <Button
-          size="sm"
-          variant={bgMode ? 'default' : 'outline'}
-          onClick={() => setBgMode(!bgMode)}
-          disabled={running}
-          title="Run next command in background (output to /tmp/pp-bg-cmd.log)"
-          className={`shrink-0 text-xs px-2 ${bgMode ? 'bg-blue-600 hover:bg-blue-700' : ''}`}
-        >
-          BG
-        </Button>
-        {hasBgLog && !running && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => runCommand('tail -100 /tmp/pp-bg-cmd.log')}
-            title="View background command output log"
-            className="shrink-0 text-xs px-2"
-          >
-            View Log
-          </Button>
-        )}
-        {!running && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => runCommand('apt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3')}
-            title="Install essential packages (git, sudo, curl, wget, nano, htop, build-essential, python3, etc.)"
-            className="shrink-0 text-xs px-2"
-          >
-            <PackagePlus className="h-3 w-3 mr-1" />Setup
-          </Button>
-        )}
-        {running ? (
-          <Button size="sm" variant="destructive" onClick={cancelCommand} title="Cancel (Ctrl+C)">
-            <Square className="h-3 w-3 mr-1" />Ctrl-C
-          </Button>
-        ) : (
-          <Button size="sm" onClick={runCommand} disabled={!command.trim()}>
-            Run
-          </Button>
-        )}
-      </div>
-      <p className="text-[10px] text-muted-foreground shrink-0">Ctrl+C to cancel · Tab to autocomplete · Up/Down for history</p>
-    </div>
-  );
-}
-
 // File manager component for browsing, uploading, and downloading files
-function ContainerFiles({ containerName }) {
+function ContainerFiles({ containerName, onOpenTerminal }) {
   const { toast } = useToast();
   const [currentPath, setCurrentPath] = useState('/root');
   const [files, setFiles] = useState([]);
@@ -467,6 +172,17 @@ function ContainerFiles({ containerName }) {
         <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => fetchFiles(currentPath)}>
           <RefreshCw className="h-3 w-3 mr-1" />Refresh
         </Button>
+        {onOpenTerminal && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => onOpenTerminal(currentPath)}
+            title={`Open terminal in ${currentPath}`}
+          >
+            <Terminal className="h-3 w-3 mr-1" />Open terminal here
+          </Button>
+        )}
         <div className="flex-1" />
         <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" />
         <Button
@@ -560,6 +276,7 @@ export default function LxcContainers() {
   const [createOpen, setCreateOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoDefaultTab, setInfoDefaultTab] = useState('details');
+  const [terminalCwd, setTerminalCwd] = useState('');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resizeOpen, setResizeOpen] = useState(false);
 
@@ -800,6 +517,7 @@ export default function LxcContainers() {
     setAddServiceForm({ domain: '', port: '', obtainCert: true });
     setEditingService(null);
     setInfoDefaultTab(tab);
+    setTerminalCwd('');
     setInfoOpen(true);
     try {
       const [stateRes, snapRes] = await Promise.all([
@@ -1546,14 +1264,9 @@ export default function LxcContainers() {
           </DialogHeader>
           {selectedContainer && (
             <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
-              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
+              <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
-                <TabsTrigger value="terminal-beta" className="flex items-center gap-1">
-                  <FlaskConical className="h-3 w-3" />
-                  Terminal
-                  <span className="text-[9px] font-medium bg-cyan-500/20 text-cyan-500 px-1 rounded">BETA</span>
-                </TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
               </TabsList>
 
@@ -1971,19 +1684,23 @@ export default function LxcContainers() {
                 </div>
               </TabsContent>
 
-              {/* Terminal Tab */}
+              {/* Terminal Tab — live PTY via WebSocket */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <ContainerTerminal containerName={selectedContainer.name} />
-              </TabsContent>
-
-              {/* Terminal Beta Tab - Interactive WebSocket Terminal (Placeholder) */}
-              <TabsContent value="terminal-beta" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <InteractiveTerminal wsPath={`/api/terminal/lxc/${selectedContainer.name}`} />
+                <InteractiveTerminal
+                  wsPath={`/api/terminal/lxc/${selectedContainer.name}`}
+                  initialCwd={terminalCwd}
+                />
               </TabsContent>
 
               {/* Files Tab */}
               <TabsContent value="files" className="flex-1 flex flex-col min-h-0 overflow-y-auto">
-                <ContainerFiles containerName={selectedContainer.name} />
+                <ContainerFiles
+                  containerName={selectedContainer.name}
+                  onOpenTerminal={(path) => {
+                    setTerminalCwd(path);
+                    setInfoDefaultTab('terminal');
+                  }}
+                />
               </TabsContent>
             </Tabs>
           )}

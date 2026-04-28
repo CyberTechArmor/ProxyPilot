@@ -553,26 +553,9 @@ export const api = {
     method: 'DELETE',
   }),
 
-  // Container exec and file management
-  execInContainer: (name, command, cwd, signal) => {
-    const csrf = readCookie('pp_csrf');
-    return fetch(`${API_BASE}/lxc/containers/${name}/exec`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
-      },
-      body: JSON.stringify({ command, cwd }),
-      ...(signal ? { signal } : {}),
-    });
-  },
-
-  tabComplete: (name, partial, cwd) => request(`/lxc/containers/${name}/tab-complete`, {
-    method: 'POST',
-    body: JSON.stringify({ partial, cwd }),
-  }),
-
+  // Container file management (exec/tab-complete retired with the
+  // legacy request-response ContainerTerminal — InteractiveTerminal
+  // streams over WebSocket instead).
   importContainer: async (name, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

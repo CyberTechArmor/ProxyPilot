@@ -10,9 +10,13 @@ import 'xterm/css/xterm.css';
 // automatically), and pipes stdin/stdout in both directions.
 //
 // Props:
-//   wsPath    — path under the same origin, e.g. `/api/terminal/lxc/foo`
-//               or `/api/terminal/host`. The component derives the
-//               ws[s]:// URL from window.location.
+//   wsPath     — path under the same origin, e.g. `/api/terminal/lxc/foo`
+//                or `/api/terminal/host`. The component derives the
+//                ws[s]:// URL from window.location.
+//   initialCwd — optional absolute path. When set, the component sends
+//                `cd <quoted> && clear\n` once the WebSocket is open
+//                (after the initial resize) so the shell starts in the
+//                requested directory. Falsy/empty → no-op.
 //
 // Lifecycle:
 //   - mount   : create Terminal, FitAddon, WebLinksAddon. Open ws.
@@ -21,7 +25,7 @@ import 'xterm/css/xterm.css';
 //               ws.send {type:'resize',cols,rows}.
 //   - message : binary or string PTY output → term.write.
 //   - close   : ws.close(), term.dispose(), observer.disconnect().
-function InteractiveTerminal({ wsPath }) {
+function InteractiveTerminal({ wsPath, initialCwd }) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
@@ -72,6 +76,16 @@ function InteractiveTerminal({ wsPath }) {
       setStatus('connected');
       setErrorText('');
       sendResize();
+      if (initialCwd) {
+        // JSON.stringify quotes for shell — paths with spaces, $, etc.
+        // become a single double-quoted token that bash treats verbatim.
+        // `clear` after cd hides the cd line so the user sees a clean
+        // prompt at the requested path.
+        const cmd = `cd ${JSON.stringify(initialCwd)} && clear\n`;
+        try {
+          ws.send(JSON.stringify({ type: 'input', data: cmd }));
+        } catch { /* socket closing */ }
+      }
       term.focus();
     };
 
@@ -138,7 +152,7 @@ function InteractiveTerminal({ wsPath }) {
       fitRef.current = null;
       wsRef.current = null;
     };
-  }, [wsPath]);
+  }, [wsPath, initialCwd]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 h-full overflow-hidden">

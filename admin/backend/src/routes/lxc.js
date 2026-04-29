@@ -977,6 +977,26 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       return res.status(409).json({ success: false, error: `Domain '${cleanDomain}' already has a Caddy config.` });
     }
 
+    // Same-domain conflict guard: this domain is already a route in the
+    // DB-backed Service Settings surface. Last-writer-wins between the
+    // two Caddy site-file owners would silently overwrite one set of
+    // changes; fail loud instead.
+    try {
+      const db = getDb();
+      const otherRoute = db
+        .prepare('SELECT id FROM service_http_routes WHERE domain = ? LIMIT 1')
+        .get(cleanDomain);
+      if (otherRoute) {
+        return res.status(409).json({
+          success: false,
+          error: `Domain '${cleanDomain}' is already managed in the Service Settings dialog. Remove it there first or edit it there instead.`,
+        });
+      }
+    } catch (e) {
+      // service_http_routes table missing / DB unavailable — fall through.
+      console.warn('[LXC] conflict-guard DB check failed:', e?.message || e);
+    }
+
     // Write Caddy config
     const tlsDirective = cert ? '' : '\n    tls internal';
     const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
@@ -1031,6 +1051,28 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
 
     try { await ensureCaddyStructure(); } catch (e) {
       console.error('[LXC] ensureCaddyStructure failed:', e?.message || e);
+    }
+
+    // Same-domain conflict guard: if the rename-target is already a
+    // route in the Service Settings surface, refuse rather than letting
+    // the two surfaces silently overwrite each other's site files.
+    // Skip when the operator is keeping the same domain (no rename).
+    const targetDomain = (newDomain || oldDomain).trim();
+    if (targetDomain !== oldDomain) {
+      try {
+        const db = getDb();
+        const otherRoute = db
+          .prepare('SELECT id FROM service_http_routes WHERE domain = ? LIMIT 1')
+          .get(targetDomain);
+        if (otherRoute) {
+          return res.status(409).json({
+            success: false,
+            error: `Domain '${targetDomain}' is already managed in the Service Settings dialog. Remove it there first or edit it there instead.`,
+          });
+        }
+      } catch (e) {
+        console.warn('[LXC] conflict-guard DB check failed:', e?.message || e);
+      }
     }
 
     // Remove old config

@@ -454,11 +454,17 @@ export default function LxcContainers() {
       script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh\n' },
   ];
 
-  // Create form
+  // Create form. Docker support + Privileged Docker default ON because
+  // (a) most operators creating LXCs through this dashboard intend to
+  // run Docker workloads, and (b) every Docker image that touches
+  // sysctls during container init (n8n, anything basing on the
+  // node:N-alpine line, etc.) fails OCI init unless AppArmor is
+  // unconfined — which is what the Privileged toggle now bundles.
+  // Operators who want stricter isolation untick before creating.
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
     name: '', image: '', cpu: '', memory: '', initScript: '',
-    dockerSupport: false, dockerPrivileged: false,
+    dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
@@ -590,7 +596,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -1632,7 +1638,7 @@ export default function LxcContainers() {
                         onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
                       />
                       <span className="text-xs text-muted-foreground">
-                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code>. Use this if `docker build` still fails with kernel-level <code className="font-mono">EPERM</code> on syscalls like <code className="font-mono">spawn sh</code> (typical for BuildKit + bcrypt-style native postinstalls). The container runs at host-root capability — only enable on hosts where you trust everything inside this LXC.
+                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
                       </span>
                     </label>
                   )}

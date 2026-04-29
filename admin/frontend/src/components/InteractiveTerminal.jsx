@@ -170,11 +170,13 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       <StatusBanner status={status} errorText={errorText} />
-      <div
-        ref={containerRef}
-        className="flex-1 min-h-0 overflow-hidden bg-black rounded-b-lg"
-        style={{ padding: '6px' }}
-      />
+      {/* Padding wrapper, so xterm's parent reports an unpadded
+          clientHeight to FitAddon. With padding on the same element
+          that holds the xterm, the fit calc rounds rows up and the
+          bottom line gets clipped. */}
+      <div className="flex-1 min-h-0 overflow-hidden bg-black rounded-b-lg p-1.5">
+        <div ref={containerRef} className="h-full w-full" />
+      </div>
     </div>
   );
 });

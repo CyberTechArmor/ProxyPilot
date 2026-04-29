@@ -765,46 +765,88 @@ async function probeTcp(ip, port, timeoutMs = 2000) {
 }
 
 // Enumerate TCP ports that are actually in LISTEN state inside the
-// container — useful diagnostic when probeTcp fails so the operator
-// can see "nothing on :3000 but :8080 is open" or "process bound
-// 127.0.0.1:3000 only". Distinguishes loopback-only from any-address
-// binds so the UI can call out the bind-on-127.0.0.1 footgun.
+// container. Reads /proc/net/tcp{,6} directly rather than shelling
+// out to `ss` — minimal LXC images sometimes lack iproute2, and the
+// procfs entries are always present and have a stable format.
+//
+// /proc/net/tcp row:
+//   sl  local_address rem_address   st  ...
+//    0: 0100007F:1538 00000000:0000 0A  ...
+//
+// local_address is `<ip-hex>:<port-hex>`. The IPv4 hex is little-
+// endian per byte (0100007F → 7F.00.00.01 → 127.0.0.1). The port
+// hex is big-endian. State 0A = TCP_LISTEN.
 async function listListeningPorts(incusName) {
-  // -H suppresses headers, -t TCP only, -n no name resolution, -l
-  // listening only. Output rows look like: `LISTEN 0 511 0.0.0.0:80
-  //   0.0.0.0:* ...`. We pluck the local-address column (4th).
-  const cmd = `incus exec ${incusName} -- sh -c 'ss -Hltn 2>/dev/null || true'`;
+  const inner = 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null';
+  const cmd = `incus exec ${incusName} -- sh -c ${JSON.stringify(inner)}`;
+  let stdout = '';
+  let stderr = '';
   try {
     const r = await execOnHost(cmd, { timeout: 5000 });
-    const out = r.stdout || '';
-    const anyHost = new Set();
-    const loopbackOnly = new Set();
-    for (const line of out.split('\n')) {
-      const cols = line.trim().split(/\s+/);
-      if (cols.length < 4) continue;
-      const local = cols[3];
-      // Strip IPv6 brackets, then split on the last `:` to get port.
-      const m = local.match(/^(.*):(\d+)$/);
-      if (!m) continue;
-      const host = m[1].replace(/^\[|\]$/g, '');
-      const port = parseInt(m[2], 10);
-      if (!port) continue;
-      if (host === '127.0.0.1' || host === '::1') {
-        loopbackOnly.add(port);
-      } else {
-        anyHost.add(port);
-      }
-    }
-    // A port that's bound on both 0.0.0.0 and 127.0.0.1 should count
-    // as reachable, not loopback-only.
-    for (const p of anyHost) loopbackOnly.delete(p);
-    return {
-      reachable: [...anyHost].sort((a, b) => a - b),
-      loopbackOnly: [...loopbackOnly].sort((a, b) => a - b),
-    };
-  } catch {
-    return { reachable: [], loopbackOnly: [] };
+    stdout = r.stdout || '';
+    stderr = r.stderr || '';
+  } catch (e) {
+    return { reachable: [], loopbackOnly: [], error: (e.stderr || e.message || '').trim() || 'introspect failed' };
   }
+  const anyHost = new Set();
+  const loopbackOnly = new Set();
+  const lines = stdout.split('\n');
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('sl')) continue;
+    const cols = line.split(/\s+/);
+    if (cols.length < 4) continue;
+    const local = cols[1];
+    const state = cols[3];
+    if (state !== '0A') continue;
+    const colonIdx = local.lastIndexOf(':');
+    if (colonIdx < 0) continue;
+    const ipHex = local.slice(0, colonIdx);
+    const portHex = local.slice(colonIdx + 1);
+    const port = parseInt(portHex, 16);
+    if (!port) continue;
+
+    let isLoopback = false;
+    let isAnyAddr = false;
+    if (ipHex.length === 8) {
+      // IPv4: little-endian per byte.
+      const b0 = parseInt(ipHex.slice(0, 2), 16);
+      const b1 = parseInt(ipHex.slice(2, 4), 16);
+      const b2 = parseInt(ipHex.slice(4, 6), 16);
+      const b3 = parseInt(ipHex.slice(6, 8), 16);
+      const ip = `${b3}.${b2}.${b1}.${b0}`;
+      if (ip === '0.0.0.0') isAnyAddr = true;
+      else if (b3 === 127) isLoopback = true;
+    } else if (ipHex.length === 32) {
+      // IPv6 in /proc/net/tcp6 is little-endian per 4-byte word.
+      // Easiest reliable signals: all zeros = `::`, the `::1` pattern
+      // when normalized, and IPv4-mapped (last 32 bits is the v4 address
+      // and the preceding 16 bits are 0xFFFF).
+      const upper = ipHex.toUpperCase();
+      if (upper === '00000000000000000000000000000000') {
+        isAnyAddr = true;
+      } else if (upper === '00000000000000000000000001000000') {
+        isLoopback = true;
+      } else if (upper.slice(16, 24) === '0000FFFF') {
+        // IPv4-mapped: last 8 hex chars are the v4 address (same
+        // little-endian-per-byte encoding as the v4 table).
+        const v4hex = upper.slice(24, 32);
+        const b0 = parseInt(v4hex.slice(0, 2), 16);
+        const b3 = parseInt(v4hex.slice(6, 8), 16);
+        if (b0 === 0 && b3 === 0) isAnyAddr = true;
+        else if (b3 === 127) isLoopback = true;
+      }
+      // Other v6 binds (link-local, ULA, GUA) — treat as reachable.
+    }
+    if (isLoopback) loopbackOnly.add(port);
+    else anyHost.add(port); // 0.0.0.0/:: or any specific interface
+  }
+  for (const p of anyHost) loopbackOnly.delete(p);
+  return {
+    reachable: [...anyHost].sort((a, b) => a - b),
+    loopbackOnly: [...loopbackOnly].sort((a, b) => a - b),
+    error: stderr && !stdout ? stderr.trim() : null,
+  };
 }
 
 // GET /containers/:name/services - List Caddy services for this container (by IP)

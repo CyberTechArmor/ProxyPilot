@@ -394,40 +394,21 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
     const snapshots = JSON.parse(result.stdout || '[]');
 
     // Best-effort enrichment: pull per-snapshot disk usage from the
-    // storage volume, which exposes it on every backend incus
-    // supports (ZFS, btrfs, LVM-thin, ceph). `incus snapshot list`
-    // alone returns only metadata; size lives on the storage volume.
-    // We resolve the instance's pool once, then call the volume show
-    // for each snapshot in parallel. Each step is wrapped — any
-    // failure leaves the snapshot list usable, just without sizes.
+    // storage volume's /state endpoint. config.size is a configured
+    // quota — almost never set; the actual usage lives in
+    // .../volumes/<...>/snapshots/<snap>/state under usage.used.
+    // We resolve the instance's pool once, then call the state
+    // endpoint for each snapshot in parallel. Any failure (older
+    // incus, backend without per-snapshot accounting, network
+    // hiccup) leaves the size unset and the rest of the row usable.
     try {
       const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
       const instance = JSON.parse(infoResult.stdout || '{}');
       const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
       if (pool && snapshots.length) {
         await Promise.all(snapshots.map(async (snap) => {
-          try {
-            // Storage volume show for `instance/<name>/<snap>` returns
-            // the per-snapshot volume config. Some backends
-            // additionally expose `used_size` (bytes) in the response.
-            const r = await execOnHost(
-              `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snap.name} 2>/dev/null`,
-              { timeout: 5000 }
-            );
-            const vol = JSON.parse(r.stdout || '{}');
-            // Different backends report size in different places:
-            // top-level config.size, top-level used_size (bytes),
-            // or status.used_by_total. Try them in order.
-            const used = vol?.config?.['volatile.rootfs.size']
-              || vol?.config?.size
-              || null;
-            if (used && /^\d+$/.test(String(used))) {
-              snap.size = parseInt(String(used), 10);
-            }
-          } catch {
-            // Pool/snapshot may not exist as a storage volume on this
-            // backend — leave size unset.
-          }
+          const used = await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snap.name}`);
+          if (used != null) snap.size = used;
         }));
       }
     } catch {
@@ -855,6 +836,48 @@ function formatSnapshotError(prefix, error, timeoutMs) {
     details: incusOutput || error.message,
     timedOut: !!isTimeout,
   };
+}
+
+// Read actual disk usage (bytes) for a storage volume. Used by the
+// snapshot-list enrichment and the export-info endpoints. The
+// /state endpoint is the only API that returns true used bytes
+// across storage backends (ZFS, btrfs, LVM-thin, dir, ceph) — the
+// volume-show config returns *quotas*, not usage.
+//
+// `volumePath` is everything after `/volumes/` — for example
+// `container/pp-dev` for the live container or
+// `container/pp-dev/snapshots/Test2` for a snapshot.
+//
+// Returns the used bytes as an integer or null when the lookup
+// failed (older incus, backend without per-volume accounting, etc).
+async function readVolumeUsedBytes(pool, volumePath) {
+  if (!pool || !volumePath) return null;
+  try {
+    const r = await execOnHost(
+      `incus query /1.0/storage-pools/${pool}/volumes/${volumePath}/state 2>/dev/null`,
+      { timeout: 5000 }
+    );
+    const state = JSON.parse(r.stdout || '{}');
+    const used = state?.usage?.used ?? state?.used ?? null;
+    if (typeof used === 'number' && used > 0) return used;
+    if (typeof used === 'string' && /^\d+$/.test(used)) return parseInt(used, 10);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve the storage pool a container's root device lives on.
+// Returns the pool name or null on any failure. Cached at the call
+// site for the duration of a request.
+async function resolveContainerPool(incusName) {
+  try {
+    const r = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+    const instance = JSON.parse(r.stdout || '{}');
+    return instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool || null;
+  } catch {
+    return null;
+  }
 }
 
 async function probeTcp(ip, port, timeoutMs = 2000) {
@@ -1869,26 +1892,13 @@ lxcRouter.get('/containers/:name/export-info', async (req, res) => {
     isRunning = containers[0]?.status === 'Running';
   } catch {}
 
-  // Best-effort: pull the rootfs volume's reported usage from the
-  // storage pool API. Wrapped — if any step fails, we just return
-  // estimatedBytes=null and the UI degrades to an unbounded progress
-  // indicator.
-  try {
-    const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
-    const instance = JSON.parse(infoResult.stdout || '{}');
-    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-    if (pool) {
-      const volResult = await execOnHost(
-        `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName} 2>/dev/null`,
-        { timeout: 5000 }
-      );
-      const vol = JSON.parse(volResult.stdout || '{}');
-      const used = vol?.config?.['volatile.rootfs.size'] || vol?.config?.size || null;
-      if (used && /^\d+$/.test(String(used))) {
-        estimatedBytes = parseInt(String(used), 10);
-      }
-    }
-  } catch {}
+  // Best-effort rootfs usage from the storage volume /state endpoint.
+  // Wrapped — null on any failure and the UI degrades to an
+  // indeterminate progress bar.
+  const pool = await resolveContainerPool(incusName);
+  if (pool) {
+    estimatedBytes = await readVolumeUsedBytes(pool, `container/${incusName}`);
+  }
 
   res.json({ success: true, estimatedBytes, isRunning });
 });
@@ -1953,41 +1963,40 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req
   }
   const incusName = `${INSTANCE_PREFIX}${name}`;
   let estimatedBytes = null;
-  try {
-    const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
-    const instance = JSON.parse(infoResult.stdout || '{}');
-    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-    if (pool) {
-      const r = await execOnHost(
-        `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snapshotName} 2>/dev/null`,
-        { timeout: 5000 }
-      );
-      const vol = JSON.parse(r.stdout || '{}');
-      const used = vol?.config?.['volatile.rootfs.size'] || vol?.config?.size || null;
-      if (used && /^\d+$/.test(String(used))) {
-        estimatedBytes = parseInt(String(used), 10);
-      }
-    }
-  } catch {}
+  const pool = await resolveContainerPool(incusName);
+  if (pool) {
+    estimatedBytes = await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snapshotName}`);
+  }
   res.json({ success: true, estimatedBytes });
 });
 
 // GET /containers/:name/snapshot/:snapshotName/export
 //
-// Download a previously-taken snapshot as a tarball. incus's export
-// command accepts a snapshot reference via `<container>/<snapshot>`,
-// so this is just a streamed pipe to the response — no temp container,
-// no temp image, no extra disk. The snapshot the operator picked is
-// the consistent point-in-time view they wanted.
+// Download a previously-taken snapshot as a tarball.
+//
+// `incus export` accepts only an instance name — passing
+// `<container>/<snapshot>` fails silently and produces an empty
+// file. The reliable path is:
+//   1. incus copy <container>/<snapshot> <temp-instance>
+//      (cheap on COW backends; full filesystem copy on dir)
+//   2. incus export <temp-instance> -   → stdout pipe
+//   3. incus delete <temp-instance> --force
+// We always delete the temp instance on every termination path —
+// successful close, error, and client disconnect — so a cancelled
+// download doesn't leak a stopped container.
 lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res) => {
   const { name, snapshotName } = req.params;
   if (!validateName(name) || !validateName(snapshotName)) {
     return res.status(400).json({ success: false, error: 'Invalid name.' });
   }
   const incusName = `${INSTANCE_PREFIX}${name}`;
+  // Temp instance name: prefixed so it's recognizable in `incus list`
+  // if anything ever leaks, suffixed with timestamp + random so two
+  // concurrent downloads of the same snapshot can't collide.
+  const tempName = `pp-snap-export-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
-  // Confirm the snapshot exists before we open the tarball stream so
-  // the failure path returns a JSON error instead of an empty file.
+  // Confirm the snapshot exists before kicking off the copy so the
+  // failure path returns JSON instead of an empty tarball.
   try {
     const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
     const snaps = JSON.parse(r.stdout || '[]');
@@ -1998,38 +2007,78 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res
     return res.status(500).json({ success: false, error: `Failed to verify snapshot: ${(e.stderr || e.message || '').trim()}` });
   }
 
+  // Idempotent cleanup. Called from every termination path.
+  let cleanupRan = false;
+  const cleanup = async () => {
+    if (cleanupRan) return;
+    cleanupRan = true;
+    try {
+      await execOnHost(`incus delete ${tempName} --force`, { timeout: 60000 });
+    } catch (e) {
+      console.error(`[LXC] Failed to delete temp export instance ${tempName}: ${(e.stderr || e.message || '').trim()}`);
+    }
+  };
+
+  // Materialize the snapshot as a stopped temp instance. On COW
+  // backends this is near-instant; on dir backends it's a full
+  // filesystem copy and can take minutes. 30 min covers realistic
+  // upper bound; raise if needed via a future env knob.
+  try {
+    await execOnHost(`incus copy ${incusName}/${snapshotName} ${tempName}`, { timeout: 30 * 60 * 1000 });
+  } catch (e) {
+    return res.status(500).json({
+      success: false,
+      error: `Failed to prepare snapshot for export: ${(e.stderr || e.stdout || e.message || '').trim()}`,
+    });
+  }
+
   const fileName = `${name}-${snapshotName}-backup.tar.gz`;
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   res.setHeader('Content-Type', 'application/gzip');
 
+  let child;
   try {
-    const exportCmd = `incus export ${incusName}/${snapshotName} -`;
-    const child = spawnOnHost(exportCmd);
-
-    child.stdout.pipe(res);
-
-    let stderr = '';
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-      console.log(`[LXC] Snapshot export stderr: ${data.toString().trim()}`);
-    });
-
-    child.on('close', (code) => {
-      if (code !== 0 && !res.headersSent) {
-        res.status(500).json({ success: false, error: `Export failed: ${stderr.trim() || `incus exited ${code}`}` });
-      }
-    });
-
-    child.on('error', (err) => {
-      if (!res.headersSent) {
-        res.status(500).json({ success: false, error: err.message });
-      }
-    });
-  } catch (error) {
+    child = spawnOnHost(`incus export ${tempName} -`);
+  } catch (e) {
+    await cleanup();
     if (!res.headersSent) {
-      res.status(500).json({ success: false, error: error.message });
+      res.status(500).json({ success: false, error: e.message });
     }
+    return;
   }
+
+  child.stdout.pipe(res);
+
+  let stderr = '';
+  child.stderr.on('data', (d) => {
+    stderr += d.toString();
+    console.log(`[LXC] Snapshot export stderr: ${d.toString().trim()}`);
+  });
+
+  child.on('close', async (code) => {
+    await cleanup();
+    if (code !== 0 && !res.headersSent) {
+      res.status(500).json({ success: false, error: `Export failed: ${stderr.trim() || `incus exited ${code}`}` });
+    }
+  });
+
+  child.on('error', async (err) => {
+    await cleanup();
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // If the client (browser) cancels mid-download, kill the export
+  // child and clean up the temp instance. Otherwise the temp
+  // container leaks and `incus list` accumulates pp-snap-export-*
+  // entries.
+  req.on('close', async () => {
+    if (child && !child.killed) {
+      try { child.kill('SIGTERM'); } catch {}
+    }
+    await cleanup();
+  });
 });
 
 // POST /containers/:name/snapshot - Create a snapshot

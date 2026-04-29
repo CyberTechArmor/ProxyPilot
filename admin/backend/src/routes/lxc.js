@@ -764,6 +764,49 @@ async function probeTcp(ip, port, timeoutMs = 2000) {
   }
 }
 
+// Enumerate TCP ports that are actually in LISTEN state inside the
+// container — useful diagnostic when probeTcp fails so the operator
+// can see "nothing on :3000 but :8080 is open" or "process bound
+// 127.0.0.1:3000 only". Distinguishes loopback-only from any-address
+// binds so the UI can call out the bind-on-127.0.0.1 footgun.
+async function listListeningPorts(incusName) {
+  // -H suppresses headers, -t TCP only, -n no name resolution, -l
+  // listening only. Output rows look like: `LISTEN 0 511 0.0.0.0:80
+  //   0.0.0.0:* ...`. We pluck the local-address column (4th).
+  const cmd = `incus exec ${incusName} -- sh -c 'ss -Hltn 2>/dev/null || true'`;
+  try {
+    const r = await execOnHost(cmd, { timeout: 5000 });
+    const out = r.stdout || '';
+    const anyHost = new Set();
+    const loopbackOnly = new Set();
+    for (const line of out.split('\n')) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 4) continue;
+      const local = cols[3];
+      // Strip IPv6 brackets, then split on the last `:` to get port.
+      const m = local.match(/^(.*):(\d+)$/);
+      if (!m) continue;
+      const host = m[1].replace(/^\[|\]$/g, '');
+      const port = parseInt(m[2], 10);
+      if (!port) continue;
+      if (host === '127.0.0.1' || host === '::1') {
+        loopbackOnly.add(port);
+      } else {
+        anyHost.add(port);
+      }
+    }
+    // A port that's bound on both 0.0.0.0 and 127.0.0.1 should count
+    // as reachable, not loopback-only.
+    for (const p of anyHost) loopbackOnly.delete(p);
+    return {
+      reachable: [...anyHost].sort((a, b) => a - b),
+      loopbackOnly: [...loopbackOnly].sort((a, b) => a - b),
+    };
+  } catch {
+    return { reachable: [], loopbackOnly: [] };
+  }
+}
+
 // GET /containers/:name/services - List Caddy services for this container (by IP)
 lxcRouter.get('/containers/:name/services', async (req, res) => {
   const { name } = req.params;
@@ -826,7 +869,22 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       }),
     );
 
-    res.json({ success: true, services, ip });
+    // If any service failed the probe, ask the container what is
+    // actually listening so the UI can render an actionable tooltip
+    // ("nothing on :3000 — these ports are open: 22, 80") instead of
+    // a generic 502. One ss call per refresh is cheap; skip it when
+    // every probe succeeded.
+    const anyUnreachable = services.some((s) => s.reachable === false);
+    let listening = null;
+    if (anyUnreachable) {
+      listening = await listListeningPorts(incusName);
+      for (const svc of services) {
+        if (svc.reachable !== false || !svc.port) continue;
+        svc.boundLoopbackOnly = listening.loopbackOnly.includes(svc.port);
+      }
+    }
+
+    res.json({ success: true, services, ip, listening });
   } catch (error) {
     res.status(500).json({
       success: false,

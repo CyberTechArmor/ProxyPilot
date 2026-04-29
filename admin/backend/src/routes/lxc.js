@@ -526,10 +526,29 @@ lxcRouter.post('/containers', async (req, res) => {
   //   syscalls.intercept.bpf=true
   //   syscalls.intercept.bpf.devices=true
   //
-  // dockerPrivileged is the escape hatch: makes the LXC privileged so
-  // it has the same capabilities as host root. Only set when the
-  // operator explicitly opts in — it surrenders the LXC isolation
-  // boundary in exchange for "Docker just works".
+  // dockerPrivileged is the "I need full Docker compatibility" escape
+  // hatch: bundles three host-trust-loosening knobs that operators
+  // hit one after another otherwise.
+  //
+  //   security.privileged=true
+  //     Drops the LXC user-namespace map so containers run with host
+  //     root capabilities. Required for some BuildKit syscalls
+  //     (e.g. `spawn sh` with bcrypt-style native postinstalls).
+  //
+  //   raw.lxc='lxc.apparmor.profile=unconfined'
+  //     Removes the AppArmor profile from the LXC. Without this,
+  //     runc inside the LXC can't write /proc/sys/* values during
+  //     container init — Docker images that touch sysctls (e.g. n8n
+  //     setting net.ipv4.ip_unprivileged_port_start) fail with
+  //     `open sysctl ... reopen fd N: permission denied`. Syscall
+  //     intercepts and security.privileged are orthogonal to
+  //     AppArmor and don't fix this on their own.
+  //
+  // We always pair these because operators who reach for "Privileged
+  // Docker" universally also need the AppArmor knob — splitting them
+  // into two checkboxes was a footgun that made every Docker image
+  // touching sysctls fail until the operator manually edited the
+  // LXC's raw.lxc.
   let dockerConfigArgs = '';
   if (dockerSupport === true) {
     dockerConfigArgs = ' --config security.nesting=true' +
@@ -538,7 +557,8 @@ lxcRouter.post('/containers', async (req, res) => {
       ' --config security.syscalls.intercept.bpf=true' +
       ' --config security.syscalls.intercept.bpf.devices=true';
     if (dockerPrivileged === true) {
-      dockerConfigArgs += ' --config security.privileged=true';
+      dockerConfigArgs += ' --config security.privileged=true' +
+        ` --config raw.lxc=${JSON.stringify('lxc.apparmor.profile=unconfined')}`;
     }
   }
   const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}`;

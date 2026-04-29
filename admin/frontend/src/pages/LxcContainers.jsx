@@ -454,11 +454,17 @@ export default function LxcContainers() {
       script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh\n' },
   ];
 
-  // Create form
+  // Create form. Docker support + Privileged Docker default ON because
+  // (a) most operators creating LXCs through this dashboard intend to
+  // run Docker workloads, and (b) every Docker image that touches
+  // sysctls during container init (n8n, anything basing on the
+  // node:N-alpine line, etc.) fails OCI init unless AppArmor is
+  // unconfined — which is what the Privileged toggle now bundles.
+  // Operators who want stricter isolation untick before creating.
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
     name: '', image: '', cpu: '', memory: '', initScript: '',
-    dockerSupport: false, dockerPrivileged: false,
+    dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
@@ -590,7 +596,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -783,13 +789,24 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
-  // Streamed download with live byte counter + percentage (when the
-  // size estimate is available). Handles both the live-container
-  // export and the per-snapshot export — they share progress wiring;
-  // only the URL, filename, and pre-flight estimator differ.
+  // Streamed download with live byte counter, phase indicator, and
+  // throughput. Handles both the live-container export and the
+  // per-snapshot export — they share progress wiring; only the URL,
+  // filename, and pre-flight estimator differ.
+  //
+  // The export is bursty by nature: incus emits a small tarball
+  // header (~few KB) immediately, then stalls for minutes while it
+  // does its internal snapshot/copy work (especially on dir
+  // storage), then streams the real rootfs bytes. We treat that
+  // as two distinct phases ("preparing" → "streaming") so the UI
+  // doesn't look stuck during the copy phase. Throughput is a
+  // 10-second moving average computed from the read-loop samples.
   const streamDownload = async ({ url, filename, fetchEstimate, label }) => {
-    setExportProgress({ loaded: 0, total: null, elapsedMs: 0 });
     const startTime = Date.now();
+    setExportProgress({
+      loaded: 0, total: null, elapsedMs: 0,
+      phase: 'preparing', throughputBps: null,
+    });
 
     let total = null;
     if (fetchEstimate) {
@@ -800,15 +817,13 @@ export default function LxcContainers() {
         // pre-flight is best-effort
       }
     }
-    setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0 }));
+    setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0, phase: 'preparing' }));
 
     const res = await fetch(url, { credentials: 'include' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `${label} failed`);
     }
-    // Content-Length, when present, is the actual gzipped tarball
-    // size — more accurate than the pre-flight rootfs estimate.
     const reportedLen = res.headers.get('content-length');
     if (reportedLen && /^\d+$/.test(reportedLen)) {
       total = parseInt(reportedLen, 10);
@@ -817,13 +832,71 @@ export default function LxcContainers() {
     const reader = res.body.getReader();
     const chunks = [];
     let loaded = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.length;
-      setExportProgress({ loaded, total, elapsedMs: Date.now() - startTime });
+    let lastByteTime = startTime;
+    // Threshold: first chunks include the ~5-15 KB tarball header
+    // incus emits before doing its real work. We don't switch to
+    // 'streaming' until we've seen meaningful payload — 256 KB filters
+    // out the header reliably across compressors.
+    const STREAM_THRESHOLD = 256 * 1024;
+    let firstStreamingByteTime = null;
+    // 10s moving window of (loaded, t) samples, drives the
+    // throughput readout.
+    const samples = [];
+
+    // Keep elapsed/phase/throughput fresh while the read loop is
+    // blocked waiting on incus (which can be minutes during the
+    // dir-storage copy phase). The read loop only fires on
+    // incoming chunks — without this interval, the UI would freeze
+    // mid-export.
+    const tick = setInterval(() => {
+      const now = Date.now();
+      const sinceLastByte = now - lastByteTime;
+      // 'preparing' until we've seen enough bytes to know rootfs
+      // streaming has begun OR we've been quiet for >2s after the
+      // header, meaning incus is in its copy/compression stage.
+      let phase = 'preparing';
+      if (firstStreamingByteTime) {
+        phase = sinceLastByte > 5000 ? 'stalled' : 'streaming';
+      }
+      let throughputBps = null;
+      if (samples.length >= 2 && firstStreamingByteTime) {
+        const first = samples[0];
+        const last = samples[samples.length - 1];
+        const dt = (last.t - first.t) / 1000;
+        const dBytes = last.loaded - first.loaded;
+        if (dt > 0.25) throughputBps = dBytes / dt;
+      }
+      setExportProgress((p) => p ? { ...p, elapsedMs: now - startTime, phase, throughputBps } : p);
+    }, 500);
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        const now = Date.now();
+        lastByteTime = now;
+        if (!firstStreamingByteTime && loaded >= STREAM_THRESHOLD) {
+          firstStreamingByteTime = now;
+          // Reset samples window so throughput reflects the
+          // streaming phase, not the long preparing-then-idle
+          // ramp-up.
+          samples.length = 0;
+          samples.push({ loaded, t: now });
+        } else if (firstStreamingByteTime) {
+          samples.push({ loaded, t: now });
+          while (samples.length > 1 && now - samples[0].t > 10000) samples.shift();
+        }
+        // Drop the loaded count into state immediately so the bytes
+        // counter ticks per-chunk; the interval tick handles
+        // elapsed/phase/throughput on its own cadence.
+        setExportProgress((p) => p ? { ...p, loaded, total } : p);
+      }
+    } finally {
+      clearInterval(tick);
     }
+
     const blob = new Blob(chunks, { type: 'application/gzip' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -892,12 +965,12 @@ export default function LxcContainers() {
     if (!importName.trim() || !importFile) return;
     setImporting(true);
     const startTime = Date.now();
-    setImportProgress({ loaded: 0, total: importFile.size, phase: 'uploading', elapsedMs: 0 });
+    setImportProgress({ loaded: 0, total: importFile.size, phase: 'uploading', elapsedMs: 0, throughputBps: null });
     let elapsedTimer = null;
+    // 10-second moving window for upload throughput. Same shape as
+    // the export streamDownload sampler.
+    const samples = [];
     try {
-      // The 'processing' phase has no progress events — drive an
-      // elapsed-time counter so the UI doesn't look frozen while incus
-      // is unpacking the tarball on the host.
       const startElapsedTimer = () => {
         if (elapsedTimer) return;
         elapsedTimer = setInterval(() => {
@@ -906,7 +979,20 @@ export default function LxcContainers() {
       };
 
       await api.importContainerWithProgress(importName.trim(), importFile, ({ loaded, total, phase }) => {
-        setImportProgress({ loaded, total, phase, elapsedMs: Date.now() - startTime });
+        const now = Date.now();
+        let throughputBps = null;
+        if (phase === 'uploading') {
+          samples.push({ loaded, t: now });
+          while (samples.length > 1 && now - samples[0].t > 10000) samples.shift();
+          if (samples.length >= 2) {
+            const first = samples[0];
+            const last = samples[samples.length - 1];
+            const dt = (last.t - first.t) / 1000;
+            const dBytes = last.loaded - first.loaded;
+            if (dt > 0.25) throughputBps = dBytes / dt;
+          }
+        }
+        setImportProgress({ loaded, total, phase, elapsedMs: now - startTime, throughputBps });
         if (phase === 'processing') startElapsedTimer();
       });
       toast({ title: 'Import complete', description: `Container '${importName}' imported successfully.` });
@@ -1552,7 +1638,7 @@ export default function LxcContainers() {
                         onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
                       />
                       <span className="text-xs text-muted-foreground">
-                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code>. Use this if `docker build` still fails with kernel-level <code className="font-mono">EPERM</code> on syscalls like <code className="font-mono">spawn sh</code> (typical for BuildKit + bcrypt-style native postinstalls). The container runs at host-root capability — only enable on hosts where you trust everything inside this LXC.
+                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
                       </span>
                     </label>
                   )}
@@ -1998,7 +2084,7 @@ export default function LxcContainers() {
                   </Button>
                   {exportProgress && (
                     <div className="mt-2 space-y-1">
-                      {exportProgress.total ? (
+                      {exportProgress.phase === 'streaming' && exportProgress.total ? (
                         <div className="h-1.5 bg-muted rounded overflow-hidden">
                           <div
                             className="h-full bg-cyan-500 transition-[width] duration-200"
@@ -2011,15 +2097,31 @@ export default function LxcContainers() {
                         </div>
                       )}
                       <p className="text-[10.5px] text-muted-foreground font-mono">
-                        {formatSize(exportProgress.loaded)}
-                        {exportProgress.total ? ` / ~${formatSize(exportProgress.total)}` : ''}
-                        {exportProgress.elapsedMs > 0 && (
-                          <> · {formatDuration(exportProgress.elapsedMs)} elapsed</>
-                        )}
-                        {exportProgress.total && exportProgress.elapsedMs > 1000 && exportProgress.loaded > 0 && (
-                          <> · ~{formatDuration(((exportProgress.total - exportProgress.loaded) / exportProgress.loaded) * exportProgress.elapsedMs)} remaining</>
+                        {exportProgress.phase === 'streaming' ? (
+                          <>
+                            {formatSize(exportProgress.loaded)}
+                            {exportProgress.total ? ` / ~${formatSize(exportProgress.total)}` : ''}
+                            {exportProgress.throughputBps && <> · {formatSize(exportProgress.throughputBps)}/s</>}
+                            {' · '}{formatDuration(exportProgress.elapsedMs)} elapsed
+                            {exportProgress.total && exportProgress.throughputBps && exportProgress.loaded < exportProgress.total && (
+                              <> · ~{formatDuration(((exportProgress.total - exportProgress.loaded) / exportProgress.throughputBps) * 1000)} remaining</>
+                            )}
+                          </>
+                        ) : (
+                          // 'preparing' (and the rare 'stalled' edge case
+                          // mid-stream) collapse to the same UI: incus
+                          // isn't producing tarball bytes right now.
+                          <>Preparing snapshot... {formatDuration(exportProgress.elapsedMs)} elapsed</>
                         )}
                       </p>
+                      {exportProgress.phase !== 'streaming' && (
+                        <p className="text-[10.5px] text-muted-foreground">
+                          incus is taking a consistent point-in-time view of the container's filesystem.
+                          On <span className="font-mono">dir</span> storage this requires a full copy to a temp area
+                          before tarball bytes can flow — typically several minutes for Docker-in-LXC containers.
+                          On ZFS/btrfs/LVM-thin this phase is near-instant.
+                        </p>
+                      )}
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground mt-1">
@@ -2291,9 +2393,10 @@ export default function LxcContainers() {
                     <>
                       Uploading: {formatSize(importProgress.loaded)} / {formatSize(importProgress.total)}
                       {' '}({Math.round((importProgress.loaded / importProgress.total) * 100)}%)
-                      {importProgress.elapsedMs > 0 && <> · {formatDuration(importProgress.elapsedMs)} elapsed</>}
-                      {importProgress.elapsedMs > 1000 && importProgress.loaded > 0 && importProgress.loaded < importProgress.total && (
-                        <> · ~{formatDuration(((importProgress.total - importProgress.loaded) / importProgress.loaded) * importProgress.elapsedMs)} remaining</>
+                      {importProgress.throughputBps && <> · {formatSize(importProgress.throughputBps)}/s</>}
+                      {' · '}{formatDuration(importProgress.elapsedMs)} elapsed
+                      {importProgress.throughputBps && importProgress.loaded < importProgress.total && (
+                        <> · ~{formatDuration(((importProgress.total - importProgress.loaded) / importProgress.throughputBps) * 1000)} remaining</>
                       )}
                     </>
                   ) : (

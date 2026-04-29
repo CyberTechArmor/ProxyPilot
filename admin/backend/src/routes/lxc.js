@@ -370,7 +370,49 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     const result = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
-    const snapshots = JSON.parse(result.stdout);
+    const snapshots = JSON.parse(result.stdout || '[]');
+
+    // Best-effort enrichment: pull per-snapshot disk usage from the
+    // storage volume, which exposes it on every backend incus
+    // supports (ZFS, btrfs, LVM-thin, ceph). `incus snapshot list`
+    // alone returns only metadata; size lives on the storage volume.
+    // We resolve the instance's pool once, then call the volume show
+    // for each snapshot in parallel. Each step is wrapped — any
+    // failure leaves the snapshot list usable, just without sizes.
+    try {
+      const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+      const instance = JSON.parse(infoResult.stdout || '{}');
+      const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+      if (pool && snapshots.length) {
+        await Promise.all(snapshots.map(async (snap) => {
+          try {
+            // Storage volume show for `instance/<name>/<snap>` returns
+            // the per-snapshot volume config. Some backends
+            // additionally expose `used_size` (bytes) in the response.
+            const r = await execOnHost(
+              `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snap.name} 2>/dev/null`,
+              { timeout: 5000 }
+            );
+            const vol = JSON.parse(r.stdout || '{}');
+            // Different backends report size in different places:
+            // top-level config.size, top-level used_size (bytes),
+            // or status.used_by_total. Try them in order.
+            const used = vol?.config?.['volatile.rootfs.size']
+              || vol?.config?.size
+              || null;
+            if (used && /^\d+$/.test(String(used))) {
+              snap.size = parseInt(String(used), 10);
+            }
+          } catch {
+            // Pool/snapshot may not exist as a storage volume on this
+            // backend — leave size unset.
+          }
+        }));
+      }
+    } catch {
+      // Couldn't even resolve the instance pool — skip enrichment.
+    }
+
     res.json({ success: true, snapshots });
   } catch (error) {
     // If no snapshots exist, incus may return an error or empty

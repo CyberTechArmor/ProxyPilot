@@ -828,6 +828,26 @@ export default function LxcContainers() {
     try {
       await api.restoreLxcSnapshot(selectedContainer.name, snap);
       toast({ title: 'Snapshot restored', description: `Restored "${snap}" on ${selectedContainer.name}.` });
+      // Restore replays the on-disk state to a previous point — that
+      // includes the container's IP lease (sometimes stale vs. live),
+      // any service-config files inside the LXC, and any process
+      // state. Re-pull containers, snapshots, and services so the UI
+      // reflects the restored reality instead of the pre-restore one
+      // (otherwise the badges/diagnostic stay stuck on whatever was
+      // showing before).
+      try {
+        await fetchContainers();
+        const [snapRes, svcRes] = await Promise.all([
+          api.getLxcSnapshots(selectedContainer.name).catch(() => ({ snapshots: [] })),
+          api.getLxcServices(selectedContainer.name).catch(() => ({ services: [], listening: null })),
+        ]);
+        setSnapshots(snapRes.snapshots || []);
+        setContainerServices(svcRes.services || []);
+        setContainerListening(svcRes.listening || null);
+      } catch {
+        // Best-effort refresh — the restore itself succeeded; if a
+        // refresh call fails the operator can hit refresh manually.
+      }
     } catch (err) {
       toast({ title: 'Restore failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -974,12 +994,18 @@ export default function LxcContainers() {
             <Server className="h-10 w-10 text-muted-foreground" />
             <div>
               <p className="font-medium">No containers yet</p>
-              <p className="text-sm text-muted-foreground">Create your first LXC container to get started.</p>
+              <p className="text-sm text-muted-foreground">Create your first LXC container or import a backup to get started.</p>
             </div>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Container
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+                <Upload className="h-4 w-4 mr-2" />
+                Import Backup
+              </Button>
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Container
+              </Button>
+            </div>
           </div>
         </Card>
       ) : (
@@ -1945,6 +1971,34 @@ export default function LxcContainers() {
                                   </Button>
                                 </div>
                               </div>
+                              {/* Snapshot detail row: size, stateful, expiry,
+                                  architecture. Each chip is conditionally
+                                  rendered so empty snapshots stay tidy.
+                                  Size comes from the backend's storage-volume
+                                  enrichment and is absent on backends that
+                                  don't expose per-snapshot usage. */}
+                              {(snap.size > 0 || snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
+                                <div className="flex flex-wrap items-center gap-1.5 mt-1 ml-5 text-[10.5px] text-muted-foreground">
+                                  {snap.size > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded bg-muted/60" title="Disk space used by this snapshot">
+                                      {formatSize(snap.size)}
+                                    </span>
+                                  )}
+                                  {snap.stateful && (
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30" title="Captured running memory state in addition to filesystem">
+                                      stateful
+                                    </span>
+                                  )}
+                                  {snap.expires_at && !snap.expires_at.startsWith('0001') && (
+                                    <span className="px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30" title="Auto-deletion time">
+                                      expires {formatDate(snap.expires_at)}
+                                    </span>
+                                  )}
+                                  {snap.architecture && (
+                                    <span className="px-1.5 py-0.5 rounded bg-muted/60 font-mono">{snap.architecture}</span>
+                                  )}
+                                </div>
+                              )}
                               {snap.description && (
                                 <p className="text-muted-foreground mt-1 italic ml-5">{snap.description}</p>
                               )}

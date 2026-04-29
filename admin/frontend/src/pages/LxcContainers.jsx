@@ -1563,7 +1563,8 @@ export default function LxcContainers() {
                   {containerServices.length > 0 ? (
                     <div className="space-y-1.5 mb-3">
                       {containerServices.map((svc) => (
-                        <div key={svc.domain} className="flex items-center gap-2 p-2 rounded-lg border border-border/50 bg-muted/30 text-xs">
+                        <div key={svc.domain} className="rounded-lg border border-border/50 bg-muted/30 text-xs overflow-hidden">
+                          <div className="flex items-center gap-2 p-2">
                           {editingService === svc.domain ? (
                             <>
                               <div className="flex-1 grid grid-cols-2 gap-1.5">
@@ -1673,6 +1674,48 @@ export default function LxcContainers() {
                                 <Trash2 className="h-3 w-3" />
                               </Button>
                             </>
+                          )}
+                          </div>
+                          {svc.reachable === false && (
+                            <div className="px-2 pb-2 -mt-1 text-[10.5px] leading-snug text-red-300/90">
+                              {(() => {
+                                const target = `${svc.upstreamIp || '?'}:${svc.port}`;
+                                if (svc.boundLoopbackOnly) {
+                                  return (
+                                    <>
+                                      Port {svc.port} is bound to <span className="font-mono">127.0.0.1</span> only inside the container —
+                                      Caddy on the host can't reach it. Rebind the upstream to <span className="font-mono">0.0.0.0:{svc.port}</span> (Docker:
+                                      use <span className="font-mono">"{svc.port}:{svc.port}"</span>, not <span className="font-mono">"127.0.0.1:{svc.port}:{svc.port}"</span>).
+                                    </>
+                                  );
+                                }
+                                const open = containerListening?.reachable || [];
+                                const loop = containerListening?.loopbackOnly || [];
+                                const introErr = containerListening?.error;
+                                if (introErr && open.length === 0 && loop.length === 0) {
+                                  return (
+                                    <>
+                                      Caddy can't reach <span className="font-mono">{target}</span>. Couldn't introspect the container's
+                                      listening sockets ({introErr}).
+                                    </>
+                                  );
+                                }
+                                return (
+                                  <>
+                                    Caddy can't reach <span className="font-mono">{target}</span>.{' '}
+                                    {open.length
+                                      ? <>Listening on a reachable interface inside the container: <span className="font-mono">{open.join(', ')}</span>.</>
+                                      : <>Nothing is listening on a non-loopback interface inside the container.</>}
+                                    {loop.length ? <> Bound to <span className="font-mono">127.0.0.1</span> only: <span className="font-mono">{loop.join(', ')}</span>.</> : null}
+                                  </>
+                                );
+                              })()}
+                            </div>
+                          )}
+                          {svc.staleIp && svc.reachable !== false && (
+                            <div className="px-2 pb-2 -mt-1 text-[10.5px] leading-snug text-yellow-300/90">
+                              Caddy config still points at <span className="font-mono">{svc.upstreamIp}</span>, but the container's current IP is different. Edit the entry and click ✓ to regenerate.
+                            </div>
                           )}
                         </div>
                       ))}

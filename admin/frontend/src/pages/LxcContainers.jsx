@@ -693,12 +693,17 @@ export default function LxcContainers() {
     if (!selectedContainer || !addServiceForm.domain.trim()) return;
     setAddingService(true);
     try {
-      await api.addLxcService(selectedContainer.name, {
-        domain: addServiceForm.domain.trim(),
+      const domain = addServiceForm.domain.trim();
+      const res = await api.addLxcService(selectedContainer.name, {
+        domain,
         port: parseInt(addServiceForm.port, 10) || 80,
         obtainCert: addServiceForm.obtainCert,
       });
-      toast({ title: 'Service added', description: `${addServiceForm.domain.trim()} configured.` });
+      if (res?.warning) {
+        toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
+      } else {
+        toast({ title: 'Service added', description: `${domain} configured.` });
+      }
       setAddServiceForm({ domain: '', port: '', obtainCert: true });
       fetchContainerServices(selectedContainer.name);
     } catch (err) {
@@ -711,12 +716,17 @@ export default function LxcContainers() {
   const handleUpdateService = async (oldDomain) => {
     if (!selectedContainer || !editServiceForm.domain.trim()) return;
     try {
-      await api.updateLxcService(selectedContainer.name, oldDomain, {
-        domain: editServiceForm.domain.trim(),
+      const domain = editServiceForm.domain.trim();
+      const res = await api.updateLxcService(selectedContainer.name, oldDomain, {
+        domain,
         port: parseInt(editServiceForm.port, 10) || 80,
         obtainCert: editServiceForm.obtainCert,
       });
-      toast({ title: 'Service updated', description: `${editServiceForm.domain.trim()} updated.` });
+      if (res?.warning) {
+        toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
+      } else {
+        toast({ title: 'Service updated', description: `${domain} updated.` });
+      }
       setEditingService(null);
       fetchContainerServices(selectedContainer.name);
     } catch (err) {
@@ -727,8 +737,12 @@ export default function LxcContainers() {
   const handleDeleteService = async (domain) => {
     if (!selectedContainer) return;
     try {
-      await api.deleteLxcService(selectedContainer.name, domain);
-      toast({ title: 'Service removed', description: `${domain} removed.` });
+      const res = await api.deleteLxcService(selectedContainer.name, domain);
+      if (res?.warning) {
+        toast({ title: 'Service removed with warning', description: res.warning, variant: 'destructive' });
+      } else {
+        toast({ title: 'Service removed', description: `${domain} removed.` });
+      }
       fetchContainerServices(selectedContainer.name);
     } catch (err) {
       toast({ title: 'Failed to remove service', description: err.message, variant: 'destructive' });
@@ -1412,7 +1426,7 @@ export default function LxcContainers() {
             </DialogDescription>
           </DialogHeader>
           {selectedContainer && (
-            <Tabs defaultValue={infoDefaultTab} key={infoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
+            <Tabs value={infoDefaultTab} onValueChange={setInfoDefaultTab} className="w-full flex-1 flex flex-col min-h-0 overflow-hidden">
               <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="terminal">Terminal</TabsTrigger>
@@ -1833,8 +1847,11 @@ export default function LxcContainers() {
                 </div>
               </TabsContent>
 
-              {/* Terminal Tab — live PTY via WebSocket */}
-              <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              {/* Terminal Tab — live PTY via WebSocket. forceMount keeps
+                  the InteractiveTerminal mounted (just CSS-hidden) when
+                  the user clicks Details/Files; without it, Radix unmounts
+                  inactive tab content and tears down the PTY/WebSocket. */}
+              <TabsContent forceMount value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden data-[state=inactive]:hidden">
                 <LxcTerminalPanel
                   containerName={selectedContainer.name}
                   initialCwd={terminalCwd}

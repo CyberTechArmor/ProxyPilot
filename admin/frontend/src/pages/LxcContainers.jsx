@@ -372,6 +372,7 @@ export default function LxcContainers() {
   const [expandedSnapshot, setExpandedSnapshot] = useState(null);
   const [newNoteText, setNewNoteText] = useState('');
   const [containerServices, setContainerServices] = useState([]);
+  const [containerListening, setContainerListening] = useState(null);
   const [servicesLoading, setServicesLoading] = useState(false);
   const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true });
   const [addingService, setAddingService] = useState(false);
@@ -618,8 +619,10 @@ export default function LxcContainers() {
     try {
       const res = await api.getLxcServices(containerName);
       setContainerServices(res.services || []);
+      setContainerListening(res.listening || null);
     } catch {
       setContainerServices([]);
+      setContainerListening(null);
     } finally {
       setServicesLoading(false);
     }
@@ -630,6 +633,7 @@ export default function LxcContainers() {
     setContainerState(null);
     setSnapshots([]);
     setContainerServices([]);
+    setContainerListening(null);
     setAddServiceForm({ domain: '', port: '', obtainCert: true });
     setEditingService(null);
     setInfoDefaultTab(tab);
@@ -1610,7 +1614,24 @@ export default function LxcContainers() {
                               {svc.reachable === false && (
                                 <span
                                   className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30"
-                                  title={`Caddy can't reach ${svc.upstreamIp || '?'}:${svc.port}. Check that something is listening on 0.0.0.0:${svc.port} (not 127.0.0.1) inside the container.`}
+                                  title={(() => {
+                                    const target = `${svc.upstreamIp || '?'}:${svc.port}`;
+                                    if (svc.boundLoopbackOnly) {
+                                      return `Caddy can't reach ${target} — port ${svc.port} is bound to 127.0.0.1 only inside the container. Rebind it to 0.0.0.0:${svc.port} so Caddy can reach it from the host.`;
+                                    }
+                                    const open = containerListening?.reachable || [];
+                                    const loop = containerListening?.loopbackOnly || [];
+                                    const parts = [`Caddy can't reach ${target} — nothing answered the TCP handshake.`];
+                                    if (open.length) {
+                                      parts.push(`Reachable ports inside container: ${open.join(', ')}.`);
+                                    } else {
+                                      parts.push('No TCP ports are listening on a non-loopback interface inside the container.');
+                                    }
+                                    if (loop.length) {
+                                      parts.push(`Bound to 127.0.0.1 only (Caddy can't reach these): ${loop.join(', ')}.`);
+                                    }
+                                    return parts.join(' ');
+                                  })()}
                                 >
                                   502
                                 </span>

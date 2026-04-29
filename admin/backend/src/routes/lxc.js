@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { writeFile, readdir, readFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import http from 'http';
 import multer from 'multer';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
@@ -388,14 +389,21 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 lxcRouter.post('/containers', async (req, res) => {
   const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, dockerPrivileged, services: rawServices } = req.body;
 
-  // Normalize services: support both new multi-service array and legacy single domain/port
+  // Normalize services: support both new multi-service array and legacy single domain/port.
+  // healthPath is optional; bad input is dropped silently here (the create
+  // flow runs async and can't return a 400 from this branch) — the
+  // dedicated POST /services endpoint validates strictly.
   const services = Array.isArray(rawServices) && rawServices.length > 0
-    ? rawServices.filter(s => s.domain && typeof s.domain === 'string' && s.domain.trim()).map(s => ({
-        domain: s.domain.trim(),
-        port: parseInt(s.port, 10) || 80,
-        obtainCert: s.obtainCert !== false,
-      }))
-    : (domain && port ? [{ domain, port: parseInt(port, 10), obtainCert: true }] : []);
+    ? rawServices.filter(s => s.domain && typeof s.domain === 'string' && s.domain.trim()).map(s => {
+        const hp = validateHealthPath(s.healthPath);
+        return {
+          domain: s.domain.trim(),
+          port: parseInt(s.port, 10) || 80,
+          obtainCert: s.obtainCert !== false,
+          healthPath: hp.ok ? hp.value : null,
+        };
+      })
+    : (domain && port ? [{ domain, port: parseInt(port, 10), obtainCert: true, healthPath: null }] : []);
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -630,7 +638,8 @@ lxcRouter.post('/containers', async (req, res) => {
 
         for (const svc of services) {
           const tlsDirective = svc.obtainCert ? '' : '\n    tls internal';
-          const caddyConfig = `${svc.domain} {${tlsDirective}\n    reverse_proxy ${ip}:${svc.port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${svc.domain}.log\n    }\n}\n`;
+          const healthMarker = svc.healthPath ? `# proxypilot: healthpath=${svc.healthPath}\n` : '';
+          const caddyConfig = `${healthMarker}${svc.domain} {${tlsDirective}\n    reverse_proxy ${ip}:${svc.port}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${svc.domain}.log\n    }\n}\n`;
           const configPath = join(CADDY_SITES_DIR, svc.domain);
           await writeFile(configPath, caddyConfig);
           console.log(`[LXC] Wrote Caddy config for ${svc.domain} -> ${ip}:${svc.port} (cert: ${svc.obtainCert})`);
@@ -764,6 +773,87 @@ async function probeTcp(ip, port, timeoutMs = 2000) {
   }
 }
 
+// healthPath validation: must start with `/`, length-capped, restricted
+// to URL-safe path/query characters. Same set used by the schema check
+// in POST/PUT and by the GET parser when it recovers the value from
+// the persisted comment line.
+const HEALTH_PATH_REGEX = /^\/[A-Za-z0-9._~\-/?=&%]*$/;
+const HEALTH_PATH_MAX = 256;
+function validateHealthPath(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string') return { ok: false, error: 'healthPath must be a string.' };
+  if (value.length > HEALTH_PATH_MAX) return { ok: false, error: `healthPath exceeds ${HEALTH_PATH_MAX} characters.` };
+  if (!HEALTH_PATH_REGEX.test(value)) {
+    return { ok: false, error: 'healthPath must start with / and contain only URL-safe characters.' };
+  }
+  return { ok: true, value };
+}
+
+// HTTP-level upstream health probe. Layered on top of the TCP probe so
+// the UI can distinguish "TCP accepts but the app errors out" (the
+// nginx-fronts-broken-Express case operators have hit) from "TCP
+// refused / timed out" (kernel-level reachability failure).
+//
+// HEAD with explicit Host so name-based vhosts route correctly. Up to
+// one redirect followed inside the timeout budget — past that we report
+// the redirect status and let the operator fix the loop. Any 2xx is
+// healthy. Implementation uses Node's built-in `http`; no extra deps
+// per the PR scope.
+function probeHttp(ip, port, host, path, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (!ip || !port || !path) {
+      resolve({ healthy: false, status: null, error: 'missing target' });
+      return;
+    }
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const doRequest = (target, redirectsLeft) => {
+      let parsed;
+      try {
+        parsed = new URL(target);
+      } catch (e) {
+        finish({ healthy: false, status: null, error: 'invalid url' });
+        return;
+      }
+      const req = http.request({
+        host: parsed.hostname,
+        port: parsed.port || 80,
+        method: 'HEAD',
+        path: (parsed.pathname || '/') + (parsed.search || ''),
+        headers: { Host: host, 'User-Agent': 'ProxyPilot-HealthCheck/1.0', Accept: '*/*' },
+        timeout: timeoutMs,
+      }, (resp) => {
+        const status = resp.statusCode || 0;
+        // Redirect: follow once, but only to plaintext http on the same
+        // host:port — anything else is the operator's TLS/host setup,
+        // not a health signal we can usefully chase.
+        const isRedirect = [301, 302, 303, 307, 308].includes(status);
+        if (isRedirect && redirectsLeft > 0 && resp.headers.location) {
+          resp.resume();
+          let next;
+          try { next = new URL(resp.headers.location, target).toString(); }
+          catch { return finish({ healthy: false, status, error: 'bad redirect target' }); }
+          return doRequest(next, redirectsLeft - 1);
+        }
+        resp.resume();
+        finish({
+          healthy: status >= 200 && status < 300,
+          status,
+          error: null,
+        });
+      });
+      req.on('error', (err) => finish({ healthy: false, status: null, error: err.code || err.message || 'request error' }));
+      req.on('timeout', () => { req.destroy(); finish({ healthy: false, status: null, error: 'timeout' }); });
+      req.end();
+    };
+    doRequest(`http://${ip}:${port}${path}`, 1);
+  });
+}
+
 // Enumerate TCP ports that are actually in LISTEN state inside the
 // container. Reads /proc/net/tcp{,6} directly rather than shelling
 // out to `ss` — minimal LXC images sometimes lack iproute2, and the
@@ -883,12 +973,20 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
           const domainMatch = content.match(/^(\S+)\s*\{/m);
           const upstreamMatch = content.match(/reverse_proxy\s+([\d.]+):(\d+)/);
           const hasTlsInternal = content.includes('tls internal');
+          // Recover the optional HEAD-probe path from the marker
+          // comment lxc.js writes when the operator opts in. Caddy
+          // ignores `#` lines, so this round-trips losslessly.
+          const healthMatch = content.match(/^#\s*proxypilot:\s*healthpath=(\S+)/m);
+          const healthPath = healthMatch
+            ? (validateHealthPath(healthMatch[1]).ok ? healthMatch[1] : null)
+            : null;
           if (domainMatch) {
             services.push({
               domain: domainMatch[1],
               port: upstreamMatch ? parseInt(upstreamMatch[2], 10) : null,
               upstreamIp: upstreamMatch ? upstreamMatch[1] : null,
               obtainCert: !hasTlsInternal,
+              healthPath,
             });
           }
         }
@@ -899,15 +997,31 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
 
     // Probe each upstream in parallel so a slow/unreachable host doesn't
     // block the whole list. 2s is enough to distinguish "refused" from
-    // "no route" for typical LXC deployments.
+    // "no route" for typical LXC deployments. When the operator
+    // configured a healthPath, layer an HTTP HEAD probe on top so the
+    // UI can flag "TCP up, app errors" — the case the d519580 TCP
+    // probe is blind to.
     await Promise.all(
       services.map(async (svc) => {
         if (!svc.port) {
           svc.reachable = null;
+          svc.httpHealthy = null;
+          svc.httpStatus = null;
+          svc.httpError = null;
           return;
         }
         svc.reachable = await probeTcp(ip, svc.port, 2000);
         svc.staleIp = svc.upstreamIp && svc.upstreamIp !== ip;
+        if (svc.reachable && svc.healthPath) {
+          const result = await probeHttp(ip, svc.port, svc.domain, svc.healthPath, 2000);
+          svc.httpHealthy = result.healthy;
+          svc.httpStatus = result.status;
+          svc.httpError = result.error;
+        } else {
+          svc.httpHealthy = null;
+          svc.httpStatus = null;
+          svc.httpError = null;
+        }
       }),
     );
 
@@ -938,7 +1052,7 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
 // POST /containers/:name/services - Add a new service/domain mapping
 lxcRouter.post('/containers/:name/services', async (req, res) => {
   const { name } = req.params;
-  const { domain, port, obtainCert } = req.body;
+  const { domain, port, obtainCert, healthPath } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -950,6 +1064,11 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
   const cleanDomain = domain.trim();
   const svcPort = parseInt(port, 10) || 80;
   const cert = obtainCert !== false;
+  const hp = validateHealthPath(healthPath);
+  if (!hp.ok) {
+    return res.status(400).json({ success: false, error: hp.error });
+  }
+  const cleanHealthPath = hp.value;
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
@@ -997,9 +1116,12 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       console.warn('[LXC] conflict-guard DB check failed:', e?.message || e);
     }
 
-    // Write Caddy config
+    // Write Caddy config. Persist the optional healthPath as a leading
+    // comment line so the GET parser can recover it on read; Caddy
+    // ignores `#` lines so this is invisible at the proxy layer.
     const tlsDirective = cert ? '' : '\n    tls internal';
-    const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
+    const healthMarker = cleanHealthPath ? `# proxypilot: healthpath=${cleanHealthPath}\n` : '';
+    const caddyConfig = `${healthMarker}${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
     await writeFile(configPath, caddyConfig);
 
     // Reload Caddy. Surface the underlying error to the operator via a
@@ -1017,7 +1139,7 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
     console.log(`[LXC] Added service ${cleanDomain} -> ${ip}:${svcPort} for container ${name}`);
     res.json({
       success: true,
-      service: { domain: cleanDomain, port: svcPort, obtainCert: cert },
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath },
       ...(reloadWarning && { warning: reloadWarning }),
     });
   } catch (error) {
@@ -1031,11 +1153,16 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
 // PUT /containers/:name/services/:domain - Update an existing service
 lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
   const { name, domain: oldDomain } = req.params;
-  const { domain: newDomain, port, obtainCert } = req.body;
+  const { domain: newDomain, port, obtainCert, healthPath } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
   }
+  const hp = validateHealthPath(healthPath);
+  if (!hp.ok) {
+    return res.status(400).json({ success: false, error: hp.error });
+  }
+  const cleanHealthPath = hp.value;
 
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
@@ -1081,12 +1208,15 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
       await unlink(oldConfigPath);
     }
 
-    // Write new config
+    // Write new config. healthPath persists as a leading comment line
+    // (Caddy ignores it; the GET parser recovers it). Empty/missing
+    // healthPath in the request → no marker line, TCP-only behavior.
     const cleanDomain = (newDomain || oldDomain).trim();
     const svcPort = parseInt(port, 10) || 80;
     const cert = obtainCert !== false;
     const tlsDirective = cert ? '' : '\n    tls internal';
-    const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
+    const healthMarker = cleanHealthPath ? `# proxypilot: healthpath=${cleanHealthPath}\n` : '';
+    const caddyConfig = `${healthMarker}${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
     const newConfigPath = join(CADDY_SITES_DIR, cleanDomain);
     await writeFile(newConfigPath, caddyConfig);
 
@@ -1102,7 +1232,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
     console.log(`[LXC] Updated service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
     res.json({
       success: true,
-      service: { domain: cleanDomain, port: svcPort, obtainCert: cert },
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath },
       ...(reloadWarning && { warning: reloadWarning }),
     });
   } catch (error) {

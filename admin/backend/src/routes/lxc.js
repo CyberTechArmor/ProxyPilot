@@ -732,6 +732,27 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
   });
 });
 
+// Probe a `<ip>:<port>` pair from the host's network namespace using
+// bash's /dev/tcp magic file. Resolves to true on a successful TCP
+// handshake within `timeoutMs`, false otherwise (connection refused,
+// timeout, host unreachable). Used to give the operator a signal in
+// the Services UI when Caddy is configured correctly but the upstream
+// isn't actually listening — the most common 502 cause once IP
+// detection is fixed.
+async function probeTcp(ip, port, timeoutMs = 2000) {
+  if (!ip || !port) return false;
+  // Bash's /dev/tcp uses a non-blocking connect under the hood; wrap
+  // in `timeout` so a black-holed host doesn't pin the request. exit
+  // 0 on success, non-zero on any failure mode.
+  const cmd = `timeout ${Math.max(1, Math.ceil(timeoutMs / 1000))} bash -c 'exec 3<>/dev/tcp/${ip}/${port}' 2>/dev/null && echo OK || echo FAIL`;
+  try {
+    const r = await execOnHost(cmd, { timeout: timeoutMs + 1000 });
+    return (r.stdout || '').trim() === 'OK';
+  } catch {
+    return false;
+  }
+}
+
 // GET /containers/:name/services - List Caddy services for this container (by IP)
 lxcRouter.get('/containers/:name/services', async (req, res) => {
   const { name } = req.params;
@@ -752,7 +773,10 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       return res.json({ success: true, services: [], ip: null });
     }
 
-    // Scan Caddy sites directory for configs referencing this IP
+    // Scan Caddy sites directory for configs referencing this IP. We
+    // also pull out the IP the file currently references so the UI can
+    // flag "stale IP" — when an LXC restart hands out a new address
+    // the sites file still points at the old one and Caddy 502s.
     const services = [];
     try {
       const files = await readdir(CADDY_SITES_DIR);
@@ -760,14 +784,14 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
         const filePath = join(CADDY_SITES_DIR, file);
         const content = await readFile(filePath, 'utf-8');
         if (content.includes(ip)) {
-          // Parse domain, port, and TLS setting from the config
           const domainMatch = content.match(/^(\S+)\s*\{/m);
-          const portMatch = content.match(/reverse_proxy\s+[\d.]+:(\d+)/);
+          const upstreamMatch = content.match(/reverse_proxy\s+([\d.]+):(\d+)/);
           const hasTlsInternal = content.includes('tls internal');
           if (domainMatch) {
             services.push({
               domain: domainMatch[1],
-              port: portMatch ? parseInt(portMatch[1], 10) : null,
+              port: upstreamMatch ? parseInt(upstreamMatch[2], 10) : null,
+              upstreamIp: upstreamMatch ? upstreamMatch[1] : null,
               obtainCert: !hasTlsInternal,
             });
           }
@@ -776,6 +800,20 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
     } catch {
       // CADDY_SITES_DIR may not exist yet
     }
+
+    // Probe each upstream in parallel so a slow/unreachable host doesn't
+    // block the whole list. 2s is enough to distinguish "refused" from
+    // "no route" for typical LXC deployments.
+    await Promise.all(
+      services.map(async (svc) => {
+        if (!svc.port) {
+          svc.reachable = null;
+          return;
+        }
+        svc.reachable = await probeTcp(ip, svc.port, 2000);
+        svc.staleIp = svc.upstreamIp && svc.upstreamIp !== ip;
+      }),
+    );
 
     res.json({ success: true, services, ip });
   } catch (error) {

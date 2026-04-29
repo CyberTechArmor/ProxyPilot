@@ -497,30 +497,55 @@ lxcRouter.post('/containers', async (req, res) => {
       // Configure DNS with public resolvers
       await ensureDns(incusName);
 
-      // Run init script if provided
+      // Run init script if provided. We don't fail the whole
+      // creation on a non-zero exit — the operator can finish setup
+      // by hand — but we capture the exit code + the tail of output
+      // and surface it on `creation.initScriptWarning` so the UI can
+      // show "container ready, init script exited 100" instead of
+      // silently producing an empty container.
       if (initScript && typeof initScript === 'string' && initScript.trim()) {
         creation.phase = 'init-script';
         creation.message = 'Running init script...';
         try {
-          // Write script to container and execute it
           const scriptContent = initScript.trim();
           await execOnHost(
             `printf '%s' ${JSON.stringify(scriptContent)} | incus exec ${incusName} -- tee /tmp/pp-init.sh > /dev/null`,
             { timeout: 15000 }
           );
           await execOnHost(`incus exec ${incusName} -- chmod +x /tmp/pp-init.sh`, { timeout: 5000 });
-          // Run with generous timeout (5 minutes for package installs)
           const initChild = spawnOnHost(`incus exec ${incusName} -- sh /tmp/pp-init.sh`);
-          await new Promise((resolve) => {
-            const timeout = setTimeout(() => { try { initChild.kill(); } catch {} resolve(); }, 300000);
-            initChild.on('close', () => { clearTimeout(timeout); resolve(); });
-            initChild.on('error', () => { clearTimeout(timeout); resolve(); });
+          let stdoutBuf = '';
+          let stderrBuf = '';
+          const TAIL_BYTES = 4096;
+          initChild.stdout?.on('data', (d) => {
+            stdoutBuf = (stdoutBuf + d.toString()).slice(-TAIL_BYTES);
+          });
+          initChild.stderr?.on('data', (d) => {
+            stderrBuf = (stderrBuf + d.toString()).slice(-TAIL_BYTES);
+          });
+          const result = await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+              try { initChild.kill(); } catch {}
+              resolve({ code: null, killed: true });
+            }, 300000);
+            initChild.on('close', (code) => { clearTimeout(timeout); resolve({ code, killed: false }); });
+            initChild.on('error', (err) => { clearTimeout(timeout); resolve({ code: null, killed: false, err: err.message }); });
           });
           await execOnHost(`incus exec ${incusName} -- rm -f /tmp/pp-init.sh`, { timeout: 5000 }).catch(() => {});
-          console.log(`[LXC] Init script completed for ${incusName}`);
+
+          if (result.killed) {
+            creation.initScriptWarning = 'Init script timed out after 5 minutes — finish setup manually inside the container.';
+            console.error(`[LXC] Init script for ${incusName} timed out`);
+          } else if (result.code !== 0) {
+            const tail = stderrBuf || stdoutBuf || '(no output captured)';
+            creation.initScriptWarning = `Init script exited with code ${result.code}. Last output:\n${tail}`;
+            console.error(`[LXC] Init script for ${incusName} exited ${result.code}: ${tail}`);
+          } else {
+            console.log(`[LXC] Init script completed cleanly for ${incusName}`);
+          }
         } catch (initErr) {
+          creation.initScriptWarning = `Init script setup failed: ${initErr.message}`;
           console.error(`[LXC] Init script failed: ${initErr.message}`);
-          // Don't fail the whole creation for init script errors
         }
       }
 
@@ -595,6 +620,7 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
       message: creation.message,
       error: creation.error,
       ip: creation.ip,
+      initScriptWarning: creation.initScriptWarning || null,
       elapsed: Math.round((Date.now() - creation.startTime) / 1000),
     });
   }

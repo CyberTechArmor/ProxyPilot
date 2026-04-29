@@ -356,7 +356,7 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 
 // POST /containers - Start async container creation
 lxcRouter.post('/containers', async (req, res) => {
-  const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, services: rawServices } = req.body;
+  const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, dockerPrivileged, services: rawServices } = req.body;
 
   // Normalize services: support both new multi-service array and legacy single domain/port
   const services = Array.isArray(rawServices) && rawServices.length > 0
@@ -429,13 +429,36 @@ lxcRouter.post('/containers', async (req, res) => {
   // Docker-in-LXC support. Without these flags `dockerd` can't mount
   // overlayfs (kernel denies overlay mounts inside an unprivileged
   // user namespace) and image pulls fail with `permission denied` on
-  // /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/. The
-  // syscall intercepts let mknod and setxattr through the user-ns
-  // boundary so package post-install hooks and overlay metadata
-  // succeed.
-  const dockerConfigArgs = dockerSupport === true
-    ? ' --config security.nesting=true --config security.syscalls.intercept.mknod=true --config security.syscalls.intercept.setxattr=true'
-    : '';
+  // /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/.
+  //
+  // The base set covers `docker pull` and most plain `docker run`:
+  //   security.nesting=true              — allow nested containers
+  //   syscalls.intercept.mknod=true      — let package post-installs mknod
+  //   syscalls.intercept.setxattr=true   — overlay metadata
+  //
+  // The bpf intercepts cover BuildKit (the default `docker build`
+  // backend in modern Docker) and packages with native postinstalls
+  // (bcrypt, node-pty, sharp, etc.). Without them, npm's spawn() of
+  // a postinstall hook from the overlay upper layer is denied by the
+  // outer kernel's seccomp/user-ns policy:
+  //   syscalls.intercept.bpf=true
+  //   syscalls.intercept.bpf.devices=true
+  //
+  // dockerPrivileged is the escape hatch: makes the LXC privileged so
+  // it has the same capabilities as host root. Only set when the
+  // operator explicitly opts in — it surrenders the LXC isolation
+  // boundary in exchange for "Docker just works".
+  let dockerConfigArgs = '';
+  if (dockerSupport === true) {
+    dockerConfigArgs = ' --config security.nesting=true' +
+      ' --config security.syscalls.intercept.mknod=true' +
+      ' --config security.syscalls.intercept.setxattr=true' +
+      ' --config security.syscalls.intercept.bpf=true' +
+      ' --config security.syscalls.intercept.bpf.devices=true';
+    if (dockerPrivileged === true) {
+      dockerConfigArgs += ' --config security.privileged=true';
+    }
+  }
   const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}`;
   console.log(`[LXC] Starting async launch: ${launchCmd}`);
 

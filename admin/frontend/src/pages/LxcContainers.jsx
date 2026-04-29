@@ -434,7 +434,8 @@ export default function LxcContainers() {
   // Create form
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false,
+    name: '', image: '', cpu: '', memory: '', initScript: '',
+    dockerSupport: false, dockerPrivileged: false,
     services: [{ domain: '', port: '', obtainCert: true }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
@@ -545,6 +546,7 @@ export default function LxcContainers() {
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
         ...(createForm.initScript && { initScript: createForm.initScript }),
         ...(createForm.dockerSupport && { dockerSupport: true }),
+        ...(createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
       };
       await api.createLxcContainer(data);
 
@@ -562,7 +564,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, services: [{ domain: '', port: '', obtainCert: true }] });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -1306,15 +1308,16 @@ export default function LxcContainers() {
                     onValueChange={(val) => {
                       setTemplateSelection(val);
                       if (val === '__custom__') {
-                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false }));
+                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false, dockerPrivileged: false }));
                       } else if (val === '' || val === 'none') {
-                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false }));
+                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false, dockerPrivileged: false }));
                       } else {
                         const tpl = INIT_TEMPLATES.find((t) => t.value === val);
                         if (tpl) setCreateForm((f) => ({
                           ...f,
                           initScript: tpl.script,
                           dockerSupport: !!tpl.dockerSupport,
+                          dockerPrivileged: false,
                         }));
                       }
                     }}
@@ -1350,12 +1353,29 @@ export default function LxcContainers() {
                       type="checkbox"
                       className="mt-0.5 cursor-pointer"
                       checked={createForm.dockerSupport}
-                      onChange={(e) => setCreateForm((f) => ({ ...f, dockerSupport: e.target.checked }))}
+                      onChange={(e) => setCreateForm((f) => ({
+                        ...f,
+                        dockerSupport: e.target.checked,
+                        dockerPrivileged: e.target.checked ? f.dockerPrivileged : false,
+                      }))}
                     />
                     <span className="text-xs text-muted-foreground">
-                      <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + syscall intercepts so dockerd can mount overlayfs. Auto-enabled by the Docker-in-LXC template; tick this if you'll install Docker via a custom script.
+                      <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + the mknod / setxattr / bpf / bpf.devices syscall intercepts so dockerd + BuildKit can mount overlayfs and run native-postinstall packages (bcrypt, sharp, node-pty, etc.). Auto-enabled by the Docker-in-LXC template.
                     </span>
                   </label>
+                  {createForm.dockerSupport && (
+                    <label className="flex items-start gap-2 pl-6 pt-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 cursor-pointer"
+                        checked={createForm.dockerPrivileged}
+                        onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code>. Use this if `docker build` still fails with kernel-level <code className="font-mono">EPERM</code> on syscalls like <code className="font-mono">spawn sh</code> (typical for BuildKit + bcrypt-style native postinstalls). The container runs at host-root capability — only enable on hosts where you trust everything inside this LXC.
+                      </span>
+                    </label>
+                  )}
                 </div>
                 {createForm.services.some((s) => s.domain.trim()) && (
                   <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">

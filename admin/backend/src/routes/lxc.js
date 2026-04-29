@@ -356,7 +356,7 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 
 // POST /containers - Start async container creation
 lxcRouter.post('/containers', async (req, res) => {
-  const { name, image, profile, domain, port, cpu, memory, initScript, services: rawServices } = req.body;
+  const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, services: rawServices } = req.body;
 
   // Normalize services: support both new multi-service array and legacy single domain/port
   const services = Array.isArray(rawServices) && rawServices.length > 0
@@ -426,7 +426,17 @@ lxcRouter.post('/containers', async (req, res) => {
 
   // Start the launch process asynchronously (no timeout — runs until done)
   const profileArg = profile ? `--profile ${profile}` : '--profile default';
-  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}`;
+  // Docker-in-LXC support. Without these flags `dockerd` can't mount
+  // overlayfs (kernel denies overlay mounts inside an unprivileged
+  // user namespace) and image pulls fail with `permission denied` on
+  // /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/. The
+  // syscall intercepts let mknod and setxattr through the user-ns
+  // boundary so package post-install hooks and overlay metadata
+  // succeed.
+  const dockerConfigArgs = dockerSupport === true
+    ? ' --config security.nesting=true --config security.syscalls.intercept.mknod=true --config security.syscalls.intercept.setxattr=true'
+    : '';
+  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}`;
   console.log(`[LXC] Starting async launch: ${launchCmd}`);
 
   const child = spawnOnHost(launchCmd);

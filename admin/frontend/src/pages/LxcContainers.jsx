@@ -423,13 +423,18 @@ export default function LxcContainers() {
     { value: 'python', label: 'Python Development',
       script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3 python3-pip python3-venv\n' },
     { value: 'docker', label: 'Docker-in-LXC',
+      // Docker requires security.nesting + syscall intercepts on the
+      // LXC itself or `dockerd` can't mount overlayfs. The Docker
+      // checkbox below auto-enables when this template is picked so
+      // the backend launches with the right --config flags.
+      dockerSupport: true,
       script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh\n' },
   ];
 
   // Create form
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', cpu: '', memory: '', initScript: '',
+    name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false,
     services: [{ domain: '', port: '', obtainCert: true }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
@@ -539,6 +544,7 @@ export default function LxcContainers() {
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
         ...(createForm.initScript && { initScript: createForm.initScript }),
+        ...(createForm.dockerSupport && { dockerSupport: true }),
       };
       await api.createLxcContainer(data);
 
@@ -556,7 +562,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', services: [{ domain: '', port: '', obtainCert: true }] });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, services: [{ domain: '', port: '', obtainCert: true }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -1300,12 +1306,16 @@ export default function LxcContainers() {
                     onValueChange={(val) => {
                       setTemplateSelection(val);
                       if (val === '__custom__') {
-                        setCreateForm((f) => ({ ...f, initScript: '' }));
-                      } else if (val === '') {
-                        setCreateForm((f) => ({ ...f, initScript: '' }));
+                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false }));
+                      } else if (val === '' || val === 'none') {
+                        setCreateForm((f) => ({ ...f, initScript: '', dockerSupport: false }));
                       } else {
                         const tpl = INIT_TEMPLATES.find((t) => t.value === val);
-                        if (tpl) setCreateForm((f) => ({ ...f, initScript: tpl.script }));
+                        if (tpl) setCreateForm((f) => ({
+                          ...f,
+                          initScript: tpl.script,
+                          dockerSupport: !!tpl.dockerSupport,
+                        }));
                       }
                     }}
                   >
@@ -1335,6 +1345,17 @@ export default function LxcContainers() {
                   <p className="text-xs text-muted-foreground">
                     Runs automatically after container is created and has network. Takes up to 5 minutes.
                   </p>
+                  <label className="flex items-start gap-2 pt-1 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 cursor-pointer"
+                      checked={createForm.dockerSupport}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, dockerSupport: e.target.checked }))}
+                    />
+                    <span className="text-xs text-muted-foreground">
+                      <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + syscall intercepts so dockerd can mount overlayfs. Auto-enabled by the Docker-in-LXC template; tick this if you'll install Docker via a custom script.
+                    </span>
+                  </label>
                 </div>
                 {createForm.services.some((s) => s.domain.trim()) && (
                   <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">

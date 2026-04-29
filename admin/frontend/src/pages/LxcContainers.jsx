@@ -26,7 +26,7 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy
+  X, Shield, Copy, Sparkles
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -405,6 +405,14 @@ export default function LxcContainers() {
   // 'uploading' while the browser is sending bytes, 'processing' once
   // upload finishes and we're waiting on `incus import` on the host.
   const [importProgress, setImportProgress] = useState(null);
+
+  // Host cleanup state. preview is the backend response; selected is
+  // the set of category keys the operator wants to clean.
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState(null);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupSelected, setCleanupSelected] = useState(new Set());
+  const [cleanupRunning, setCleanupRunning] = useState(false);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -1009,6 +1017,74 @@ export default function LxcContainers() {
     }
   };
 
+  // Open the cleanup dialog and populate the preview. Default-select
+  // every category that has at least one item so the operator's
+  // first action is "Clean Up" rather than "click each checkbox" —
+  // most operators want everything reclaimed when they bother to
+  // open this dialog.
+  const openCleanup = async () => {
+    setCleanupOpen(true);
+    setCleanupPreview(null);
+    setCleanupSelected(new Set());
+    setCleanupLoading(true);
+    try {
+      const res = await api.getLxcCleanupPreview();
+      setCleanupPreview(res);
+      const preselect = new Set((res.categories || []).filter((c) => c.count > 0).map((c) => c.key));
+      setCleanupSelected(preselect);
+    } catch (err) {
+      toast({ title: 'Cleanup preview failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setCleanupLoading(false);
+    }
+  };
+
+  const toggleCleanupCategory = (key) => {
+    setCleanupSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleRunCleanup = async () => {
+    if (cleanupSelected.size === 0) return;
+    setCleanupRunning(true);
+    try {
+      const res = await api.executeLxcCleanup([...cleanupSelected]);
+      // Build a single toast description summarizing every category
+      // that ran, including a count of any per-item errors so they
+      // don't get swallowed when only some items failed.
+      const parts = [];
+      let totalFreed = 0;
+      let totalErrors = 0;
+      for (const [key, r] of Object.entries(res.results || {})) {
+        if (!r) continue;
+        parts.push(`${key}: ${r.removed} removed${r.freedBytes ? ` (${formatSize(r.freedBytes)})` : ''}`);
+        totalFreed += r.freedBytes || 0;
+        totalErrors += (r.errors || []).length;
+      }
+      const desc = parts.join(' · ') + (totalErrors ? ` · ${totalErrors} error(s)` : '') + (totalFreed ? ` — ${formatSize(totalFreed)} freed` : '');
+      toast({
+        title: totalErrors ? 'Cleanup finished with errors' : 'Cleanup complete',
+        description: desc || 'Nothing to clean.',
+        variant: totalErrors ? 'destructive' : 'default',
+      });
+      // Refresh the preview so the dialog reflects the post-cleanup
+      // state. Operator can run another pass without closing.
+      try {
+        const fresh = await api.getLxcCleanupPreview();
+        setCleanupPreview(fresh);
+        setCleanupSelected(new Set());
+      } catch {}
+    } catch (err) {
+      toast({ title: 'Cleanup failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setCleanupRunning(false);
+    }
+  };
+
   const handleCreateSnapshot = async () => {
     if (!selectedContainer || !snapshotName.trim()) return;
     setSnapshotLoading(true);
@@ -1168,6 +1244,10 @@ export default function LxcContainers() {
           <Button variant="outline" size="sm" onClick={fetchContainers}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
+          </Button>
+          <Button variant="outline" size="sm" onClick={openCleanup}>
+            <Sparkles className="h-4 w-4 mr-2" />
+            Cleanup
           </Button>
           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
             <Upload className="h-4 w-4 mr-2" />
@@ -2337,6 +2417,105 @@ export default function LxcContainers() {
               </TabsContent>
             </Tabs>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Host Cleanup Dialog. Two-stage UX: preview lists every
+          category with counts/sizes; operator selects what to clean,
+          confirms, executes. Categories with count=0 stay greyed out
+          so the operator can see the host is already tidy without
+          guessing. */}
+      <Dialog open={cleanupOpen} onOpenChange={(open) => { if (!cleanupRunning) setCleanupOpen(open); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-cyan-500" />
+              Host Cleanup
+            </DialogTitle>
+            <DialogDescription>
+              Reclaim disk by removing unused image cache, orphaned export temp containers, and stale upload temp files.
+              {' '}Operator data (containers, snapshots, attached storage volumes) is never touched.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {cleanupLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Scanning host...
+              </div>
+            )}
+            {!cleanupLoading && cleanupPreview?.categories?.map((cat) => {
+              const checked = cleanupSelected.has(cat.key);
+              const empty = cat.count === 0;
+              return (
+                <label
+                  key={cat.key}
+                  className={`flex items-start gap-3 p-3 rounded-lg border ${empty ? 'opacity-50 cursor-not-allowed border-border/30' : 'cursor-pointer border-border/60 hover:border-cyan-500/40'} ${checked && !empty ? 'bg-cyan-500/5 border-cyan-500/40' : 'bg-muted/20'}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-1 cursor-pointer"
+                    checked={checked}
+                    disabled={empty || cleanupRunning}
+                    onChange={() => toggleCleanupCategory(cat.key)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{cat.label}</span>
+                      <span className="text-xs text-muted-foreground font-mono">
+                        {cat.count} item{cat.count === 1 ? '' : 's'}
+                        {cat.bytes > 0 ? ` · ${formatSize(cat.bytes)}` : ''}
+                      </span>
+                    </div>
+                    {cat.description && (
+                      <p className="text-xs text-muted-foreground mt-1">{cat.description}</p>
+                    )}
+                    {cat.error && (
+                      <p className="text-xs text-red-400 mt-1 font-mono">Scan error: {cat.error}</p>
+                    )}
+                    {cat.items?.length > 0 && (
+                      <details className="mt-1.5">
+                        <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground">
+                          Show items
+                        </summary>
+                        <ul className="mt-1 space-y-0.5 text-[11px] font-mono text-muted-foreground max-h-32 overflow-y-auto">
+                          {cat.items.map((item) => (
+                            <li key={item.id} className="flex justify-between gap-2">
+                              <span className="truncate">
+                                {item.label}
+                                {item.sublabel && <span className="text-muted-foreground/60"> · {item.sublabel}</span>}
+                              </span>
+                              {item.size > 0 && <span className="shrink-0">{formatSize(item.size)}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+            {!cleanupLoading && cleanupPreview && cleanupPreview.categories?.every((c) => c.count === 0) && (
+              <div className="text-center py-6 text-sm text-muted-foreground">
+                Host is already tidy — nothing to clean.
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCleanupOpen(false)} disabled={cleanupRunning}>
+              {cleanupRunning ? 'Running...' : 'Close'}
+            </Button>
+            <Button
+              onClick={handleRunCleanup}
+              disabled={cleanupRunning || cleanupLoading || cleanupSelected.size === 0}
+            >
+              {cleanupRunning ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Cleaning up...</>
+              ) : (
+                <><Sparkles className="h-4 w-4 mr-2" />Clean Up{cleanupSelected.size > 0 ? ` (${cleanupSelected.size})` : ''}</>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -26,7 +26,7 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy
+  X, Shield, Copy, Sparkles
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -90,80 +90,16 @@ function formatDuration(ms) {
   return remM ? `${h}h ${remM}m` : `${h}h`;
 }
 
-// Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
-// init template either failed (network race on first boot) or wasn't
-// selected. Wrapped in a retry loop for apt-get update so a flaky
-// first-boot DNS doesn't make the install no-op silently.
-const QUICK_INSTALL_SCRIPT =
-  'i=0; until apt-get update; do i=$((i+1)); [ "$i" -ge 5 ] && break; echo "retrying apt-get update in 5s..."; sleep 5; done && apt-get install -y sudo nano git curl wget htop ca-certificates && echo "=== ProxyPilot quick-install complete ==="';
 
-const QUICK_INSTALL_FLAG_PREFIX = 'pp-lxc-quick-installed:';
-
-function quickInstallDone(containerName) {
-  try {
-    return localStorage.getItem(QUICK_INSTALL_FLAG_PREFIX + containerName) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function markQuickInstallDone(containerName) {
-  try {
-    localStorage.setItem(QUICK_INSTALL_FLAG_PREFIX + containerName, '1');
-  } catch { /* private mode / quota */ }
-}
-
-// LxcTerminalPanel wraps InteractiveTerminal with a small toolbar.
-// The toolbar shows a "Run install script" button on first open of
-// each container; clicking it pushes the apt one-liner into the live
-// PTY via the imperative ref and persists a per-container flag in
-// localStorage so the button stops appearing on subsequent opens of
-// that LXC. Hidden entirely once the flag is set.
-function LxcTerminalPanel({ containerName, initialCwd, toast }) {
-  const termRef = useRef(null);
-  const [installed, setInstalled] = useState(() => quickInstallDone(containerName));
-
-  // Re-evaluate when the container selection changes inside the same dialog.
-  useEffect(() => {
-    setInstalled(quickInstallDone(containerName));
-  }, [containerName]);
-
-  const runInstallScript = () => {
-    const sent = termRef.current?.sendInput(QUICK_INSTALL_SCRIPT + '\n');
-    if (sent) {
-      markQuickInstallDone(containerName);
-      setInstalled(true);
-      toast({
-        title: 'Install script sent',
-        description: 'Watch the terminal — apt-get update + install runs now. The button will not show on this container again.',
-      });
-    } else {
-      toast({
-        title: 'Terminal not ready',
-        description: 'Wait for the green "Connected" banner and try again.',
-        variant: 'destructive',
-      });
-    }
-  };
-
+// LxcTerminalPanel wraps InteractiveTerminal for an LXC.
+// The legacy "Run install script" toolbar was removed once dedicated
+// install scripts (XRay, n8n, …) replaced the apt one-liner — the
+// button was a footgun on Alpine/CentOS and added no value for
+// operators running real install scripts.
+function LxcTerminalPanel({ containerName, initialCwd }) {
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-      {!installed && (
-        <div className="flex items-center justify-end gap-2 px-1 pb-1 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={runInstallScript}
-            title="One-click: runs apt-get update + installs sudo, nano, git, curl, wget, htop, ca-certificates. Hidden after a successful click."
-          >
-            <Copy className="h-3 w-3 mr-1" />
-            Run install script
-          </Button>
-        </div>
-      )}
       <InteractiveTerminal
-        ref={termRef}
         wsPath={`/api/terminal/lxc/${containerName}`}
         initialCwd={initialCwd}
       />
@@ -393,9 +329,13 @@ export default function LxcContainers() {
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [exporting, setExporting] = useState(false);
-  // Live export progress: { loaded, total, elapsedMs } during a download.
-  // total is null when the storage backend can't report rootfs usage —
-  // the UI degrades to bytes-downloaded + elapsed without a percentage.
+  // Live export progress. Carries the containerName the export belongs
+  // to so the panel only renders progress for that container — without
+  // this scoping, opening another LXC's panel mid-export inherits the
+  // running progress bar. abortController lets the Cancel button kill
+  // the in-flight fetch (and trigger backend cleanup via req.close).
+  // Shape: { containerName, snapshotName?, loaded, total, elapsedMs,
+  //          phase, throughputBps, abortController }
   const [exportProgress, setExportProgress] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
@@ -405,6 +345,14 @@ export default function LxcContainers() {
   // 'uploading' while the browser is sending bytes, 'processing' once
   // upload finishes and we're waiting on `incus import` on the host.
   const [importProgress, setImportProgress] = useState(null);
+
+  // Host cleanup state. preview is the backend response; selected is
+  // the set of category keys the operator wants to clean.
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState(null);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupSelected, setCleanupSelected] = useState(new Set());
+  const [cleanupRunning, setCleanupRunning] = useState(false);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -801,11 +749,19 @@ export default function LxcContainers() {
   // as two distinct phases ("preparing" → "streaming") so the UI
   // doesn't look stuck during the copy phase. Throughput is a
   // 10-second moving average computed from the read-loop samples.
-  const streamDownload = async ({ url, filename, fetchEstimate, label }) => {
+  const streamDownload = async ({ url, filename, fetchEstimate, label, containerName, snapshotName }) => {
     const startTime = Date.now();
+    // AbortController wires the Cancel button to fetch — calling
+    // .abort() makes reader.read() throw, the catch path below
+    // tags it 'AbortError' so the toast says "cancelled" rather
+    // than "failed". The backend's req.on('close') handler kills
+    // the incus export child + cleans up any temp container.
+    const abortController = new AbortController();
     setExportProgress({
+      containerName, snapshotName: snapshotName || null,
       loaded: 0, total: null, elapsedMs: 0,
       phase: 'preparing', throughputBps: null,
+      abortController,
     });
 
     let total = null;
@@ -819,7 +775,7 @@ export default function LxcContainers() {
     }
     setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0, phase: 'preparing' }));
 
-    const res = await fetch(url, { credentials: 'include' });
+    const res = await fetch(url, { credentials: 'include', signal: abortController.signal });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `${label} failed`);
@@ -914,16 +870,25 @@ export default function LxcContainers() {
   const handleExport = async () => {
     if (!selectedContainer) return;
     setExporting(true);
+    const ctName = selectedContainer.name;
     try {
       const loaded = await streamDownload({
-        url: `/api/lxc/containers/${selectedContainer.name}/export`,
-        filename: `${selectedContainer.name}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcExportInfo(selectedContainer.name),
+        url: `/api/lxc/containers/${ctName}/export`,
+        filename: `${ctName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcExportInfo(ctName),
         label: 'Export',
+        containerName: ctName,
       });
-      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded (${formatSize(loaded)}).` });
+      toast({ title: 'Export complete', description: `${ctName} backup downloaded (${formatSize(loaded)}).` });
     } catch (err) {
-      toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+      // AbortError = operator clicked Cancel. Distinguish it from a
+      // real failure so the toast doesn't blame the operator's
+      // action as an error.
+      if (err?.name === 'AbortError') {
+        toast({ title: 'Export cancelled', description: `${ctName} export cancelled.` });
+      } else {
+        toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+      }
     } finally {
       setExporting(false);
       setExportProgress(null);
@@ -936,16 +901,23 @@ export default function LxcContainers() {
   const handleDownloadSnapshot = async (snapshotName) => {
     if (!selectedContainer) return;
     setExporting(true);
+    const ctName = selectedContainer.name;
     try {
       const loaded = await streamDownload({
-        url: `/api/lxc/containers/${selectedContainer.name}/snapshot/${encodeURIComponent(snapshotName)}/export`,
-        filename: `${selectedContainer.name}-${snapshotName}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcSnapshotExportInfo(selectedContainer.name, snapshotName),
+        url: `/api/lxc/containers/${ctName}/snapshot/${encodeURIComponent(snapshotName)}/export`,
+        filename: `${ctName}-${snapshotName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcSnapshotExportInfo(ctName, snapshotName),
         label: 'Snapshot download',
+        containerName: ctName,
+        snapshotName,
       });
       toast({ title: 'Snapshot downloaded', description: `${snapshotName} (${formatSize(loaded)})` });
     } catch (err) {
-      toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
+      if (err?.name === 'AbortError') {
+        toast({ title: 'Download cancelled', description: `Snapshot ${snapshotName} cancelled.` });
+      } else {
+        toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
+      }
     } finally {
       setExporting(false);
       setExportProgress(null);
@@ -1006,6 +978,74 @@ export default function LxcContainers() {
       if (elapsedTimer) clearInterval(elapsedTimer);
       setImporting(false);
       setImportProgress(null);
+    }
+  };
+
+  // Open the cleanup dialog and populate the preview. Default-select
+  // every category that has at least one item so the operator's
+  // first action is "Clean Up" rather than "click each checkbox" —
+  // most operators want everything reclaimed when they bother to
+  // open this dialog.
+  const openCleanup = async () => {
+    setCleanupOpen(true);
+    setCleanupPreview(null);
+    setCleanupSelected(new Set());
+    setCleanupLoading(true);
+    try {
+      const res = await api.getLxcCleanupPreview();
+      setCleanupPreview(res);
+      const preselect = new Set((res.categories || []).filter((c) => c.count > 0).map((c) => c.key));
+      setCleanupSelected(preselect);
+    } catch (err) {
+      toast({ title: 'Cleanup preview failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setCleanupLoading(false);
+    }
+  };
+
+  const toggleCleanupCategory = (key) => {
+    setCleanupSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleRunCleanup = async () => {
+    if (cleanupSelected.size === 0) return;
+    setCleanupRunning(true);
+    try {
+      const res = await api.executeLxcCleanup([...cleanupSelected]);
+      // Build a single toast description summarizing every category
+      // that ran, including a count of any per-item errors so they
+      // don't get swallowed when only some items failed.
+      const parts = [];
+      let totalFreed = 0;
+      let totalErrors = 0;
+      for (const [key, r] of Object.entries(res.results || {})) {
+        if (!r) continue;
+        parts.push(`${key}: ${r.removed} removed${r.freedBytes ? ` (${formatSize(r.freedBytes)})` : ''}`);
+        totalFreed += r.freedBytes || 0;
+        totalErrors += (r.errors || []).length;
+      }
+      const desc = parts.join(' · ') + (totalErrors ? ` · ${totalErrors} error(s)` : '') + (totalFreed ? ` — ${formatSize(totalFreed)} freed` : '');
+      toast({
+        title: totalErrors ? 'Cleanup finished with errors' : 'Cleanup complete',
+        description: desc || 'Nothing to clean.',
+        variant: totalErrors ? 'destructive' : 'default',
+      });
+      // Refresh the preview so the dialog reflects the post-cleanup
+      // state. Operator can run another pass without closing.
+      try {
+        const fresh = await api.getLxcCleanupPreview();
+        setCleanupPreview(fresh);
+        setCleanupSelected(new Set());
+      } catch {}
+    } catch (err) {
+      toast({ title: 'Cleanup failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setCleanupRunning(false);
     }
   };
 
@@ -1168,6 +1208,10 @@ export default function LxcContainers() {
           <Button variant="outline" size="sm" onClick={fetchContainers}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
+          </Button>
+          <Button variant="outline" size="sm" onClick={openCleanup}>
+            <Sparkles className="h-4 w-4 mr-2" />
+            Cleanup
           </Button>
           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
             <Upload className="h-4 w-4 mr-2" />
@@ -2070,19 +2114,33 @@ export default function LxcContainers() {
                     <Download className="h-4 w-4" />
                     Backup
                   </h4>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleExport}
-                    disabled={exporting}
-                  >
-                    {exporting ? (
-                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Exporting...</>
-                    ) : (
-                      <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleExport}
+                      disabled={exporting}
+                    >
+                      {exporting && exportProgress?.containerName === selectedContainer.name ? (
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          {exportProgress.snapshotName ? 'Downloading snapshot...' : 'Exporting...'}
+                        </>
+                      ) : (
+                        <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
+                      )}
+                    </Button>
+                    {exporting && exportProgress?.containerName === selectedContainer.name && exportProgress?.abortController && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-red-500 hover:text-red-400 border-red-500/30 hover:border-red-500/60"
+                        onClick={() => exportProgress.abortController.abort()}
+                      >
+                        <X className="h-3 w-3 mr-1" />Cancel
+                      </Button>
                     )}
-                  </Button>
-                  {exportProgress && (
+                  </div>
+                  {exportProgress && exportProgress.containerName === selectedContainer.name && (
                     <div className="mt-2 space-y-1">
                       {exportProgress.phase === 'streaming' && exportProgress.total ? (
                         <div className="h-1.5 bg-muted rounded overflow-hidden">
@@ -2321,7 +2379,6 @@ export default function LxcContainers() {
                 <LxcTerminalPanel
                   containerName={selectedContainer.name}
                   initialCwd={terminalCwd}
-                  toast={toast}
                 />
               </TabsContent>
 
@@ -2337,6 +2394,105 @@ export default function LxcContainers() {
               </TabsContent>
             </Tabs>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Host Cleanup Dialog. Two-stage UX: preview lists every
+          category with counts/sizes; operator selects what to clean,
+          confirms, executes. Categories with count=0 stay greyed out
+          so the operator can see the host is already tidy without
+          guessing. */}
+      <Dialog open={cleanupOpen} onOpenChange={(open) => { if (!cleanupRunning) setCleanupOpen(open); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-cyan-500" />
+              Host Cleanup
+            </DialogTitle>
+            <DialogDescription>
+              Reclaim disk by removing unused image cache, orphaned export temp containers, and stale upload temp files.
+              {' '}Operator data (containers, snapshots, attached storage volumes) is never touched.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {cleanupLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Scanning host...
+              </div>
+            )}
+            {!cleanupLoading && cleanupPreview?.categories?.map((cat) => {
+              const checked = cleanupSelected.has(cat.key);
+              const empty = cat.count === 0;
+              return (
+                <label
+                  key={cat.key}
+                  className={`flex items-start gap-3 p-3 rounded-lg border ${empty ? 'opacity-50 cursor-not-allowed border-border/30' : 'cursor-pointer border-border/60 hover:border-cyan-500/40'} ${checked && !empty ? 'bg-cyan-500/5 border-cyan-500/40' : 'bg-muted/20'}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-1 cursor-pointer"
+                    checked={checked}
+                    disabled={empty || cleanupRunning}
+                    onChange={() => toggleCleanupCategory(cat.key)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{cat.label}</span>
+                      <span className="text-xs text-muted-foreground font-mono">
+                        {cat.count} item{cat.count === 1 ? '' : 's'}
+                        {cat.bytes > 0 ? ` · ${formatSize(cat.bytes)}` : ''}
+                      </span>
+                    </div>
+                    {cat.description && (
+                      <p className="text-xs text-muted-foreground mt-1">{cat.description}</p>
+                    )}
+                    {cat.error && (
+                      <p className="text-xs text-red-400 mt-1 font-mono">Scan error: {cat.error}</p>
+                    )}
+                    {cat.items?.length > 0 && (
+                      <details className="mt-1.5">
+                        <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground">
+                          Show items
+                        </summary>
+                        <ul className="mt-1 space-y-0.5 text-[11px] font-mono text-muted-foreground max-h-32 overflow-y-auto">
+                          {cat.items.map((item) => (
+                            <li key={item.id} className="flex justify-between gap-2">
+                              <span className="truncate">
+                                {item.label}
+                                {item.sublabel && <span className="text-muted-foreground/60"> · {item.sublabel}</span>}
+                              </span>
+                              {item.size > 0 && <span className="shrink-0">{formatSize(item.size)}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+            {!cleanupLoading && cleanupPreview && cleanupPreview.categories?.every((c) => c.count === 0) && (
+              <div className="text-center py-6 text-sm text-muted-foreground">
+                Host is already tidy — nothing to clean.
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCleanupOpen(false)} disabled={cleanupRunning}>
+              {cleanupRunning ? 'Running...' : 'Close'}
+            </Button>
+            <Button
+              onClick={handleRunCleanup}
+              disabled={cleanupRunning || cleanupLoading || cleanupSelected.size === 0}
+            >
+              {cleanupRunning ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Cleaning up...</>
+              ) : (
+                <><Sparkles className="h-4 w-4 mr-2" />Clean Up{cleanupSelected.size > 0 ? ` (${cleanupSelected.size})` : ''}</>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -1964,6 +1964,17 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
         res.status(500).json({ success: false, error: err.message });
       }
     });
+
+    // Client cancelled (browser closed, AbortController.abort() in
+    // the dashboard, network drop). Kill the export child so incus
+    // stops compressing — otherwise it keeps running on the host
+    // until done, wasting CPU + disk for a download nobody is
+    // receiving anymore.
+    req.on('close', () => {
+      if (child && !child.killed) {
+        try { child.kill('SIGTERM'); } catch {}
+      }
+    });
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ success: false, error: error.message });
@@ -2417,4 +2428,211 @@ lxcRouter.delete('/cached-images/:fingerprint', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: error.stderr || error.message });
   }
+});
+
+// ----------------------------------------------------------------------------
+// Host Cleanup
+// ----------------------------------------------------------------------------
+//
+// Surfaces three categories of safely-removable artifacts that
+// accumulate on a ProxyPilot host over time. Two-step UX: GET
+// /preview enumerates everything with sizes; POST /execute deletes
+// only the categories the operator explicitly opts into.
+//
+// Excluded by design:
+//   - The host's Docker daemon — ProxyPilot itself runs in Docker,
+//     so a generic `docker system prune` from the dashboard could
+//     wipe the dashboard. Per-LXC Docker prune is a separate
+//     feature and belongs inside each container's own management
+//     surface.
+//   - LXC snapshots and storage volumes attached to instances —
+//     operator data, never auto-prune.
+//   - Caddy site files — already cleaned up by the container
+//     delete handler.
+
+const PP_SNAP_EXPORT_PREFIX = 'pp-snap-export-';
+// Stale-cutoff for upload temp files. 24h is comfortably longer than
+// any realistic import (50 GiB at 100 Mbit ≈ 70 min) so we never
+// race a still-running upload, while still reclaiming disk from
+// failed/cancelled uploads.
+const IMPORT_TEMP_STALE_MS = 24 * 60 * 60 * 1000;
+
+// GET /cleanup/preview - Enumerate cleanable artifacts.
+lxcRouter.get('/cleanup/preview', async (req, res) => {
+  const categories = [];
+
+  // 1. Unused Incus images. `used_by` is empty when no instance is
+  //    currently using the image. Auto-downloaded images
+  //    accumulate every time an operator picks a different distro
+  //    template — they're cheap to re-download and safe to remove.
+  try {
+    const r = await execOnHost('incus image list --format json 2>/dev/null', { timeout: 15000 });
+    const images = JSON.parse(r.stdout || '[]');
+    const unused = images.filter((img) => !Array.isArray(img.used_by) || img.used_by.length === 0);
+    categories.push({
+      key: 'images',
+      label: 'Unused Incus images',
+      description: 'Image cache entries not currently used by any container. Re-downloaded automatically when needed.',
+      count: unused.length,
+      bytes: unused.reduce((s, i) => s + (typeof i.size === 'number' ? i.size : 0), 0),
+      items: unused.map((img) => ({
+        id: img.fingerprint,
+        label: (Array.isArray(img.aliases) && img.aliases[0]?.name) || (img.fingerprint || '').slice(0, 12),
+        sublabel: img.update_source?.alias || img.properties?.description || null,
+        size: typeof img.size === 'number' ? img.size : 0,
+      })),
+    });
+  } catch (e) {
+    categories.push({ key: 'images', label: 'Unused Incus images', count: 0, bytes: 0, items: [], error: (e.stderr || e.message || '').trim() });
+  }
+
+  // 2. Orphaned snapshot-export temp containers. The snapshot
+  //    download endpoint creates pp-snap-export-<ts>-<rand> via
+  //    `incus copy` and deletes it on every termination path,
+  //    including client disconnect. If the backend itself crashes
+  //    mid-export, the temp instance leaks — surface those here.
+  try {
+    const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 15000 });
+    const containers = JSON.parse(r.stdout || '[]');
+    const orphans = containers.filter((c) => typeof c.name === 'string' && c.name.startsWith(PP_SNAP_EXPORT_PREFIX));
+    categories.push({
+      key: 'exportTemps',
+      label: 'Orphaned snapshot-export temp containers',
+      description: 'Created by snapshot downloads; normally auto-cleaned on download finish or cancel. Leftovers usually mean the backend crashed mid-export.',
+      count: orphans.length,
+      bytes: 0,
+      items: orphans.map((c) => ({
+        id: c.name,
+        label: c.name,
+        sublabel: c.status || null,
+        size: 0,
+      })),
+    });
+  } catch (e) {
+    categories.push({ key: 'exportTemps', label: 'Orphaned snapshot-export temp containers', count: 0, bytes: 0, items: [], error: (e.stderr || e.message || '').trim() });
+  }
+
+  // 3. Stale upload temp files. Multer disk-storage writes uploaded
+  //    backups here before piping into incus import. The /import
+  //    handler unlinks on every termination path, but a backend
+  //    crash during the import phase leaves the tarball behind.
+  try {
+    let names = [];
+    try { names = await readdir(LXC_IMPORT_TMP_DIR); } catch { names = []; }
+    const cutoff = Date.now() - IMPORT_TEMP_STALE_MS;
+    const stale = [];
+    for (const name of names) {
+      try {
+        const s = await stat(join(LXC_IMPORT_TMP_DIR, name));
+        if (s.isFile() && s.mtimeMs < cutoff) {
+          stale.push({ id: name, label: name, sublabel: `modified ${new Date(s.mtimeMs).toISOString()}`, size: s.size });
+        }
+      } catch {}
+    }
+    categories.push({
+      key: 'importTemps',
+      label: 'Stale upload temp files (>24h)',
+      description: `Buffered backup uploads in ${LXC_IMPORT_TMP_DIR}. Normally auto-deleted after import; older than 24h means a failed upload.`,
+      count: stale.length,
+      bytes: stale.reduce((s, i) => s + i.size, 0),
+      items: stale,
+    });
+  } catch (e) {
+    categories.push({ key: 'importTemps', label: 'Stale upload temp files (>24h)', count: 0, bytes: 0, items: [], error: e.message });
+  }
+
+  res.json({ success: true, categories });
+});
+
+// POST /cleanup/execute - Run the requested cleanup categories.
+//
+// Body: { categories: ['images', 'exportTemps', 'importTemps'] }
+//
+// Re-enumerates everything fresh (the preview snapshot may be stale
+// by the time the operator clicks Clean Up — a download could have
+// completed and reclaimed its temp instance, etc.) so we never
+// delete something that just transitioned out of "orphaned" state.
+// Each category is best-effort: a per-item failure is logged and
+// reported but doesn't abort the rest of the run.
+lxcRouter.post('/cleanup/execute', requireSudo, async (req, res) => {
+  const { categories } = req.body || {};
+  const allowed = new Set(['images', 'exportTemps', 'importTemps']);
+  if (!Array.isArray(categories) || categories.length === 0 || categories.some((c) => !allowed.has(c))) {
+    return res.status(400).json({ success: false, error: 'Invalid categories.' });
+  }
+  const selected = new Set(categories);
+  const results = {};
+
+  // 1. Unused Incus images.
+  if (selected.has('images')) {
+    const result = { removed: 0, freedBytes: 0, errors: [] };
+    try {
+      const r = await execOnHost('incus image list --format json 2>/dev/null', { timeout: 15000 });
+      const images = JSON.parse(r.stdout || '[]');
+      const unused = images.filter((img) => !Array.isArray(img.used_by) || img.used_by.length === 0);
+      for (const img of unused) {
+        try {
+          await execOnHost(`incus image delete ${img.fingerprint}`, { timeout: 30000 });
+          result.removed++;
+          if (typeof img.size === 'number') result.freedBytes += img.size;
+        } catch (e) {
+          result.errors.push(`${img.fingerprint.slice(0, 12)}: ${(e.stderr || e.message || '').trim()}`);
+        }
+      }
+    } catch (e) {
+      result.errors.push(`enumerate failed: ${(e.stderr || e.message || '').trim()}`);
+    }
+    results.images = result;
+  }
+
+  // 2. Orphaned snapshot-export temp containers. Force-delete since
+  //    they may be in a stopped/created state from a crashed export.
+  if (selected.has('exportTemps')) {
+    const result = { removed: 0, freedBytes: 0, errors: [] };
+    try {
+      const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 15000 });
+      const containers = JSON.parse(r.stdout || '[]');
+      const orphans = containers.filter((c) => typeof c.name === 'string' && c.name.startsWith(PP_SNAP_EXPORT_PREFIX));
+      for (const c of orphans) {
+        try {
+          await execOnHost(`incus delete ${c.name} --force`, { timeout: 60000 });
+          result.removed++;
+        } catch (e) {
+          result.errors.push(`${c.name}: ${(e.stderr || e.message || '').trim()}`);
+        }
+      }
+    } catch (e) {
+      result.errors.push(`enumerate failed: ${(e.stderr || e.message || '').trim()}`);
+    }
+    results.exportTemps = result;
+  }
+
+  // 3. Stale upload temp files. Re-stat each before unlink so a
+  //    file that was just modified by an in-flight upload is left
+  //    alone even if it was in the preview list.
+  if (selected.has('importTemps')) {
+    const result = { removed: 0, freedBytes: 0, errors: [] };
+    try {
+      let names = [];
+      try { names = await readdir(LXC_IMPORT_TMP_DIR); } catch { names = []; }
+      const cutoff = Date.now() - IMPORT_TEMP_STALE_MS;
+      for (const name of names) {
+        const path = join(LXC_IMPORT_TMP_DIR, name);
+        try {
+          const s = await stat(path);
+          if (!s.isFile() || s.mtimeMs >= cutoff) continue;
+          await unlink(path);
+          result.removed++;
+          result.freedBytes += s.size;
+        } catch (e) {
+          result.errors.push(`${name}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      result.errors.push(`enumerate failed: ${e.message}`);
+    }
+    results.importTemps = result;
+  }
+
+  res.json({ success: true, results });
 });

@@ -536,6 +536,16 @@ export const api = {
     method: 'DELETE',
   }),
 
+  // Host cleanup — enumerate and delete safely-removable artifacts
+  // (unused incus images, orphaned snapshot-export temp containers,
+  // stale upload temp files). Two-step: preview, then execute only
+  // the categories the operator opts into.
+  getLxcCleanupPreview: () => request('/lxc/cleanup/preview'),
+  executeLxcCleanup: (categories) => request('/lxc/cleanup/execute', {
+    method: 'POST',
+    body: JSON.stringify({ categories }),
+  }),
+
   getLxcImages: () => request('/lxc/images'),
 
   // Incus Infrastructure Management

@@ -90,80 +90,16 @@ function formatDuration(ms) {
   return remM ? `${h}h ${remM}m` : `${h}h`;
 }
 
-// Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
-// init template either failed (network race on first boot) or wasn't
-// selected. Wrapped in a retry loop for apt-get update so a flaky
-// first-boot DNS doesn't make the install no-op silently.
-const QUICK_INSTALL_SCRIPT =
-  'i=0; until apt-get update; do i=$((i+1)); [ "$i" -ge 5 ] && break; echo "retrying apt-get update in 5s..."; sleep 5; done && apt-get install -y sudo nano git curl wget htop ca-certificates && echo "=== ProxyPilot quick-install complete ==="';
 
-const QUICK_INSTALL_FLAG_PREFIX = 'pp-lxc-quick-installed:';
-
-function quickInstallDone(containerName) {
-  try {
-    return localStorage.getItem(QUICK_INSTALL_FLAG_PREFIX + containerName) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function markQuickInstallDone(containerName) {
-  try {
-    localStorage.setItem(QUICK_INSTALL_FLAG_PREFIX + containerName, '1');
-  } catch { /* private mode / quota */ }
-}
-
-// LxcTerminalPanel wraps InteractiveTerminal with a small toolbar.
-// The toolbar shows a "Run install script" button on first open of
-// each container; clicking it pushes the apt one-liner into the live
-// PTY via the imperative ref and persists a per-container flag in
-// localStorage so the button stops appearing on subsequent opens of
-// that LXC. Hidden entirely once the flag is set.
-function LxcTerminalPanel({ containerName, initialCwd, toast }) {
-  const termRef = useRef(null);
-  const [installed, setInstalled] = useState(() => quickInstallDone(containerName));
-
-  // Re-evaluate when the container selection changes inside the same dialog.
-  useEffect(() => {
-    setInstalled(quickInstallDone(containerName));
-  }, [containerName]);
-
-  const runInstallScript = () => {
-    const sent = termRef.current?.sendInput(QUICK_INSTALL_SCRIPT + '\n');
-    if (sent) {
-      markQuickInstallDone(containerName);
-      setInstalled(true);
-      toast({
-        title: 'Install script sent',
-        description: 'Watch the terminal — apt-get update + install runs now. The button will not show on this container again.',
-      });
-    } else {
-      toast({
-        title: 'Terminal not ready',
-        description: 'Wait for the green "Connected" banner and try again.',
-        variant: 'destructive',
-      });
-    }
-  };
-
+// LxcTerminalPanel wraps InteractiveTerminal for an LXC.
+// The legacy "Run install script" toolbar was removed once dedicated
+// install scripts (XRay, n8n, …) replaced the apt one-liner — the
+// button was a footgun on Alpine/CentOS and added no value for
+// operators running real install scripts.
+function LxcTerminalPanel({ containerName, initialCwd }) {
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-      {!installed && (
-        <div className="flex items-center justify-end gap-2 px-1 pb-1 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={runInstallScript}
-            title="One-click: runs apt-get update + installs sudo, nano, git, curl, wget, htop, ca-certificates. Hidden after a successful click."
-          >
-            <Copy className="h-3 w-3 mr-1" />
-            Run install script
-          </Button>
-        </div>
-      )}
       <InteractiveTerminal
-        ref={termRef}
         wsPath={`/api/terminal/lxc/${containerName}`}
         initialCwd={initialCwd}
       />
@@ -393,9 +329,13 @@ export default function LxcContainers() {
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [exporting, setExporting] = useState(false);
-  // Live export progress: { loaded, total, elapsedMs } during a download.
-  // total is null when the storage backend can't report rootfs usage —
-  // the UI degrades to bytes-downloaded + elapsed without a percentage.
+  // Live export progress. Carries the containerName the export belongs
+  // to so the panel only renders progress for that container — without
+  // this scoping, opening another LXC's panel mid-export inherits the
+  // running progress bar. abortController lets the Cancel button kill
+  // the in-flight fetch (and trigger backend cleanup via req.close).
+  // Shape: { containerName, snapshotName?, loaded, total, elapsedMs,
+  //          phase, throughputBps, abortController }
   const [exportProgress, setExportProgress] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
@@ -809,11 +749,19 @@ export default function LxcContainers() {
   // as two distinct phases ("preparing" → "streaming") so the UI
   // doesn't look stuck during the copy phase. Throughput is a
   // 10-second moving average computed from the read-loop samples.
-  const streamDownload = async ({ url, filename, fetchEstimate, label }) => {
+  const streamDownload = async ({ url, filename, fetchEstimate, label, containerName, snapshotName }) => {
     const startTime = Date.now();
+    // AbortController wires the Cancel button to fetch — calling
+    // .abort() makes reader.read() throw, the catch path below
+    // tags it 'AbortError' so the toast says "cancelled" rather
+    // than "failed". The backend's req.on('close') handler kills
+    // the incus export child + cleans up any temp container.
+    const abortController = new AbortController();
     setExportProgress({
+      containerName, snapshotName: snapshotName || null,
       loaded: 0, total: null, elapsedMs: 0,
       phase: 'preparing', throughputBps: null,
+      abortController,
     });
 
     let total = null;
@@ -827,7 +775,7 @@ export default function LxcContainers() {
     }
     setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0, phase: 'preparing' }));
 
-    const res = await fetch(url, { credentials: 'include' });
+    const res = await fetch(url, { credentials: 'include', signal: abortController.signal });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `${label} failed`);
@@ -922,16 +870,25 @@ export default function LxcContainers() {
   const handleExport = async () => {
     if (!selectedContainer) return;
     setExporting(true);
+    const ctName = selectedContainer.name;
     try {
       const loaded = await streamDownload({
-        url: `/api/lxc/containers/${selectedContainer.name}/export`,
-        filename: `${selectedContainer.name}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcExportInfo(selectedContainer.name),
+        url: `/api/lxc/containers/${ctName}/export`,
+        filename: `${ctName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcExportInfo(ctName),
         label: 'Export',
+        containerName: ctName,
       });
-      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded (${formatSize(loaded)}).` });
+      toast({ title: 'Export complete', description: `${ctName} backup downloaded (${formatSize(loaded)}).` });
     } catch (err) {
-      toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+      // AbortError = operator clicked Cancel. Distinguish it from a
+      // real failure so the toast doesn't blame the operator's
+      // action as an error.
+      if (err?.name === 'AbortError') {
+        toast({ title: 'Export cancelled', description: `${ctName} export cancelled.` });
+      } else {
+        toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+      }
     } finally {
       setExporting(false);
       setExportProgress(null);
@@ -944,16 +901,23 @@ export default function LxcContainers() {
   const handleDownloadSnapshot = async (snapshotName) => {
     if (!selectedContainer) return;
     setExporting(true);
+    const ctName = selectedContainer.name;
     try {
       const loaded = await streamDownload({
-        url: `/api/lxc/containers/${selectedContainer.name}/snapshot/${encodeURIComponent(snapshotName)}/export`,
-        filename: `${selectedContainer.name}-${snapshotName}-backup.tar.gz`,
-        fetchEstimate: () => api.getLxcSnapshotExportInfo(selectedContainer.name, snapshotName),
+        url: `/api/lxc/containers/${ctName}/snapshot/${encodeURIComponent(snapshotName)}/export`,
+        filename: `${ctName}-${snapshotName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcSnapshotExportInfo(ctName, snapshotName),
         label: 'Snapshot download',
+        containerName: ctName,
+        snapshotName,
       });
       toast({ title: 'Snapshot downloaded', description: `${snapshotName} (${formatSize(loaded)})` });
     } catch (err) {
-      toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
+      if (err?.name === 'AbortError') {
+        toast({ title: 'Download cancelled', description: `Snapshot ${snapshotName} cancelled.` });
+      } else {
+        toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
+      }
     } finally {
       setExporting(false);
       setExportProgress(null);
@@ -2150,19 +2114,33 @@ export default function LxcContainers() {
                     <Download className="h-4 w-4" />
                     Backup
                   </h4>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleExport}
-                    disabled={exporting}
-                  >
-                    {exporting ? (
-                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Exporting...</>
-                    ) : (
-                      <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleExport}
+                      disabled={exporting}
+                    >
+                      {exporting && exportProgress?.containerName === selectedContainer.name ? (
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          {exportProgress.snapshotName ? 'Downloading snapshot...' : 'Exporting...'}
+                        </>
+                      ) : (
+                        <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
+                      )}
+                    </Button>
+                    {exporting && exportProgress?.containerName === selectedContainer.name && exportProgress?.abortController && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-red-500 hover:text-red-400 border-red-500/30 hover:border-red-500/60"
+                        onClick={() => exportProgress.abortController.abort()}
+                      >
+                        <X className="h-3 w-3 mr-1" />Cancel
+                      </Button>
                     )}
-                  </Button>
-                  {exportProgress && (
+                  </div>
+                  {exportProgress && exportProgress.containerName === selectedContainer.name && (
                     <div className="mt-2 space-y-1">
                       {exportProgress.phase === 'streaming' && exportProgress.total ? (
                         <div className="h-1.5 bg-muted rounded overflow-hidden">
@@ -2401,7 +2379,6 @@ export default function LxcContainers() {
                 <LxcTerminalPanel
                   containerName={selectedContainer.name}
                   initialCwd={terminalCwd}
-                  toast={toast}
                 />
               </TabsContent>
 

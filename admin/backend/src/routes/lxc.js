@@ -1964,6 +1964,17 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
         res.status(500).json({ success: false, error: err.message });
       }
     });
+
+    // Client cancelled (browser closed, AbortController.abort() in
+    // the dashboard, network drop). Kill the export child so incus
+    // stops compressing — otherwise it keeps running on the host
+    // until done, wasting CPU + disk for a download nobody is
+    // receiving anymore.
+    req.on('close', () => {
+      if (child && !child.killed) {
+        try { child.kill('SIGTERM'); } catch {}
+      }
+    });
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ success: false, error: error.message });

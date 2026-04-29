@@ -120,34 +120,63 @@ function validateName(name) {
   return NAME_REGEX.test(name);
 }
 
-// Extract IPv4 address from container state
-function extractIPv4(container) {
+// Interfaces created by Docker / container runtimes inside the LXC.
+// These are bridges and veth peers that only exist within the LXC's
+// network namespace — their addresses (172.17.0.1, 172.18.0.1, etc.)
+// are unreachable from the host so Caddy reverse-proxying to them
+// returns 502. Filter them out when picking the LXC's externally
+// reachable IP.
+const DOCKER_IFACE_PATTERNS = [
+  /^docker\d+$/,        // docker0, docker1
+  /^docker_gwbridge$/,  // swarm overlay
+  /^br-[0-9a-f]+$/,     // compose-style user-defined networks
+  /^veth/,              // veth peers attached to docker bridges
+  /^cni\d*$/,           // CNI plugins
+];
+
+function isContainerRuntimeIface(name) {
+  return DOCKER_IFACE_PATTERNS.some((re) => re.test(name));
+}
+
+// Pick a non-loopback, non-docker, non-link-scope IPv4 address from the
+// Incus state. Tries the conventional `eth0` first so the LXC's primary
+// interface wins even if Object.entries iteration order ever surprises
+// us; falls back to any other interface that isn't a docker/veth bridge.
+function pickIp(container, family) {
   if (!container.state?.network) return null;
-  for (const [name, iface] of Object.entries(container.state.network)) {
-    if (name === 'lo') continue;
+  const ifaces = Object.entries(container.state.network);
+  const matches = (name, addr) => {
+    if (addr.family !== family) return false;
+    if (addr.scope && addr.scope !== 'global') return false;
+    if (family === 'inet' && addr.address.startsWith('127.')) return false;
+    if (family === 'inet6' && (addr.address.startsWith('::1') || addr.address.startsWith('fe80'))) return false;
+    return true;
+  };
+  for (const [name, iface] of ifaces) {
+    if (name !== 'eth0') continue;
     for (const addr of iface.addresses || []) {
-      if (addr.family === 'inet' && !addr.address.startsWith('127.')) {
-        return addr.address;
-      }
+      if (matches(name, addr)) return addr.address;
+    }
+  }
+  for (const [name, iface] of ifaces) {
+    if (name === 'lo' || isContainerRuntimeIface(name)) continue;
+    for (const addr of iface.addresses || []) {
+      if (matches(name, addr)) return addr.address;
     }
   }
   return null;
+}
+
+// Extract IPv4 address from container state
+function extractIPv4(container) {
+  return pickIp(container, 'inet');
 }
 
 // Phase 2b E.1: extract the first non-loopback IPv6 address from container
 // state, mirroring the `extractIPv4` helper. Returns null when no IPv6
 // address is bound (common for default Incus profiles).
 function extractIPv6(container) {
-  if (!container.state?.network) return null;
-  for (const [name, iface] of Object.entries(container.state.network)) {
-    if (name === 'lo') continue;
-    for (const addr of iface.addresses || []) {
-      if (addr.family === 'inet6' && !addr.address.startsWith('::1') && !addr.address.startsWith('fe80')) {
-        return addr.address;
-      }
-    }
-  }
-  return null;
+  return pickIp(container, 'inet6');
 }
 
 // Helper to sleep for polling

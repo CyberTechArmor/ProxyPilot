@@ -2278,15 +2278,35 @@ servicesRouter.post('/:id/refresh-ip', async (req, res) => {
       const containers = JSON.parse(result.stdout || '[]');
       const target = containers.find((c) => c.name === incusName);
       if (target && target.state && target.state.network) {
-        for (const [name, iface] of Object.entries(target.state.network)) {
-          if (name === 'lo') continue;
+        // Skip Docker/CNI bridges and veth peers — those are internal
+        // to the LXC and unreachable from the host (Caddy 502).
+        const isContainerRuntimeIface = (name) =>
+          /^docker\d+$/.test(name) ||
+          name === 'docker_gwbridge' ||
+          /^br-[0-9a-f]+$/.test(name) ||
+          /^veth/.test(name) ||
+          /^cni\d*$/.test(name);
+        const isUsable = (addr) =>
+          addr.family === 'inet' &&
+          !addr.address.startsWith('127.') &&
+          (!addr.scope || addr.scope === 'global');
+        const ifaces = Object.entries(target.state.network);
+        // Prefer eth0 (the LXC's bridged interface).
+        for (const [name, iface] of ifaces) {
+          if (name !== 'eth0') continue;
           for (const addr of iface.addresses || []) {
-            if (addr.family === 'inet' && !addr.address.startsWith('127.')) {
-              newIp = addr.address;
-              break;
-            }
+            if (isUsable(addr)) { newIp = addr.address; break; }
           }
           if (newIp) break;
+        }
+        if (!newIp) {
+          for (const [name, iface] of ifaces) {
+            if (name === 'lo' || isContainerRuntimeIface(name)) continue;
+            for (const addr of iface.addresses || []) {
+              if (isUsable(addr)) { newIp = addr.address; break; }
+            }
+            if (newIp) break;
+          }
         }
       }
     } catch (e) {

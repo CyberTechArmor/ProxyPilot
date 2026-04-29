@@ -223,6 +223,67 @@ function caddyFilePath(domain) {
   return `${CADDY_SITES_DIR}/${caddyFileName(domain)}`;
 }
 
+// Enumerate current LXC bridge IPs so the conflict guard below can tell
+// "Caddy site file written by lxc.js" (upstream IP is a live LXC) apart
+// from "site file written by this same Service Settings surface". A bare
+// `incus list --format json` returns enough state to walk container
+// network interfaces and pick the IPv4 addresses Caddy would target.
+//
+// Returns a Set; on any failure (incus missing, parse error, timeout)
+// returns an empty set so the conflict guard fails open rather than
+// blocking unrelated writes.
+async function getLxcBridgeIps() {
+  try {
+    const r = await execOnHost('incus list --format json 2>/dev/null', { timeout: 5000 });
+    const containers = JSON.parse(r.stdout || '[]');
+    const ips = new Set();
+    for (const c of containers) {
+      const networks = (c.state && c.state.network) || {};
+      for (const iface of Object.values(networks)) {
+        if (!iface || !Array.isArray(iface.addresses)) continue;
+        for (const addr of iface.addresses) {
+          if (addr && addr.family === 'inet' && addr.scope === 'global' && addr.address) {
+            ips.add(addr.address);
+          }
+        }
+      }
+    }
+    return ips;
+  } catch {
+    return new Set();
+  }
+}
+
+// Inspect the existing Caddy site file at configPath. If it contains a
+// `reverse_proxy <ip>:<port>` line whose IP belongs to a live LXC, the
+// file was written by lxc.js's inline-services route — return that IP
+// so the caller can refuse to clobber it. Otherwise return null.
+//
+// Caveat: a Service Settings entry that legitimately reverse-proxies an
+// LXC by IP would also match. The guardrail accepts that false-positive
+// — operators who want both surfaces editing the same domain should
+// pick one. This is UX, not a security control.
+async function detectLxcManagedSiteFile(configPath, lxcIps) {
+  if (!lxcIps || lxcIps.size === 0) return null;
+  if (!existsSync(configPath)) return null;
+  try {
+    const content = await readFile(configPath, 'utf-8');
+    const m = content.match(/reverse_proxy\s+([\d.]+):\d+/);
+    if (!m) return null;
+    return lxcIps.has(m[1]) ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Standard 409 payload for "this domain is being edited from the other
+// surface." Centralized so all four call sites stay verbatim consistent.
+function lxcConflictResponse(domain) {
+  return {
+    error: `Domain '${domain}' is currently managed in the LXC's inline Services list. Remove it there first or edit it there instead.`,
+  };
+}
+
 // Validation schemas
 const createServiceSchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -1364,6 +1425,19 @@ services:
     //      and the on-disk file to the pre-create state.
     await ensureCaddyStructure();
     const configPath = caddyFilePath(data.domain);
+
+    // Same-domain conflict guard: if a site file already exists for this
+    // domain and points at a live LXC's bridge IP, lxc.js's inline-
+    // services route wrote it. Refuse rather than silently overwrite the
+    // operator's other-surface edits.
+    {
+      const lxcIps = await getLxcBridgeIps();
+      const lxcUpstream = await detectLxcManagedSiteFile(configPath, lxcIps);
+      if (lxcUpstream) {
+        return res.status(409).json(lxcConflictResponse(data.domain));
+      }
+    }
+
     let backupMergedConfig = null;
     let backupExisted = false;
     try {
@@ -1688,6 +1762,17 @@ servicesRouter.put('/:id', async (req, res) => {
     const newConfigPath = caddyFilePath(updatedData.domain);
     const oldConfigPath = preRouteDomain ? caddyFilePath(preRouteDomain) : null;
     const domainChanged = data.domain && data.domain !== preRouteDomain;
+
+    // Same-domain conflict guard: only relevant when the rename-target
+    // domain isn't this service's existing domain. If the target site
+    // file is already pointed at a live LXC, lxc.js owns it.
+    if (domainChanged) {
+      const lxcIps = await getLxcBridgeIps();
+      const lxcUpstream = await detectLxcManagedSiteFile(newConfigPath, lxcIps);
+      if (lxcUpstream) {
+        return res.status(409).json(lxcConflictResponse(updatedData.domain));
+      }
+    }
 
     let backupNew = null;
     let backupNewExisted = false;
@@ -2715,6 +2800,18 @@ servicesRouter.post('/:id/routes', async (req, res) => {
     // restore it on any downstream failure.
     await ensureCaddyStructure();
     const configPath = caddyFilePath(data.domain);
+
+    // Same-domain conflict guard: see getLxcBridgeIps comment. Adding a
+    // route on a domain that lxc.js already owns would silently overwrite
+    // the inline-services entry on the next regenerate.
+    {
+      const lxcIps = await getLxcBridgeIps();
+      const lxcUpstream = await detectLxcManagedSiteFile(configPath, lxcIps);
+      if (lxcUpstream) {
+        return res.status(409).json(lxcConflictResponse(data.domain));
+      }
+    }
+
     let backupMergedConfig = null;
     let backupExisted = false;
     try {
@@ -2963,6 +3060,16 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
     await ensureCaddyStructure();
     const newConfigPath = caddyFilePath(updated.domain);
     const oldConfigPath = caddyFilePath(oldDomain);
+
+    // Same-domain conflict guard: only relevant when the route's domain
+    // actually changes — otherwise we are rewriting our own merged file.
+    if (domainChanged) {
+      const lxcIps = await getLxcBridgeIps();
+      const lxcUpstream = await detectLxcManagedSiteFile(newConfigPath, lxcIps);
+      if (lxcUpstream) {
+        return res.status(409).json(lxcConflictResponse(updated.domain));
+      }
+    }
 
     let backupNew = null;
     let backupNewExisted = false;

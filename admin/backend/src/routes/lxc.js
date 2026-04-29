@@ -541,8 +541,19 @@ lxcRouter.post('/containers', async (req, res) => {
         creation.message = 'Running init script...';
         try {
           const scriptContent = initScript.trim();
+          // Encode as base64 before piping into the container. The
+          // previous `printf '%s' ${JSON.stringify(...)}` round-trip
+          // emitted JSON-style escapes — `\n` arrived as literal
+          // backslash-n on the container side, so the entire script
+          // collapsed to a single line that began with `#!/bin/sh\n…`
+          // and bash treated the whole thing as one comment. The
+          // script "ran" with exit code 0 and no packages were ever
+          // installed. base64 is shell-safe (only [A-Za-z0-9+/=]),
+          // and `base64 -d` is in coreutils on every distro we ship
+          // images for.
+          const b64 = Buffer.from(scriptContent, 'utf8').toString('base64');
           await execOnHost(
-            `printf '%s' ${JSON.stringify(scriptContent)} | incus exec ${incusName} -- tee /tmp/pp-init.sh > /dev/null`,
+            `echo '${b64}' | base64 -d | incus exec ${incusName} -- tee /tmp/pp-init.sh > /dev/null`,
             { timeout: 15000 }
           );
           await execOnHost(`incus exec ${incusName} -- chmod +x /tmp/pp-init.sh`, { timeout: 5000 });

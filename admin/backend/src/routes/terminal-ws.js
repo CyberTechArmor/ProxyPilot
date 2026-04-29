@@ -10,6 +10,14 @@ import {
 const MAX_SESSIONS_PER_USER = parseInt(process.env.TERMINAL_MAX_SESSIONS || '3', 10);
 const IDLE_TIMEOUT_MS = parseInt(process.env.TERMINAL_IDLE_TIMEOUT_MS || `${15 * 60_000}`, 10);
 const BACKPRESSURE_BYTES = parseInt(process.env.TERMINAL_OUTPUT_BACKPRESSURE_BYTES || '1000000', 10);
+// WebSocket ping interval — kept under typical reverse-proxy idle
+// timeouts (Caddy/nginx default ~60s, browsers ~120s) so quiet periods
+// during long-running scripts (apt-get download, docker pull) don't get
+// the connection torn down by an intermediary that thinks it's dead.
+const PING_INTERVAL_MS = parseInt(process.env.TERMINAL_PING_INTERVAL_MS || '25000', 10);
+// If we don't see a pong this long after a ping, treat the connection
+// as half-open and terminate so the client can reconnect cleanly.
+const PONG_TIMEOUT_MS = parseInt(process.env.TERMINAL_PONG_TIMEOUT_MS || '20000', 10);
 
 // userId -> count of live sessions. Decremented on close. Used to enforce
 // MAX_SESSIONS_PER_USER without consulting the database — sessions are
@@ -146,6 +154,40 @@ function handleSession(ws, req, user, target) {
     }
   }, Math.min(60_000, Math.max(5_000, Math.floor(IDLE_TIMEOUT_MS / 4))));
 
+  // Heartbeat: send a WebSocket-protocol-level ping every PING_INTERVAL_MS.
+  // Browsers respond automatically with pong frames at the protocol level
+  // even when the tab is backgrounded, which keeps reverse proxies from
+  // closing the upgraded connection during long quiet periods (apt-get
+  // download bursts, docker pull, sleeping prompt) where there's no PTY
+  // output to keep the wire warm. If a pong doesn't arrive within
+  // PONG_TIMEOUT_MS, we declare the connection half-open and terminate
+  // so the client surfaces "Disconnected" instead of hanging silently.
+  let awaitingPong = false;
+  let pongTimer = null;
+  const onPong = () => {
+    awaitingPong = false;
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+  };
+  ws.on('pong', onPong);
+  const heartbeatTimer = setInterval(() => {
+    if (closed) return;
+    if (ws.readyState !== ws.OPEN) return;
+    if (awaitingPong) {
+      // Previous ping never came back — handled by pongTimer below; skip.
+      return;
+    }
+    awaitingPong = true;
+    try { ws.ping(); } catch {
+      awaitingPong = false;
+      return;
+    }
+    pongTimer = setTimeout(() => {
+      if (closed) return;
+      try { ws.terminate(); } catch {}
+      cleanup('pong-timeout');
+    }, PONG_TIMEOUT_MS);
+  }, PING_INTERVAL_MS);
+
   const onPtyData = (data) => {
     lastActivity = Date.now();
     const buf = Buffer.from(data, 'utf8');
@@ -218,6 +260,9 @@ function handleSession(ws, req, user, target) {
     if (closed) return;
     closed = true;
     clearInterval(idleTimer);
+    clearInterval(heartbeatTimer);
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+    try { ws.off('pong', onPong); } catch {}
     try { ptyDataSub?.dispose?.(); } catch {}
     try { ptyExitSub?.dispose?.(); } catch {}
     try { term.kill(); } catch { /* already dead */ }

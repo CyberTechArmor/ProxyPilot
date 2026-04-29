@@ -374,10 +374,10 @@ export default function LxcContainers() {
   const [containerServices, setContainerServices] = useState([]);
   const [containerListening, setContainerListening] = useState(null);
   const [servicesLoading, setServicesLoading] = useState(false);
-  const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true });
+  const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [addingService, setAddingService] = useState(false);
-  const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert } or null
-  const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true });
+  const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
+  const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [exporting, setExporting] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
@@ -437,7 +437,7 @@ export default function LxcContainers() {
   const [createForm, setCreateForm] = useState({
     name: '', image: '', cpu: '', memory: '', initScript: '',
     dockerSupport: false, dockerPrivileged: false,
-    services: [{ domain: '', port: '', obtainCert: true }],
+    services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
   const [templateSelection, setTemplateSelection] = useState('');
   const [creating, setCreating] = useState(false);
@@ -530,13 +530,16 @@ export default function LxcContainers() {
     setCreateProgress({ phase: 'starting', message: 'Starting creation...', elapsed: 0 });
 
     try {
-      // Filter services to only include entries with at least a domain specified
+      // Filter services to only include entries with at least a domain specified.
+      // healthPath is optional; trim and forward only when set so the backend
+      // sees null vs an empty string and stays on TCP-only.
       const validServices = createForm.services
         .filter((s) => s.domain.trim())
         .map((s) => ({
           domain: s.domain.trim(),
           port: s.port ? parseInt(s.port, 10) : 80,
           obtainCert: s.obtainCert,
+          ...(s.healthPath && s.healthPath.trim() && { healthPath: s.healthPath.trim() }),
         }));
 
       const data = {
@@ -565,7 +568,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true }] });
+            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: false, dockerPrivileged: false, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -698,17 +701,19 @@ export default function LxcContainers() {
     setAddingService(true);
     try {
       const domain = addServiceForm.domain.trim();
+      const trimmedHealthPath = (addServiceForm.healthPath || '').trim();
       const res = await api.addLxcService(selectedContainer.name, {
         domain,
         port: parseInt(addServiceForm.port, 10) || 80,
         obtainCert: addServiceForm.obtainCert,
+        healthPath: trimmedHealthPath || null,
       });
       if (res?.warning) {
         toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
       } else {
         toast({ title: 'Service added', description: `${domain} configured.` });
       }
-      setAddServiceForm({ domain: '', port: '', obtainCert: true });
+      setAddServiceForm({ domain: '', port: '', obtainCert: true, healthPath: '' });
       fetchContainerServices(selectedContainer.name);
     } catch (err) {
       toast({ title: 'Failed to add service', description: err.message, variant: 'destructive' });
@@ -721,10 +726,12 @@ export default function LxcContainers() {
     if (!selectedContainer || !editServiceForm.domain.trim()) return;
     try {
       const domain = editServiceForm.domain.trim();
+      const trimmedHealthPath = (editServiceForm.healthPath || '').trim();
       const res = await api.updateLxcService(selectedContainer.name, oldDomain, {
         domain,
         port: parseInt(editServiceForm.port, 10) || 80,
         obtainCert: editServiceForm.obtainCert,
+        healthPath: trimmedHealthPath || null,
       });
       if (res?.warning) {
         toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
@@ -1231,7 +1238,7 @@ export default function LxcContainers() {
                       className="h-6 px-2 text-xs text-cyan-500 hover:text-cyan-400"
                       onClick={() => setCreateForm((f) => ({
                         ...f,
-                        services: [...f.services, { domain: '', port: '', obtainCert: true }],
+                        services: [...f.services, { domain: '', port: '', obtainCert: true, healthPath: '' }],
                       }))}
                     >
                       <Plus className="h-3 w-3 mr-1" />Add Service
@@ -1240,7 +1247,7 @@ export default function LxcContainers() {
                   <div className="space-y-2">
                     {createForm.services.map((svc, idx) => (
                       <div key={idx} className="flex items-start gap-2 p-2.5 rounded-lg border border-border/50 bg-muted/30">
-                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2">
                           <Input
                             placeholder="myapp.example.com"
                             value={svc.domain}
@@ -1261,6 +1268,17 @@ export default function LxcContainers() {
                               return { ...f, services };
                             })}
                             className="h-8 text-xs"
+                          />
+                          <Input
+                            placeholder="/healthz (optional)"
+                            value={svc.healthPath || ''}
+                            onChange={(e) => setCreateForm((f) => {
+                              const services = [...f.services];
+                              services[idx] = { ...services[idx], healthPath: e.target.value };
+                              return { ...f, services };
+                            })}
+                            className="h-8 text-xs font-mono"
+                            title="Optional HTTP HEAD probe path. Leave blank to keep TCP-only health checks."
                           />
                         </div>
                         <div className="flex items-center gap-1.5 pt-1">
@@ -1567,7 +1585,7 @@ export default function LxcContainers() {
                           <div className="flex items-center gap-2 p-2">
                           {editingService === svc.domain ? (
                             <>
-                              <div className="flex-1 grid grid-cols-2 gap-1.5">
+                              <div className="flex-1 grid grid-cols-3 gap-1.5">
                                 <Input
                                   value={editServiceForm.domain}
                                   onChange={(e) => setEditServiceForm((f) => ({ ...f, domain: e.target.value }))}
@@ -1580,6 +1598,13 @@ export default function LxcContainers() {
                                   onChange={(e) => setEditServiceForm((f) => ({ ...f, port: e.target.value }))}
                                   className="h-7 text-xs"
                                   placeholder="port"
+                                />
+                                <Input
+                                  value={editServiceForm.healthPath || ''}
+                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, healthPath: e.target.value }))}
+                                  className="h-7 text-xs font-mono"
+                                  placeholder="/healthz"
+                                  title="Optional HTTP HEAD probe path. Leave blank to keep TCP-only health checks."
                                 />
                               </div>
                               <div className="flex items-center gap-1">
@@ -1637,14 +1662,34 @@ export default function LxcContainers() {
                                   502
                                 </span>
                               )}
-                              {svc.reachable === true && (
+                              {svc.reachable === true && (svc.httpHealthy === false ? (
+                                <span
+                                  className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
+                                  title={(() => {
+                                    const target = `${svc.upstreamIp || '?'}:${svc.port}`;
+                                    const path = svc.healthPath || '';
+                                    if (svc.httpStatus) {
+                                      return `Reached ${target} but HEAD ${path} returned HTTP ${svc.httpStatus}. The TCP listener is up; the application is replying with errors.`;
+                                    }
+                                    return `Reached ${target} but HEAD ${path} failed (${svc.httpError || 'no response'}). The TCP listener is up; the application isn't responding to HTTP.`;
+                                  })()}
+                                >
+                                  TCP
+                                </span>
+                              ) : (
                                 <span
                                   className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/30"
-                                  title={`Upstream ${svc.upstreamIp || ''}:${svc.port} is reachable.`}
+                                  title={(() => {
+                                    const target = `${svc.upstreamIp || ''}:${svc.port}`;
+                                    if (svc.healthPath) {
+                                      return `Upstream ${target} is reachable; HEAD ${svc.healthPath} returned HTTP ${svc.httpStatus || '2xx'}.`;
+                                    }
+                                    return `Upstream ${target} is reachable.`;
+                                  })()}
                                 >
                                   OK
                                 </span>
-                              )}
+                              ))}
                               {svc.staleIp && (
                                 <span
                                   className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
@@ -1660,7 +1705,12 @@ export default function LxcContainers() {
                                 className="h-6 px-1.5 text-muted-foreground hover:text-cyan-500"
                                 onClick={() => {
                                   setEditingService(svc.domain);
-                                  setEditServiceForm({ domain: svc.domain, port: String(svc.port || ''), obtainCert: svc.obtainCert });
+                                  setEditServiceForm({
+                                    domain: svc.domain,
+                                    port: String(svc.port || ''),
+                                    obtainCert: svc.obtainCert,
+                                    healthPath: svc.healthPath || '',
+                                  });
                                 }}
                               >
                                 <Settings className="h-3 w-3" />
@@ -1717,6 +1767,16 @@ export default function LxcContainers() {
                               Caddy config still points at <span className="font-mono">{svc.upstreamIp}</span>, but the container's current IP is different. Edit the entry and click ✓ to regenerate.
                             </div>
                           )}
+                          {svc.reachable === true && svc.httpHealthy === false && (
+                            <div className="px-2 pb-2 -mt-1 text-[10.5px] leading-snug text-yellow-300/90">
+                              Reached <span className="font-mono">{svc.upstreamIp || '?'}:{svc.port}</span> but{' '}
+                              <span className="font-mono">GET {svc.healthPath}</span>{' '}
+                              {svc.httpStatus
+                                ? <>returned HTTP <span className="font-mono">{svc.httpStatus}</span>.</>
+                                : <>failed ({svc.httpError || 'no response'}).</>}
+                              {' '}The TCP listener is up; the application is replying with errors.
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1728,7 +1788,7 @@ export default function LxcContainers() {
 
                   {/* Add new service form */}
                   <div className="flex items-center gap-2 p-2 rounded-lg border border-dashed border-border/50 bg-muted/20">
-                    <div className="flex-1 grid grid-cols-2 gap-1.5">
+                    <div className="flex-1 grid grid-cols-3 gap-1.5">
                       <Input
                         placeholder="domain.example.com"
                         value={addServiceForm.domain}
@@ -1742,6 +1802,14 @@ export default function LxcContainers() {
                         value={addServiceForm.port}
                         onChange={(e) => setAddServiceForm((f) => ({ ...f, port: e.target.value }))}
                         className="h-7 text-xs"
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
+                      />
+                      <Input
+                        placeholder="/healthz"
+                        value={addServiceForm.healthPath}
+                        onChange={(e) => setAddServiceForm((f) => ({ ...f, healthPath: e.target.value }))}
+                        className="h-7 text-xs font-mono"
+                        title="Optional HTTP HEAD probe path. Leave blank to keep TCP-only health checks."
                         onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
                       />
                     </div>

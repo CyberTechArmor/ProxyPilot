@@ -1607,6 +1607,30 @@ export default function LxcContainers() {
                               <Globe className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
                               <span className="font-mono flex-1 truncate">{svc.domain}</span>
                               <span className="text-muted-foreground">:{svc.port}</span>
+                              {svc.reachable === false && (
+                                <span
+                                  className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30"
+                                  title={`Caddy can't reach ${svc.upstreamIp || '?'}:${svc.port}. Check that something is listening on 0.0.0.0:${svc.port} (not 127.0.0.1) inside the container.`}
+                                >
+                                  502
+                                </span>
+                              )}
+                              {svc.reachable === true && (
+                                <span
+                                  className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/30"
+                                  title={`Upstream ${svc.upstreamIp || ''}:${svc.port} is reachable.`}
+                                >
+                                  OK
+                                </span>
+                              )}
+                              {svc.staleIp && (
+                                <span
+                                  className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
+                                  title={`Caddy config still points at ${svc.upstreamIp}, but the container's current IP is different. Edit and save to regenerate.`}
+                                >
+                                  stale IP
+                                </span>
+                              )}
                               <Shield className={`h-3 w-3 ${svc.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
                               <Button
                                 variant="ghost"

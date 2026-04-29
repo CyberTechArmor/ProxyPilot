@@ -94,6 +94,7 @@ import {
   Bell,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import InteractiveTerminal from '@/components/InteractiveTerminal';
 
 // Language detection based on file extension
 const getLanguageFromFile = (filename) => {
@@ -312,6 +313,11 @@ export default function Dashboard() {
   const [systemInfo, setSystemInfo] = useState(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState('/');
+  // Cwd handed off to the live PTY. Distinct from terminalCwd (file
+  // browser cwd) so navigating folders doesn't tear down a running
+  // session — only an explicit "Open terminal here" copies the file
+  // browser path into terminalInitialCwd, which forces a reconnect.
+  const [terminalInitialCwd, setTerminalInitialCwd] = useState('');
   const terminalOutputRef = useCallback(node => {
     if (node) node.scrollTop = node.scrollHeight;
   }, [terminalOutput]);
@@ -1703,6 +1709,7 @@ export default function Dashboard() {
     // Always start with /root if no directory specified
     const startDir = initialDir || '/root';
     setTerminalCwd(startDir);
+    setTerminalInitialCwd(startDir);
     setTerminalFullscreen(true);
     setTerminalOutput(prev => prev.length === 0 ? [{ type: 'system', text: 'Terminal ready. Type commands and press Enter.' }] : prev);
     // Open dialog after state is set
@@ -5318,6 +5325,18 @@ volumes:
                     Current View
                   </span>
                   <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      onClick={() => {
+                        setTerminalInitialCwd(terminalCwd);
+                        setTerminalActiveTab('terminal');
+                      }}
+                      title={`Open terminal in ${terminalCwd}`}
+                    >
+                      <Terminal className="h-3 w-3" />
+                    </Button>
                     <label>
                       <input type="file" multiple className="hidden" onChange={handleTerminalFileUpload} />
                       <Button variant="ghost" size="sm" className="h-6 w-6 p-0" asChild title="Upload files to current folder">
@@ -5470,103 +5489,22 @@ volumes:
                 </button>
               </div>
 
-              {/* Terminal Tab Content */}
-              {terminalActiveTab === 'terminal' && (
-                <>
-                  <div ref={terminalOutputRef} className="flex-1 bg-black text-green-400 font-mono text-sm p-3 overflow-auto">
-                    {terminalOutput.map((line, i) => (
-                      <div key={i} className={`whitespace-pre-wrap ${
-                        line.type === 'input' ? 'text-cyan-400 font-bold' :
-                        line.type === 'error' ? 'text-red-400' :
-                        line.type === 'system' ? 'text-blue-400' :
-                        'text-green-400'
-                      }`}>
-                        {String(line.text || '')}
-                        {line.duration !== undefined && (
-                          <span className="text-gray-500 text-xs ml-2">({line.duration}ms)</span>
-                        )}
-                      </div>
-                    ))}
-                    {terminalRunning && (
-                      <div className="flex items-center gap-2 text-yellow-400">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        Running...
-                      </div>
-                    )}
-                  </div>
-                  {/* Tab suggestions */}
-                  {showTabSuggestions && tabSuggestions.length > 0 && (
-                    <div className="border-t bg-gray-800 p-2 flex flex-wrap gap-1">
-                      {tabSuggestions.map((s, i) => (
-                        <span
-                          key={i}
-                          className="text-xs font-mono px-1.5 py-0.5 bg-gray-700 rounded cursor-pointer hover:bg-gray-600 text-cyan-300"
-                          onClick={() => {
-                            const parts = terminalCommand.split(/\s+/);
-                            const lastPart = parts[parts.length - 1] || '';
-                            const prefix = lastPart.includes('/') ? lastPart.substring(0, lastPart.lastIndexOf('/') + 1) : '';
-                            parts[parts.length - 1] = prefix + s;
-                            setTerminalCommand(parts.join(' '));
-                            setShowTabSuggestions(false);
-                            terminalInputRef.current?.focus();
-                          }}
-                        >
-                          {s}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="border-t p-2 flex gap-2 bg-gray-900">
-                    <span className="text-cyan-400 font-mono text-sm shrink-0">{terminalCwd}$</span>
-                    <Input
-                      ref={terminalInputRef}
-                      value={terminalCommand}
-                      onChange={(e) => { setTerminalCommand(e.target.value); setShowTabSuggestions(false); }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          executeTerminalCommand();
-                        } else if (e.key === 'Tab') {
-                          e.preventDefault();
-                          handleTabComplete();
-                        } else if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          if (commandHistory.length > 0) {
-                            const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
-                            setHistoryIndex(newIndex);
-                            setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
-                          }
-                        } else if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          if (historyIndex > 0) {
-                            const newIndex = historyIndex - 1;
-                            setHistoryIndex(newIndex);
-                            setTerminalCommand(commandHistory[commandHistory.length - 1 - newIndex] || '');
-                          } else if (historyIndex === 0) {
-                            setHistoryIndex(-1);
-                            setTerminalCommand('');
-                          }
-                        } else if (e.key === 'Escape') {
-                          setShowTabSuggestions(false);
-                        }
-                      }}
-                      placeholder="Enter command... (Tab=complete, ↑↓=history)"
-                      className="flex-1 font-mono bg-black text-green-400 border-0 focus-visible:ring-0 h-8"
-                      disabled={terminalRunning}
-                      autoFocus
-                    />
-                    {terminalRunning ? (
-                      <Button onClick={cancelTerminalCommand} variant="destructive" size="sm">
-                        <X className="h-4 w-4 mr-1" />
-                        Cancel
-                      </Button>
-                    ) : (
-                      <Button onClick={executeTerminalCommand} disabled={!terminalCommand.trim()} size="sm">
-                        Run
-                      </Button>
-                    )}
-                  </div>
-                </>
-              )}
+              {/* Terminal Tab Content — live PTY over WebSocket. Kept
+                  mounted (toggled with `hidden`) so the session
+                  survives tab switches between Terminal and Editor. */}
+              <div
+                className={cn(
+                  'flex-1 flex flex-col min-h-0 overflow-hidden',
+                  terminalActiveTab !== 'terminal' && 'hidden'
+                )}
+              >
+                {terminalOpen && (
+                  <InteractiveTerminal
+                    wsPath="/api/terminal/host"
+                    initialCwd={terminalInitialCwd}
+                  />
+                )}
+              </div>
 
               {/* Editor Tab Content */}
               {terminalActiveTab === 'editor' && (

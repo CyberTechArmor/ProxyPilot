@@ -43,13 +43,28 @@ function rejectUpgrade(socket, statusCode, reason) {
 }
 
 // Parse `/api/terminal/lxc/<name>` or `/api/terminal/host` from the
-// upgrade URL. Returns null on no-match.
+// upgrade URL plus the optional `?cwd=<absolute-path>` query. Returns
+// null on no-match for the path. The cwd is sanity-checked so bogus
+// values don't make it to pty.spawn.
 function parseTarget(rawUrl) {
-  // Strip query string + trailing slashes.
-  const url = (rawUrl || '').split('?')[0].replace(/\/+$/, '');
-  if (url === '/api/terminal/host') return { kind: 'host', target: null };
+  const [pathPart, queryPart = ''] = (rawUrl || '').split('?');
+  const url = pathPart.replace(/\/+$/, '');
+
+  let cwd = null;
+  try {
+    const params = new URLSearchParams(queryPart);
+    const raw = params.get('cwd');
+    // Only accept absolute paths up to a sane length, rule out any
+    // shell-significant characters that have no business in a directory
+    // name. Anything else → ignore and let bash start in HOME.
+    if (raw && raw.startsWith('/') && raw.length <= 4096 && !/[\0\n\r]/.test(raw)) {
+      cwd = raw;
+    }
+  } catch { /* malformed query → no cwd */ }
+
+  if (url === '/api/terminal/host') return { kind: 'host', target: null, cwd };
   const m = url.match(/^\/api\/terminal\/lxc\/([a-zA-Z0-9_-]{1,64})$/);
-  if (m) return { kind: 'lxc', target: m[1] };
+  if (m) return { kind: 'lxc', target: m[1], cwd };
   return null;
 }
 
@@ -101,7 +116,11 @@ function handleSession(ws, req, user, target) {
 
   let term;
   try {
-    term = spawnTerminalPty({ kind: target.kind, target: target.target });
+    term = spawnTerminalPty({
+      kind: target.kind,
+      target: target.target,
+      cwd: target.cwd || undefined,
+    });
   } catch (e) {
     try { ws.send(JSON.stringify({ type: 'closed', reason: 'spawn-failed', error: e.message })); } catch {}
     try { ws.close(1011, 'PTY spawn failed'); } catch {}
@@ -115,7 +134,7 @@ function handleSession(ws, req, user, target) {
     AUDIT_TERMINAL_SESSION_START,
     'terminal',
     `${target.kind}:${target.target || 'host'}`,
-    { kind: target.kind, target: target.target, source_ip: remoteIp },
+    { kind: target.kind, target: target.target, cwd: target.cwd || null, source_ip: remoteIp },
     remoteIp,
   );
 

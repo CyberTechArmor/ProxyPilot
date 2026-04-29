@@ -26,7 +26,7 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield
+  X, Shield, Copy
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -74,6 +74,47 @@ function formatSize(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
+// init template either failed (network race on first boot) or wasn't
+// selected. Pasted into the terminal with Ctrl+Shift+V so the user
+// doesn't need to retype the apt one-liner.
+const QUICK_INSTALL_SCRIPT =
+  'apt-get update && apt-get install -y sudo nano git curl wget htop ca-certificates';
+
+async function copyInstallScript(toast) {
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(QUICK_INSTALL_SCRIPT);
+      copied = true;
+    }
+  } catch { /* fall through to execCommand */ }
+  if (!copied) {
+    // navigator.clipboard requires a secure context; fall back for
+    // plain-HTTP installs and older browsers.
+    const ta = document.createElement('textarea');
+    ta.value = QUICK_INSTALL_SCRIPT;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { copied = document.execCommand('copy'); } catch { /* ignore */ }
+    document.body.removeChild(ta);
+  }
+  if (copied) {
+    toast({
+      title: 'Install script copied',
+      description: 'Paste into the terminal with Ctrl+Shift+V (or right-click → paste) and press Enter.',
+    });
+  } else {
+    toast({
+      title: 'Copy failed',
+      description: QUICK_INSTALL_SCRIPT,
+      variant: 'destructive',
+    });
+  }
 }
 
 // File manager component for browsing, uploading, and downloading files
@@ -315,15 +356,34 @@ export default function LxcContainers() {
     { value: 'images:rockylinux/9', label: 'Rocky Linux 9' },
   ];
 
+  // Init scripts run inside the freshly-launched container as soon as
+  // it has an IP. apt-get can race networking on first boot, so each
+  // template retries `apt-get update` up to 5 times with 5s backoff
+  // before the install step. The set -e at the top makes the script
+  // exit non-zero on the first install failure so the backend can
+  // surface it instead of silently producing an empty container.
+  const APT_RETRY_PREAMBLE = (
+    '#!/bin/sh\n' +
+    'set -e\n' +
+    'export DEBIAN_FRONTEND=noninteractive\n' +
+    '# Wait for DNS + apt repos to come up.\n' +
+    'i=0\n' +
+    'until apt-get update; do\n' +
+    '  i=$((i+1))\n' +
+    '  [ "$i" -ge 5 ] && { echo "apt-get update failed after 5 attempts" >&2; exit 1; }\n' +
+    '  echo "apt-get update failed (attempt $i/5), retrying in 5s..." >&2\n' +
+    '  sleep 5\n' +
+    'done\n'
+  );
   const INIT_TEMPLATES = [
     { value: 'essentials', label: 'Essentials (git, curl, sudo, nano, htop)',
-      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client' },
+      script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client\n' },
     { value: 'webdev', label: 'Web Development (Node.js, git, build tools)',
-      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential\ncurl -fsSL https://deb.nodesource.com/setup_22.x | bash -\napt-get install -y nodejs' },
+      script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential\ncurl -fsSL https://deb.nodesource.com/setup_22.x | bash -\napt-get install -y nodejs\n' },
     { value: 'python', label: 'Python Development',
-      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3 python3-pip python3-venv' },
+      script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates openssh-client build-essential python3 python3-pip python3-venv\n' },
     { value: 'docker', label: 'Docker-in-LXC',
-      script: '#!/bin/sh\nexport DEBIAN_FRONTEND=noninteractive\napt-get update && apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh' },
+      script: APT_RETRY_PREAMBLE + 'apt-get install -y git sudo curl wget nano htop unzip ca-certificates\ncurl -fsSL https://get.docker.com | sh\n' },
   ];
 
   // Create form
@@ -459,10 +519,18 @@ export default function LxcContainers() {
             setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', services: [{ domain: '', port: '', obtainCert: true }] });
             setImageSelection('');
             setTemplateSelection('');
-            toast({
-              title: 'Container created',
-              description: `${containerName} is running${status.ip ? ` (IP: ${status.ip})` : ''}`,
-            });
+            if (status.initScriptWarning) {
+              toast({
+                title: 'Container created — init script failed',
+                description: status.initScriptWarning,
+                variant: 'destructive',
+              });
+            } else {
+              toast({
+                title: 'Container created',
+                description: `${containerName} is running${status.ip ? ` (IP: ${status.ip})` : ''}`,
+              });
+            }
             await fetchContainers();
           } else if (status.phase === 'failed') {
             // Failed — stop polling
@@ -1686,6 +1754,18 @@ export default function LxcContainers() {
 
               {/* Terminal Tab — live PTY via WebSocket */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                <div className="flex items-center justify-end gap-2 px-1 pb-1 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => copyInstallScript(toast)}
+                    title="Copy a one-liner that installs sudo, nano, git, curl, etc. Paste into the terminal with Ctrl+Shift+V."
+                  >
+                    <Copy className="h-3 w-3 mr-1" />
+                    Copy install script
+                  </Button>
+                </div>
                 <InteractiveTerminal
                   wsPath={`/api/terminal/lxc/${selectedContainer.name}`}
                   initialCwd={terminalCwd}

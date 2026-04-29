@@ -76,6 +76,20 @@ function formatSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Compact human-readable duration. Used by the export/import progress
+// rows to show elapsed and ETA without dragging in a date library.
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '-';
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM ? `${h}h ${remM}m` : `${h}h`;
+}
+
 // Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
 // init template either failed (network race on first boot) or wasn't
 // selected. Wrapped in a retry loop for apt-get update so a flaky
@@ -379,10 +393,18 @@ export default function LxcContainers() {
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [exporting, setExporting] = useState(false);
+  // Live export progress: { loaded, total, elapsedMs } during a download.
+  // total is null when the storage backend can't report rootfs usage —
+  // the UI degrades to bytes-downloaded + elapsed without a percentage.
+  const [exportProgress, setExportProgress] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
   const [importFile, setImportFile] = useState(null);
   const [importing, setImporting] = useState(false);
+  // Live import progress: { loaded, total, phase, elapsedMs }. phase is
+  // 'uploading' while the browser is sending bytes, 'processing' once
+  // upload finishes and we're waiting on `incus import` on the host.
+  const [importProgress, setImportProgress] = useState(null);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -761,11 +783,28 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
-  // Export container as tarball
+  // Export container as tarball.
+  //
+  // Streams the response body via ReadableStream so the UI can show a
+  // live byte counter + percentage (when the size estimate is
+  // available) instead of a no-feedback wait. The estimate comes from
+  // the export-info pre-flight; if the backend can't get a number from
+  // the storage driver, the UI shows bytes-downloaded + elapsed only.
   const handleExport = async () => {
     if (!selectedContainer) return;
     setExporting(true);
-    toast({ title: 'Exporting...', description: `Exporting ${selectedContainer.name} — this may take a while.` });
+    setExportProgress({ loaded: 0, total: null, elapsedMs: 0 });
+    const startTime = Date.now();
+
+    let total = null;
+    try {
+      const info = await api.getLxcExportInfo(selectedContainer.name);
+      if (typeof info?.estimatedBytes === 'number') total = info.estimatedBytes;
+    } catch {
+      // pre-flight is best-effort
+    }
+    setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0 }));
+
     try {
       const url = `/api/lxc/containers/${selectedContainer.name}/export`;
       const res = await fetch(url, { credentials: 'include' });
@@ -773,26 +812,70 @@ export default function LxcContainers() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Export failed');
       }
-      const blob = await res.blob();
+      // Some servers report Content-Length; prefer that over the
+      // pre-flight estimate when present (the estimate is rootfs
+      // usage; Content-Length is the actual gzipped tarball, which
+      // is more accurate for the progress bar).
+      const reportedLen = res.headers.get('content-length');
+      if (reportedLen && /^\d+$/.test(reportedLen)) {
+        total = parseInt(reportedLen, 10);
+      }
+
+      const reader = res.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        setExportProgress({ loaded, total, elapsedMs: Date.now() - startTime });
+      }
+      const blob = new Blob(chunks, { type: 'application/gzip' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `${selectedContainer.name}-backup.tar.gz`;
       a.click();
       URL.revokeObjectURL(a.href);
-      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded.` });
+      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded (${formatSize(loaded)}).` });
     } catch (err) {
       toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
     } finally {
       setExporting(false);
+      setExportProgress(null);
     }
   };
 
-  // Import container from backup
+  // Import container from backup.
+  //
+  // Uses XHR (via api.importContainerWithProgress) instead of fetch so
+  // the UI can show upload byte progress — fetch's Request body stream
+  // doesn't expose upload progress on the wire. Two phases:
+  //   - 'uploading'   browser → backend, determinate, % of file size.
+  //   - 'processing'  backend ran multer → disk; now streaming temp
+  //                   file into `incus import -` and waiting for it to
+  //                   finish. Indeterminate; show elapsed time only.
   const handleImport = async () => {
     if (!importName.trim() || !importFile) return;
     setImporting(true);
+    const startTime = Date.now();
+    setImportProgress({ loaded: 0, total: importFile.size, phase: 'uploading', elapsedMs: 0 });
+    let elapsedTimer = null;
     try {
-      await api.importContainer(importName.trim(), importFile);
+      // The 'processing' phase has no progress events — drive an
+      // elapsed-time counter so the UI doesn't look frozen while incus
+      // is unpacking the tarball on the host.
+      const startElapsedTimer = () => {
+        if (elapsedTimer) return;
+        elapsedTimer = setInterval(() => {
+          setImportProgress((p) => p ? { ...p, elapsedMs: Date.now() - startTime } : p);
+        }, 1000);
+      };
+
+      await api.importContainerWithProgress(importName.trim(), importFile, ({ loaded, total, phase }) => {
+        setImportProgress({ loaded, total, phase, elapsedMs: Date.now() - startTime });
+        if (phase === 'processing') startElapsedTimer();
+      });
       toast({ title: 'Import complete', description: `Container '${importName}' imported successfully.` });
       setImportOpen(false);
       setImportName('');
@@ -801,7 +884,9 @@ export default function LxcContainers() {
     } catch (err) {
       toast({ title: 'Import failed', description: err.message, variant: 'destructive' });
     } finally {
+      if (elapsedTimer) clearInterval(elapsedTimer);
       setImporting(false);
+      setImportProgress(null);
     }
   };
 
@@ -1878,6 +1963,32 @@ export default function LxcContainers() {
                       <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
                     )}
                   </Button>
+                  {exportProgress && (
+                    <div className="mt-2 space-y-1">
+                      {exportProgress.total ? (
+                        <div className="h-1.5 bg-muted rounded overflow-hidden">
+                          <div
+                            className="h-full bg-cyan-500 transition-[width] duration-200"
+                            style={{ width: `${Math.min(100, Math.round((exportProgress.loaded / exportProgress.total) * 100))}%` }}
+                          />
+                        </div>
+                      ) : (
+                        <div className="h-1.5 bg-muted rounded overflow-hidden">
+                          <div className="h-full w-1/3 bg-cyan-500/60 animate-pulse" />
+                        </div>
+                      )}
+                      <p className="text-[10.5px] text-muted-foreground font-mono">
+                        {formatSize(exportProgress.loaded)}
+                        {exportProgress.total ? ` / ~${formatSize(exportProgress.total)}` : ''}
+                        {exportProgress.elapsedMs > 0 && (
+                          <> · {formatDuration(exportProgress.elapsedMs)} elapsed</>
+                        )}
+                        {exportProgress.total && exportProgress.elapsedMs > 1000 && exportProgress.loaded > 0 && (
+                          <> · ~{formatDuration(((exportProgress.total - exportProgress.loaded) / exportProgress.loaded) * exportProgress.elapsedMs)} remaining</>
+                        )}
+                      </p>
+                    </div>
+                  )}
                   <p className="text-xs text-muted-foreground mt-1">
                     Downloads a full backup (.tar.gz) of this container including filesystem and config.
                   </p>
@@ -2111,11 +2222,48 @@ export default function LxcContainers() {
                 type="file"
                 accept=".tar.gz,.tar,.gz"
                 onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                disabled={importing}
               />
               <p className="text-xs text-muted-foreground">
                 Upload a .tar.gz backup file created by the export feature.
+                {importFile && <> Selected: <span className="font-mono">{importFile.name}</span> ({formatSize(importFile.size)}).</>}
               </p>
             </div>
+            {importProgress && (
+              <div className="space-y-1.5">
+                {importProgress.phase === 'uploading' && importProgress.total ? (
+                  <div className="h-2 bg-muted rounded overflow-hidden">
+                    <div
+                      className="h-full bg-cyan-500 transition-[width] duration-200"
+                      style={{ width: `${Math.min(100, Math.round((importProgress.loaded / importProgress.total) * 100))}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-2 bg-muted rounded overflow-hidden">
+                    <div className="h-full w-1/3 bg-cyan-500/60 animate-pulse" />
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground font-mono">
+                  {importProgress.phase === 'uploading' ? (
+                    <>
+                      Uploading: {formatSize(importProgress.loaded)} / {formatSize(importProgress.total)}
+                      {' '}({Math.round((importProgress.loaded / importProgress.total) * 100)}%)
+                      {importProgress.elapsedMs > 0 && <> · {formatDuration(importProgress.elapsedMs)} elapsed</>}
+                      {importProgress.elapsedMs > 1000 && importProgress.loaded > 0 && importProgress.loaded < importProgress.total && (
+                        <> · ~{formatDuration(((importProgress.total - importProgress.loaded) / importProgress.loaded) * importProgress.elapsedMs)} remaining</>
+                      )}
+                    </>
+                  ) : (
+                    <>Processing on host (incus import + start)... {formatDuration(importProgress.elapsedMs)} elapsed</>
+                  )}
+                </p>
+                {importProgress.phase === 'processing' && (
+                  <p className="text-[10.5px] text-muted-foreground">
+                    Upload complete; the host is now unpacking the tarball and registering the container with incus. This can take several minutes for large backups.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>
@@ -2123,7 +2271,9 @@ export default function LxcContainers() {
             </Button>
             <Button onClick={handleImport} disabled={importing || !importName.trim() || !importFile}>
               {importing ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Importing...</>
+                importProgress?.phase === 'processing'
+                  ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
+                  : <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
               ) : (
                 <><Upload className="h-4 w-4 mr-2" />Import</>
               )}

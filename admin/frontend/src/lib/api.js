@@ -521,6 +521,10 @@ export const api = {
     method: 'DELETE',
   }),
 
+  // Pre-flight estimate for downloading a previously-taken snapshot.
+  getLxcSnapshotExportInfo: (name, snapshotName) =>
+    request(`/lxc/containers/${name}/snapshot/${snapshotName}/export-info`),
+
   getSnapshotNotes: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`),
 
   addSnapshotNote: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`, {
@@ -570,6 +574,54 @@ export const api = {
     const data = await response.json();
     if (!response.ok) throw new ApiError(data.error || 'Import failed', response.status, data);
     return data;
+  },
+
+  // Pre-flight info for an export — backend returns
+  // { estimatedBytes, isRunning } so the UI can render a sized progress
+  // bar before the actual streaming download starts.
+  getLxcExportInfo: (name) => request(`/lxc/containers/${name}/export-info`),
+
+  // Import with upload-progress callback. fetch() doesn't expose upload
+  // progress; XMLHttpRequest does via xhr.upload.onprogress. Returns a
+  // promise resolving with the parsed response. onProgress is called
+  // with { loaded, total, phase }, where phase is 'uploading' during
+  // the byte transfer and 'processing' once the body is fully sent and
+  // we're waiting on incus to finish the import on the host.
+  importContainerWithProgress: (name, file, onProgress) => {
+    return new Promise((resolve, reject) => {
+      const csrf = readCookie('pp_csrf');
+      const formData = new FormData();
+      formData.append('name', name);
+      formData.append('backup', file);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE}/lxc/containers/import`);
+      xhr.withCredentials = true;
+      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+      xhr.upload.addEventListener('progress', (e) => {
+        if (onProgress && e.lengthComputable) {
+          onProgress({ loaded: e.loaded, total: e.total, phase: 'uploading' });
+        }
+      });
+      // Once the upload byte stream finishes, the backend is still
+      // running `incus import` on the host. Surface that distinct
+      // phase so the UI can swap from a determinate progress bar to
+      // a "processing on host..." spinner with elapsed time.
+      xhr.upload.addEventListener('load', () => {
+        if (onProgress) onProgress({ loaded: file.size, total: file.size, phase: 'processing' });
+      });
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data);
+        } else {
+          reject(new ApiError(data.error || `Import failed (HTTP ${xhr.status})`, xhr.status, data));
+        }
+      };
+      xhr.onerror = () => reject(new ApiError('Network error during import', 0, {}));
+      xhr.onabort = () => reject(new ApiError('Import cancelled', 0, {}));
+      xhr.send(formData);
+    });
   },
 
   listContainerFiles: (name, path = '/root') => request(`/lxc/containers/${name}/files?path=${encodeURIComponent(path)}`),

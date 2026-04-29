@@ -76,6 +76,20 @@ function formatSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Compact human-readable duration. Used by the export/import progress
+// rows to show elapsed and ETA without dragging in a date library.
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '-';
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM ? `${h}h ${remM}m` : `${h}h`;
+}
+
 // Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
 // init template either failed (network race on first boot) or wasn't
 // selected. Wrapped in a retry loop for apt-get update so a flaky
@@ -379,10 +393,18 @@ export default function LxcContainers() {
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [exporting, setExporting] = useState(false);
+  // Live export progress: { loaded, total, elapsedMs } during a download.
+  // total is null when the storage backend can't report rootfs usage —
+  // the UI degrades to bytes-downloaded + elapsed without a percentage.
+  const [exportProgress, setExportProgress] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState('');
   const [importFile, setImportFile] = useState(null);
   const [importing, setImporting] = useState(false);
+  // Live import progress: { loaded, total, phase, elapsedMs }. phase is
+  // 'uploading' while the browser is sending bytes, 'processing' once
+  // upload finishes and we're waiting on `incus import` on the host.
+  const [importProgress, setImportProgress] = useState(null);
 
   // Preset images for the dropdown
   const PRESET_IMAGES = [
@@ -761,38 +783,132 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
-  // Export container as tarball
+  // Streamed download with live byte counter + percentage (when the
+  // size estimate is available). Handles both the live-container
+  // export and the per-snapshot export — they share progress wiring;
+  // only the URL, filename, and pre-flight estimator differ.
+  const streamDownload = async ({ url, filename, fetchEstimate, label }) => {
+    setExportProgress({ loaded: 0, total: null, elapsedMs: 0 });
+    const startTime = Date.now();
+
+    let total = null;
+    if (fetchEstimate) {
+      try {
+        const info = await fetchEstimate();
+        if (typeof info?.estimatedBytes === 'number') total = info.estimatedBytes;
+      } catch {
+        // pre-flight is best-effort
+      }
+    }
+    setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0 }));
+
+    const res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `${label} failed`);
+    }
+    // Content-Length, when present, is the actual gzipped tarball
+    // size — more accurate than the pre-flight rootfs estimate.
+    const reportedLen = res.headers.get('content-length');
+    if (reportedLen && /^\d+$/.test(reportedLen)) {
+      total = parseInt(reportedLen, 10);
+    }
+
+    const reader = res.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      setExportProgress({ loaded, total, elapsedMs: Date.now() - startTime });
+    }
+    const blob = new Blob(chunks, { type: 'application/gzip' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return loaded;
+  };
+
+  // Export the live container as a tarball. Streams via ReadableStream
+  // so the UI can show a live byte counter + percentage. With the
+  // export endpoint no longer force-stopping the container, this is a
+  // true online backup — the bridge IP stays bound and the inline
+  // services list keeps showing the active routes throughout.
   const handleExport = async () => {
     if (!selectedContainer) return;
     setExporting(true);
-    toast({ title: 'Exporting...', description: `Exporting ${selectedContainer.name} — this may take a while.` });
     try {
-      const url = `/api/lxc/containers/${selectedContainer.name}/export`;
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Export failed');
-      }
-      const blob = await res.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${selectedContainer.name}-backup.tar.gz`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded.` });
+      const loaded = await streamDownload({
+        url: `/api/lxc/containers/${selectedContainer.name}/export`,
+        filename: `${selectedContainer.name}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcExportInfo(selectedContainer.name),
+        label: 'Export',
+      });
+      toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded (${formatSize(loaded)}).` });
     } catch (err) {
       toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
     } finally {
       setExporting(false);
+      setExportProgress(null);
     }
   };
 
-  // Import container from backup
+  // Download a previously-taken snapshot as a tarball. incus's export
+  // accepts <container>/<snapshot>, so the backend just streams that
+  // pipe; the UI side reuses the same progress wiring as handleExport.
+  const handleDownloadSnapshot = async (snapshotName) => {
+    if (!selectedContainer) return;
+    setExporting(true);
+    try {
+      const loaded = await streamDownload({
+        url: `/api/lxc/containers/${selectedContainer.name}/snapshot/${encodeURIComponent(snapshotName)}/export`,
+        filename: `${selectedContainer.name}-${snapshotName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcSnapshotExportInfo(selectedContainer.name, snapshotName),
+        label: 'Snapshot download',
+      });
+      toast({ title: 'Snapshot downloaded', description: `${snapshotName} (${formatSize(loaded)})` });
+    } catch (err) {
+      toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setExporting(false);
+      setExportProgress(null);
+    }
+  };
+
+  // Import container from backup.
+  //
+  // Uses XHR (via api.importContainerWithProgress) instead of fetch so
+  // the UI can show upload byte progress — fetch's Request body stream
+  // doesn't expose upload progress on the wire. Two phases:
+  //   - 'uploading'   browser → backend, determinate, % of file size.
+  //   - 'processing'  backend ran multer → disk; now streaming temp
+  //                   file into `incus import -` and waiting for it to
+  //                   finish. Indeterminate; show elapsed time only.
   const handleImport = async () => {
     if (!importName.trim() || !importFile) return;
     setImporting(true);
+    const startTime = Date.now();
+    setImportProgress({ loaded: 0, total: importFile.size, phase: 'uploading', elapsedMs: 0 });
+    let elapsedTimer = null;
     try {
-      await api.importContainer(importName.trim(), importFile);
+      // The 'processing' phase has no progress events — drive an
+      // elapsed-time counter so the UI doesn't look frozen while incus
+      // is unpacking the tarball on the host.
+      const startElapsedTimer = () => {
+        if (elapsedTimer) return;
+        elapsedTimer = setInterval(() => {
+          setImportProgress((p) => p ? { ...p, elapsedMs: Date.now() - startTime } : p);
+        }, 1000);
+      };
+
+      await api.importContainerWithProgress(importName.trim(), importFile, ({ loaded, total, phase }) => {
+        setImportProgress({ loaded, total, phase, elapsedMs: Date.now() - startTime });
+        if (phase === 'processing') startElapsedTimer();
+      });
       toast({ title: 'Import complete', description: `Container '${importName}' imported successfully.` });
       setImportOpen(false);
       setImportName('');
@@ -801,7 +917,9 @@ export default function LxcContainers() {
     } catch (err) {
       toast({ title: 'Import failed', description: err.message, variant: 'destructive' });
     } finally {
+      if (elapsedTimer) clearInterval(elapsedTimer);
       setImporting(false);
+      setImportProgress(null);
     }
   };
 
@@ -828,6 +946,26 @@ export default function LxcContainers() {
     try {
       await api.restoreLxcSnapshot(selectedContainer.name, snap);
       toast({ title: 'Snapshot restored', description: `Restored "${snap}" on ${selectedContainer.name}.` });
+      // Restore replays the on-disk state to a previous point — that
+      // includes the container's IP lease (sometimes stale vs. live),
+      // any service-config files inside the LXC, and any process
+      // state. Re-pull containers, snapshots, and services so the UI
+      // reflects the restored reality instead of the pre-restore one
+      // (otherwise the badges/diagnostic stay stuck on whatever was
+      // showing before).
+      try {
+        await fetchContainers();
+        const [snapRes, svcRes] = await Promise.all([
+          api.getLxcSnapshots(selectedContainer.name).catch(() => ({ snapshots: [] })),
+          api.getLxcServices(selectedContainer.name).catch(() => ({ services: [], listening: null })),
+        ]);
+        setSnapshots(snapRes.snapshots || []);
+        setContainerServices(svcRes.services || []);
+        setContainerListening(svcRes.listening || null);
+      } catch {
+        // Best-effort refresh — the restore itself succeeded; if a
+        // refresh call fails the operator can hit refresh manually.
+      }
     } catch (err) {
       toast({ title: 'Restore failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -974,12 +1112,18 @@ export default function LxcContainers() {
             <Server className="h-10 w-10 text-muted-foreground" />
             <div>
               <p className="font-medium">No containers yet</p>
-              <p className="text-sm text-muted-foreground">Create your first LXC container to get started.</p>
+              <p className="text-sm text-muted-foreground">Create your first LXC container or import a backup to get started.</p>
             </div>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Container
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+                <Upload className="h-4 w-4 mr-2" />
+                Import Backup
+              </Button>
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Container
+              </Button>
+            </div>
           </div>
         </Card>
       ) : (
@@ -1852,6 +1996,32 @@ export default function LxcContainers() {
                       <><Download className="h-3 w-3 mr-1" />Export Container Backup</>
                     )}
                   </Button>
+                  {exportProgress && (
+                    <div className="mt-2 space-y-1">
+                      {exportProgress.total ? (
+                        <div className="h-1.5 bg-muted rounded overflow-hidden">
+                          <div
+                            className="h-full bg-cyan-500 transition-[width] duration-200"
+                            style={{ width: `${Math.min(100, Math.round((exportProgress.loaded / exportProgress.total) * 100))}%` }}
+                          />
+                        </div>
+                      ) : (
+                        <div className="h-1.5 bg-muted rounded overflow-hidden">
+                          <div className="h-full w-1/3 bg-cyan-500/60 animate-pulse" />
+                        </div>
+                      )}
+                      <p className="text-[10.5px] text-muted-foreground font-mono">
+                        {formatSize(exportProgress.loaded)}
+                        {exportProgress.total ? ` / ~${formatSize(exportProgress.total)}` : ''}
+                        {exportProgress.elapsedMs > 0 && (
+                          <> · {formatDuration(exportProgress.elapsedMs)} elapsed</>
+                        )}
+                        {exportProgress.total && exportProgress.elapsedMs > 1000 && exportProgress.loaded > 0 && (
+                          <> · ~{formatDuration(((exportProgress.total - exportProgress.loaded) / exportProgress.loaded) * exportProgress.elapsedMs)} remaining</>
+                        )}
+                      </p>
+                    </div>
+                  )}
                   <p className="text-xs text-muted-foreground mt-1">
                     Downloads a full backup (.tar.gz) of this container including filesystem and config.
                   </p>
@@ -1928,6 +2098,16 @@ export default function LxcContainers() {
                                   <Button
                                     variant="ghost"
                                     size="sm"
+                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
+                                    onClick={() => handleDownloadSnapshot(sName)}
+                                    disabled={snapshotLoading || exporting}
+                                    title="Download snapshot as .tar.gz"
+                                  >
+                                    <Download className="h-3 w-3" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
                                     className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
                                     onClick={() => handleRestoreSnapshot(sName)}
                                     disabled={snapshotLoading}
@@ -1945,6 +2125,34 @@ export default function LxcContainers() {
                                   </Button>
                                 </div>
                               </div>
+                              {/* Snapshot detail row: size, stateful, expiry,
+                                  architecture. Each chip is conditionally
+                                  rendered so empty snapshots stay tidy.
+                                  Size comes from the backend's storage-volume
+                                  enrichment and is absent on backends that
+                                  don't expose per-snapshot usage. */}
+                              {(snap.size > 0 || snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
+                                <div className="flex flex-wrap items-center gap-1.5 mt-1 ml-5 text-[10.5px] text-muted-foreground">
+                                  {snap.size > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded bg-muted/60" title="Disk space used by this snapshot">
+                                      {formatSize(snap.size)}
+                                    </span>
+                                  )}
+                                  {snap.stateful && (
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30" title="Captured running memory state in addition to filesystem">
+                                      stateful
+                                    </span>
+                                  )}
+                                  {snap.expires_at && !snap.expires_at.startsWith('0001') && (
+                                    <span className="px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30" title="Auto-deletion time">
+                                      expires {formatDate(snap.expires_at)}
+                                    </span>
+                                  )}
+                                  {snap.architecture && (
+                                    <span className="px-1.5 py-0.5 rounded bg-muted/60 font-mono">{snap.architecture}</span>
+                                  )}
+                                </div>
+                              )}
                               {snap.description && (
                                 <p className="text-muted-foreground mt-1 italic ml-5">{snap.description}</p>
                               )}
@@ -2057,11 +2265,48 @@ export default function LxcContainers() {
                 type="file"
                 accept=".tar.gz,.tar,.gz"
                 onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                disabled={importing}
               />
               <p className="text-xs text-muted-foreground">
                 Upload a .tar.gz backup file created by the export feature.
+                {importFile && <> Selected: <span className="font-mono">{importFile.name}</span> ({formatSize(importFile.size)}).</>}
               </p>
             </div>
+            {importProgress && (
+              <div className="space-y-1.5">
+                {importProgress.phase === 'uploading' && importProgress.total ? (
+                  <div className="h-2 bg-muted rounded overflow-hidden">
+                    <div
+                      className="h-full bg-cyan-500 transition-[width] duration-200"
+                      style={{ width: `${Math.min(100, Math.round((importProgress.loaded / importProgress.total) * 100))}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-2 bg-muted rounded overflow-hidden">
+                    <div className="h-full w-1/3 bg-cyan-500/60 animate-pulse" />
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground font-mono">
+                  {importProgress.phase === 'uploading' ? (
+                    <>
+                      Uploading: {formatSize(importProgress.loaded)} / {formatSize(importProgress.total)}
+                      {' '}({Math.round((importProgress.loaded / importProgress.total) * 100)}%)
+                      {importProgress.elapsedMs > 0 && <> · {formatDuration(importProgress.elapsedMs)} elapsed</>}
+                      {importProgress.elapsedMs > 1000 && importProgress.loaded > 0 && importProgress.loaded < importProgress.total && (
+                        <> · ~{formatDuration(((importProgress.total - importProgress.loaded) / importProgress.loaded) * importProgress.elapsedMs)} remaining</>
+                      )}
+                    </>
+                  ) : (
+                    <>Processing on host (incus import + start)... {formatDuration(importProgress.elapsedMs)} elapsed</>
+                  )}
+                </p>
+                {importProgress.phase === 'processing' && (
+                  <p className="text-[10.5px] text-muted-foreground">
+                    Upload complete; the host is now unpacking the tarball and registering the container with incus. This can take several minutes for large backups.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>
@@ -2069,7 +2314,9 @@ export default function LxcContainers() {
             </Button>
             <Button onClick={handleImport} disabled={importing || !importName.trim() || !importFile}>
               {importing ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Importing...</>
+                importProgress?.phase === 'processing'
+                  ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
+                  : <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
               ) : (
                 <><Upload className="h-4 w-4 mr-2" />Import</>
               )}

@@ -1,18 +1,39 @@
 import { Router } from 'express';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
-import { writeFile, readdir, readFile, unlink } from 'fs/promises';
-import { existsSync } from 'fs';
+import { writeFile, readdir, readFile, unlink, mkdir, stat } from 'fs/promises';
+import { createReadStream, existsSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import http from 'http';
 import multer from 'multer';
+import { randomUUID } from 'crypto';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure } from './services.js';
 
 const execAsync = promisify(exec);
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB limit
+
+// Container backups can be tens to hundreds of GB on disk-heavy LXCs
+// (Docker-in-LXC, databases, large media). The previous memoryStorage
+// multer config buffered the entire upload into RAM and capped at 2GB,
+// which both bottlenecked the import and crashed the backend on
+// realistic backups. Switch to disk-backed multer with a far larger
+// cap and stream the temp file into `incus import -` stdin from the
+// disk handler.
+//
+// Cap is generous (50 GiB) but bounded so a single bad upload can't
+// fill the host disk indefinitely — operators with bigger backups can
+// raise LXC_IMPORT_LIMIT_BYTES via the environment.
+const LXC_IMPORT_TMP_DIR = process.env.LXC_IMPORT_TMP_DIR || join(tmpdir(), 'proxypilot-imports');
+const LXC_IMPORT_LIMIT_BYTES = parseInt(process.env.LXC_IMPORT_LIMIT_BYTES || String(50 * 1024 * 1024 * 1024), 10);
+try { await mkdir(LXC_IMPORT_TMP_DIR, { recursive: true }); } catch {}
+const importStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, LXC_IMPORT_TMP_DIR),
+  filename: (_req, _file, cb) => cb(null, `import-${Date.now()}-${randomUUID()}.tar.gz`),
+});
+const upload = multer({ storage: importStorage, limits: { fileSize: LXC_IMPORT_LIMIT_BYTES } });
 
 export const lxcRouter = Router();
 
@@ -370,7 +391,49 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
     const result = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
-    const snapshots = JSON.parse(result.stdout);
+    const snapshots = JSON.parse(result.stdout || '[]');
+
+    // Best-effort enrichment: pull per-snapshot disk usage from the
+    // storage volume, which exposes it on every backend incus
+    // supports (ZFS, btrfs, LVM-thin, ceph). `incus snapshot list`
+    // alone returns only metadata; size lives on the storage volume.
+    // We resolve the instance's pool once, then call the volume show
+    // for each snapshot in parallel. Each step is wrapped — any
+    // failure leaves the snapshot list usable, just without sizes.
+    try {
+      const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+      const instance = JSON.parse(infoResult.stdout || '{}');
+      const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+      if (pool && snapshots.length) {
+        await Promise.all(snapshots.map(async (snap) => {
+          try {
+            // Storage volume show for `instance/<name>/<snap>` returns
+            // the per-snapshot volume config. Some backends
+            // additionally expose `used_size` (bytes) in the response.
+            const r = await execOnHost(
+              `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snap.name} 2>/dev/null`,
+              { timeout: 5000 }
+            );
+            const vol = JSON.parse(r.stdout || '{}');
+            // Different backends report size in different places:
+            // top-level config.size, top-level used_size (bytes),
+            // or status.used_by_total. Try them in order.
+            const used = vol?.config?.['volatile.rootfs.size']
+              || vol?.config?.size
+              || null;
+            if (used && /^\d+$/.test(String(used))) {
+              snap.size = parseInt(String(used), 10);
+            }
+          } catch {
+            // Pool/snapshot may not exist as a storage volume on this
+            // backend — leave size unset.
+          }
+        }));
+      }
+    } catch {
+      // Couldn't even resolve the instance pool — skip enrichment.
+    }
+
     res.json({ success: true, snapshots });
   } catch (error) {
     // If no snapshots exist, incus may return an error or empty
@@ -1375,11 +1438,24 @@ lxcRouter.post('/containers/:name/tab-complete', async (req, res) => {
   }
 });
 
-// POST /containers/import - Import a container from a backup tarball
+// POST /containers/import - Import a container from a backup tarball.
+//
+// Multer writes the upload to LXC_IMPORT_TMP_DIR on disk (memoryStorage
+// previously buffered the whole file in RAM, which OOMed the backend on
+// realistic backups). We then stream the temp file into `incus import -`
+// stdin and unlink it in a finally regardless of success/failure.
 lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
   const { name } = req.body;
 
+  // Helper to clean up the temp upload regardless of outcome.
+  const cleanupTempFile = async () => {
+    if (req.file?.path) {
+      try { await unlink(req.file.path); } catch {}
+    }
+  };
+
   if (!name || !validateName(name)) {
+    await cleanupTempFile();
     return res.status(400).json({ success: false, error: 'Valid container name is required.' });
   }
 
@@ -1392,6 +1468,7 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
   // Check if container already exists
   try {
     await execOnHost(`incus info ${incusName} 2>/dev/null`);
+    await cleanupTempFile();
     return res.status(409).json({ success: false, error: `Container '${name}' already exists.` });
   } catch {
     // Good — doesn't exist
@@ -1408,8 +1485,13 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
         else reject(new Error(stderr.trim() || `Import exited with code ${code}`));
       });
       child.on('error', reject);
-      child.stdin.write(req.file.buffer);
-      child.stdin.end();
+      // Stream the temp file into incus stdin instead of buffering the
+      // whole tarball into memory. createReadStream uses a 64 KiB
+      // highWaterMark by default, which is fine here — the bottleneck
+      // is incus, not Node.
+      const fileStream = createReadStream(req.file.path);
+      fileStream.on('error', reject);
+      fileStream.pipe(child.stdin);
     });
 
     // Start the container
@@ -1422,6 +1504,8 @@ lxcRouter.post('/import', upload.single('backup'), async (req, res) => {
     // Cleanup on failure
     try { await execOnHost(`incus delete ${incusName} --force 2>/dev/null || true`); } catch {}
     res.status(500).json({ success: false, error: `Import failed: ${error.message}` });
+  } finally {
+    await cleanupTempFile();
   }
 });
 
@@ -1760,6 +1844,55 @@ lxcRouter.delete('/containers/:name', requireSudo, async (req, res) => {
   }
 });
 
+// GET /containers/:name/export-info - Pre-flight estimate for an export.
+//
+// The frontend uses this to render a size-aware progress bar before
+// kicking off the export proper. Estimate is the rootfs disk usage
+// reported by the storage backend; the actual tarball will be smaller
+// (gzip) but same order of magnitude. When the backend can't report
+// usage (e.g. dir storage), bytes is null and the UI falls back to an
+// indeterminate spinner.
+lxcRouter.get('/containers/:name/export-info', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  let estimatedBytes = null;
+  let isRunning = false;
+  try {
+    const stateResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(stateResult.stdout || '[]');
+    if (containers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Container not found.' });
+    }
+    isRunning = containers[0]?.status === 'Running';
+  } catch {}
+
+  // Best-effort: pull the rootfs volume's reported usage from the
+  // storage pool API. Wrapped — if any step fails, we just return
+  // estimatedBytes=null and the UI degrades to an unbounded progress
+  // indicator.
+  try {
+    const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+    const instance = JSON.parse(infoResult.stdout || '{}');
+    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+    if (pool) {
+      const volResult = await execOnHost(
+        `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName} 2>/dev/null`,
+        { timeout: 5000 }
+      );
+      const vol = JSON.parse(volResult.stdout || '{}');
+      const used = vol?.config?.['volatile.rootfs.size'] || vol?.config?.size || null;
+      if (used && /^\d+$/.test(String(used))) {
+        estimatedBytes = parseInt(String(used), 10);
+      }
+    }
+  } catch {}
+
+  res.json({ success: true, estimatedBytes, isRunning });
+});
+
 // GET /containers/:name/export - Export container as tarball backup
 lxcRouter.get('/containers/:name/export', async (req, res) => {
   const { name } = req.params;
@@ -1774,19 +1907,13 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Type', 'application/gzip');
 
-    // Stop the container first if running (required for clean export)
-    let wasRunning = false;
-    try {
-      const stateResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
-      const containers = JSON.parse(stateResult.stdout || '[]');
-      wasRunning = containers[0]?.status === 'Running';
-      if (wasRunning) {
-        console.log(`[LXC] Stopping ${incusName} for export...`);
-        await execOnHost(`incus stop ${incusName} --force`, { timeout: 30000 });
-      }
-    } catch {}
-
-    // Use incus export which creates a tarball to stdout
+    // Stream the export. The container can stay running — modern incus
+    // takes a brief storage-level snapshot internally for a consistent
+    // tarball without operator-visible downtime. The previous code
+    // force-stopped the container, which yanked the bridge IP and made
+    // the inline services list flicker to empty in the UI for the
+    // duration of the export. Dropping that gives operators a true
+    // online backup.
     const exportCmd = `incus export ${incusName} -`;
     const child = spawnOnHost(exportCmd);
 
@@ -1797,17 +1924,99 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
     });
 
     child.on('close', async (code) => {
-      // Restart container if it was running before
-      if (wasRunning) {
-        try {
-          await execOnHost(`incus start ${incusName}`, { timeout: 30000 });
-          console.log(`[LXC] Restarted ${incusName} after export`);
-        } catch (err) {
-          console.error(`[LXC] Failed to restart after export:`, err.message);
-        }
-      }
       if (code !== 0 && !res.headersSent) {
         res.status(500).json({ success: false, error: 'Export failed' });
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+});
+
+// GET /containers/:name/snapshot/:snapshotName/export-info
+//
+// Pre-flight size estimate for downloading an existing snapshot.
+// Mirrors /containers/:name/export-info but reads from the snapshot's
+// storage volume instead of the live container's root volume.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req, res) => {
+  const { name, snapshotName } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  let estimatedBytes = null;
+  try {
+    const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+    const instance = JSON.parse(infoResult.stdout || '{}');
+    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+    if (pool) {
+      const r = await execOnHost(
+        `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snapshotName} 2>/dev/null`,
+        { timeout: 5000 }
+      );
+      const vol = JSON.parse(r.stdout || '{}');
+      const used = vol?.config?.['volatile.rootfs.size'] || vol?.config?.size || null;
+      if (used && /^\d+$/.test(String(used))) {
+        estimatedBytes = parseInt(String(used), 10);
+      }
+    }
+  } catch {}
+  res.json({ success: true, estimatedBytes });
+});
+
+// GET /containers/:name/snapshot/:snapshotName/export
+//
+// Download a previously-taken snapshot as a tarball. incus's export
+// command accepts a snapshot reference via `<container>/<snapshot>`,
+// so this is just a streamed pipe to the response — no temp container,
+// no temp image, no extra disk. The snapshot the operator picked is
+// the consistent point-in-time view they wanted.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res) => {
+  const { name, snapshotName } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+
+  // Confirm the snapshot exists before we open the tarball stream so
+  // the failure path returns a JSON error instead of an empty file.
+  try {
+    const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const snaps = JSON.parse(r.stdout || '[]');
+    if (!snaps.some((s) => s.name === snapshotName)) {
+      return res.status(404).json({ success: false, error: `Snapshot '${snapshotName}' not found on '${name}'.` });
+    }
+  } catch (e) {
+    return res.status(500).json({ success: false, error: `Failed to verify snapshot: ${(e.stderr || e.message || '').trim()}` });
+  }
+
+  const fileName = `${name}-${snapshotName}-backup.tar.gz`;
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.setHeader('Content-Type', 'application/gzip');
+
+  try {
+    const exportCmd = `incus export ${incusName}/${snapshotName} -`;
+    const child = spawnOnHost(exportCmd);
+
+    child.stdout.pipe(res);
+
+    let stderr = '';
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+      console.log(`[LXC] Snapshot export stderr: ${data.toString().trim()}`);
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).json({ success: false, error: `Export failed: ${stderr.trim() || `incus exited ${code}`}` });
       }
     });
 

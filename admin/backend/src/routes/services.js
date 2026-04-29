@@ -6086,4 +6086,4 @@ export function assertSiblingsMatchStance(
 // this module at the call-site level but exported so integration tests and
 // the Phase 2 verification pass can invoke them directly without spinning
 // up the full HTTP router.
-export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy };
+export { buildDomainCaddyConfig, regenerateDomainCaddyConfig, generateServiceHandlerBody, syncPrimaryRouteFromLegacy, ensureCaddyStructure };

@@ -8,6 +8,7 @@ import multer from 'multer';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
+import { ensureCaddyStructure } from './services.js';
 
 const execAsync = promisify(exec);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB limit
@@ -795,6 +796,14 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Container has no IP address. Is it running?' });
     }
 
+    // Make sure the main Caddyfile exists with the `import sites/*`
+    // line — otherwise the file we are about to write is invisible to
+    // the running Caddy and the operator gets a "saved but doesn't
+    // resolve" symptom with no signal.
+    try { await ensureCaddyStructure(); } catch (e) {
+      console.error('[LXC] ensureCaddyStructure failed:', e?.message || e);
+    }
+
     // Check if domain config already exists
     const configPath = join(CADDY_SITES_DIR, cleanDomain);
     if (existsSync(configPath)) {
@@ -806,14 +815,24 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
     const caddyConfig = `${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
     await writeFile(configPath, caddyConfig);
 
+    // Reload Caddy. Surface the underlying error to the operator via a
+    // warning field — silently swallowing it leaves them staring at a
+    // domain that "saved" but never routes.
+    let reloadWarning = null;
     try {
       await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
     } catch (reloadError) {
-      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+      const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
+      console.error('[LXC] Caddy reload failed:', detail);
+      reloadWarning = `Config saved but Caddy reload failed: ${detail || 'unknown error'}`;
     }
 
     console.log(`[LXC] Added service ${cleanDomain} -> ${ip}:${svcPort} for container ${name}`);
-    res.json({ success: true, service: { domain: cleanDomain, port: svcPort, obtainCert: cert } });
+    res.json({
+      success: true,
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert },
+      ...(reloadWarning && { warning: reloadWarning }),
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -843,6 +862,10 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Container has no IP address.' });
     }
 
+    try { await ensureCaddyStructure(); } catch (e) {
+      console.error('[LXC] ensureCaddyStructure failed:', e?.message || e);
+    }
+
     // Remove old config
     const oldConfigPath = join(CADDY_SITES_DIR, oldDomain);
     if (existsSync(oldConfigPath)) {
@@ -858,14 +881,21 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
     const newConfigPath = join(CADDY_SITES_DIR, cleanDomain);
     await writeFile(newConfigPath, caddyConfig);
 
+    let reloadWarning = null;
     try {
       await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
     } catch (reloadError) {
-      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+      const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
+      console.error('[LXC] Caddy reload failed:', detail);
+      reloadWarning = `Config saved but Caddy reload failed: ${detail || 'unknown error'}`;
     }
 
     console.log(`[LXC] Updated service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
-    res.json({ success: true, service: { domain: cleanDomain, port: svcPort, obtainCert: cert } });
+    res.json({
+      success: true,
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert },
+      ...(reloadWarning && { warning: reloadWarning }),
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -890,14 +920,21 @@ lxcRouter.delete('/containers/:name/services/:domain', async (req, res) => {
 
     await unlink(configPath);
 
+    let reloadWarning = null;
     try {
       await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
     } catch (reloadError) {
-      console.error('[LXC] Caddy reload failed:', reloadError.stderr || reloadError.message);
+      const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
+      console.error('[LXC] Caddy reload failed:', detail);
+      reloadWarning = `Config removed but Caddy reload failed: ${detail || 'unknown error'}`;
     }
 
     console.log(`[LXC] Removed service ${domain} for container ${name}`);
-    res.json({ success: true, message: `Service '${domain}' removed.` });
+    res.json({
+      success: true,
+      message: `Service '${domain}' removed.`,
+      ...(reloadWarning && { warning: reloadWarning }),
+    });
   } catch (error) {
     res.status(500).json({
       success: false,

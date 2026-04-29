@@ -759,6 +759,41 @@ lxcRouter.get('/containers/:name/create-status', async (req, res) => {
 // the Services UI when Caddy is configured correctly but the upstream
 // isn't actually listening — the most common 502 cause once IP
 // detection is fixed.
+// Format the JSON body for a failed `incus snapshot {create|restore|delete}`
+// call. execAsync's behavior on timeout is the failure mode that bites
+// here: it sends SIGTERM, returns an Error with `killed=true` and
+// usually-empty stderr/stdout (incus may not have flushed anything
+// before SIGTERM). The previous templating fell through stderr →
+// stdout → message and surfaced Node's generic "Command failed:
+// nsenter ..." string with no actionable signal. Detect timeout
+// explicitly and explain so the operator knows whether to bump the
+// budget or look at incus.
+function formatSnapshotError(prefix, error, timeoutMs) {
+  // execAsync timeout: error.killed=true, error.signal='SIGTERM'.
+  // error.code is the spawn-side numeric on timeout; for an actual
+  // non-zero exit it's the exit code (a number). The combination of
+  // killed + signal is reliable.
+  const isTimeout = error && (error.killed === true || error.signal === 'SIGTERM' || error.signal === 'SIGKILL');
+  const stderr = (error.stderr || '').trim();
+  const stdout = (error.stdout || '').trim();
+  const incusOutput = stderr || stdout;
+  let message;
+  if (isTimeout && !incusOutput) {
+    const seconds = Math.round((timeoutMs || 0) / 1000);
+    message = `${prefix}: timed out after ${seconds}s. Snapshots of running Docker-in-LXC containers can take several minutes; check 'incus operation list' on the host to see if it's still in progress, or try again with the container stopped.`;
+  } else if (incusOutput) {
+    message = `${prefix}: ${incusOutput}`;
+  } else {
+    message = `${prefix}: ${error.message || 'unknown error'} (exit code: ${error.code ?? 'n/a'})`;
+  }
+  return {
+    success: false,
+    error: message,
+    details: incusOutput || error.message,
+    timedOut: !!isTimeout,
+  };
+}
+
 async function probeTcp(ip, port, timeoutMs = 2000) {
   if (!ip || !port) return false;
   // Bash's /dev/tcp uses a non-blocking connect under the hood; wrap
@@ -1807,9 +1842,17 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
     });
   }
 
+  // Snapshot create copies the container's filesystem; on running
+  // Docker-in-LXC instances with overlay layers this routinely runs
+  // longer than execOnHost's 30s default. SIGTERM at 30s leaves stderr
+  // empty and the operator stares at the bare nsenter wrapper command
+  // with no signal as to what happened. 5 min covers realistic worst
+  // cases without pinning the request indefinitely.
+  const SNAPSHOT_TIMEOUT_MS = 5 * 60 * 1000;
+
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot create ${incusName} ${snapshotName}`);
+    await execOnHost(`incus snapshot create ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
     // Set description if note provided
     if (note) {
       await execOnHost(`incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`).catch(() => {});
@@ -1819,11 +1862,7 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
       message: `Snapshot '${snapshotName}' created for container '${name}'.`,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: `Failed to create snapshot for container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
-      details: error.stderr || error.stdout || error.message,
-    });
+    res.status(500).json(formatSnapshotError(`Failed to create snapshot for container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
   }
 });
 
@@ -1845,19 +1884,18 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
     });
   }
 
+  // Restore touches the same storage as create; same timeout reasoning.
+  const SNAPSHOT_TIMEOUT_MS = 5 * 60 * 1000;
+
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot restore ${incusName} ${snapshotName}`);
+    await execOnHost(`incus snapshot restore ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
     res.json({
       success: true,
       message: `Snapshot '${snapshotName}' restored for container '${name}'.`,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: `Failed to restore snapshot for container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
-      details: error.stderr || error.stdout || error.message,
-    });
+    res.status(500).json(formatSnapshotError(`Failed to restore snapshot for container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
   }
 });
 
@@ -1879,9 +1917,13 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
     });
   }
 
+  // Delete reclaims storage; on copy-on-write backends with many
+  // overlapping snapshots this can take a while.
+  const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
+
   try {
     const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`);
+    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
     // Clean up notes for deleted snapshot
     try {
       const db = getDb();
@@ -1892,11 +1934,7 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
       message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: `Failed to delete snapshot from container '${name}': ${(error.stderr || error.stdout || error.message || '').trim()}`,
-      details: error.stderr || error.stdout || error.message,
-    });
+    res.status(500).json(formatSnapshotError(`Failed to delete snapshot from container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
   }
 });
 

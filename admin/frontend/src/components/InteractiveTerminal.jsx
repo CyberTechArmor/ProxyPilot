@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
@@ -26,13 +26,32 @@ import 'xterm/css/xterm.css';
 //               ws.send {type:'resize',cols,rows}.
 //   - message : binary or string PTY output → term.write.
 //   - close   : ws.close(), term.dispose(), observer.disconnect().
-function InteractiveTerminal({ wsPath, initialCwd }) {
+const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, initialCwd }, ref) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
   const wsRef = useRef(null);
   const [status, setStatus] = useState('connecting');
   const [errorText, setErrorText] = useState('');
+
+  // Imperative handle: parent can call .sendInput(text) to push bytes
+  // into the PTY (e.g. a "Run install script" button). Returns true
+  // when the WebSocket is open and the data was queued.
+  useImperativeHandle(ref, () => ({
+    sendInput(text) {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN || typeof text !== 'string') return false;
+      try {
+        ws.send(JSON.stringify({ type: 'input', data: text }));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    isConnected() {
+      return wsRef.current?.readyState === WebSocket.OPEN;
+    },
+  }), []);
 
   useEffect(() => {
     if (!containerRef.current || !wsPath) return undefined;
@@ -149,7 +168,7 @@ function InteractiveTerminal({ wsPath, initialCwd }) {
   }, [wsPath, initialCwd]);
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 h-full overflow-hidden">
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       <StatusBanner status={status} errorText={errorText} />
       <div
         ref={containerRef}
@@ -158,7 +177,7 @@ function InteractiveTerminal({ wsPath, initialCwd }) {
       />
     </div>
   );
-}
+});
 
 function StatusBanner({ status, errorText }) {
   const map = {

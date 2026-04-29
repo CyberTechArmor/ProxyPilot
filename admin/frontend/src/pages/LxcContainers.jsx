@@ -78,43 +78,83 @@ function formatSize(bytes) {
 
 // Minimum-viable bootstrap for a fresh Debian/Ubuntu LXC where the
 // init template either failed (network race on first boot) or wasn't
-// selected. Pasted into the terminal with Ctrl+Shift+V so the user
-// doesn't need to retype the apt one-liner.
+// selected. Wrapped in a retry loop for apt-get update so a flaky
+// first-boot DNS doesn't make the install no-op silently.
 const QUICK_INSTALL_SCRIPT =
-  'apt-get update && apt-get install -y sudo nano git curl wget htop ca-certificates';
+  'i=0; until apt-get update; do i=$((i+1)); [ "$i" -ge 5 ] && break; echo "retrying apt-get update in 5s..."; sleep 5; done && apt-get install -y sudo nano git curl wget htop ca-certificates && echo "=== ProxyPilot quick-install complete ==="';
 
-async function copyInstallScript(toast) {
-  let copied = false;
+const QUICK_INSTALL_FLAG_PREFIX = 'pp-lxc-quick-installed:';
+
+function quickInstallDone(containerName) {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(QUICK_INSTALL_SCRIPT);
-      copied = true;
+    return localStorage.getItem(QUICK_INSTALL_FLAG_PREFIX + containerName) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markQuickInstallDone(containerName) {
+  try {
+    localStorage.setItem(QUICK_INSTALL_FLAG_PREFIX + containerName, '1');
+  } catch { /* private mode / quota */ }
+}
+
+// LxcTerminalPanel wraps InteractiveTerminal with a small toolbar.
+// The toolbar shows a "Run install script" button on first open of
+// each container; clicking it pushes the apt one-liner into the live
+// PTY via the imperative ref and persists a per-container flag in
+// localStorage so the button stops appearing on subsequent opens of
+// that LXC. Hidden entirely once the flag is set.
+function LxcTerminalPanel({ containerName, initialCwd, toast }) {
+  const termRef = useRef(null);
+  const [installed, setInstalled] = useState(() => quickInstallDone(containerName));
+
+  // Re-evaluate when the container selection changes inside the same dialog.
+  useEffect(() => {
+    setInstalled(quickInstallDone(containerName));
+  }, [containerName]);
+
+  const runInstallScript = () => {
+    const sent = termRef.current?.sendInput(QUICK_INSTALL_SCRIPT + '\n');
+    if (sent) {
+      markQuickInstallDone(containerName);
+      setInstalled(true);
+      toast({
+        title: 'Install script sent',
+        description: 'Watch the terminal — apt-get update + install runs now. The button will not show on this container again.',
+      });
+    } else {
+      toast({
+        title: 'Terminal not ready',
+        description: 'Wait for the green "Connected" banner and try again.',
+        variant: 'destructive',
+      });
     }
-  } catch { /* fall through to execCommand */ }
-  if (!copied) {
-    // navigator.clipboard requires a secure context; fall back for
-    // plain-HTTP installs and older browsers.
-    const ta = document.createElement('textarea');
-    ta.value = QUICK_INSTALL_SCRIPT;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { copied = document.execCommand('copy'); } catch { /* ignore */ }
-    document.body.removeChild(ta);
-  }
-  if (copied) {
-    toast({
-      title: 'Install script copied',
-      description: 'Paste into the terminal with Ctrl+Shift+V (or right-click → paste) and press Enter.',
-    });
-  } else {
-    toast({
-      title: 'Copy failed',
-      description: QUICK_INSTALL_SCRIPT,
-      variant: 'destructive',
-    });
-  }
+  };
+
+  return (
+    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      {!installed && (
+        <div className="flex items-center justify-end gap-2 px-1 pb-1 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={runInstallScript}
+            title="One-click: runs apt-get update + installs sudo, nano, git, curl, wget, htop, ca-certificates. Hidden after a successful click."
+          >
+            <Copy className="h-3 w-3 mr-1" />
+            Run install script
+          </Button>
+        </div>
+      )}
+      <InteractiveTerminal
+        ref={termRef}
+        wsPath={`/api/terminal/lxc/${containerName}`}
+        initialCwd={initialCwd}
+      />
+    </div>
+  );
 }
 
 // File manager component for browsing, uploading, and downloading files
@@ -1754,21 +1794,10 @@ export default function LxcContainers() {
 
               {/* Terminal Tab — live PTY via WebSocket */}
               <TabsContent value="terminal" className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <div className="flex items-center justify-end gap-2 px-1 pb-1 shrink-0">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={() => copyInstallScript(toast)}
-                    title="Copy a one-liner that installs sudo, nano, git, curl, etc. Paste into the terminal with Ctrl+Shift+V."
-                  >
-                    <Copy className="h-3 w-3 mr-1" />
-                    Copy install script
-                  </Button>
-                </div>
-                <InteractiveTerminal
-                  wsPath={`/api/terminal/lxc/${selectedContainer.name}`}
+                <LxcTerminalPanel
+                  containerName={selectedContainer.name}
                   initialCwd={terminalCwd}
+                  toast={toast}
                 />
               </TabsContent>
 

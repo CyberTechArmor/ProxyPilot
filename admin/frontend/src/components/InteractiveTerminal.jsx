@@ -13,10 +13,11 @@ import 'xterm/css/xterm.css';
 //   wsPath     — path under the same origin, e.g. `/api/terminal/lxc/foo`
 //                or `/api/terminal/host`. The component derives the
 //                ws[s]:// URL from window.location.
-//   initialCwd — optional absolute path. When set, the component sends
-//                `cd <quoted> && clear\n` once the WebSocket is open
-//                (after the initial resize) so the shell starts in the
-//                requested directory. Falsy/empty → no-op.
+//   initialCwd — optional absolute path. When set, the component appends
+//                `?cwd=<encoded>` to wsPath; the backend uses node-pty's
+//                `cwd` option (translating container→host paths for
+//                host-kind PTYs) so bash starts directly in that
+//                directory. Falsy/empty → no-op (PTY starts in HOME).
 //
 // Lifecycle:
 //   - mount   : create Terminal, FitAddon, WebLinksAddon. Open ws.
@@ -57,7 +58,10 @@ function InteractiveTerminal({ wsPath, initialCwd }) {
     termRef.current = term;
     fitRef.current = fit;
 
-    const wsUrl = `${window.location.origin.replace(/^http/, 'ws')}${wsPath}`;
+    const wsBase = `${window.location.origin.replace(/^http/, 'ws')}${wsPath}`;
+    const wsUrl = initialCwd
+      ? `${wsBase}${wsPath.includes('?') ? '&' : '?'}cwd=${encodeURIComponent(initialCwd)}`
+      : wsBase;
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
@@ -76,16 +80,6 @@ function InteractiveTerminal({ wsPath, initialCwd }) {
       setStatus('connected');
       setErrorText('');
       sendResize();
-      if (initialCwd) {
-        // JSON.stringify quotes for shell — paths with spaces, $, etc.
-        // become a single double-quoted token that bash treats verbatim.
-        // `clear` after cd hides the cd line so the user sees a clean
-        // prompt at the requested path.
-        const cmd = `cd ${JSON.stringify(initialCwd)} && clear\n`;
-        try {
-          ws.send(JSON.stringify({ type: 'input', data: cmd }));
-        } catch { /* socket closing */ }
-      }
       term.focus();
     };
 

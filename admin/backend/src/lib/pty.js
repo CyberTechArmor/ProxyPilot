@@ -13,7 +13,30 @@ function validInstanceName(name) {
   return typeof name === 'string' && /^[a-zA-Z0-9_-]+$/.test(name) && name.length > 0 && name.length <= 64;
 }
 
-// spawnTerminalPty({ kind, target, cols, rows }) — returns a node-pty IPty.
+// Translate a path from the admin-container's view to the host view.
+// The compose mount is `${INSTALL_DIR}/data:/data`, so a container path
+// like `/data/services/foo` corresponds to host path
+// `${INSTALL_DIR}/data/services/foo`. Used when a host-kind PTY needs
+// to start in a directory the admin container surfaced (file browser
+// → "Open terminal here").
+//
+// CADDY_STATIC_ROOT is exported by the install-side wrapper as
+// `${INSTALL_DIR}/data/services` and is the only mapping today. If
+// the cwd doesn't start with SERVICES_DATA_DIR, return as-is.
+export function translateContainerPathToHost(p) {
+  if (typeof p !== 'string' || !p) return null;
+  const servicesContainer = process.env.SERVICES_DATA_DIR || '/data/services';
+  const servicesHost = process.env.CADDY_STATIC_ROOT || servicesContainer;
+  if (servicesHost === servicesContainer) return p; // not running in Docker
+  if (p === servicesContainer) return servicesHost;
+  if (p.startsWith(servicesContainer + '/')) {
+    return servicesHost + p.slice(servicesContainer.length);
+  }
+  return p;
+}
+
+// spawnTerminalPty({ kind, target, cols, rows, cwd }) — returns a node-pty
+// IPty.
 //
 // kind='lxc'   : opens a PTY into `incus exec -t pp-<target> -- bash`. When
 //                running inside the admin Docker container we pivot to the
@@ -26,9 +49,14 @@ function validInstanceName(name) {
 //                nsenter pivot when in Docker; falls through to a plain
 //                `bash -l` on bare-metal / non-Docker installs.
 //
+// `cwd`        : optional starting directory. When kind='host' and cwd
+//                points into the admin container's view of the services
+//                volume (e.g. /data/services/foo), it is translated to the
+//                host's path so nsenter'd bash actually finds the dir.
+//
 // Defaults: cols=80, rows=24, name='xterm-256color'. The TERM env var is
 // forced to xterm-256color so colour and alt-screen apps work consistently.
-export function spawnTerminalPty({ kind, target, cols = 80, rows = 24 } = {}) {
+export function spawnTerminalPty({ kind, target, cols = 80, rows = 24, cwd } = {}) {
   let cmd;
   let args;
 
@@ -56,11 +84,21 @@ export function spawnTerminalPty({ kind, target, cols = 80, rows = 24 } = {}) {
     throw new Error(`Unsupported PTY kind: ${kind}`);
   }
 
+  // Resolve the starting cwd. Host-kind sessions can be handed a
+  // container-view path (file browser → "Open terminal here") which
+  // we translate to its host equivalent so nsenter'd bash finds it.
+  // Empty / falsy cwd → fall back to HOME.
+  let startCwd = process.env.HOME || '/';
+  if (cwd && typeof cwd === 'string') {
+    const translated = kind === 'host' ? translateContainerPathToHost(cwd) : cwd;
+    if (translated) startCwd = translated;
+  }
+
   return pty.spawn(cmd, args, {
     name: 'xterm-256color',
     cols,
     rows,
-    cwd: process.env.HOME || '/',
+    cwd: startCwd,
     env: { ...process.env, TERM: 'xterm-256color' },
   });
 }

@@ -783,63 +783,96 @@ export default function LxcContainers() {
   };
 
   // Snapshot actions
-  // Export container as tarball.
-  //
-  // Streams the response body via ReadableStream so the UI can show a
-  // live byte counter + percentage (when the size estimate is
-  // available) instead of a no-feedback wait. The estimate comes from
-  // the export-info pre-flight; if the backend can't get a number from
-  // the storage driver, the UI shows bytes-downloaded + elapsed only.
-  const handleExport = async () => {
-    if (!selectedContainer) return;
-    setExporting(true);
+  // Streamed download with live byte counter + percentage (when the
+  // size estimate is available). Handles both the live-container
+  // export and the per-snapshot export — they share progress wiring;
+  // only the URL, filename, and pre-flight estimator differ.
+  const streamDownload = async ({ url, filename, fetchEstimate, label }) => {
     setExportProgress({ loaded: 0, total: null, elapsedMs: 0 });
     const startTime = Date.now();
 
     let total = null;
-    try {
-      const info = await api.getLxcExportInfo(selectedContainer.name);
-      if (typeof info?.estimatedBytes === 'number') total = info.estimatedBytes;
-    } catch {
-      // pre-flight is best-effort
+    if (fetchEstimate) {
+      try {
+        const info = await fetchEstimate();
+        if (typeof info?.estimatedBytes === 'number') total = info.estimatedBytes;
+      } catch {
+        // pre-flight is best-effort
+      }
     }
     setExportProgress((p) => ({ ...(p || { loaded: 0 }), total, elapsedMs: 0 }));
 
-    try {
-      const url = `/api/lxc/containers/${selectedContainer.name}/export`;
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Export failed');
-      }
-      // Some servers report Content-Length; prefer that over the
-      // pre-flight estimate when present (the estimate is rootfs
-      // usage; Content-Length is the actual gzipped tarball, which
-      // is more accurate for the progress bar).
-      const reportedLen = res.headers.get('content-length');
-      if (reportedLen && /^\d+$/.test(reportedLen)) {
-        total = parseInt(reportedLen, 10);
-      }
+    const res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `${label} failed`);
+    }
+    // Content-Length, when present, is the actual gzipped tarball
+    // size — more accurate than the pre-flight rootfs estimate.
+    const reportedLen = res.headers.get('content-length');
+    if (reportedLen && /^\d+$/.test(reportedLen)) {
+      total = parseInt(reportedLen, 10);
+    }
 
-      const reader = res.body.getReader();
-      const chunks = [];
-      let loaded = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-        setExportProgress({ loaded, total, elapsedMs: Date.now() - startTime });
-      }
-      const blob = new Blob(chunks, { type: 'application/gzip' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${selectedContainer.name}-backup.tar.gz`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+    const reader = res.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      setExportProgress({ loaded, total, elapsedMs: Date.now() - startTime });
+    }
+    const blob = new Blob(chunks, { type: 'application/gzip' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return loaded;
+  };
+
+  // Export the live container as a tarball. Streams via ReadableStream
+  // so the UI can show a live byte counter + percentage. With the
+  // export endpoint no longer force-stopping the container, this is a
+  // true online backup — the bridge IP stays bound and the inline
+  // services list keeps showing the active routes throughout.
+  const handleExport = async () => {
+    if (!selectedContainer) return;
+    setExporting(true);
+    try {
+      const loaded = await streamDownload({
+        url: `/api/lxc/containers/${selectedContainer.name}/export`,
+        filename: `${selectedContainer.name}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcExportInfo(selectedContainer.name),
+        label: 'Export',
+      });
       toast({ title: 'Export complete', description: `${selectedContainer.name} backup downloaded (${formatSize(loaded)}).` });
     } catch (err) {
       toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setExporting(false);
+      setExportProgress(null);
+    }
+  };
+
+  // Download a previously-taken snapshot as a tarball. incus's export
+  // accepts <container>/<snapshot>, so the backend just streams that
+  // pipe; the UI side reuses the same progress wiring as handleExport.
+  const handleDownloadSnapshot = async (snapshotName) => {
+    if (!selectedContainer) return;
+    setExporting(true);
+    try {
+      const loaded = await streamDownload({
+        url: `/api/lxc/containers/${selectedContainer.name}/snapshot/${encodeURIComponent(snapshotName)}/export`,
+        filename: `${selectedContainer.name}-${snapshotName}-backup.tar.gz`,
+        fetchEstimate: () => api.getLxcSnapshotExportInfo(selectedContainer.name, snapshotName),
+        label: 'Snapshot download',
+      });
+      toast({ title: 'Snapshot downloaded', description: `${snapshotName} (${formatSize(loaded)})` });
+    } catch (err) {
+      toast({ title: 'Download failed', description: err.message, variant: 'destructive' });
     } finally {
       setExporting(false);
       setExportProgress(null);
@@ -2062,6 +2095,16 @@ export default function LxcContainers() {
                                   )}
                                 </div>
                                 <div className="flex gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
+                                    onClick={() => handleDownloadSnapshot(sName)}
+                                    disabled={snapshotLoading || exporting}
+                                    title="Download snapshot as .tar.gz"
+                                  >
+                                    <Download className="h-3 w-3" />
+                                  </Button>
                                   <Button
                                     variant="ghost"
                                     size="sm"

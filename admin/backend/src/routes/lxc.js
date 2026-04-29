@@ -1907,19 +1907,13 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Type', 'application/gzip');
 
-    // Stop the container first if running (required for clean export)
-    let wasRunning = false;
-    try {
-      const stateResult = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
-      const containers = JSON.parse(stateResult.stdout || '[]');
-      wasRunning = containers[0]?.status === 'Running';
-      if (wasRunning) {
-        console.log(`[LXC] Stopping ${incusName} for export...`);
-        await execOnHost(`incus stop ${incusName} --force`, { timeout: 30000 });
-      }
-    } catch {}
-
-    // Use incus export which creates a tarball to stdout
+    // Stream the export. The container can stay running — modern incus
+    // takes a brief storage-level snapshot internally for a consistent
+    // tarball without operator-visible downtime. The previous code
+    // force-stopped the container, which yanked the bridge IP and made
+    // the inline services list flicker to empty in the UI for the
+    // duration of the export. Dropping that gives operators a true
+    // online backup.
     const exportCmd = `incus export ${incusName} -`;
     const child = spawnOnHost(exportCmd);
 
@@ -1930,17 +1924,99 @@ lxcRouter.get('/containers/:name/export', async (req, res) => {
     });
 
     child.on('close', async (code) => {
-      // Restart container if it was running before
-      if (wasRunning) {
-        try {
-          await execOnHost(`incus start ${incusName}`, { timeout: 30000 });
-          console.log(`[LXC] Restarted ${incusName} after export`);
-        } catch (err) {
-          console.error(`[LXC] Failed to restart after export:`, err.message);
-        }
-      }
       if (code !== 0 && !res.headersSent) {
         res.status(500).json({ success: false, error: 'Export failed' });
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+});
+
+// GET /containers/:name/snapshot/:snapshotName/export-info
+//
+// Pre-flight size estimate for downloading an existing snapshot.
+// Mirrors /containers/:name/export-info but reads from the snapshot's
+// storage volume instead of the live container's root volume.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req, res) => {
+  const { name, snapshotName } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  let estimatedBytes = null;
+  try {
+    const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+    const instance = JSON.parse(infoResult.stdout || '{}');
+    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+    if (pool) {
+      const r = await execOnHost(
+        `incus query /1.0/storage-pools/${pool}/volumes/container/${incusName}/snapshots/${snapshotName} 2>/dev/null`,
+        { timeout: 5000 }
+      );
+      const vol = JSON.parse(r.stdout || '{}');
+      const used = vol?.config?.['volatile.rootfs.size'] || vol?.config?.size || null;
+      if (used && /^\d+$/.test(String(used))) {
+        estimatedBytes = parseInt(String(used), 10);
+      }
+    }
+  } catch {}
+  res.json({ success: true, estimatedBytes });
+});
+
+// GET /containers/:name/snapshot/:snapshotName/export
+//
+// Download a previously-taken snapshot as a tarball. incus's export
+// command accepts a snapshot reference via `<container>/<snapshot>`,
+// so this is just a streamed pipe to the response — no temp container,
+// no temp image, no extra disk. The snapshot the operator picked is
+// the consistent point-in-time view they wanted.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res) => {
+  const { name, snapshotName } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+
+  // Confirm the snapshot exists before we open the tarball stream so
+  // the failure path returns a JSON error instead of an empty file.
+  try {
+    const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const snaps = JSON.parse(r.stdout || '[]');
+    if (!snaps.some((s) => s.name === snapshotName)) {
+      return res.status(404).json({ success: false, error: `Snapshot '${snapshotName}' not found on '${name}'.` });
+    }
+  } catch (e) {
+    return res.status(500).json({ success: false, error: `Failed to verify snapshot: ${(e.stderr || e.message || '').trim()}` });
+  }
+
+  const fileName = `${name}-${snapshotName}-backup.tar.gz`;
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.setHeader('Content-Type', 'application/gzip');
+
+  try {
+    const exportCmd = `incus export ${incusName}/${snapshotName} -`;
+    const child = spawnOnHost(exportCmd);
+
+    child.stdout.pipe(res);
+
+    let stderr = '';
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+      console.log(`[LXC] Snapshot export stderr: ${data.toString().trim()}`);
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).json({ success: false, error: `Export failed: ${stderr.trim() || `incus exited ${code}`}` });
       }
     });
 

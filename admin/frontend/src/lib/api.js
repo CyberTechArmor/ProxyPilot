@@ -521,6 +521,10 @@ export const api = {
     method: 'DELETE',
   }),
 
+  // Pre-flight estimate for downloading a previously-taken snapshot.
+  getLxcSnapshotExportInfo: (name, snapshotName) =>
+    request(`/lxc/containers/${name}/snapshot/${snapshotName}/export-info`),
+
   getSnapshotNotes: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`),
 
   addSnapshotNote: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/notes`, {

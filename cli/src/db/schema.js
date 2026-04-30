@@ -128,6 +128,23 @@ export function initSchema(db) {
     );
   `);
 
+  // ── Routes: additive `vpn_only` + `service` columns (step 7b) ──────────
+  // vpn_only=1 makes the route render with a per-/32 Caddy matcher
+  // listing exactly the peers allowed to reach it (joined the same way
+  // as firewall vpn-only rules); requests from other sources get 403.
+  // `service` is the optional join tag — when set, only services-scope
+  // peers whose scope_services_json includes the tag get a /32 in the
+  // matcher; full+admin peers are always included regardless of the
+  // tag. Both columns are nullable / default 0 so existing rows keep
+  // their current public-internet semantics.
+  const routeCols = db.prepare(`PRAGMA table_info(routes)`).all().map(c => c.name);
+  if (!routeCols.includes('vpn_only')) {
+    db.exec(`ALTER TABLE routes ADD COLUMN vpn_only INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!routeCols.includes('service')) {
+    db.exec(`ALTER TABLE routes ADD COLUMN service TEXT`);
+  }
+
   // ── Firewall rules: additive `service` column (step 7a) ─────────────────
   // Tag string for vpn-only rules so per-peer scope can join peers with
   // a `services` scope to the rules they're allowed to reach. Additive

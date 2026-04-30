@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import { Loader2, KeyRound, Copy, Check, Trash2, RefreshCw, ShieldOff, TerminalSquare } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
@@ -73,8 +74,19 @@ export default function SshAccess() {
   const [connectServer, setConnectServer] = useState('');
   const [connectCopied, setConnectCopied] = useState(null); // 'bash' | 'powershell' | null
 
+  // Password-auth toggle state. The /password-auth/status endpoint
+  // returns { password_auth, effective_default, match_overrides,
+  // active_keys_total, active_keys_per_user, ... }.
+  const [pwAuth, setPwAuth] = useState(null);
+  const [pwAuthBusy, setPwAuthBusy] = useState(false);
+  const [pwAuthGate, setPwAuthGate] = useState(null); // { active_keys_total, ... }
+  const [pwAuthPhrase, setPwAuthPhrase] = useState('');
+
   useEffect(() => {
-    if (isAdmin) loadEntries();
+    if (isAdmin) {
+      loadEntries();
+      loadPwAuth();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, filter]);
 
@@ -91,6 +103,65 @@ export default function SshAccess() {
       setLoading(false);
     }
   }
+
+  async function loadPwAuth() {
+    try {
+      const r = await api.getSshPasswordAuthStatus();
+      setPwAuth(r);
+    } catch (e) {
+      // Don't toast — the SSH Access page is still useful without
+      // this. Surface the error inline next to the toggle instead.
+      setPwAuth({ ok: false, error: e.message });
+    }
+  }
+
+  // Effective state: the CLI returns 'default' when no directive is
+  // present. sshd's pre-9.5 default is `yes`, so the switch should
+  // reflect that.
+  const pwAuthEffective = pwAuth?.password_auth === 'default'
+    ? (pwAuth?.effective_default || 'yes')
+    : pwAuth?.password_auth;
+  const pwAuthOn = pwAuthEffective === 'yes';
+
+  async function handlePwAuthToggle(checked, force = false) {
+    if (!checked) {
+      // Disabling. If we already know there are zero active keys
+      // and force isn't set, surface the gate without round-tripping.
+      // (The backend will refuse otherwise; this is just a faster
+      // explanation for the operator.)
+      if (!force && pwAuth?.active_keys_total === 0) {
+        setPwAuthGate({ active_keys_total: 0, active_keys_per_user: pwAuth?.active_keys_per_user || {} });
+        setPwAuthPhrase('');
+        return;
+      }
+    }
+    setPwAuthBusy(true);
+    try {
+      await api.setSshPasswordAuth({ enabled: !!checked, force });
+      toast({ title: `Password auth ${checked ? 'enabled' : 'disabled'}` });
+      setPwAuthGate(null);
+      setPwAuthPhrase('');
+      loadPwAuth();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && e.code === 'NO_ACTIVE_KEYS') {
+        setPwAuthGate({
+          active_keys_total: e.active_keys_total ?? 0,
+          active_keys_per_user: e.active_keys_per_user ?? {},
+          message: e.message,
+        });
+        setPwAuthPhrase('');
+      } else {
+        toast({
+          variant: 'destructive',
+          title: `Failed to ${checked ? 'enable' : 'disable'} password auth`,
+          description: e.message,
+        });
+      }
+    } finally {
+      setPwAuthBusy(false);
+    }
+  }
+
 
   async function handleReconcile() {
     setReconciling(true);
@@ -298,6 +369,37 @@ export default function SshAccess() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* Password-auth toggle. Disabling without an active managed
+              key would lock everyone out, so the disable path goes
+              through a typed-phrase gate (mirrors the revoke flow). */}
+          <div className="flex flex-wrap items-center gap-4 rounded border bg-muted/30 p-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium">Password authentication (sshd)</div>
+              <div className="text-xs text-muted-foreground">
+                {pwAuth?.error
+                  ? <span className="text-red-500">unable to read sshd_config: {pwAuth.error}</span>
+                  : pwAuth
+                    ? <>
+                        Currently <code>{pwAuthEffective ?? '?'}</code>
+                        {pwAuth.password_auth === 'default' && <> (no directive — sshd default is yes)</>}
+                        {pwAuth.match_overrides?.length > 0 && (
+                          <> · <span className="text-amber-600">{pwAuth.match_overrides.length} Match-block override(s)</span></>
+                        )}
+                        {' · '}{pwAuth.active_keys_total ?? 0} active key{pwAuth.active_keys_total === 1 ? '' : 's'}
+                      </>
+                    : <span className="text-muted-foreground">loading…</span>}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">{pwAuthOn ? 'on' : 'off'}</span>
+              <Switch
+                checked={pwAuthOn}
+                disabled={pwAuthBusy || !pwAuth || pwAuth.error}
+                onCheckedChange={(c) => handlePwAuthToggle(c, false)}
+              />
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-4">
             <Tabs value={filter} onValueChange={setFilter}>
               <TabsList>
@@ -658,6 +760,59 @@ export default function SshAccess() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setConnectRow(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Password-auth lockout gate. Fires when the operator tries to
+          disable PasswordAuthentication with no active ssh-access keys
+          on the host (CLI returns 409 + code=NO_ACTIVE_KEYS). The
+          typed phrase is the same one revoke uses, on purpose: this
+          is the same class of "make sure you have another way in"
+          decision. */}
+      <Dialog open={!!pwAuthGate} onOpenChange={(o) => { if (!o) { setPwAuthGate(null); setPwAuthPhrase(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Disable password auth?</DialogTitle>
+            <DialogDescription>
+              You're about to set <code>PasswordAuthentication no</code> in
+              <code> /etc/ssh/sshd_config</code> and reload sshd. Existing SSH
+              sessions stay alive — sshd consults the config at connect time.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+            <p className="font-semibold text-amber-700 dark:text-amber-400">
+              ⚠ {pwAuthGate?.active_keys_total === 0
+                ? 'There are NO active managed SSH keys on this host.'
+                : 'Make sure your registered keys actually work before flipping this.'}
+            </p>
+            <p className="text-xs">
+              If your only way in is password auth and you don't have console access,
+              you'll lock yourself out. Keep a recovery shell open while you toggle.
+            </p>
+            <div>
+              <Label htmlFor="pw-phrase">type to confirm: <code>{TYPED_PHRASE}</code></Label>
+              <Input
+                id="pw-phrase"
+                value={pwAuthPhrase}
+                onChange={e => setPwAuthPhrase(e.target.value)}
+                placeholder={TYPED_PHRASE}
+                className="font-mono"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setPwAuthGate(null); setPwAuthPhrase(''); }}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={pwAuthBusy || pwAuthPhrase !== TYPED_PHRASE}
+              onClick={() => handlePwAuthToggle(false, true)}
+            >
+              {pwAuthBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Disable anyway
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

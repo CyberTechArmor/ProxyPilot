@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readState } from './state.js';
 import { render, checksum } from './render.js';
@@ -37,6 +40,27 @@ function nft(args, input) {
 }
 
 /**
+ * Apply a ruleset by writing to a temp file and invoking `nft -f <path>`.
+ * Some nft builds reject `-f -` ("Not a regular file") even when piped
+ * via stdin. The temp file is created in /run with mode 0600 and removed
+ * after apply succeeds or fails. nft's own transaction semantics still
+ * give us atomicity: the whole file is parsed and committed in one go.
+ */
+function applyRuleset(ruleset) {
+  const dir = fs.existsSync('/run') ? '/run/proxypilot' : os.tmpdir();
+  if (dir === '/run/proxypilot') {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const tmp = path.join(dir, `firewall-${process.pid}-${Date.now()}.nft`);
+  fs.writeFileSync(tmp, ruleset, { mode: 0o600 });
+  try {
+    return spawnSync('nft', ['-f', tmp], { encoding: 'utf-8' });
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+  }
+}
+
+/**
  * Reconcile state → live nftables. Runs lockout check first, then
  * applies the full ruleset atomically with `nft -f -`. nft transactions
  * are atomic: if any rule in the file is invalid, none are applied, and
@@ -61,7 +85,7 @@ export async function reconcile({ dryRun = false, forceLockoutOk = false, actor 
     return { ok: true, applied: false, dryRun: true, ruleset, checksum: sum, ruleCount };
   }
 
-  const apply = nft(['-f', '-'], ruleset);
+  const apply = applyRuleset(ruleset);
   if (apply.status !== 0) {
     recordReconcile({
       checksum: sum,

@@ -285,7 +285,17 @@ program
   });
 
 // ── firewall command group ──────────────────────────────────────────────────
-import { reconcileCommand as firewallReconcileCommand, firewallStatusCommand } from '../src/commands/firewall/index.js';
+import {
+  reconcileCommand as firewallReconcileCommand,
+  firewallStatusCommand,
+  listCommand as firewallListCommand,
+  scanCommand as firewallScanCommand,
+  enableCommand as firewallEnableCommand,
+  disableCommand as firewallDisableCommand,
+  setScopeCommand as firewallSetScopeCommand,
+  addManualCommand as firewallAddManualCommand,
+  removeManualCommand as firewallRemoveManualCommand,
+} from '../src/commands/firewall/index.js';
 
 const firewall = program
   .command('firewall')
@@ -307,6 +317,74 @@ firewall
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallStatusCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('list')
+  .description('List firewall rules')
+  .option('--all', 'Show all rules')
+  .option('--enabled', 'Show only enabled rules')
+  .option('--needs-review', 'Show only newly discovered rules awaiting review')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallListCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('scan')
+  .description('Discover host listeners and update firewall state')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallScanCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('enable <id>')
+  .description('Enable a firewall rule and reconcile')
+  .option('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
+  .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--yes', 'Skip the public-internet confirmation prompt')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEnableCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('disable <id>')
+  .description('Disable a firewall rule and reconcile')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallDisableCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('set-scope <id> <scope>')
+  .description('Change a rule\'s scope and reconcile')
+  .option('--source-cidr <cidr>', 'Pin to source CIDR (repeatable; clears existing if omitted)', (v, prev) => [...(prev ?? []), v])
+  .action(async (id, scope, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallSetScopeCommand(id, scope, opts, globalOpts);
+  });
+
+firewall
+  .command('add-manual')
+  .description('Add an operator-curated firewall rule for a non-discoverable listener')
+  .requiredOption('--port <p>', 'Port number', parseInt)
+  .requiredOption('--proto <tcp|udp>', 'Protocol')
+  .requiredOption('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
+  .requiredOption('--reason <text>', 'Why this port is open')
+  .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallAddManualCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('remove-manual <id>')
+  .description('Remove an operator-curated firewall rule')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallRemoveManualCommand(id, opts, globalOpts);
   });
 
 // ── parse and execute ───────────────────────────────────────────────────────

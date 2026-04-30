@@ -444,6 +444,11 @@ egress
 import {
   enableCommand as vpnEnableCommand,
   disableCommand as vpnDisableCommand,
+  peerAddCommand as vpnPeerAddCommand,
+  peerRotateCommand as vpnPeerRotateCommand,
+  peerEnableCommand as vpnPeerEnableCommand,
+  peerDisableCommand as vpnPeerDisableCommand,
+  peerRemoveCommand as vpnPeerRemoveCommand,
 } from '../src/commands/vpn/index.js';
 
 const vpn = program
@@ -467,6 +472,54 @@ vpn
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await vpnDisableCommand(opts, globalOpts);
+  });
+
+const vpnPeer = vpn
+  .command('peer')
+  .description('Per-peer lifecycle: add, rotate, enable, disable, remove, list, show');
+
+vpnPeer
+  .command('add <name>')
+  .description('Generate a fresh keypair, allocate a /32, render config + QR')
+  .option('--scope <scope>', 'full | admin | services (default admin)')
+  .option('--services <list>', 'Comma-separated service list (only with --scope services)')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerAddCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('rotate <name>')
+  .description('Issue a new keypair for an existing peer (old key invalidated immediately)')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerRotateCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('enable <name>')
+  .description('Re-add a previously-disabled peer (same key, same IP)')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerEnableCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('disable <name>')
+  .description('Drop a peer from wg0 without losing its record')
+  .option('--force', 'Override the only-enabled-peer lockout guard (typed confirmation required)')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerDisableCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('remove <name>')
+  .description('Hard-delete a peer record and return its IP to the pool')
+  .option('--force', 'Override the only-enabled-peer / recently-active guards (typed confirmation required)')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerRemoveCommand(name, opts, globalOpts);
   });
 
 // ── parse and execute ───────────────────────────────────────────────────────

@@ -24,9 +24,9 @@ fi
 # just warn so the operator knows to address it before vpn enable.
 if ! modprobe wireguard 2>/dev/null; then
     log "WARNING: kernel module 'wireguard' could not be loaded."
-    log "         `proxypilot vpn enable` will fail until this is resolved."
+    log "         'proxypilot vpn enable' will fail until this is resolved."
     log "         On stock Debian/Ubuntu hosts, install the matching headers"
-    log "         (apt install linux-headers-\$(uname -r)) and try again."
+    log '         (apt install linux-headers-$(uname -r)) and try again.'
 fi
 
 # ── 3. Ensure /etc/wireguard exists with restrictive perms ─────────

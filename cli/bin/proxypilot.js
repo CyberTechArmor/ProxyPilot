@@ -615,6 +615,9 @@ import {
   showCommand as sshAccessShowCommand,
   reconcileCommand as sshAccessReconcileCommand,
   bootstrapScriptCommand as sshAccessBootstrapScriptCommand,
+  passwordAuthStatusCommand as sshPasswordAuthStatusCommand,
+  passwordAuthEnableCommand as sshPasswordAuthEnableCommand,
+  passwordAuthDisableCommand as sshPasswordAuthDisableCommand,
 } from '../src/commands/ssh-access/index.js';
 
 const ssh = program
@@ -692,6 +695,35 @@ sshAccess
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await sshAccessBootstrapScriptCommand(id, opts, globalOpts);
+  });
+
+const sshPasswordAuth = ssh
+  .command('password-auth')
+  .description('Toggle PasswordAuthentication in /etc/ssh/sshd_config (validates with sshd -t, atomic write, reload)');
+
+sshPasswordAuth
+  .command('status')
+  .description('Show current PasswordAuthentication value and active-key counts')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshPasswordAuthStatusCommand(opts, globalOpts);
+  });
+
+sshPasswordAuth
+  .command('enable')
+  .description('Set PasswordAuthentication yes and reload sshd (does not affect Match-block overrides)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshPasswordAuthEnableCommand(opts, globalOpts);
+  });
+
+sshPasswordAuth
+  .command('disable')
+  .description('Set PasswordAuthentication no and reload sshd (refuses without --force when no active ssh-access keys exist)')
+  .option('--force', 'Override the no-active-keys lockout guard (typed confirmation required)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshPasswordAuthDisableCommand(opts, globalOpts);
   });
 
 // ── parse and execute ───────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ import {
   Menu,
   TerminalSquare,
   KeyRound,
+  Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -227,6 +228,7 @@ export default function Layout() {
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
+    { name: 'Firewall', href: '/firewall', icon: Shield, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];

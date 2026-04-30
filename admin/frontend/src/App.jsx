@@ -7,6 +7,7 @@ import Users from '@/pages/Users';
 import IncusManagement from '@/pages/IncusManagement';
 import HostShell from '@/pages/HostShell';
 import SshAccess from '@/pages/SshAccess';
+import Firewall from '@/pages/Firewall';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -58,6 +59,7 @@ function App() {
         <Route path="profile" element={<Profile />} />
         <Route path="admin/shell" element={<HostShell />} />
         <Route path="ssh-access" element={<SshAccess />} />
+        <Route path="firewall" element={<Firewall />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

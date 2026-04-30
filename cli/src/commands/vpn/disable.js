@@ -3,9 +3,13 @@ import * as output from '../../output.js';
 
 export async function disableCommand(_opts, globalOpts) {
   try {
-    await disable({});
+    const result = await disable({});
     if (globalOpts.json) {
-      output.json({ ok: true });
+      output.json({ ok: true, already_disabled: !!result.alreadyDisabled });
+      return;
+    }
+    if (result.alreadyDisabled) {
+      output.info('VPN is not enabled — nothing to do');
       return;
     }
     output.success('VPN disabled (peer records preserved)');

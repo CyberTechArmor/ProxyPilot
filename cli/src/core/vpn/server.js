@@ -25,6 +25,22 @@ function run(cmd, args, opts = {}) {
 }
 
 /**
+ * Pull a useful message out of a spawnSync result. When the binary is
+ * missing (ENOENT) or the OS rejected the spawn, status is null and
+ * stderr/stdout are undefined; calling .trim() on them throws a
+ * confusing TypeError. This helper returns the first non-empty signal
+ * available, falling back to the spawn error itself.
+ */
+function spawnError(result, fallback = 'unknown error') {
+  const stderr = (result.stderr ?? '').trim();
+  if (stderr) return stderr;
+  const stdout = (result.stdout ?? '').trim();
+  if (stdout) return stdout;
+  if (result.error) return result.error.message;
+  return fallback;
+}
+
+/**
  * Detect the host's default-route interface. We prefer `ip -j route` JSON
  * because it is unambiguous; if the JSON form is unavailable on this
  * host we fall back to parsing the human-readable form. Either way we
@@ -51,14 +67,17 @@ export function detectDefaultIface() {
 export function generateServerKeypair() {
   const priv = run('wg', ['genkey']);
   if (priv.status !== 0) {
-    throw new Error(`wg genkey failed: ${priv.stderr.trim() || priv.error?.message}`);
+    throw new Error(`wg genkey failed: ${spawnError(priv)}`);
   }
-  const privateKey = priv.stdout.trim();
+  const privateKey = (priv.stdout ?? '').trim();
+  if (!privateKey) throw new Error('wg genkey produced no output');
   const pub = run('wg', ['pubkey'], { input: privateKey });
   if (pub.status !== 0) {
-    throw new Error(`wg pubkey failed: ${pub.stderr.trim() || pub.error?.message}`);
+    throw new Error(`wg pubkey failed: ${spawnError(pub)}`);
   }
-  return { private: privateKey, public: pub.stdout.trim() };
+  const publicKey = (pub.stdout ?? '').trim();
+  if (!publicKey) throw new Error('wg pubkey produced no output');
+  return { private: privateKey, public: publicKey };
 }
 
 export function readVpnConfig() {
@@ -115,7 +134,12 @@ function atomicWrite(filePath, content, mode = 0o600) {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, content, { mode });
+  // flag 'wx' fails if a stale tmp from a crashed prior run exists, so
+  // we never inherit unexpected perms. Then chmod explicitly: the mode
+  // arg of writeFileSync only applies on file *create* and respects
+  // umask, so chmod is the only way to guarantee the bits we asked for.
+  fs.writeFileSync(tmp, content, { mode, flag: 'wx' });
+  fs.chmodSync(tmp, mode);
   fs.renameSync(tmp, filePath);
 }
 
@@ -223,11 +247,11 @@ export async function enable({ endpoint, listenPort = WG_DEFAULT_PORT, dns = WG_
   // both the cold-start and the "operator changed --port" cases).
   const en = run('systemctl', ['enable', `wg-quick@${WG_INTERFACE}`]);
   if (en.status !== 0) {
-    throw new Error(`failed to enable wg-quick@${WG_INTERFACE}: ${en.stderr.trim() || en.stdout.trim()}`);
+    throw new Error(`failed to enable wg-quick@${WG_INTERFACE}: ${spawnError(en)}`);
   }
   const up = run('systemctl', ['restart', `wg-quick@${WG_INTERFACE}`]);
   if (up.status !== 0) {
-    throw new Error(`failed to start wg-quick@${WG_INTERFACE}: ${up.stderr.trim() || up.stdout.trim()}`);
+    throw new Error(`failed to start wg-quick@${WG_INTERFACE}: ${spawnError(up)}`);
   }
 
   fwEnable({ id: 'base-wireguard', actor });
@@ -256,10 +280,19 @@ export async function enable({ endpoint, listenPort = WG_DEFAULT_PORT, dns = WG_
  * comes back up identically.
  */
 export async function disable({ actor } = {}) {
+  // Bail early if the VPN was never enabled. Without this short-circuit
+  // we'd fight wg-quick over a non-existent unit, churn the
+  // base-wireguard rule timestamps, and emit a confusing audit row for
+  // a no-op. Operators running `vpn disable` on a fresh host is a
+  // common "is it off?" sanity-check; treat it as a success.
+  if (!readVpnConfig()) {
+    return { ok: true, alreadyDisabled: true };
+  }
+
   const down = run('systemctl', ['disable', '--now', `wg-quick@${WG_INTERFACE}`]);
   // Tolerate "Unit is not loaded" / already-down: surface only hard failures.
   if (down.status !== 0 && !/not loaded|not found/i.test(down.stderr || '')) {
-    throw new Error(`failed to stop wg-quick@${WG_INTERFACE}: ${down.stderr.trim() || down.stdout.trim()}`);
+    throw new Error(`failed to stop wg-quick@${WG_INTERFACE}: ${spawnError(down)}`);
   }
 
   try { fwDisable({ id: 'base-wireguard', actor }); } catch (e) {

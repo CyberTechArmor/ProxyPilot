@@ -11,3 +11,4 @@ export {
 } from './toggle.js';
 export { panicCloseCommand, panicOpenCommand } from './panic.js';
 export { egressAllowCommand, egressDenyCommand, egressListCommand } from './egress.js';
+export { detectBridgeCommand } from './detect-bridge.js';

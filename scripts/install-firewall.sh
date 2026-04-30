@@ -91,17 +91,29 @@ EOF
 
 systemctl daemon-reload
 
-# ── 4. Apply the initial ruleset (creates default firewall.json on
+# ── 4. Auto-detect the LXC bridge and commit it to firewall.json
+#       BEFORE the initial reconcile, so the rendered rules carry the
+#       host's actual bridge iface / CIDR / gateway. The detect step
+#       only writes when state.network is missing — it will not
+#       silently overwrite an operator's hand-edited config. On a
+#       fresh install Incus is up by this point (install_incus runs
+#       before us); if it isn't, detect-bridge logs a warning and
+#       reconcile uses the default `pp-br0` values.
+log "Auto-detecting LXC bridge..."
+"${PROXYPILOT_BIN}" firewall detect-bridge --apply || \
+    log "  (detection skipped — incus not available yet; re-run after init)"
+
+# ── 5. Apply the initial ruleset (creates default firewall.json on
 #       first run via the CLI's lazy-init path). --------------------------
 log "Running initial firewall reconcile..."
 "${PROXYPILOT_BIN}" firewall reconcile
 
-# ── 5. Enable the units so they survive reboot --------------------------
+# ── 6. Enable the units so they survive reboot --------------------------
 systemctl enable proxypilot-firewall-reconcile.service >/dev/null
 systemctl enable proxypilot-firewall-reconcile.timer >/dev/null
 systemctl enable proxypilot-firewall-discover.timer >/dev/null
 
-# ── 6. Start the timers (services are oneshot triggered by timers
+# ── 7. Start the timers (services are oneshot triggered by timers
 #       and by boot-time reconcile.service) -------------------------------
 systemctl restart proxypilot-firewall-reconcile.timer
 systemctl restart proxypilot-firewall-discover.timer

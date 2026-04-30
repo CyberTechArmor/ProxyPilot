@@ -460,6 +460,7 @@ import {
   peerEnableCommand as vpnPeerEnableCommand,
   peerDisableCommand as vpnPeerDisableCommand,
   peerRemoveCommand as vpnPeerRemoveCommand,
+  peerSetScopeCommand as vpnPeerSetScopeCommand,
   peerListCommand as vpnPeerListCommand,
   peerShowCommand as vpnPeerShowCommand,
 } from '../src/commands/vpn/index.js';
@@ -533,6 +534,16 @@ vpnPeer
   .action(async (name, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await vpnPeerRemoveCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('set-scope <name> <scope>')
+  .description('Update peer scope (full | admin | services [--services <list>]) and reconcile the firewall')
+  .option('--services <list>', 'Comma-separated service tags (only with scope=services)')
+  .option('--force', 'Override the last-full|admin demote lockout guard (typed confirmation required)')
+  .action(async (name, scope, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerSetScopeCommand(name, scope, opts, globalOpts);
   });
 
 vpnPeer

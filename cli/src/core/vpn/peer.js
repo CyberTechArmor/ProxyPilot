@@ -14,6 +14,7 @@ import {
   WG_SERVER_IP,
 } from './server.js';
 import { dumpPeers, isOnline } from './status.js';
+import { readState as fwReadState } from '../firewall/state.js';
 
 export const VPN_PEERS_DIR = '/var/lib/proxypilot/vpn-peers';
 const POOL_START_SUFFIX = 10;
@@ -537,6 +538,108 @@ export function listPeers() {
       disabledAt: r.disabled_at,
     };
   });
+}
+
+/**
+ * Update a peer's scope (full | admin | services) and, when scope is
+ * `services`, the explicit service list. One transaction over
+ * vpn_peers. Audit row carries the before/after scope + services so
+ * the dashboard's history view can render the diff.
+ *
+ * Lockout gate: refuses without --force when demoting the only enabled
+ * full|admin peer to `services`, AND the firewall has at least one
+ * enabled vpn-only rule with no service tag. After such a demotion,
+ * those untagged vpn-only rules would resolve to an empty source set
+ * (no full|admin peers to allow, services peers excluded by default)
+ * and the operator would silently lose admin reachability to anything
+ * the firewall protects under untagged vpn-only — typically Postgres,
+ * pgbouncer-stats, container SSH, etc. The CLI gates --force behind a
+ * typed phrase distinct from peer.disable / peer.remove so muscle
+ * memory can't approve the wrong gate.
+ *
+ * The actual reconcile of firewall + wg state happens in the caller
+ * (the CLI), so this function is a pure SQLite mutation + audit write.
+ * Wiring fwReconcile into the mutation flow lands in the next commit
+ * along with the parallel changes to addPeer / rotatePeer / etc.
+ */
+export function setPeerScope({ name, scope, services = null, force = false, actor } = {}) {
+  validatePeerName(name);
+  validateScope(scope, services);
+  const peer = readPeerByName(name);
+  if (!peer) throw new Error(`peer "${name}" not found`);
+
+  const before = {
+    scope: peer.scope,
+    services: peer.scope_services_json ? JSON.parse(peer.scope_services_json) : null,
+  };
+
+  // Lockout: demoting full|admin → services. The risk only exists when
+  // (a) we're moving away from full|admin, and (b) no other enabled
+  // full|admin peer remains, and (c) at least one enabled vpn-only
+  // rule has no service tag (which would resolve to "this peer
+  // would-have-been-allowed" for the untagged set).
+  if (
+    !force
+    && (peer.scope === 'full' || peer.scope === 'admin')
+    && scope === 'services'
+    && peer.status === 'enabled'
+  ) {
+    const otherFullAdmin = getDb().prepare(`
+      SELECT COUNT(*) AS n FROM vpn_peers
+      WHERE status = 'enabled' AND id <> ? AND (scope = 'full' OR scope = 'admin')
+    `).get(peer.id).n;
+    if (otherFullAdmin === 0) {
+      // Read firewall.json directly (not through the firewall manager
+      // public API) so this check stays a pure read with no side
+      // effects. fwReadState() is the same helper the firewall
+      // manager itself uses.
+      let untaggedVpnOnly = [];
+      try {
+        const fwState = fwReadState();
+        const all = [...(fwState.base ?? []), ...(fwState.discovered ?? [])];
+        untaggedVpnOnly = all.filter(r => r.enabled && r.scope === 'vpn-only' && !r.service);
+      } catch (_e) {
+        // No firewall state file yet ⇒ no untagged rules to worry about.
+      }
+      if (untaggedVpnOnly.length > 0) {
+        const err = new Error(
+          `refusing to demote "${name}" (the last full|admin peer) to scope=services — ` +
+          `${untaggedVpnOnly.length} enabled vpn-only rule(s) lack a service tag and would lose all reachable peers. ` +
+          `Pass --force (with typed confirmation) if you really want to proceed, or tag those rules first.`,
+        );
+        err.code = 'LAST_FULL_ADMIN_DEMOTE';
+        err.untaggedRules = untaggedVpnOnly.map(r => r.id);
+        throw err;
+      }
+    }
+  }
+
+  getDb().prepare(`
+    UPDATE vpn_peers
+    SET scope = ?, scope_services_json = ?
+    WHERE id = ?
+  `).run(
+    scope,
+    services ? JSON.stringify(services) : null,
+    peer.id,
+  );
+
+  audit({
+    subsystem: 'vpn',
+    action: 'peer.set-scope',
+    resource: name,
+    actor,
+    before,
+    after: { scope, services: services ?? null },
+  });
+
+  return {
+    ok: true,
+    name,
+    ip: peer.allowed_ip,
+    before,
+    after: { scope, services: services ?? null },
+  };
 }
 
 export function showPeer(name) {

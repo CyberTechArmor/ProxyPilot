@@ -23,6 +23,7 @@ export {
   enablePeer,
   disablePeer,
   removePeer,
+  setPeerScope,
   listPeers,
   showPeer,
   validatePeerName,

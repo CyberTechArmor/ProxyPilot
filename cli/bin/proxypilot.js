@@ -440,5 +440,34 @@ egress
     await firewallEgressDenyCommand(container, service, opts, globalOpts);
   });
 
+// ── vpn command group ───────────────────────────────────────────────────────
+import {
+  enableCommand as vpnEnableCommand,
+  disableCommand as vpnDisableCommand,
+} from '../src/commands/vpn/index.js';
+
+const vpn = program
+  .command('vpn')
+  .description('WireGuard VPN management (composes with firewall manager)');
+
+vpn
+  .command('enable')
+  .description('Bring up wg0 and open 51820/udp via the firewall manager')
+  .requiredOption('--endpoint <host:port>', 'Public endpoint peers will dial (e.g. vpn.example.com:51820)')
+  .option('--port <p>', 'WireGuard listen port (default 51820)')
+  .option('--dns <ip>', 'DNS pushed to peers (default 10.100.0.1)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnEnableCommand(opts, globalOpts);
+  });
+
+vpn
+  .command('disable')
+  .description('Take wg0 down and close 51820/udp; peer records are preserved')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnDisableCommand(opts, globalOpts);
+  });
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

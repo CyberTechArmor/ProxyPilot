@@ -2,13 +2,24 @@ import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import {
   Loader2,
   Cable,
   RefreshCw,
   AlertTriangle,
+  Power,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -39,6 +50,17 @@ export default function Vpn() {
   const [peers, setPeers] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Enable VPN modal. Backend's enableSchema requires a `host:port` (or
+  // host) endpoint string; port and dns are optional with sensible
+  // defaults that match the CLI's WG_DEFAULT_*. The form keeps `port`
+  // separate so the operator can paste an endpoint without thinking
+  // about the port suffix.
+  const [enableOpen, setEnableOpen] = useState(false);
+  const [enableBusy, setEnableBusy] = useState(false);
+  const [enableForm, setEnableForm] = useState({
+    endpoint: '', port: '51820', dns: '10.100.0.1',
+  });
+
   useEffect(() => {
     if (isAdmin) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -56,6 +78,35 @@ export default function Vpn() {
       toast({ variant: 'destructive', title: 'Failed to load VPN', description: e.message });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function submitEnable() {
+    const endpoint = enableForm.endpoint.trim();
+    if (!endpoint) {
+      toast({ variant: 'destructive', title: 'Endpoint required' });
+      return;
+    }
+    const body = { endpoint };
+    if (enableForm.port.trim()) {
+      const p = Number(enableForm.port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        toast({ variant: 'destructive', title: 'Invalid port' });
+        return;
+      }
+      body.port = p;
+    }
+    if (enableForm.dns.trim()) body.dns = enableForm.dns.trim();
+    setEnableBusy(true);
+    try {
+      const r = await api.enableVpn(body);
+      toast({ title: 'VPN enabled', description: r.public_key ? `pubkey ${r.public_key.slice(0, 18)}…` : '' });
+      setEnableOpen(false);
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Enable VPN failed', description: e.message });
+    } finally {
+      setEnableBusy(false);
     }
   }
 
@@ -84,15 +135,24 @@ export default function Vpn() {
         </CardHeader>
         <CardContent className="space-y-4">
           {!enabled && !loading && (
-            <div className="flex items-start gap-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-              <div>
-                <div className="font-semibold text-amber-700 dark:text-amber-300">VPN is not enabled</div>
-                <div className="text-muted-foreground">
-                  Run <code>proxypilot vpn enable --endpoint &lt;host:port&gt;</code> on the
-                  host, or use the Enable VPN action (coming next).
+            <div className="flex items-start justify-between gap-3 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div>
+                  <div className="font-semibold text-amber-700 dark:text-amber-300">VPN is not enabled</div>
+                  <div className="text-muted-foreground">
+                    Set the public endpoint and turn on the WireGuard server. The base-wireguard
+                    firewall rule is created automatically.
+                  </div>
                 </div>
               </div>
+              <Button
+                size="sm"
+                onClick={() => setEnableOpen(true)}
+              >
+                <Power className="h-4 w-4 mr-2" />
+                Enable VPN
+              </Button>
             </div>
           )}
 
@@ -186,6 +246,63 @@ export default function Vpn() {
           )}
         </CardContent>
       </Card>
+
+      {/* Enable VPN. The CLI generates the server keypair, writes
+          wg0.conf, brings up wg-quick@wg0, and creates the
+          base-wireguard firewall rule scoped to the listen port. */}
+      <Dialog open={enableOpen} onOpenChange={(o) => { if (!o) setEnableOpen(false); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Enable VPN</DialogTitle>
+            <DialogDescription>
+              The public endpoint is what clients connect to (host or host:port the server is
+              reachable on from the public internet). The listen port and DNS default to the
+              WireGuard convention.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="vpn-endpoint">Public endpoint *</Label>
+              <Input
+                id="vpn-endpoint"
+                value={enableForm.endpoint}
+                onChange={e => setEnableForm(f => ({ ...f, endpoint: e.target.value }))}
+                placeholder="vpn.example.com:51820"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="vpn-port">Listen port</Label>
+                <Input
+                  id="vpn-port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={enableForm.port}
+                  onChange={e => setEnableForm(f => ({ ...f, port: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="vpn-dns">DNS</Label>
+                <Input
+                  id="vpn-dns"
+                  value={enableForm.dns}
+                  onChange={e => setEnableForm(f => ({ ...f, dns: e.target.value }))}
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEnableOpen(false)} disabled={enableBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitEnable} disabled={enableBusy}>
+              {enableBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Enable
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,83 +1,128 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { existsSync } from 'fs';
 import { logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 
-// Backend route for the SSH access manager. Wraps the CLI core
-// directly — every mutation funnels through the same reconcile() that
-// the CLI uses, so authorized_keys is rewritten by exactly one code
-// path regardless of where the request originated.
-//
-// Import path is the monorepo-relative one: admin/backend → cli/src.
-// Both are JavaScript ESM and share better-sqlite3, so the import
-// resolves at runtime without a build step.
-import {
-  addEntry,
-  revokeEntry,
-  removeEntry,
-  listEntries,
-  showEntry,
-  reconcile,
-  inspectFallbacks,
-  renderBootstrapScript,
-} from '../../../../cli/src/core/ssh-access/index.js';
-import { touchLastSeen } from '../../../../cli/src/core/ssh-access/last-seen.js';
+const execAsync = promisify(exec);
+
+// The backend runs in a Docker container with `pid: host` and
+// `privileged: true`; the CLI source tree (cli/) is NOT inside the
+// container, only on the host at $INSTALL_DIR/cli/. To stay
+// consistent with the services.js / lxc.js pattern, every
+// state-mutating call shells out to /usr/local/bin/proxypilot via
+// nsenter so the action lands on the host's CLI database, audit
+// log, and authorized_keys files. The CLI's --json mode is the
+// stable contract.
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot';
+
+async function execOnHost(command, { timeout = 15000 } = {}) {
+  if (isInDocker) {
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;
+    return execAsync(hostCommand, { timeout, maxBuffer: 4 * 1024 * 1024 });
+  }
+  return execAsync(command, { timeout, maxBuffer: 4 * 1024 * 1024 });
+}
+
+/**
+ * Run `proxypilot --json ssh access <args>` on the host and return the
+ * parsed JSON result. The CLI exits non-zero on validation failures,
+ * but it ALSO emits a structured `{ ok: false, error: ... }` JSON body
+ * before exiting, so we capture stdout regardless of exit status and
+ * parse first; only treat exec errors that produced no JSON as fatal.
+ */
+async function callProxypilot(args, { stdin, timeout } = {}) {
+  // args is a list of pre-validated, shell-safe tokens (we control
+  // every value going in). We pass them through `printf %q` style
+  // quoting via JSON.stringify so an unexpected character can't break
+  // out of the argv list.
+  const cmd = [`${JSON.stringify(PROXYPILOT_BIN)}`, '--json', 'ssh', 'access', ...args.map(a => JSON.stringify(a))].join(' ');
+  const wrapped = stdin
+    ? `cat <<'PP_SSH_PUBKEY_HEREDOC' | ${cmd}\n${stdin}\nPP_SSH_PUBKEY_HEREDOC`
+    : cmd;
+  let result;
+  try {
+    result = await execOnHost(wrapped, { timeout });
+  } catch (e) {
+    // exec rejects on non-zero exit AND on signal — but also surfaces
+    // stdout/stderr on the error object. Try to recover the JSON body
+    // before declaring failure.
+    if (e?.stdout) {
+      try {
+        const parsed = JSON.parse(e.stdout);
+        return parsed;
+      } catch {
+        // fall through
+      }
+    }
+    const stderr = (e?.stderr || '').toString().trim();
+    const stdout = (e?.stdout || '').toString().trim();
+    throw new Error(stderr || stdout || e.message || 'proxypilot ssh access failed');
+  }
+  const out = (result.stdout || '').toString();
+  try {
+    return JSON.parse(out);
+  } catch {
+    throw new Error(`proxypilot ssh access produced non-JSON output: ${out.slice(0, 200)}`);
+  }
+}
 
 export const sshAccessRouter = Router();
 
-// All routes require an authenticated admin. Mutations also require a
-// fresh sudo grant (same model as services destructive actions).
 sshAccessRouter.use(requireAdmin);
-
-function actorFor(req) {
-  // The CLI core writes audit rows under this actor string. Distinct
-  // prefix (`dashboard:`) so the operator can tell at a glance whether
-  // an action came from the CLI or the admin panel.
-  const u = req.user?.username || req.user?.email || `id:${req.user?.id ?? 'unknown'}`;
-  return `dashboard:${u}`;
-}
 
 const filterSchema = z.enum(['all', 'active', 'revoked']).default('active');
 
-sshAccessRouter.get('/', (req, res) => {
+sshAccessRouter.get('/', async (req, res) => {
+  let filter;
   try {
-    const filter = filterSchema.parse(req.query.filter || 'active');
-    // Best-effort touch on dashboard load. Idempotent and cheap.
-    try { touchLastSeen(); } catch { /* best-effort, never blocks list */ }
-    const entries = listEntries({ filter });
-    res.json({ ok: true, filter, entries });
+    filter = filterSchema.parse(req.query.filter || 'active');
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+  try {
+    const flag = filter === 'all' ? '--all' : filter === 'revoked' ? '--revoked' : '--active';
+    const result = await callProxypilot(['list', flag]);
+    if (!result.ok) return res.status(400).json(result);
+    res.json({ ok: true, filter, entries: result.entries || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-sshAccessRouter.get('/:id', (req, res) => {
+sshAccessRouter.get('/:id', async (req, res) => {
   try {
-    const entry = showEntry(req.params.id);
-    res.json({ ok: true, entry });
+    const result = await callProxypilot(['show', req.params.id]);
+    if (!result.ok) {
+      return res.status(404).json(result);
+    }
+    res.json({ ok: true, entry: result.entry });
   } catch (e) {
-    res.status(404).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-sshAccessRouter.get('/:id/bootstrap-script', (req, res) => {
+sshAccessRouter.get('/:id/bootstrap-script', async (req, res) => {
   try {
-    const script = renderBootstrapScript({
-      id: req.params.id,
-      user: typeof req.query.user === 'string' && req.query.user ? req.query.user : '<unix-user>',
-      server: typeof req.query.server === 'string' && req.query.server ? req.query.server : '<server>',
-    });
-    res.json({ ok: true, id: req.params.id, script });
+    const args = ['bootstrap-script', req.params.id];
+    if (typeof req.query.user === 'string' && req.query.user) args.push('--user', req.query.user);
+    if (typeof req.query.server === 'string' && req.query.server) args.push('--server', req.query.server);
+    const result = await callProxypilot(args);
+    if (!result.ok) return res.status(400).json(result);
+    res.json({ ok: true, id: req.params.id, script: result.script });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
 const addSchema = z.object({
-  id: z.string().min(1),
-  unix_user: z.string().min(1),
+  id: z.string().min(1).max(63).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  unix_user: z.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]*\$?$/),
   public_key: z.string().min(1),
-  label: z.string().optional().nullable(),
+  label: z.string().max(255).optional().nullable(),
 });
 
 sshAccessRouter.post('/', requireSudo, async (req, res) => {
@@ -88,26 +133,25 @@ sshAccessRouter.post('/', requireSudo, async (req, res) => {
     return res.status(400).json({ ok: false, error: e.message });
   }
   try {
-    const result = await addEntry({
-      id: body.id,
-      unixUser: body.unix_user,
-      pubkey: body.public_key,
-      label: body.label ?? null,
-      actor: actorFor(req),
-    });
+    const args = ['add', body.id, '--user', body.unix_user, '--pubkey', '-'];
+    if (body.label) args.push('--label', body.label);
+    const result = await callProxypilot(args, { stdin: body.public_key });
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
     logAudit(req.user.id, 'SSH_ACCESS_ADD', 'ssh_access', body.id, {
       unix_user: body.unix_user,
       fingerprint: result.fingerprint,
       label: body.label ?? null,
     }, req.ip);
-    res.json({ ok: true, ...result });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
 const revokeSchema = z.object({
-  reason: z.string().optional().nullable(),
+  reason: z.string().max(255).optional().nullable(),
   force: z.boolean().optional(),
 });
 
@@ -118,49 +162,32 @@ sshAccessRouter.post('/:id/revoke', requireSudo, async (req, res) => {
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
-  let row;
   try {
-    row = showEntry(req.params.id);
-  } catch (e) {
-    return res.status(404).json({ ok: false, error: e.message });
-  }
-  if (!row.revoked_at) {
-    const fb = inspectFallbacks({ unixUser: row.unix_user, idBeingRevoked: row.id });
-    const wouldStrand = fb.fallbacks.length === 0 && fb.remainingManaged === 0;
-    if (wouldStrand && !body.force) {
-      // The backend's gate is force-flag based; the typed-phrase prompt
-      // happens client-side in the dashboard before we get here. Refuse
-      // until the frontend re-sends with `force: true` after the
-      // operator confirms.
-      return res.status(409).json({
-        ok: false,
-        code: 'WOULD_STRAND',
-        error:
-          `revoking "${row.id}" would leave unix user "${row.unix_user}" with ` +
-          `no authorized_keys access (no operator-added fallback, no other ` +
-          `managed entries).`,
-        unix_user: row.unix_user,
-        fallbacks: fb.fallbacks,
-        remaining_managed: fb.remainingManaged,
-        requires_force: true,
-      });
+    const args = ['revoke', req.params.id];
+    if (body.reason) args.push('--reason', body.reason);
+    if (body.force) args.push('--force');
+    const result = await callProxypilot(args);
+    if (!result.ok) {
+      // Lockout-gate: CLI returns code=WOULD_STRAND with
+      // requires_typed_confirm:true when stranding without a typed
+      // phrase. The dashboard prompts the user, then re-sends with
+      // force:true. Re-surface as 409 so the frontend's existing
+      // ApiError handler picks up `code` and switches the modal to
+      // the typed-phrase view.
+      if (result.code === 'WOULD_STRAND') {
+        return res.status(409).json(result);
+      }
+      return res.status(400).json(result);
     }
-  }
-  try {
-    const result = await revokeEntry({
-      id: req.params.id,
-      reason: body.reason ?? null,
-      actor: actorFor(req),
-    });
     logAudit(req.user.id, 'SSH_ACCESS_REVOKE', 'ssh_access', req.params.id, {
-      unix_user: row.unix_user,
-      fingerprint: row.fingerprint,
+      unix_user: result.unix_user,
+      fingerprint: result.fingerprint,
       reason: body.reason ?? null,
       forced: !!body.force,
     }, req.ip);
-    res.json({ ok: true, ...result });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -173,42 +200,24 @@ sshAccessRouter.delete('/:id', requireSudo, async (req, res) => {
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
-  let row;
   try {
-    row = showEntry(req.params.id);
-  } catch (e) {
-    return res.status(404).json({ ok: false, error: e.message });
-  }
-  if (!row.revoked_at) {
-    const fb = inspectFallbacks({ unixUser: row.unix_user, idBeingRevoked: row.id });
-    const wouldStrand = fb.fallbacks.length === 0 && fb.remainingManaged === 0;
-    if (wouldStrand && !body.force) {
-      return res.status(409).json({
-        ok: false,
-        code: 'WOULD_STRAND',
-        error:
-          `removing "${row.id}" would leave unix user "${row.unix_user}" with ` +
-          `no authorized_keys access. Prefer revoke for the audit trail.`,
-        unix_user: row.unix_user,
-        fallbacks: fb.fallbacks,
-        remaining_managed: fb.remainingManaged,
-        requires_force: true,
-      });
+    const args = ['remove', req.params.id];
+    if (body.force) args.push('--force');
+    const result = await callProxypilot(args);
+    if (!result.ok) {
+      if (result.code === 'WOULD_STRAND') {
+        return res.status(409).json(result);
+      }
+      return res.status(400).json(result);
     }
-  }
-  try {
-    const result = await removeEntry({
-      id: req.params.id,
-      actor: actorFor(req),
-    });
     logAudit(req.user.id, 'SSH_ACCESS_REMOVE', 'ssh_access', req.params.id, {
-      unix_user: row.unix_user,
-      fingerprint: row.fingerprint,
+      unix_user: result.unix_user,
+      fingerprint: result.fingerprint,
       forced: !!body.force,
     }, req.ip);
-    res.json({ ok: true, ...result });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -222,17 +231,17 @@ sshAccessRouter.post('/reconcile', requireSudo, async (req, res) => {
     return res.status(400).json({ ok: false, error: e.message });
   }
   try {
-    const result = await reconcile({
-      dryRun: !!body.dry_run,
-      actor: actorFor(req),
-    });
+    const args = ['reconcile'];
+    if (body.dry_run) args.push('--dry-run');
+    const result = await callProxypilot(args);
+    if (!result.ok) return res.status(400).json(result);
     if (!body.dry_run) {
       logAudit(req.user.id, 'SSH_ACCESS_RECONCILE', 'ssh_access', null, {
-        users_changed: result.users.filter(u => u.changed).map(u => u.user),
+        users_changed: (result.users || []).filter(u => u.changed).map(u => u.user),
       }, req.ip);
     }
-    res.json({ ok: true, dry_run: !!body.dry_run, ...result });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });

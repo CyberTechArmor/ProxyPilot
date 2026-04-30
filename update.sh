@@ -749,6 +749,15 @@ EOF
             log "${YELLOW}Warning: VPN prereq refresh reported issues — see $LOG_FILE${NC}"
         fi
     fi
+
+    if [[ -x "$SCRIPT_DIR/scripts/install-ssh-access.sh" ]]; then
+        log "${BLUE}Refreshing SSH access manager...${NC}"
+        if ! PROXYPILOT_BIN=/usr/local/bin/proxypilot \
+            PROXYPILOT_INSTALL_DIR="$SCRIPT_DIR" \
+            "$SCRIPT_DIR/scripts/install-ssh-access.sh" 2>&1 | tee -a "$LOG_FILE"; then
+            log "${YELLOW}Warning: SSH access refresh reported issues — see $LOG_FILE${NC}"
+        fi
+    fi
 fi
 
 log ""

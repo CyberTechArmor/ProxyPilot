@@ -1013,6 +1013,18 @@ EOF
             "${SCRIPT_DIR}/scripts/install-vpn.sh"
             log_success "WireGuard prerequisites installed"
         fi
+
+        # Emit ssh-access systemd units (last-seen scanner timer).
+        # The CLI's `ssh access` subcommand group is already wired by
+        # the proxypilot wrapper above; this script only sets up the
+        # 5-min last-seen scanner timer.
+        if [[ -x "${SCRIPT_DIR}/scripts/install-ssh-access.sh" ]]; then
+            log_info "Configuring SSH access manager..."
+            PROXYPILOT_BIN=/usr/local/bin/proxypilot \
+                PROXYPILOT_INSTALL_DIR="${INSTALL_DIR}" \
+                "${SCRIPT_DIR}/scripts/install-ssh-access.sh"
+            log_success "SSH access manager configured"
+        fi
     fi
 
     # Build and start Docker container

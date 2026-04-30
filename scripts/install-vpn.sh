@@ -13,10 +13,17 @@ set -euo pipefail
 log() { echo "[vpn] $*"; }
 
 # ── 1. Ensure WireGuard userspace tooling is installed ──────────────
-if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then
-    log "Installing WireGuard tools..."
+# qrencode is required by `proxypilot vpn peer add` to render the
+# client config as a scannable QR (PNG + ANSI). The wireguard-tools
+# package does NOT pull it in, so install it explicitly.
+NEED_INSTALL=()
+command -v wg        >/dev/null 2>&1 || NEED_INSTALL+=(wireguard)
+command -v wg-quick  >/dev/null 2>&1 || NEED_INSTALL+=(wireguard-tools)
+command -v qrencode  >/dev/null 2>&1 || NEED_INSTALL+=(qrencode)
+if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
+    log "Installing: ${NEED_INSTALL[*]}"
     apt-get update -qq
-    apt-get install -y wireguard wireguard-tools >/dev/null
+    apt-get install -y "${NEED_INSTALL[@]}" >/dev/null
 fi
 
 # ── 2. Verify the wireguard kernel module is loadable ──────────────

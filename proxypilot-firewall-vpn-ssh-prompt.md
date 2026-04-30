@@ -876,11 +876,31 @@ can:
   access add` command to run on the server. The private key never
   leaves the device.
 
-This ships on all profiles. It does **not** disable
-`PasswordAuthentication` itself; that's a one-line operator edit
-in `/etc/ssh/sshd_config` after the first device is registered
-and verified working. (We do not flip that bit automatically —
-the lockout risk is too high without operator confirmation.)
+This ships on all profiles. The dashboard exposes an explicit
+**operator-driven** toggle for `PasswordAuthentication` via
+`proxypilot ssh password-auth status|enable|disable` (and the SSH
+Access panel's Switch). The toggle is **never** flipped
+automatically — the disable path refuses unless at least one active
+ssh-access row exists, and even then requires a typed-phrase
+confirmation through the dashboard's gate (same posture as the
+revoke flow). Workflow when disabling:
+  1. CLI lockout check refuses with `code: NO_ACTIVE_KEYS` when no
+     managed key exists. Backend re-raises as 409 +
+     `requires_force: true`.
+  2. Candidate config is written to a sibling tempfile, validated
+     with `sshd -t -f <tmp>`, and only renamed over `sshd_config`
+     if validation passes.
+  3. Live config is backed up to
+     `/var/lib/proxypilot/sshd_config.bak` before swap.
+  4. `systemctl reload ssh` (with fallback to `sshd` / `kill -HUP`)
+     applies the new config without dropping live sessions. Reload
+     failure auto-rolls-back from the backup.
+  5. Audit log records the before/after, the actor, and whether
+     the disable was forced past the lockout gate.
+
+Match-block overrides in `sshd_config` are surfaced (in `status`)
+but never modified — the toggle only touches the global
+unconditional directive.
 
 ### Source of Truth
 
@@ -1077,9 +1097,14 @@ A new "SSH Access" panel under the existing admin dashboard:
   `authorized_keys` line by hand in the operator-managed section
   (above the `# proxypilot-managed:` marker the reconcile
   preserves).
-* No automatic `PasswordAuthentication no` flip. That's a one-
-  line `sshd_config` edit the operator does after their first
-  device is verified working — too lockout-prone to automate.
+* No *automatic* `PasswordAuthentication no` flip. There is an
+  explicit operator-driven toggle (`proxypilot ssh password-auth`
+  + dashboard Switch) that goes through atomic write +
+  `sshd -t` validation + reload-with-rollback + lockout gate
+  (refuses to disable when zero active managed keys exist; typed
+  phrase to override). Auto-flipping at install time remains
+  forbidden — the operator chooses the moment after verifying
+  their first device works.
 * No principals / role mapping. Each row binds one pubkey to one
   unix user. If the operator wants `alice` to log in as both
   `root` and `deploy`, that's two `add` calls.

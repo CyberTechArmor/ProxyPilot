@@ -2,6 +2,39 @@ import { readState, writeState } from './state.js';
 import { audit } from '../../db/audit.js';
 
 const VALID_SCOPES = ['public', 'lan-only', 'vpn-only', 'localhost-only'];
+// Tight regex for the optional service tag — matches the peer-side
+// validation in cli/src/core/vpn/peer.js so a tag operators bind to a
+// peer's scope_services_json must satisfy the same shape as the rule
+// it joins against. Keep them in lockstep.
+const SERVICE_TAG_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/**
+ * Validate the optional service tag and apply it to the rule. Returns
+ * a `warnings` array so the CLI surface can warn (not error) when the
+ * tag is set on a non-vpn-only rule — the spec says the tag is only
+ * meaningful on vpn-only but allowing it elsewhere keeps the schema
+ * uniform and lets the operator preset a tag before flipping the
+ * scope.
+ */
+function applyServiceTag(rule, service) {
+  if (service === undefined || service === null) return [];
+  if (service === '') {
+    // Explicit empty-string clears the tag.
+    delete rule.service;
+    return [];
+  }
+  if (!SERVICE_TAG_RE.test(service)) {
+    throw new Error(`invalid service tag "${service}": must match ${SERVICE_TAG_RE}`);
+  }
+  rule.service = service;
+  if (rule.scope !== 'vpn-only') {
+    return [
+      `service tag "${service}" set on rule ${rule.id} which has scope=${rule.scope}; ` +
+      `tag is only consulted when the rule's scope is vpn-only`,
+    ];
+  }
+  return [];
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -33,7 +66,12 @@ function mutate({ id, action, fn, actor }) {
     throw err;
   }
   const beforeSnapshot = { ...before };
-  fn(before, state);
+  // The mutator can return a list of human-readable warnings (e.g.
+  // "service tag set on a non-vpn-only rule"). They surface to the
+  // operator via the CLI but are not persisted to firewall.json, so
+  // we attach them as a non-enumerable property — JSON.stringify
+  // skips them, the CLI reads them directly.
+  const warnings = fn(before, state) ?? [];
   writeState(state);
   audit({
     subsystem: 'firewall',
@@ -43,10 +81,12 @@ function mutate({ id, action, fn, actor }) {
     before: beforeSnapshot,
     after: findRule(state, id),
   });
-  return findRule(state, id);
+  const result = findRule(state, id);
+  Object.defineProperty(result, '_warnings', { value: warnings, enumerable: false });
+  return result;
 }
 
-export function enable({ id, scope, sourceCidrs, actor }) {
+export function enable({ id, scope, sourceCidrs, service, actor }) {
   return mutate({
     id,
     action: 'enable',
@@ -64,6 +104,7 @@ export function enable({ id, scope, sourceCidrs, actor }) {
       if (sourceCidrs && sourceCidrs.length > 0) {
         rule.source_cidrs = sourceCidrs;
       }
+      return applyServiceTag(rule, service);
     },
   });
 }
@@ -81,7 +122,7 @@ export function disable({ id, actor }) {
   });
 }
 
-export function setScope({ id, scope, sourceCidrs, actor }) {
+export function setScope({ id, scope, sourceCidrs, service, actor }) {
   if (!VALID_SCOPES.includes(scope)) {
     throw new Error(`invalid scope: ${scope}`);
   }
@@ -96,6 +137,7 @@ export function setScope({ id, scope, sourceCidrs, actor }) {
       } else if (sourceCidrs && sourceCidrs.length === 0) {
         delete rule.source_cidrs;
       }
+      return applyServiceTag(rule, service);
     },
   });
 }
@@ -106,7 +148,7 @@ export function setScope({ id, scope, sourceCidrs, actor }) {
  * in the same `discovered` array as scanned entries but with
  * source: 'manual'.
  */
-export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, actor }) {
+export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, service, actor }) {
   if (!VALID_SCOPES.includes(scope)) throw new Error(`invalid scope: ${scope}`);
   if (proto !== 'tcp' && proto !== 'udp') throw new Error(`invalid proto: ${proto}`);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -144,6 +186,7 @@ export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, ac
     enabled_by: actor ?? null,
   };
   if (sourceCidrs && sourceCidrs.length > 0) rule.source_cidrs = sourceCidrs;
+  const warnings = applyServiceTag(rule, service);
   state.discovered.push(rule);
   state.discovered.sort((a, b) => a.id.localeCompare(b.id));
   writeState(state);
@@ -154,6 +197,7 @@ export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, ac
     actor,
     after: rule,
   });
+  Object.defineProperty(rule, '_warnings', { value: warnings, enumerable: false });
   return rule;
 }
 

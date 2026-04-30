@@ -42,6 +42,8 @@ lxc
   .option('--cpu <cores>', 'CPU core limit', parseInt)
   .option('--memory <mb>', 'Memory limit in MB', parseInt)
   .option('--disk <mb>', 'Disk limit in MB', parseInt)
+  .option('--vpn-only', 'Render the route with an @vpn remote_ip matcher (per-peer L7 scope)')
+  .option('--service <name>', 'Service tag for vpn-only routes (joins to peer scope_services_json)')
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await lxcCommands.create(opts, globalOpts);
@@ -359,6 +361,7 @@ firewall
   .description('Enable a firewall rule and reconcile')
   .option('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
   .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .option('--yes', 'Skip the public-internet confirmation prompt')
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
@@ -377,6 +380,7 @@ firewall
   .command('set-scope <id> <scope>')
   .description('Change a rule\'s scope and reconcile')
   .option('--source-cidr <cidr>', 'Pin to source CIDR (repeatable; clears existing if omitted)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .action(async (id, scope, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallSetScopeCommand(id, scope, opts, globalOpts);
@@ -391,6 +395,7 @@ firewall
   .requiredOption('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
   .requiredOption('--reason <text>', 'Why this port is open')
   .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallAddManualCommand(opts, globalOpts);
@@ -451,6 +456,35 @@ egress
     await firewallEgressDenyCommand(container, service, opts, globalOpts);
   });
 
+// ── route command group ─────────────────────────────────────────────────────
+import {
+  routeUpdateCommand,
+  routeReconcileCommand,
+} from '../src/commands/route/index.js';
+
+const route = program
+  .command('route')
+  .description('Per-route Caddy management (vpn-only matchers, manual reconcile)');
+
+route
+  .command('update <domain>')
+  .description('Toggle vpn-only or change service tag on an existing route')
+  .option('--vpn-only', 'Render the route with an @vpn remote_ip matcher')
+  .option('--no-vpn-only', 'Drop the matcher and serve publicly')
+  .option('--service <name>', 'Service tag (empty string clears the tag)')
+  .action(async (domain, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await routeUpdateCommand(domain, opts, globalOpts);
+  });
+
+route
+  .command('reconcile')
+  .description('Re-render every vpn-only route\'s site file and reload Caddy')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await routeReconcileCommand(opts, globalOpts);
+  });
+
 // ── vpn command group ───────────────────────────────────────────────────────
 import {
   enableCommand as vpnEnableCommand,
@@ -460,6 +494,7 @@ import {
   peerEnableCommand as vpnPeerEnableCommand,
   peerDisableCommand as vpnPeerDisableCommand,
   peerRemoveCommand as vpnPeerRemoveCommand,
+  peerSetScopeCommand as vpnPeerSetScopeCommand,
   peerListCommand as vpnPeerListCommand,
   peerShowCommand as vpnPeerShowCommand,
 } from '../src/commands/vpn/index.js';
@@ -533,6 +568,16 @@ vpnPeer
   .action(async (name, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await vpnPeerRemoveCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('set-scope <name> <scope>')
+  .description('Update peer scope (full | admin | services [--services <list>]) and reconcile the firewall')
+  .option('--services <list>', 'Comma-separated service tags (only with scope=services)')
+  .option('--force', 'Override the last-full|admin demote lockout guard (typed confirmation required)')
+  .action(async (name, scope, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerSetScopeCommand(name, scope, opts, globalOpts);
   });
 
 vpnPeer

@@ -99,8 +99,8 @@ function mirrorToSqlite(state) {
     INSERT INTO firewall_rules (
       id, source, container, process,
       port_start, port_end, proto, scope, source_cidrs_json,
-      enabled, reason, first_seen, last_seen
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      enabled, reason, first_seen, last_seen, service
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const tx = db.transaction(() => {
     wipe.run();
@@ -120,6 +120,7 @@ function mirrorToSqlite(state) {
         r.reason ?? null,
         r.first_seen,
         r.last_seen,
+        r.service ?? null,
       );
     }
   });

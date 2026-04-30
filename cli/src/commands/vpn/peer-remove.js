@@ -1,4 +1,5 @@
 import { removePeer } from '../../core/vpn/index.js';
+import { surfacePeerMutationResult } from './_firewall-feedback.js';
 import * as output from '../../output.js';
 
 const PHRASE_LAST = 'I understand this locks everyone out';
@@ -16,7 +17,7 @@ export async function peerRemoveCommand(name, opts, globalOpts) {
   try {
     let result;
     try {
-      result = removePeer({ name, force: false });
+      result = await removePeer({ name, force: false });
     } catch (e) {
       if (e.code !== 'LAST_ENABLED_PEER' && e.code !== 'RECENTLY_ACTIVE') throw e;
       if (!opts.force) {
@@ -44,13 +45,20 @@ export async function peerRemoveCommand(name, opts, globalOpts) {
         process.exitCode = 1;
         return;
       }
-      result = removePeer({ name, force: true });
+      result = await removePeer({ name, force: true });
     }
     if (globalOpts.json) {
-      output.json({ ok: true, name: result.name, ip: result.ip });
+      output.json({
+        ok: true,
+        name: result.name,
+        ip: result.ip,
+        firewall: result.firewall ?? null,
+        caddy: result.caddy ?? null,
+      });
       return;
     }
     output.success(`peer "${name}" removed (ip ${result.ip} returned to pool)`);
+    surfacePeerMutationResult(result);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message, code: e.code ?? null });

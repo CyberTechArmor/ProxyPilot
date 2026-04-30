@@ -14,6 +14,73 @@ import {
   WG_SERVER_IP,
 } from './server.js';
 import { dumpPeers, isOnline } from './status.js';
+import { readState as fwReadState } from '../firewall/state.js';
+import { reconcile as fwReconcile } from '../firewall/reconcile.js';
+import { reconcileVpnRoutes } from '../../caddy/reconcile.js';
+
+/**
+ * Run a firewall reconcile then a Caddy vpn-route reconcile after
+ * every peer mutation so both layers' per-/32 source sets converge
+ * on the same operator action.
+ *
+ * Sequencing matters: firewall reconcile first (it's the L4
+ * security boundary; lockout check + atomic nft apply happen
+ * here), Caddy reconcile second (L7 matchers can be regenerated
+ * any time without touching live traffic). If Caddy fails we
+ * surface it but do NOT roll back the firewall — a stale L7
+ * matcher is recoverable via `proxypilot route reconcile`, while
+ * undoing the firewall would re-open already-closed paths.
+ *
+ * Neither step throws on failure. The SQLite mutation + audit row
+ * + wg syncconf are already durable when this runs; a hard throw
+ * would mislead the CLI into reporting the whole peer mutation as
+ * failed when only one of the two convergence steps is incomplete.
+ * Each layer's result is returned so the CLI can surface
+ * per-layer warnings + recovery hints separately.
+ */
+async function reconcileAfterPeerMutation(actor) {
+  let firewall;
+  try {
+    const r = await fwReconcile({ actor });
+    firewall = {
+      ok: r.ok,
+      checksum: r.checksum ?? null,
+      rule_count: r.ruleCount ?? null,
+      warnings: r.warnings ?? [],
+      rejection: r.rejection ?? null,
+    };
+  } catch (e) {
+    firewall = {
+      ok: false,
+      checksum: null,
+      rule_count: null,
+      warnings: [],
+      rejection: { reason: e.message },
+    };
+  }
+
+  let caddy;
+  try {
+    const c = await reconcileVpnRoutes({ actor });
+    caddy = {
+      ok: c.ok,
+      route_count: c.routeCount ?? 0,
+      written: c.written ?? 0,
+      reload: c.reload ?? null,
+      warnings: c.warnings ?? [],
+    };
+  } catch (e) {
+    caddy = {
+      ok: false,
+      route_count: 0,
+      written: 0,
+      reload: 'failed',
+      warnings: [`reconcileVpnRoutes threw: ${e.message}`],
+    };
+  }
+
+  return { firewall, caddy };
+}
 
 export const VPN_PEERS_DIR = '/var/lib/proxypilot/vpn-peers';
 const POOL_START_SUFFIX = 10;
@@ -201,7 +268,7 @@ function chownToInvoker(filePath) {
  * client config file at /var/lib/proxypilot/vpn-peers/<name>.conf, mode
  * 0600. It never reaches SQLite or the audit log.
  */
-export function addPeer({ name, scope = 'admin', services = null, actor } = {}) {
+export async function addPeer({ name, scope = 'admin', services = null, actor } = {}) {
   validatePeerName(name);
   validateScope(scope, services);
   const cfg = readVpnConfig();
@@ -268,6 +335,7 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
   });
 
   syncconfWg0();
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
 
   return {
     id,
@@ -279,6 +347,8 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
     privateKey: kp.private,
     configBody: confBody,
     configPath: confPath,
+    firewall,
+    caddy,
   };
 }
 
@@ -287,7 +357,7 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
  * the IP, scope, and services. The old key is invalidated the moment
  * `wg syncconf` runs — no overlap window. Used when a device is lost.
  */
-export function rotatePeer({ name, actor } = {}) {
+export async function rotatePeer({ name, actor } = {}) {
   validatePeerName(name);
   const cfg = readVpnConfig();
   if (!cfg) {
@@ -336,6 +406,7 @@ export function rotatePeer({ name, actor } = {}) {
   // Belt-and-braces evict the old key in case syncconf raced with a
   // fresh handshake. Best-effort because syncconf already removed it.
   try { wgPeerRemove(peer.public_key); } catch { /* best-effort */ }
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
 
   return {
     id: peer.id,
@@ -347,6 +418,8 @@ export function rotatePeer({ name, actor } = {}) {
     privateKey: kp.private,
     configBody: confBody,
     configPath: confPath,
+    firewall,
+    caddy,
   };
 }
 
@@ -362,7 +435,7 @@ function countEnabledPeers() {
  * and the live interface evicts it via wgPeerRemove. Re-enabling restores
  * the same key + IP.
  */
-export function disablePeer({ name, force = false, actor } = {}) {
+export async function disablePeer({ name, force = false, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -401,10 +474,11 @@ export function disablePeer({ name, force = false, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'disabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
-export function enablePeer({ name, actor } = {}) {
+export async function enablePeer({ name, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -430,7 +504,8 @@ export function enablePeer({ name, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'enabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
 /**
@@ -439,7 +514,7 @@ export function enablePeer({ name, actor } = {}) {
  * Refuses without force if (a) the peer handshook in the last 24h, or
  * (b) it's the only enabled peer.
  */
-export function removePeer({ name, force = false, actor } = {}) {
+export async function removePeer({ name, force = false, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -499,7 +574,8 @@ export function removePeer({ name, force = false, actor } = {}) {
       status: peer.status, public_key: peer.public_key,
     },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
 /**
@@ -537,6 +613,112 @@ export function listPeers() {
       disabledAt: r.disabled_at,
     };
   });
+}
+
+/**
+ * Update a peer's scope (full | admin | services) and, when scope is
+ * `services`, the explicit service list. One transaction over
+ * vpn_peers. Audit row carries the before/after scope + services so
+ * the dashboard's history view can render the diff.
+ *
+ * Lockout gate: refuses without --force when demoting the only enabled
+ * full|admin peer to `services`, AND the firewall has at least one
+ * enabled vpn-only rule with no service tag. After such a demotion,
+ * those untagged vpn-only rules would resolve to an empty source set
+ * (no full|admin peers to allow, services peers excluded by default)
+ * and the operator would silently lose admin reachability to anything
+ * the firewall protects under untagged vpn-only — typically Postgres,
+ * pgbouncer-stats, container SSH, etc. The CLI gates --force behind a
+ * typed phrase distinct from peer.disable / peer.remove so muscle
+ * memory can't approve the wrong gate.
+ *
+ * The actual reconcile of firewall + wg state happens in the caller
+ * (the CLI), so this function is a pure SQLite mutation + audit write.
+ * Wiring fwReconcile into the mutation flow lands in the next commit
+ * along with the parallel changes to addPeer / rotatePeer / etc.
+ */
+export async function setPeerScope({ name, scope, services = null, force = false, actor } = {}) {
+  validatePeerName(name);
+  validateScope(scope, services);
+  const peer = readPeerByName(name);
+  if (!peer) throw new Error(`peer "${name}" not found`);
+
+  const before = {
+    scope: peer.scope,
+    services: peer.scope_services_json ? JSON.parse(peer.scope_services_json) : null,
+  };
+
+  // Lockout: demoting full|admin → services. The risk only exists when
+  // (a) we're moving away from full|admin, and (b) no other enabled
+  // full|admin peer remains, and (c) at least one enabled vpn-only
+  // rule has no service tag (which would resolve to "this peer
+  // would-have-been-allowed" for the untagged set).
+  if (
+    !force
+    && (peer.scope === 'full' || peer.scope === 'admin')
+    && scope === 'services'
+    && peer.status === 'enabled'
+  ) {
+    const otherFullAdmin = getDb().prepare(`
+      SELECT COUNT(*) AS n FROM vpn_peers
+      WHERE status = 'enabled' AND id <> ? AND (scope = 'full' OR scope = 'admin')
+    `).get(peer.id).n;
+    if (otherFullAdmin === 0) {
+      // Read firewall.json directly (not through the firewall manager
+      // public API) so this check stays a pure read with no side
+      // effects. fwReadState() is the same helper the firewall
+      // manager itself uses.
+      let untaggedVpnOnly = [];
+      try {
+        const fwState = fwReadState();
+        const all = [...(fwState.base ?? []), ...(fwState.discovered ?? [])];
+        untaggedVpnOnly = all.filter(r => r.enabled && r.scope === 'vpn-only' && !r.service);
+      } catch (_e) {
+        // No firewall state file yet ⇒ no untagged rules to worry about.
+      }
+      if (untaggedVpnOnly.length > 0) {
+        const err = new Error(
+          `refusing to demote "${name}" (the last full|admin peer) to scope=services — ` +
+          `${untaggedVpnOnly.length} enabled vpn-only rule(s) lack a service tag and would lose all reachable peers. ` +
+          `Pass --force (with typed confirmation) if you really want to proceed, or tag those rules first.`,
+        );
+        err.code = 'LAST_FULL_ADMIN_DEMOTE';
+        err.untaggedRules = untaggedVpnOnly.map(r => r.id);
+        throw err;
+      }
+    }
+  }
+
+  getDb().prepare(`
+    UPDATE vpn_peers
+    SET scope = ?, scope_services_json = ?
+    WHERE id = ?
+  `).run(
+    scope,
+    services ? JSON.stringify(services) : null,
+    peer.id,
+  );
+
+  audit({
+    subsystem: 'vpn',
+    action: 'peer.set-scope',
+    resource: name,
+    actor,
+    before,
+    after: { scope, services: services ?? null },
+  });
+
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+
+  return {
+    ok: true,
+    name,
+    ip: peer.allowed_ip,
+    before,
+    after: { scope, services: services ?? null },
+    firewall,
+    caddy,
+  };
 }
 
 export function showPeer(name) {

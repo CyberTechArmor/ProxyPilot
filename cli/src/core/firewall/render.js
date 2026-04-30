@@ -37,15 +37,28 @@ function bridgeFromState(state) {
 
 /**
  * Named services the firewall manager knows how to gate. Each entry
- * is a host-side endpoint expressed as ip:port/proto. Allow rules in
- * container_egress reference these by name; the operator never types
- * addresses directly. Adding a service is a code change here, which
- * is intentional — services are part of the ProxyPilot platform, not
- * operator-curated.
+ * is a host-side endpoint expressed as port/proto plus a `dst`
+ * resolver — either a literal IPv4 (back-compat for services that
+ * truly bind a specific address) or the string 'bridge_gw', which
+ * the renderer substitutes with the bridge gateway from state.network
+ * at render time. The bridge-gw form is required for services that
+ * listen on the LXC bridge gateway (PgBouncer's typical placement)
+ * because hardcoding 10.0.100.1 silently breaks on hosts whose Incus
+ * bridge isn't ProxyPilot's pp-br0 default — e.g. legacy incusbr0 at
+ * 10.64.250.1, where containers cannot reach the pgbouncer rule at
+ * all because the dst is wrong.
+ *
+ * Adding a service is a code change here, which is intentional —
+ * services are part of the ProxyPilot platform, not operator-curated.
  */
 export const NAMED_SERVICES = {
-  pgbouncer: { dst: '10.0.100.1', port: 6432, proto: 'tcp' },
+  pgbouncer: { dst: 'bridge_gw', port: 6432, proto: 'tcp' },
 };
+
+function resolveServiceDst(def, bridgeGw) {
+  if (def.dst === 'bridge_gw') return bridgeGw;
+  return def.dst;
+}
 
 /**
  * Resolve a rule's effective source restriction to a list of nft set
@@ -146,8 +159,9 @@ function renderContainerEgress(state) {
         lines.push(`    # unknown service '${svc}' for container '${entry.container}'`);
         continue;
       }
+      const dst = resolveServiceDst(def, bridgeGw);
       lines.push(
-        `    ip saddr ${src} ip daddr ${def.dst} ${def.proto} dport ${def.port} accept ` +
+        `    ip saddr ${src} ip daddr ${dst} ${def.proto} dport ${def.port} accept ` +
         `comment "egress: ${entry.container}->${svc}"`,
       );
     }

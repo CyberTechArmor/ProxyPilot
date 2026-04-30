@@ -27,6 +27,7 @@ import {
   Lock,
   HomeIcon,
   AlertTriangle,
+  Plus,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -89,6 +90,21 @@ export default function Firewall() {
   const [publicConfirm, setPublicConfirm] = useState(null); // rule | null
   const [publicPhrase, setPublicPhrase] = useState('');
   const [publicBusy, setPublicBusy] = useState(false);
+
+  // Manual-rule modal. Mirrors the manualSchema shape on the backend
+  // (port_start/end ints, proto enum, scope enum, optional service for
+  // vpn-only, csv source_cidrs parsed to array, required reason).
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualForm, setManualForm] = useState({
+    port_start: '',
+    port_end: '',
+    proto: 'tcp',
+    scope: 'lan-only',
+    service: '',
+    source_cidrs: '',
+    reason: '',
+  });
 
   useEffect(() => {
     if (isAdmin) loadAll();
@@ -218,6 +234,62 @@ export default function Firewall() {
     }
   }
 
+  function resetManualForm() {
+    setManualForm({
+      port_start: '', port_end: '', proto: 'tcp', scope: 'lan-only',
+      service: '', source_cidrs: '', reason: '',
+    });
+  }
+
+  async function submitManual() {
+    const portStart = Number(manualForm.port_start);
+    if (!Number.isInteger(portStart) || portStart < 1 || portStart > 65535) {
+      toast({ variant: 'destructive', title: 'Invalid port', description: 'Start port must be 1–65535.' });
+      return;
+    }
+    let portEnd = null;
+    if (manualForm.port_end !== '') {
+      portEnd = Number(manualForm.port_end);
+      if (!Number.isInteger(portEnd) || portEnd < portStart || portEnd > 65535) {
+        toast({ variant: 'destructive', title: 'Invalid port range', description: 'End port must be ≥ start and ≤ 65535.' });
+        return;
+      }
+    }
+    if (!manualForm.reason.trim()) {
+      toast({ variant: 'destructive', title: 'Reason required' });
+      return;
+    }
+    if (manualForm.scope === 'vpn-only' && !manualForm.service.trim()) {
+      toast({ variant: 'destructive', title: 'Service required for vpn-only' });
+      return;
+    }
+    const cidrs = manualForm.source_cidrs
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const body = {
+      port_start: portStart,
+      port_end: portEnd,
+      proto: manualForm.proto,
+      scope: manualForm.scope,
+      reason: manualForm.reason.trim(),
+    };
+    if (manualForm.scope === 'vpn-only') body.service = manualForm.service.trim();
+    if (cidrs.length) body.source_cidrs = cidrs;
+    setManualBusy(true);
+    try {
+      const r = await api.addFirewallManualRule(body);
+      toast({ title: `Added manual rule ${r.rule?.id ?? ''}` });
+      setManualOpen(false);
+      resetManualForm();
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Add manual rule failed', description: e.message });
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   async function handlePanicOpen() {
     setPanicOpenBusy(true);
     try {
@@ -281,6 +353,10 @@ export default function Firewall() {
             </CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => { resetManualForm(); setManualOpen(true); }}>
+              <Plus className="h-4 w-4 mr-2" />
+              Add manual rule
+            </Button>
             <Button variant="outline" onClick={handleScan} disabled={scanning}>
               {scanning ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <ScanLine className="h-4 w-4 mr-2" />}
               Scan now
@@ -419,6 +495,113 @@ export default function Firewall() {
           )}
         </CardContent>
       </Card>
+
+      {/* Add manual rule. Mirrors the backend's manualSchema: port
+          range, proto, scope, optional service (required for
+          vpn-only), comma-separated source CIDRs, and a free-form
+          reason that ends up in the audit row + the rule's
+          `reason` field. */}
+      <Dialog open={manualOpen} onOpenChange={(o) => { if (!o) { setManualOpen(false); resetManualForm(); } }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add manual firewall rule</DialogTitle>
+            <DialogDescription>
+              Manual rules live alongside discovered listeners. Reconcile runs after submit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="m-port-start">Port (start) *</Label>
+                <Input
+                  id="m-port-start"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={manualForm.port_start}
+                  onChange={e => setManualForm(f => ({ ...f, port_start: e.target.value }))}
+                  placeholder="22"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="m-port-end">Port (end, optional)</Label>
+                <Input
+                  id="m-port-end"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={manualForm.port_end}
+                  onChange={e => setManualForm(f => ({ ...f, port_end: e.target.value }))}
+                  placeholder=""
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="m-proto">Proto *</Label>
+                <select
+                  id="m-proto"
+                  value={manualForm.proto}
+                  onChange={e => setManualForm(f => ({ ...f, proto: e.target.value }))}
+                  className="h-9 w-full rounded border bg-background px-2 text-sm"
+                >
+                  <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="m-scope">Scope *</Label>
+                <select
+                  id="m-scope"
+                  value={manualForm.scope}
+                  onChange={e => setManualForm(f => ({ ...f, scope: e.target.value }))}
+                  className="h-9 w-full rounded border bg-background px-2 text-sm"
+                >
+                  {SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+            {manualForm.scope === 'vpn-only' && (
+              <div className="space-y-1">
+                <Label htmlFor="m-service">Service tag * (vpn-only requires it)</Label>
+                <Input
+                  id="m-service"
+                  value={manualForm.service}
+                  onChange={e => setManualForm(f => ({ ...f, service: e.target.value }))}
+                  placeholder="e.g. caddy-admin"
+                />
+              </div>
+            )}
+            <div className="space-y-1">
+              <Label htmlFor="m-cidrs">Source CIDRs (comma-separated, optional)</Label>
+              <Input
+                id="m-cidrs"
+                value={manualForm.source_cidrs}
+                onChange={e => setManualForm(f => ({ ...f, source_cidrs: e.target.value }))}
+                placeholder="10.0.0.0/8, 192.168.1.0/24"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="m-reason">Reason *</Label>
+              <Input
+                id="m-reason"
+                value={manualForm.reason}
+                onChange={e => setManualForm(f => ({ ...f, reason: e.target.value }))}
+                placeholder="why this rule exists — surfaces in the audit log"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setManualOpen(false); resetManualForm(); }} disabled={manualBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitManual} disabled={manualBusy}>
+              {manualBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Add rule
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Public-internet enable confirm. The CLI's interactive y/N
           is bypassed by --yes from the backend; this is the only

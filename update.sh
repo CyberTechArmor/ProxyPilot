@@ -742,6 +742,13 @@ EOF
             log "${YELLOW}Warning: firewall refresh reported issues — see $LOG_FILE${NC}"
         fi
     fi
+
+    if [[ -x "$SCRIPT_DIR/scripts/install-vpn.sh" ]]; then
+        log "${BLUE}Refreshing WireGuard prerequisites...${NC}"
+        if ! "$SCRIPT_DIR/scripts/install-vpn.sh" 2>&1 | tee -a "$LOG_FILE"; then
+            log "${YELLOW}Warning: VPN prereq refresh reported issues — see $LOG_FILE${NC}"
+        fi
+    fi
 fi
 
 log ""

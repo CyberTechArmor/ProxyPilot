@@ -156,6 +156,60 @@ export function initSchema(db) {
     );
   `);
 
+  // ── VPN config (singleton row) ──────────────────────────────────────────
+  // Row only exists once `proxypilot vpn enable` has run. Reads return
+  // null on Standard installs that never opted in. server_public_key is
+  // the public half only — the private half lives in
+  // /etc/wireguard/server_private.key (mode 0600) and Infisical.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vpn_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      server_public_key TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      listen_port INTEGER NOT NULL DEFAULT 51820,
+      cidr TEXT NOT NULL DEFAULT '10.100.0.0/24',
+      default_iface TEXT NOT NULL,
+      dns TEXT NOT NULL DEFAULT '10.100.0.1',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  // ── VPN peers ───────────────────────────────────────────────────────────
+  // public_key is stored; private keys never touch this table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vpn_peers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      public_key TEXT NOT NULL UNIQUE,
+      preshared_key_hash TEXT,
+      allowed_ip TEXT NOT NULL UNIQUE,
+      scope TEXT NOT NULL DEFAULT 'admin'
+            CHECK (scope IN ('full','admin','services')),
+      scope_services_json TEXT,
+      status TEXT NOT NULL DEFAULT 'enabled'
+            CHECK (status IN ('enabled','disabled','revoked')),
+      created_at TEXT DEFAULT (datetime('now')),
+      created_by TEXT,
+      last_handshake_at TEXT,
+      last_endpoint TEXT,
+      rotated_at TEXT,
+      disabled_at TEXT,
+      revoked_at TEXT
+    );
+  `);
+
+  // ── VPN IP pool ─────────────────────────────────────────────────────────
+  // Tracks per-/32 allocation in the VPN subnet. peer_id is null for
+  // unallocated rows; released_at marks rows freed by `peer remove` so
+  // they can be re-issued without churning the pool order.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vpn_ip_pool (
+      ip TEXT PRIMARY KEY,
+      peer_id INTEGER REFERENCES vpn_peers(id),
+      released_at TEXT
+    );
+  `);
+
   // ── Profiles ────────────────────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (

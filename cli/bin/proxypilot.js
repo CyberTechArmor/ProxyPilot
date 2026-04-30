@@ -284,5 +284,30 @@ program
     await certsCommand(globalOpts);
   });
 
+// ── firewall command group ──────────────────────────────────────────────────
+import { reconcileCommand as firewallReconcileCommand, firewallStatusCommand } from '../src/commands/firewall/index.js';
+
+const firewall = program
+  .command('firewall')
+  .description('Host firewall management (nftables, default-deny)');
+
+firewall
+  .command('reconcile')
+  .description('Apply firewall.json to live nftables')
+  .option('--dry-run', 'Render the ruleset without applying')
+  .option('--force-lockout-ok', 'Apply even if the lockout-safety check fails')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallReconcileCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('status')
+  .description('Show firewall backend, policy, rule counts, last reconcile')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallStatusCommand(opts, globalOpts);
+  });
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

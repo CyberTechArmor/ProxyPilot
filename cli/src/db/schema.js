@@ -105,6 +105,57 @@ export function initSchema(db) {
     );
   `);
 
+  // ── Firewall rules (mirror of firewall.json) ────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS firewall_rules (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL CHECK (source IN ('base','manual','lxc','docker','caddy-l4','host')),
+      container TEXT,
+      process TEXT,
+      port_start INTEGER NOT NULL,
+      port_end INTEGER,
+      proto TEXT NOT NULL CHECK (proto IN ('tcp','udp')),
+      scope TEXT NOT NULL CHECK (scope IN ('public','lan-only','vpn-only','localhost-only')),
+      source_cidrs_json TEXT,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      enabled_at TEXT,
+      enabled_by TEXT,
+      disabled_at TEXT,
+      disabled_by TEXT
+    );
+  `);
+
+  // ── Firewall reconciles (apply history) ─────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS firewall_reconciles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ruleset_checksum TEXT NOT NULL,
+      rule_count INTEGER NOT NULL,
+      applied INTEGER NOT NULL,
+      rejection_reason TEXT,
+      reconciled_at TEXT DEFAULT (datetime('now')),
+      reconciled_by TEXT
+    );
+  `);
+
+  // ── Audit log (state mutations across all subsystems) ───────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      subsystem TEXT NOT NULL,
+      action TEXT NOT NULL,
+      resource TEXT,
+      actor TEXT,
+      before_json TEXT,
+      after_json TEXT,
+      detail TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
   // ── Profiles ────────────────────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (

@@ -688,6 +688,7 @@ sshAccess
   .description('Print a self-contained shell snippet the operator runs on the new device')
   .option('--user <unix-user>', 'Substitute the unix user into the printed instructions')
   .option('--server <host>', 'Substitute the operator hostname into the printed ssh -i line')
+  .option('--shell <name>', 'Render variant: bash (default) or powershell', 'bash')
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await sshAccessBootstrapScriptCommand(id, opts, globalOpts);

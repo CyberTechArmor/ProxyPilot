@@ -52,6 +52,7 @@ export default function SshAccess() {
   const [bootstrapId, setBootstrapId] = useState('');
   const [bootstrapUser, setBootstrapUser] = useState('root');
   const [bootstrapServer, setBootstrapServer] = useState(window.location.host);
+  const [bootstrapShell, setBootstrapShell] = useState('bash');
   const [bootstrapScript, setBootstrapScript] = useState('');
   const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [scriptCopied, setScriptCopied] = useState(false);
@@ -112,6 +113,7 @@ export default function SshAccess() {
     setBootstrapScript('');
     setBootstrapPubkey('');
     setBootstrapLabel('');
+    setBootstrapShell('bash');
     setPasteForm({ id: '', unix_user: 'root', label: '', public_key: '' });
     setAddOpen(true);
   }
@@ -126,6 +128,7 @@ export default function SshAccess() {
       const r = await api.getSshAccessBootstrapScript(bootstrapId, {
         user: bootstrapUser,
         server: bootstrapServer,
+        shell: bootstrapShell,
       });
       setBootstrapScript(r.script || '');
     } catch (e) {
@@ -343,7 +346,7 @@ export default function SshAccess() {
 
       {/* Add device modal */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-[min(96vw,80rem)] max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle>Add device</DialogTitle>
             <DialogDescription>
@@ -360,7 +363,7 @@ export default function SshAccess() {
 
             {addTab === 'bootstrap' && (
               <div className="space-y-3 mt-4">
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-4 gap-3">
                   <div>
                     <Label htmlFor="bs-id">id</Label>
                     <Input id="bs-id" value={bootstrapId} onChange={e => setBootstrapId(e.target.value)} placeholder="alice-laptop" />
@@ -373,6 +376,18 @@ export default function SshAccess() {
                     <Label htmlFor="bs-server">server</Label>
                     <Input id="bs-server" value={bootstrapServer} onChange={e => setBootstrapServer(e.target.value)} />
                   </div>
+                  <div>
+                    <Label htmlFor="bs-shell">shell</Label>
+                    <select
+                      id="bs-shell"
+                      value={bootstrapShell}
+                      onChange={e => setBootstrapShell(e.target.value)}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="bash">bash / zsh (Linux/macOS/WSL/git-bash)</option>
+                      <option value="powershell">PowerShell (Windows)</option>
+                    </select>
+                  </div>
                 </div>
                 <Button onClick={handleGenerateBootstrap} disabled={bootstrapLoading || !bootstrapId}>
                   {bootstrapLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
@@ -382,15 +397,16 @@ export default function SshAccess() {
                   <>
                     <div className="flex items-center justify-between">
                       <p className="text-xs text-muted-foreground">
-                        Copy this snippet and run it on the device. It generates a keypair locally
-                        and prints the <code>proxypilot ssh access add</code> heredoc to paste back here.
+                        {bootstrapShell === 'powershell'
+                          ? 'Copy this snippet and run it in PowerShell on the device (5.1 or 7+). Save it as a .ps1 if your execution policy blocks paste-and-run. It generates a keypair locally and prints the public key + the proxypilot ssh access add command to paste back here.'
+                          : 'Copy this snippet and run it on the device (bash/zsh, including git-bash on Windows). It generates a keypair locally and prints the public key + the proxypilot ssh access add command to paste back here.'}
                       </p>
                       <Button size="sm" variant="ghost" onClick={copyBootstrap}>
                         {scriptCopied ? <Check className="h-3.5 w-3.5 mr-1" /> : <Copy className="h-3.5 w-3.5 mr-1" />}
                         {scriptCopied ? 'Copied' : 'Copy'}
                       </Button>
                     </div>
-                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-[55vh] whitespace-pre">{bootstrapScript}</pre>
+                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-[55vh] max-w-full min-w-0 whitespace-pre">{bootstrapScript}</pre>
 
                     <div className="space-y-2 rounded border border-dashed p-3">
                       <p className="text-xs text-muted-foreground">

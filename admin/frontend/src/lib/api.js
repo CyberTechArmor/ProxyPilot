@@ -643,10 +643,11 @@ export const api = {
     request(`/ssh-access?filter=${encodeURIComponent(filter)}`),
   getSshAccess: (id) =>
     request(`/ssh-access/${encodeURIComponent(id)}`),
-  getSshAccessBootstrapScript: (id, { user, server } = {}) => {
+  getSshAccessBootstrapScript: (id, { user, server, shell } = {}) => {
     const params = new URLSearchParams();
     if (user) params.set('user', user);
     if (server) params.set('server', server);
+    if (shell) params.set('shell', shell);
     const qs = params.toString() ? `?${params.toString()}` : '';
     return request(`/ssh-access/${encodeURIComponent(id)}/bootstrap-script${qs}`);
   },

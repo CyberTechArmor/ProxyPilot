@@ -132,14 +132,26 @@ sshAccessRouter.get('/:id', async (req, res) => {
   }
 });
 
+// Allowlist of shell variants. The CLI's renderer also validates,
+// but we constrain at the boundary so a junk value never reaches
+// the shellSingleQuote+execOnHost path. Keep in sync with
+// BOOTSTRAP_SHELLS in cli/src/core/ssh-access/bootstrap.js.
+const ALLOWED_BOOTSTRAP_SHELLS = new Set(['bash', 'powershell']);
+
 sshAccessRouter.get('/:id/bootstrap-script', async (req, res) => {
   try {
     const args = ['bootstrap-script', req.params.id];
     if (typeof req.query.user === 'string' && req.query.user) args.push('--user', req.query.user);
     if (typeof req.query.server === 'string' && req.query.server) args.push('--server', req.query.server);
+    if (typeof req.query.shell === 'string' && req.query.shell) {
+      if (!ALLOWED_BOOTSTRAP_SHELLS.has(req.query.shell)) {
+        return res.status(400).json({ ok: false, error: `unknown shell: ${req.query.shell}` });
+      }
+      args.push('--shell', req.query.shell);
+    }
     const result = await callProxypilot(args);
     if (!result.ok) return res.status(400).json(result);
-    res.json({ ok: true, id: req.params.id, script: result.script });
+    res.json({ ok: true, id: req.params.id, shell: result.shell ?? 'bash', script: result.script });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

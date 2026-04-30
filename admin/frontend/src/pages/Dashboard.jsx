@@ -1158,10 +1158,27 @@ export default function Dashboard() {
         </div>
         <CardDescription className="flex items-center gap-1">
           <Globe className="h-3 w-3" />
-          {service.domain}
-          {service.pathPrefix && service.pathPrefix !== '/' && (
-            <span className="font-mono text-xs text-muted-foreground">{service.pathPrefix}</span>
-          )}
+          {/* Clickable URL: opens the live site in a new tab.
+              stopPropagation so the click doesn't trigger the card's
+              drag/select handlers; draggable=false so the browser's
+              default anchor-drag behaviour doesn't compete with the
+              card's draggable=true. Protocol picks https whenever SSL
+              is on the route — matches what Caddy is actually serving. */}
+          <a
+            href={`${service.sslEnabled ? 'https' : 'http'}://${service.domain}${service.pathPrefix && service.pathPrefix !== '/' ? service.pathPrefix : ''}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            draggable={false}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            className="hover:underline hover:text-primary transition-colors flex items-center gap-1"
+            title="Open in new tab"
+          >
+            {service.domain}
+            {service.pathPrefix && service.pathPrefix !== '/' && (
+              <span className="font-mono text-xs text-muted-foreground">{service.pathPrefix}</span>
+            )}
+          </a>
         </CardDescription>
       </CardHeader>
       <CardContent>

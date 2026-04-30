@@ -237,13 +237,14 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
   });
   const { id, ip } = tx();
 
-  // Re-render wg0.conf and hot-apply. If syncconf fails (e.g. wg0 not
-  // up), surface the error but the SQLite row + IP allocation stay —
-  // the operator can re-run `vpn enable` and the next reconcile picks
-  // it up. We deliberately don't roll back the row because the peer's
-  // private key only exists in memory and would be lost on rollback.
+  // Re-render wg0.conf, write the client artifact, and audit BEFORE
+  // hot-applying. That way a syncconf failure (wg0 manually stopped,
+  // kernel module unloaded) leaves a recoverable state: the SQLite
+  // row, wg0.conf, the client config file, and the audit trail are
+  // all durable. The operator can fix wg0 with `systemctl restart
+  // wg-quick@wg0` (which reads the already-updated wg0.conf) without
+  // re-running `peer add` or losing the just-generated keypair.
   regenerateWg0();
-  syncconfWg0();
 
   const confPath = clientConfigPath(name);
   const confBody = renderClientConfig({
@@ -265,6 +266,8 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
     actor,
     after: { name, ip, scope, services: services ?? null, public_key: kp.public },
   });
+
+  syncconfWg0();
 
   return {
     id,
@@ -301,12 +304,10 @@ export function rotatePeer({ name, actor } = {}) {
     WHERE id = ?
   `).run(kp.public, peer.id);
 
+  // Same ordering as addPeer: render + artifact + audit, then hot-apply
+  // last so a syncconf failure can't strand the operator without their
+  // freshly-generated client config.
   regenerateWg0();
-  syncconfWg0();
-
-  // Old public key is now gone from wg0.conf and the live interface;
-  // belt-and-braces evict in case syncconf raced with a fresh handshake.
-  try { wgPeerRemove(peer.public_key); } catch { /* best-effort */ }
 
   const services = peer.scope_services_json ? JSON.parse(peer.scope_services_json) : null;
   const confPath = clientConfigPath(name);
@@ -330,6 +331,11 @@ export function rotatePeer({ name, actor } = {}) {
     before: { public_key: peer.public_key },
     after: { name, ip: peer.allowed_ip, scope: peer.scope, public_key: kp.public },
   });
+
+  syncconfWg0();
+  // Belt-and-braces evict the old key in case syncconf raced with a
+  // fresh handshake. Best-effort because syncconf already removed it.
+  try { wgPeerRemove(peer.public_key); } catch { /* best-effort */ }
 
   return {
     id: peer.id,

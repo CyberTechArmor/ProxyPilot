@@ -91,6 +91,28 @@ function renderAllowRule(rule) {
  * Until containers register their bridge IP, allow rules use the
  * full bridge CIDR, which is permissive but no worse than today.
  */
+/**
+ * Render the nat_postrouting chain body.
+ *
+ * The only consumer today is the VPN module: when enabled, it sets
+ * state.nat.vpn_masquerade_iface to the host's default-route interface
+ * (e.g. "eth0") and the firewall manager emits a single MASQUERADE
+ * line for the VPN subnet. The source CIDR is hard-coded to the VPN
+ * subnet so the field can only widen NAT for VPN clients, never for
+ * arbitrary sources.
+ *
+ * If the field is unset, the chain stays empty — same behaviour as
+ * before this helper existed.
+ */
+function renderNatPostrouting(state) {
+  const iface = state.nat?.vpn_masquerade_iface;
+  if (!iface) return '    # (no NAT rules)';
+  if (!/^[A-Za-z0-9_.-]{1,15}$/.test(iface)) {
+    throw new Error(`invalid vpn_masquerade_iface: ${iface}`);
+  }
+  return `    oifname "${iface}" ip saddr ${VPN_CIDR} masquerade comment "vpn-masquerade"`;
+}
+
 function renderContainerEgress(state) {
   const lines = [];
   for (const entry of state.container_egress ?? []) {
@@ -130,6 +152,7 @@ export function render(state) {
     : '    # (no enabled discovered rules)';
 
   const containerEgressBody = renderContainerEgress(state);
+  const natPostroutingBody = renderNatPostrouting(state);
 
   // The leading `add table` + `flush table` pair makes the apply
   // idempotent: it creates the table on first run and empties every
@@ -176,7 +199,7 @@ ${containerEgressBody}
 
   chain nat_postrouting {
     type nat hook postrouting priority 100;
-    # populated when VPN module lands
+${natPostroutingBody}
   }
 }
 `;

@@ -14,6 +14,8 @@ import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
 import { sshAccessRouter } from './routes/ssh-access.js';
+import { firewallRouter } from './routes/firewall.js';
+import { vpnRouter } from './routes/vpn.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
@@ -201,6 +203,8 @@ app.use('/api/services', authenticateToken, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
 app.use('/api/lxc', authenticateToken, lxcRouter);
 app.use('/api/ssh-access', authenticateToken, sshAccessRouter);
+app.use('/api/firewall', authenticateToken, firewallRouter);
+app.use('/api/vpn', authenticateToken, vpnRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

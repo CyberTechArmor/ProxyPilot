@@ -668,6 +668,78 @@ export const api = {
       body: JSON.stringify({ dry_run: !!dryRun }),
     }),
 
+  // ── Firewall manager ──────────────────────────────────────────────────
+  // The CLI's --json contract is the wire format: list returns a bare
+  // array of rules, status returns the bare object, the toggle paths
+  // wrap their result in { ok, action, rule, warnings, reconcile }.
+  // Helpers below preserve that shape — frontend reads `rules`, `status`,
+  // `entries`, `services` directly off the parsed body.
+  listFirewall: () => request('/firewall'),
+  getFirewallStatus: () => request('/firewall/status'),
+  listFirewallEgress: () => request('/firewall/egress'),
+  enableFirewallRule: (id, body = {}) =>
+    request(`/firewall/${encodeURIComponent(id)}/enable`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  disableFirewallRule: (id) =>
+    request(`/firewall/${encodeURIComponent(id)}/disable`, { method: 'POST', body: '{}' }),
+  setFirewallRuleScope: (id, body) =>
+    request(`/firewall/${encodeURIComponent(id)}/set-scope`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+  addFirewallManualRule: (body) =>
+    request('/firewall/manual', { method: 'POST', body: JSON.stringify(body || {}) }),
+  removeFirewallManualRule: (id) =>
+    request(`/firewall/manual/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}' }),
+  reconcileFirewall: (dryRun = false) =>
+    request('/firewall/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: !!dryRun }),
+    }),
+  scanFirewall: () => request('/firewall/scan', { method: 'POST', body: '{}' }),
+  panicCloseFirewall: () => request('/firewall/panic-close', { method: 'POST', body: '{}' }),
+  panicOpenFirewall: () => request('/firewall/panic-open', { method: 'POST', body: '{}' }),
+  allowFirewallEgress: (body) =>
+    request('/firewall/egress/allow', { method: 'POST', body: JSON.stringify(body || {}) }),
+  denyFirewallEgress: (body) =>
+    request('/firewall/egress/deny', { method: 'POST', body: JSON.stringify(body || {}) }),
+
+  // ── VPN manager ───────────────────────────────────────────────────────
+  // GET / returns { ok, status, peers } (status = vpn-status JSON shape,
+  // peers = peer-list JSON shape with wg-show data joined). addVpnPeer's
+  // response carries `private_key` + `config` once — the frontend renders
+  // QR + textarea immediately and DOES NOT round-trip the key back later.
+  // 409 + requires_force on a destructive call signals one of
+  // { LAST_ENABLED_PEER, RECENTLY_ACTIVE, LAST_FULL_ADMIN_DEMOTE };
+  // the dashboard re-prompts the operator with a typed phrase before
+  // re-issuing with force:true.
+  listVpn: () => request('/vpn'),
+  getVpnPeer: (name) => request(`/vpn/${encodeURIComponent(name)}`),
+  enableVpn: (body) => request('/vpn/enable', { method: 'POST', body: JSON.stringify(body || {}) }),
+  disableVpn: () => request('/vpn/disable', { method: 'POST', body: '{}' }),
+  addVpnPeer: (body) => request('/vpn/peers', { method: 'POST', body: JSON.stringify(body || {}) }),
+  rotateVpnPeer: (name) =>
+    request(`/vpn/peers/${encodeURIComponent(name)}/rotate`, { method: 'POST', body: '{}' }),
+  enableVpnPeer: (name) =>
+    request(`/vpn/peers/${encodeURIComponent(name)}/enable`, { method: 'POST', body: '{}' }),
+  disableVpnPeer: (name, body = {}) =>
+    request(`/vpn/peers/${encodeURIComponent(name)}/disable`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  removeVpnPeer: (name, body = {}) =>
+    request(`/vpn/peers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    }),
+  setVpnPeerScope: (name, body) =>
+    request(`/vpn/peers/${encodeURIComponent(name)}/set-scope`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

@@ -55,6 +55,9 @@ export default function SshAccess() {
   const [bootstrapScript, setBootstrapScript] = useState('');
   const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [scriptCopied, setScriptCopied] = useState(false);
+  const [bootstrapPubkey, setBootstrapPubkey] = useState('');
+  const [bootstrapLabel, setBootstrapLabel] = useState('');
+  const [bootstrapSubmitting, setBootstrapSubmitting] = useState(false);
 
   const [pasteForm, setPasteForm] = useState({ id: '', unix_user: 'root', label: '', public_key: '' });
   const [adding, setAdding] = useState(false);
@@ -107,6 +110,8 @@ export default function SshAccess() {
     setAddTab('bootstrap');
     setBootstrapId('');
     setBootstrapScript('');
+    setBootstrapPubkey('');
+    setBootstrapLabel('');
     setPasteForm({ id: '', unix_user: 'root', label: '', public_key: '' });
     setAddOpen(true);
   }
@@ -127,6 +132,33 @@ export default function SshAccess() {
       toast({ variant: 'destructive', title: 'Failed to render bootstrap script', description: e.message });
     } finally {
       setBootstrapLoading(false);
+    }
+  }
+
+  // Submit just the public key the operator copied from their device
+  // shell after running the bootstrap script. id + unix user already
+  // live on the form fields above; label is an optional human tag.
+  async function handleBootstrapSubmit() {
+    const trimmed = bootstrapPubkey.trim();
+    if (!bootstrapId || !bootstrapUser || !trimmed) {
+      toast({ variant: 'destructive', title: 'id, unix user, and public key are required' });
+      return;
+    }
+    setBootstrapSubmitting(true);
+    try {
+      await api.addSshAccess({
+        id: bootstrapId,
+        unix_user: bootstrapUser,
+        public_key: trimmed,
+        label: bootstrapLabel.trim() || null,
+      });
+      toast({ title: `Added "${bootstrapId}"` });
+      setAddOpen(false);
+      loadEntries();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Add failed', description: e.message });
+    } finally {
+      setBootstrapSubmitting(false);
     }
   }
 
@@ -311,7 +343,7 @@ export default function SshAccess() {
 
       {/* Add device modal */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add device</DialogTitle>
             <DialogDescription>
@@ -358,7 +390,42 @@ export default function SshAccess() {
                         {scriptCopied ? 'Copied' : 'Copy'}
                       </Button>
                     </div>
-                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-80 whitespace-pre">{bootstrapScript}</pre>
+                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-[55vh] whitespace-pre">{bootstrapScript}</pre>
+
+                    <div className="space-y-2 rounded border border-dashed p-3">
+                      <p className="text-xs text-muted-foreground">
+                        After running the script on the device, copy the <code>ssh-...</code>{' '}
+                        public key line it printed and paste it here. Hit Submit to register the
+                        device under <code>{bootstrapId}</code> for unix user{' '}
+                        <code>{bootstrapUser}</code>.
+                      </p>
+                      <div>
+                        <Label htmlFor="bs-label">label (optional)</Label>
+                        <Input
+                          id="bs-label"
+                          value={bootstrapLabel}
+                          onChange={e => setBootstrapLabel(e.target.value)}
+                          placeholder="Alice's MacBook Pro"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="bs-pubkey">public key</Label>
+                        <textarea
+                          id="bs-pubkey"
+                          className="w-full h-24 rounded border bg-background p-2 font-mono text-xs"
+                          value={bootstrapPubkey}
+                          onChange={e => setBootstrapPubkey(e.target.value)}
+                          placeholder="ssh-ed25519 AAAAC3Nza... proxypilot:device@host"
+                        />
+                      </div>
+                      <Button
+                        onClick={handleBootstrapSubmit}
+                        disabled={bootstrapSubmitting || !bootstrapPubkey.trim()}
+                      >
+                        {bootstrapSubmitting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                        Submit public key
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>

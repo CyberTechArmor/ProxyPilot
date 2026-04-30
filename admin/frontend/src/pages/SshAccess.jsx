@@ -343,7 +343,7 @@ export default function SshAccess() {
 
       {/* Add device modal */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-[min(96vw,80rem)] max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle>Add device</DialogTitle>
             <DialogDescription>
@@ -390,7 +390,7 @@ export default function SshAccess() {
                         {scriptCopied ? 'Copied' : 'Copy'}
                       </Button>
                     </div>
-                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-[55vh] whitespace-pre">{bootstrapScript}</pre>
+                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-[55vh] max-w-full min-w-0 whitespace-pre">{bootstrapScript}</pre>
 
                     <div className="space-y-2 rounded border border-dashed p-3">
                       <p className="text-xs text-muted-foreground">

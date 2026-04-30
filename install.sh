@@ -1005,6 +1005,14 @@ EOF
                 "${SCRIPT_DIR}/scripts/install-firewall.sh"
             log_success "Host firewall configured"
         fi
+
+        # Install VPN userspace + module prerequisites. Does NOT bring
+        # wg0 up — operator opts in via `proxypilot vpn enable`.
+        if [[ -x "${SCRIPT_DIR}/scripts/install-vpn.sh" ]]; then
+            log_info "Installing WireGuard prerequisites..."
+            "${SCRIPT_DIR}/scripts/install-vpn.sh"
+            log_success "WireGuard prerequisites installed"
+        fi
     fi
 
     # Build and start Docker container

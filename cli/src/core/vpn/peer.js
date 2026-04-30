@@ -16,25 +16,33 @@ import {
 import { dumpPeers, isOnline } from './status.js';
 import { readState as fwReadState } from '../firewall/state.js';
 import { reconcile as fwReconcile } from '../firewall/reconcile.js';
+import { reconcileVpnRoutes } from '../../caddy/reconcile.js';
 
 /**
- * Run a firewall reconcile after a peer mutation so any vpn-only
- * rule's per-/32 source set picks up the new shape on the same
- * call. We never call nft directly; reconcile is the single L4
- * writer.
+ * Run a firewall reconcile then a Caddy vpn-route reconcile after
+ * every peer mutation so both layers' per-/32 source sets converge
+ * on the same operator action.
  *
- * If reconcile fails (lockout check, nft apply error, etc.) we do
- * NOT throw — the SQLite mutation + audit row + wg syncconf are
- * already durable, and a hard throw would mislead the CLI into
- * reporting the whole peer mutation as failed when only the L4
- * convergence step is incomplete. The operator can re-run
- * `proxypilot firewall reconcile` to catch up. The firewall
- * summary is returned so the CLI can surface a warning.
+ * Sequencing matters: firewall reconcile first (it's the L4
+ * security boundary; lockout check + atomic nft apply happen
+ * here), Caddy reconcile second (L7 matchers can be regenerated
+ * any time without touching live traffic). If Caddy fails we
+ * surface it but do NOT roll back the firewall — a stale L7
+ * matcher is recoverable via `proxypilot route reconcile`, while
+ * undoing the firewall would re-open already-closed paths.
+ *
+ * Neither step throws on failure. The SQLite mutation + audit row
+ * + wg syncconf are already durable when this runs; a hard throw
+ * would mislead the CLI into reporting the whole peer mutation as
+ * failed when only one of the two convergence steps is incomplete.
+ * Each layer's result is returned so the CLI can surface
+ * per-layer warnings + recovery hints separately.
  */
 async function reconcileAfterPeerMutation(actor) {
+  let firewall;
   try {
     const r = await fwReconcile({ actor });
-    return {
+    firewall = {
       ok: r.ok,
       checksum: r.checksum ?? null,
       rule_count: r.ruleCount ?? null,
@@ -42,7 +50,7 @@ async function reconcileAfterPeerMutation(actor) {
       rejection: r.rejection ?? null,
     };
   } catch (e) {
-    return {
+    firewall = {
       ok: false,
       checksum: null,
       rule_count: null,
@@ -50,6 +58,28 @@ async function reconcileAfterPeerMutation(actor) {
       rejection: { reason: e.message },
     };
   }
+
+  let caddy;
+  try {
+    const c = await reconcileVpnRoutes({ actor });
+    caddy = {
+      ok: c.ok,
+      route_count: c.routeCount ?? 0,
+      written: c.written ?? 0,
+      reload: c.reload ?? null,
+      warnings: c.warnings ?? [],
+    };
+  } catch (e) {
+    caddy = {
+      ok: false,
+      route_count: 0,
+      written: 0,
+      reload: 'failed',
+      warnings: [`reconcileVpnRoutes threw: ${e.message}`],
+    };
+  }
+
+  return { firewall, caddy };
 }
 
 export const VPN_PEERS_DIR = '/var/lib/proxypilot/vpn-peers';
@@ -305,7 +335,7 @@ export async function addPeer({ name, scope = 'admin', services = null, actor } 
   });
 
   syncconfWg0();
-  const firewall = await reconcileAfterPeerMutation(actor);
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
 
   return {
     id,
@@ -318,6 +348,7 @@ export async function addPeer({ name, scope = 'admin', services = null, actor } 
     configBody: confBody,
     configPath: confPath,
     firewall,
+    caddy,
   };
 }
 
@@ -375,7 +406,7 @@ export async function rotatePeer({ name, actor } = {}) {
   // Belt-and-braces evict the old key in case syncconf raced with a
   // fresh handshake. Best-effort because syncconf already removed it.
   try { wgPeerRemove(peer.public_key); } catch { /* best-effort */ }
-  const firewall = await reconcileAfterPeerMutation(actor);
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
 
   return {
     id: peer.id,
@@ -388,6 +419,7 @@ export async function rotatePeer({ name, actor } = {}) {
     configBody: confBody,
     configPath: confPath,
     firewall,
+    caddy,
   };
 }
 
@@ -442,8 +474,8 @@ export async function disablePeer({ name, force = false, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'disabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  const firewall = await reconcileAfterPeerMutation(actor);
-  return { ok: true, name, ip: peer.allowed_ip, firewall };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
 export async function enablePeer({ name, actor } = {}) {
@@ -472,8 +504,8 @@ export async function enablePeer({ name, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'enabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  const firewall = await reconcileAfterPeerMutation(actor);
-  return { ok: true, name, ip: peer.allowed_ip, firewall };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
 /**
@@ -542,8 +574,8 @@ export async function removePeer({ name, force = false, actor } = {}) {
       status: peer.status, public_key: peer.public_key,
     },
   });
-  const firewall = await reconcileAfterPeerMutation(actor);
-  return { ok: true, name, ip: peer.allowed_ip, firewall };
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall, caddy };
 }
 
 /**
@@ -676,7 +708,7 @@ export async function setPeerScope({ name, scope, services = null, force = false
     after: { scope, services: services ?? null },
   });
 
-  const firewall = await reconcileAfterPeerMutation(actor);
+  const { firewall, caddy } = await reconcileAfterPeerMutation(actor);
 
   return {
     ok: true,
@@ -685,6 +717,7 @@ export async function setPeerScope({ name, scope, services = null, force = false
     before,
     after: { scope, services: services ?? null },
     firewall,
+    caddy,
   };
 }
 

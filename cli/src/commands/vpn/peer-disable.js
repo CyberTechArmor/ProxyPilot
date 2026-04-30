@@ -1,5 +1,5 @@
 import { disablePeer } from '../../core/vpn/index.js';
-import { surfaceFirewallResult } from './_firewall-feedback.js';
+import { surfacePeerMutationResult } from './_firewall-feedback.js';
 import * as output from '../../output.js';
 
 const TYPED_PHRASE = 'I understand this locks everyone out';
@@ -54,6 +54,7 @@ export async function peerDisableCommand(name, opts, globalOpts) {
         ip: result.ip,
         already_disabled: !!result.alreadyDisabled,
         firewall: result.firewall ?? null,
+        caddy: result.caddy ?? null,
       });
       return;
     }
@@ -62,7 +63,7 @@ export async function peerDisableCommand(name, opts, globalOpts) {
       return;
     }
     output.success(`peer "${name}" disabled (record + IP allocation preserved)`);
-    surfaceFirewallResult(result.firewall);
+    surfacePeerMutationResult(result);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message, code: e.code ?? null });

@@ -1,5 +1,5 @@
 import { enablePeer } from '../../core/vpn/index.js';
-import { surfaceFirewallResult } from './_firewall-feedback.js';
+import { surfacePeerMutationResult } from './_firewall-feedback.js';
 import * as output from '../../output.js';
 
 export async function peerEnableCommand(name, _opts, globalOpts) {
@@ -12,6 +12,7 @@ export async function peerEnableCommand(name, _opts, globalOpts) {
         ip: result.ip,
         already_enabled: !!result.alreadyEnabled,
         firewall: result.firewall ?? null,
+        caddy: result.caddy ?? null,
       });
       return;
     }
@@ -20,7 +21,7 @@ export async function peerEnableCommand(name, _opts, globalOpts) {
       return;
     }
     output.success(`peer "${name}" enabled (${result.ip})`);
-    surfaceFirewallResult(result.firewall);
+    surfacePeerMutationResult(result);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message });

@@ -1,5 +1,5 @@
 import { setPeerScope } from '../../core/vpn/index.js';
-import { surfaceFirewallResult } from './_firewall-feedback.js';
+import { surfacePeerMutationResult } from './_firewall-feedback.js';
 import * as output from '../../output.js';
 
 const TYPED_PHRASE = 'demote the last admin peer';
@@ -86,6 +86,7 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
         before: result.before,
         after: result.after,
         firewall: result.firewall ?? null,
+        caddy: result.caddy ?? null,
       });
       return;
     }
@@ -95,7 +96,7 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
       ` → ${result.after.scope}` +
       (result.after.services ? `(${result.after.services.join(',')})` : ''),
     );
-    surfaceFirewallResult(result.firewall);
+    surfacePeerMutationResult(result);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message, code: e.code ?? null });

@@ -11,19 +11,29 @@ const LOCALHOST_V6 = '::1/128';
  * subnet to host-side services. If the operator changes the bridge
  * CIDR, egress rules must be regenerated — not in scope for this step.
  */
-const LXC_BRIDGE_CIDR = '10.0.100.0/24';
-// Host's address on the LXC bridge — the only target the
-// container_egress chain restricts. External egress (DNS, internet,
-// host's other interfaces) falls through to chain default-accept.
-const LXC_BRIDGE_GW = '10.0.100.1';
-// Bridge interface ProxyPilot creates for LXC containers. Hardcoded to
-// match config.network.bridge_name in cli/src/config.js. Trusted at
-// input — containers must reach the host's dnsmasq (DHCP UDP 67, DNS
-// UDP/TCP 53) on this interface to obtain IPs and resolve names. Without
-// this trust the host drops the very first DHCP DISCOVER and containers
-// boot with no IPv4 forever. The egress restriction in container_egress
-// (forward hook) still gates what containers can send OUT of the bridge.
-const LXC_BRIDGE_IFACE = 'pp-br0';
+// LXC bridge defaults — matched to cli/src/config.js's `network.*`. The
+// renderer reads overrides from `state.network` so a host whose Incus
+// bridge isn't ProxyPilot's `pp-br0` (e.g. legacy `incusbr0` installs at
+// `10.64.250.0/24`) can correct the values without code edits. All three
+// are validated against tight regexes before reaching nft.
+const DEFAULT_BRIDGE_IFACE = 'pp-br0';
+const DEFAULT_BRIDGE_CIDR = '10.0.100.0/24';
+const DEFAULT_BRIDGE_GW = '10.0.100.1';
+
+const IFACE_RE = /^[A-Za-z0-9_.-]{1,15}$/;
+const CIDR_RE = /^(?:\d{1,3}\.){3}\d{1,3}\/(?:\d|[12]\d|3[0-2])$/;
+const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+function bridgeFromState(state) {
+  const n = state.network ?? {};
+  const iface = n.bridge_iface ?? DEFAULT_BRIDGE_IFACE;
+  const cidr = n.bridge_cidr ?? DEFAULT_BRIDGE_CIDR;
+  const gw = n.bridge_gw ?? DEFAULT_BRIDGE_GW;
+  if (!IFACE_RE.test(iface)) throw new Error(`invalid network.bridge_iface: ${iface}`);
+  if (!CIDR_RE.test(cidr))   throw new Error(`invalid network.bridge_cidr: ${cidr}`);
+  if (!IPV4_RE.test(gw))     throw new Error(`invalid network.bridge_gw: ${gw}`);
+  return { iface, cidr, gw };
+}
 
 /**
  * Named services the firewall manager knows how to gate. Each entry
@@ -126,9 +136,10 @@ function renderNatPostrouting(state) {
 }
 
 function renderContainerEgress(state) {
+  const { cidr: bridgeCidr, gw: bridgeGw } = bridgeFromState(state);
   const lines = [];
   for (const entry of state.container_egress ?? []) {
-    const src = entry.container_ip ? `${entry.container_ip}/32` : LXC_BRIDGE_CIDR;
+    const src = entry.container_ip ? `${entry.container_ip}/32` : bridgeCidr;
     for (const svc of (entry.allow ?? [])) {
       const def = NAMED_SERVICES[svc];
       if (!def) {
@@ -142,16 +153,15 @@ function renderContainerEgress(state) {
     }
   }
   // Default-deny tail: bridge → host services that weren't allowed
-  // above get dropped. Scoped to `daddr 10.0.100.1` (the host's
-  // bridge interface) so external egress — DNS, package mirrors,
-  // upstream APIs the LXC's apps depend on — falls through to chain
-  // default-accept. Without this scope every LXC outbound packet was
-  // dropped, which broke DHCP renewal, container startup scripts,
-  // and made Caddy-proxied LXC services time out on any backend that
-  // reached out (a 3-4s page-load stall the operator could see).
-  // Inter-container traffic on the bridge is unaffected — the Linux
-  // bridge handles it before it ever hits this forward-hook chain.
-  lines.push(`    ip saddr ${LXC_BRIDGE_CIDR} ip daddr ${LXC_BRIDGE_GW} drop`);
+  // above get dropped. Scoped to the bridge gateway so external
+  // egress — DNS, package mirrors, upstream APIs the LXC's apps
+  // depend on — falls through to chain default-accept. Without this
+  // scope every LXC outbound packet was dropped, which broke DHCP
+  // renewal, container startup scripts, and made Caddy-proxied LXC
+  // services time out on any backend that reached out. Inter-
+  // container traffic on the bridge is unaffected — the Linux bridge
+  // handles it before it ever hits this forward-hook chain.
+  lines.push(`    ip saddr ${bridgeCidr} ip daddr ${bridgeGw} drop`);
   return lines.join('\n');
 }
 
@@ -159,17 +169,12 @@ export function render(state) {
   const enabledBase = state.base.filter(r => r.enabled);
   const enabledDiscovered = state.discovered.filter(r => r.enabled);
 
-  // Bridge iface name. State override exists for hosts whose Incus
-  // bridge isn't named `pp-br0` (legacy `incusbr0` installs, operator
-  // renamed bridges, etc.); validate hard against an iface-safe regex
-  // so a junk value can never reach nft. The match below uses
-  // `iifname` (string match) rather than `iif` (numeric index) so the
-  // rule loads even when the bridge isn't up yet — at boot the
-  // firewall comes up before the bridge, with `iif` nft would reject.
-  const bridgeIface = state.network?.bridge_iface ?? LXC_BRIDGE_IFACE;
-  if (!/^[A-Za-z0-9_.-]{1,15}$/.test(bridgeIface)) {
-    throw new Error(`invalid network.bridge_iface: ${bridgeIface}`);
-  }
+  // Bridge iface from state — defaults to ProxyPilot's `pp-br0`,
+  // overridable for legacy `incusbr0`-style installs. The rule below
+  // uses `iifname` (string match) rather than `iif` (numeric index)
+  // so it loads even when the bridge isn't up yet — at boot the
+  // firewall reconciles before the bridge, with `iif` nft rejects.
+  const { iface: bridgeIface } = bridgeFromState(state);
 
   // Loopback, ct state, and ICMP are handled in input_hook before we
   // jump here, so base_input only carries the operator-facing

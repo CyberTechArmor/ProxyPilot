@@ -128,6 +128,15 @@ export function initSchema(db) {
     );
   `);
 
+  // ── Firewall rules: additive `service` column (step 7a) ─────────────────
+  // Tag string for vpn-only rules so per-peer scope can join peers with
+  // a `services` scope to the rules they're allowed to reach. Additive
+  // and idempotent: the PRAGMA guard makes re-runs a no-op on installs
+  // that already have the column.
+  if (!db.prepare(`PRAGMA table_info(firewall_rules)`).all().some(c => c.name === 'service')) {
+    db.exec(`ALTER TABLE firewall_rules ADD COLUMN service TEXT`);
+  }
+
   // ── Firewall reconciles (apply history) ─────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS firewall_reconciles (

@@ -1,12 +1,10 @@
-import { writeFile, unlink, readdir, rename, access } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { unlink, readdir, rename } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { getDb } from '../db/index.js';
 import { renderRoute } from './render.js';
 import { atomicWrite } from '../core/vpn/server.js';
 
 const CADDY_SITES_DIR = '/etc/caddy/sites';
-const CADDY_CONFIG_FILE = '/etc/caddy/Caddyfile';
 
 /**
  * Get the full Caddy config via the admin API.

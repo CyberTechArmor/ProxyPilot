@@ -6,6 +6,7 @@ export {
   readVpnConfig,
   renderWg0Conf,
   writeWg0Conf,
+  validateEndpoint,
   WG_INTERFACE,
   WG_CONFIG_FILE,
   WG_SERVER_PRIVATE,

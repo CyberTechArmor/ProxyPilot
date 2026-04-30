@@ -5,7 +5,7 @@ export async function enableCommand(opts, globalOpts) {
   try {
     const result = await enable({
       endpoint: opts.endpoint,
-      listenPort: opts.port ? Number(opts.port) : undefined,
+      listenPort: opts.port,
       dns: opts.dns,
     });
     if (globalOpts.json) {

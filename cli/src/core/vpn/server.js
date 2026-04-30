@@ -140,9 +140,40 @@ function clearNatIface() {
 }
 
 /**
+ * Validate a peer-dialable endpoint string. We accept "<host>:<port>"
+ * where host is a DNS name, IPv4 literal, or bracketed IPv6 literal,
+ * and port is 1-65535. Reject anything that could surprise the
+ * operator at peer-config-render time (step 6) — better to fail at
+ * `vpn enable` than to ship a broken QR code.
+ */
+export function validateEndpoint(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length === 0 || endpoint.length > 253) {
+    throw new Error(`invalid --endpoint: must be host:port`);
+  }
+  const m = endpoint.match(/^(?:\[([0-9a-fA-F:]+)\]|([A-Za-z0-9.-]+)):(\d{1,5})$/);
+  if (!m) throw new Error(`invalid --endpoint "${endpoint}": expected host:port (IPv6 in brackets)`);
+  const port = Number(m[3]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`invalid --endpoint "${endpoint}": port out of range`);
+  }
+  return { host: m[1] ?? m[2], port };
+}
+
+function validateListenPort(p) {
+  const n = Number(p);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(`invalid --port "${p}": expected integer 1-65535`);
+  }
+  return n;
+}
+
+/**
  * Bring up the VPN. Reuses the existing private key if `vpn_config`
  * + the on-disk private key are both present, so re-running enable is
- * idempotent and never silently rotates the server key.
+ * idempotent and never silently rotates the server key. If vpn_config
+ * is present but the private key file is missing we refuse rather than
+ * generate a new keypair — that would invalidate every peer's client
+ * config, and the operator probably wants to know the key was lost.
  *
  * Order matters here: write config + start the interface BEFORE
  * touching the firewall. If wg-quick fails we abort without ever
@@ -151,12 +182,21 @@ function clearNatIface() {
  */
 export async function enable({ endpoint, listenPort = WG_DEFAULT_PORT, dns = WG_DEFAULT_DNS, actor } = {}) {
   if (!endpoint) throw new Error('endpoint is required (host:port the peer dials)');
+  validateEndpoint(endpoint);
+  listenPort = validateListenPort(listenPort);
   const existing = readVpnConfig();
   const iface = detectDefaultIface();
 
   let privateKey;
   let publicKey;
-  if (existing && fs.existsSync(WG_SERVER_PRIVATE)) {
+  if (existing) {
+    if (!fs.existsSync(WG_SERVER_PRIVATE)) {
+      throw new Error(
+        `vpn_config row exists but ${WG_SERVER_PRIVATE} is missing. ` +
+        `Refusing to silently rotate the server key (would invalidate every peer). ` +
+        `Restore the key file from backup, or run \`proxypilot vpn disable\` and re-enable to start fresh.`,
+      );
+    }
     privateKey = fs.readFileSync(WG_SERVER_PRIVATE, 'utf-8').trim();
     publicKey = existing.server_public_key;
   } else {
@@ -179,7 +219,13 @@ export async function enable({ endpoint, listenPort = WG_DEFAULT_PORT, dns = WG_
   const peers = readEnabledPeers();
   writeWg0Conf({ privateKey, listenPort, serverIp: WG_SERVER_IP, peers });
 
-  const up = run('systemctl', ['enable', '--now', `wg-quick@${WG_INTERFACE}`]);
+  // enable for boot-persistence + restart to re-read wg0.conf (covers
+  // both the cold-start and the "operator changed --port" cases).
+  const en = run('systemctl', ['enable', `wg-quick@${WG_INTERFACE}`]);
+  if (en.status !== 0) {
+    throw new Error(`failed to enable wg-quick@${WG_INTERFACE}: ${en.stderr.trim() || en.stdout.trim()}`);
+  }
+  const up = run('systemctl', ['restart', `wg-quick@${WG_INTERFACE}`]);
   if (up.status !== 0) {
     throw new Error(`failed to start wg-quick@${WG_INTERFACE}: ${up.stderr.trim() || up.stdout.trim()}`);
   }

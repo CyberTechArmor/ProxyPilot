@@ -1,0 +1,13 @@
+[Unit]
+Description=ProxyPilot SSH access last-seen scanner (every 5 minutes)
+
+[Timer]
+# Five-minute cadence per spec. The dashboard also fires the same
+# scanner on load, so the timer is the cold-state safety net rather
+# than the primary update path.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

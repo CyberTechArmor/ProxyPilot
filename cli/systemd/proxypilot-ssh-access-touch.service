@@ -1,0 +1,16 @@
+[Unit]
+Description=ProxyPilot SSH access last-seen scanner
+After=network.target
+ConditionPathExists=/var/lib/proxypilot
+
+[Service]
+Type=oneshot
+# Best-effort scanner. Parses `last -F -i -n 200` and updates the
+# last_seen_at column for every active ssh_access row of each unix
+# user that logged in. Idempotent — only updates strictly-newer
+# timestamps, so re-running on the 5-minute timer is a no-op when
+# nobody has logged in.
+ExecStart=/usr/bin/node /opt/proxypilot/cli/bin/proxypilot-ssh-access-touch.js
+# Failures here are not actionable — the dashboard already shows "—"
+# on missing data. Don't restart, don't alert.
+SuccessExitStatus=0 1

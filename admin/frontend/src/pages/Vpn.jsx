@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import QRCode from 'qrcode';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -20,6 +21,10 @@ import {
   RefreshCw,
   AlertTriangle,
   Power,
+  Plus,
+  Copy,
+  Check,
+  ShieldAlert,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -61,6 +66,22 @@ export default function Vpn() {
     endpoint: '', port: '51820', dns: '10.100.0.1',
   });
 
+  // Add-peer modal — has TWO phases on a single Dialog:
+  //   form    — name + scope + (services when scope=services)
+  //   reveal  — once-only show of {private_key, config, QR}; the
+  //             backend never persists the private key, so when this
+  //             dialog closes the React state is wiped and there's no
+  //             way to get it back. The operator must save it before
+  //             clicking "I've saved it".
+  const [addPeerOpen, setAddPeerOpen] = useState(false);
+  const [addPeerBusy, setAddPeerBusy] = useState(false);
+  const [addPeerForm, setAddPeerForm] = useState({
+    name: '', scope: 'admin', services: '',
+  });
+  // Reveal payload: { name, ip, scope, services, public_key, config,
+  // private_key }. Set once on add/rotate response, cleared on close.
+  const [reveal, setReveal] = useState(null);
+
   useEffect(() => {
     if (isAdmin) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -78,6 +99,45 @@ export default function Vpn() {
       toast({ variant: 'destructive', title: 'Failed to load VPN', description: e.message });
     } finally {
       setLoading(false);
+    }
+  }
+
+  function resetAddPeer() {
+    setAddPeerForm({ name: '', scope: 'admin', services: '' });
+  }
+
+  async function submitAddPeer() {
+    const name = addPeerForm.name.trim();
+    if (!name) { toast({ variant: 'destructive', title: 'Name required' }); return; }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      toast({ variant: 'destructive', title: 'Invalid name', description: 'letters, digits, ., _, - only; must start with a letter or digit' });
+      return;
+    }
+    const body = { name, scope: addPeerForm.scope };
+    if (addPeerForm.scope === 'services') {
+      const services = addPeerForm.services
+        .split(',').map(s => s.trim()).filter(Boolean);
+      if (services.length === 0) {
+        toast({ variant: 'destructive', title: 'At least one service tag required' });
+        return;
+      }
+      body.services = services;
+    }
+    setAddPeerBusy(true);
+    try {
+      const r = await api.addVpnPeer(body);
+      // Flip the dialog into reveal mode. The state IS the private key
+      // — when the operator closes the dialog (or this page unmounts),
+      // it's gone. The backend never persists it, the audit row only
+      // carries the public key.
+      setReveal(r);
+      setAddPeerOpen(false);
+      resetAddPeer();
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Add peer failed', description: e.message });
+    } finally {
+      setAddPeerBusy(false);
     }
   }
 
@@ -127,6 +187,12 @@ export default function Vpn() {
             </CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
+            {enabled && (
+              <Button variant="outline" onClick={() => { resetAddPeer(); setAddPeerOpen(true); }}>
+                <Plus className="h-4 w-4 mr-2" />
+                Add peer
+              </Button>
+            )}
             <Button variant="outline" onClick={loadAll} disabled={loading}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
               Refresh
@@ -247,6 +313,70 @@ export default function Vpn() {
         </CardContent>
       </Card>
 
+      {/* Add peer (form phase). On submit the response opens the
+          PeerRevealDialog with the private key + QR. The form
+          dialog itself never sees the secret. */}
+      <Dialog open={addPeerOpen} onOpenChange={(o) => { if (!o) { setAddPeerOpen(false); resetAddPeer(); } }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add VPN peer</DialogTitle>
+            <DialogDescription>
+              Each peer gets its own keypair and IP. The private key is shown once after
+              creation — the server cannot reprint it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="peer-name">Name *</Label>
+              <Input
+                id="peer-name"
+                value={addPeerForm.name}
+                onChange={e => setAddPeerForm(f => ({ ...f, name: e.target.value }))}
+                placeholder="laptop-anna"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="peer-scope">Scope *</Label>
+              <select
+                id="peer-scope"
+                value={addPeerForm.scope}
+                onChange={e => setAddPeerForm(f => ({ ...f, scope: e.target.value }))}
+                className="h-9 w-full rounded border bg-background px-2 text-sm"
+              >
+                <option value="full">full — full network access</option>
+                <option value="admin">admin — admin paths + services</option>
+                <option value="services">services — explicit list only</option>
+              </select>
+            </div>
+            {addPeerForm.scope === 'services' && (
+              <div className="space-y-1">
+                <Label htmlFor="peer-services">Service tags (comma-separated) *</Label>
+                <Input
+                  id="peer-services"
+                  value={addPeerForm.services}
+                  onChange={e => setAddPeerForm(f => ({ ...f, services: e.target.value }))}
+                  placeholder="caddy-admin, app-postgres"
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setAddPeerOpen(false); resetAddPeer(); }} disabled={addPeerBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitAddPeer} disabled={addPeerBusy}>
+              {addPeerBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Add peer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reveal phase: shown for both add-peer and (later) rotate
+          responses. Closing this dialog DROPS the private key from
+          React state — there is no second chance. */}
+      <PeerRevealDialog reveal={reveal} onClose={() => setReveal(null)} />
+
       {/* Enable VPN. The CLI generates the server keypair, writes
           wg0.conf, brings up wg-quick@wg0, and creates the
           base-wireguard firewall rule scoped to the listen port. */}
@@ -304,6 +434,112 @@ export default function Vpn() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Once-only display of the peer's private material.
+ *
+ * Critical invariants:
+ * - The `reveal` prop is the ONLY copy of the private key in the
+ *   browser. When this dialog closes (`onClose`), the parent wipes
+ *   that state — there is no server-side persistence to fall back on,
+ *   the audit row only carries the public key.
+ * - The QR is generated client-side from the config body via the
+ *   `qrcode` package. We don't fetch a QR endpoint because that would
+ *   send the private key through another HTTP round-trip.
+ * - Closing the dialog is the ONLY way out: there is no auto-dismiss,
+ *   no "save for later". The operator must click "I've saved it".
+ */
+function PeerRevealDialog({ reveal, onClose }) {
+  const [qrDataUrl, setQrDataUrl] = useState('');
+  const [copied, setCopied] = useState(false);
+  const open = !!reveal;
+
+  useEffect(() => {
+    if (!reveal?.config) { setQrDataUrl(''); return; }
+    let cancelled = false;
+    QRCode.toDataURL(reveal.config, { width: 256, margin: 1 })
+      .then((dataUrl) => { if (!cancelled) setQrDataUrl(dataUrl); })
+      .catch((err) => {
+        console.error('Failed to generate VPN QR code:', err);
+        if (!cancelled) setQrDataUrl('');
+      });
+    return () => { cancelled = true; };
+  }, [reveal]);
+
+  async function copyConfig() {
+    if (!reveal?.config) return;
+    try {
+      await navigator.clipboard.writeText(reveal.config);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard may be blocked; the textarea is still selectable
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldAlert className="h-5 w-5 text-red-600" />
+            Save peer config now — server cannot reprint
+          </DialogTitle>
+          <DialogDescription>
+            The private key below is shown only this once. The server does not store it.
+            Save it to your client (or scan the QR) before closing this dialog.
+          </DialogDescription>
+        </DialogHeader>
+
+        {reveal && (
+          <div className="space-y-4 py-2">
+            <div className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm">
+              <div className="font-semibold text-red-700 dark:text-red-300">
+                Peer "{reveal.name}" · {reveal.ip} · scope={reveal.scope}
+                {reveal.services?.length ? ` (${reveal.services.join(',')})` : ''}
+              </div>
+              <div className="text-muted-foreground text-xs">
+                Closing this dialog wipes the private key from the browser. There is no recovery.
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>WireGuard config</Label>
+                  <Button size="sm" variant="outline" onClick={copyConfig}>
+                    {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </Button>
+                </div>
+                <textarea
+                  readOnly
+                  value={reveal.config ?? ''}
+                  className="w-full h-72 rounded border bg-muted/40 p-2 font-mono text-xs"
+                  onFocus={e => e.target.select()}
+                />
+              </div>
+              <div className="flex flex-col items-center gap-2">
+                <Label>QR (scan from WireGuard mobile)</Label>
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="WireGuard config QR" className="border rounded bg-white p-2" />
+                ) : (
+                  <div className="h-64 w-64 flex items-center justify-center text-xs text-muted-foreground border rounded">
+                    generating…
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button onClick={onClose}>I've saved it</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

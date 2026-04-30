@@ -669,6 +669,19 @@ export const api = {
       body: JSON.stringify({ dry_run: !!dryRun }),
     }),
 
+  // ── SSH password-auth toggle (sshd_config PasswordAuthentication) ─────
+  // GET status: { ok, password_auth: 'yes'|'no'|'default', effective_default,
+  //   match_overrides[], active_keys_total, active_keys_per_user }
+  // POST set: { enabled: boolean, force?: boolean }
+  // 409 with code=NO_ACTIVE_KEYS + requires_force=true on disable when
+  // no active ssh-access entries exist (lockout guard).
+  getSshPasswordAuthStatus: () => request('/ssh-access/password-auth/status'),
+  setSshPasswordAuth: (body) =>
+    request('/ssh-access/password-auth', {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+
   // ── Firewall manager ──────────────────────────────────────────────────
   // The CLI's --json contract is the wire format: list returns a bare
   // array of rules, status returns the bare object, the toggle paths

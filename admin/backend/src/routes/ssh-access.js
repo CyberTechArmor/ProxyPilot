@@ -262,6 +262,79 @@ sshAccessRouter.delete('/:id', requireSudo, async (req, res) => {
 
 const reconcileSchema = z.object({ dry_run: z.boolean().optional() });
 
+// ── Password authentication toggle ─────────────────────────────────────
+// Wraps `proxypilot ssh password-auth status|enable|disable`. The CLI
+// performs the dangerous bits (atomic write, sshd -t validation,
+// reload-with-rollback); the backend just relays operator intent and
+// surfaces the lockout-gate code so the dashboard can flip its modal
+// to the typed-phrase view.
+async function callProxypilotSshPasswordAuth(args, opts = {}) {
+  // Reuse the shellSingleQuote + execOnHost helpers but route through
+  // a different subcommand path.
+  const cmd = [
+    shellSingleQuote(PROXYPILOT_BIN),
+    '--json',
+    'ssh',
+    'password-auth',
+    ...args.map(shellSingleQuote),
+  ].join(' ');
+  let result;
+  try {
+    result = await execOnHost(cmd, { timeout: opts.timeout ?? 20000 });
+  } catch (e) {
+    if (e?.stdout) {
+      try { return JSON.parse(e.stdout); } catch { /* fall through */ }
+    }
+    throw new Error((e?.stderr || e?.stdout || e.message || 'proxypilot ssh password-auth failed').toString().trim());
+  }
+  const out = (result.stdout || '').toString();
+  try { return JSON.parse(out); }
+  catch { throw new Error(`proxypilot ssh password-auth produced non-JSON output: ${out.slice(0, 200)}`); }
+}
+
+sshAccessRouter.get('/password-auth/status', async (req, res) => {
+  try {
+    const result = await callProxypilotSshPasswordAuth(['status']);
+    if (result?.ok === false) return res.status(400).json(result);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+const passwordAuthSetSchema = z.object({
+  enabled: z.boolean(),
+  force: z.boolean().optional(),
+});
+
+sshAccessRouter.post('/password-auth', requireSudo, async (req, res) => {
+  let body;
+  try { body = passwordAuthSetSchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+  try {
+    const args = [body.enabled ? 'enable' : 'disable'];
+    if (!body.enabled && body.force) args.push('--force');
+    const result = await callProxypilotSshPasswordAuth(args);
+    if (result?.ok === false) {
+      // NO_ACTIVE_KEYS is the only code the disable path raises.
+      // Mirror the WOULD_STRAND posture from the revoke route.
+      if (result.code === 'NO_ACTIVE_KEYS') {
+        return res.status(409).json({ ...result, requires_force: true });
+      }
+      return res.status(400).json(result);
+    }
+    logAudit(req.user.id, 'SSH_PASSWORD_AUTH_SET', 'sshd_config', null, {
+      target: body.enabled ? 'yes' : 'no',
+      forced: !!body.force,
+      no_change: !!result?.no_change,
+      reload_method: result?.reload?.method ?? null,
+    }, req.ip);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 sshAccessRouter.post('/reconcile', requireSudo, async (req, res) => {
   let body;
   try {

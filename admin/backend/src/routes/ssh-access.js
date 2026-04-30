@@ -21,10 +21,29 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 
 async function execOnHost(command, { timeout = 15000 } = {}) {
   if (isInDocker) {
-    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;
+    // Wrap the inner command in single-quote shell escaping for the
+    // outer `sh -c` argv. shellSingleQuote handles every byte safely
+    // (including embedded single quotes); JSON.stringify here would
+    // re-introduce the same `$()`-in-double-quotes injection class
+    // we deliberately avoid below.
+    const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`;
     return execAsync(hostCommand, { timeout, maxBuffer: 4 * 1024 * 1024 });
   }
   return execAsync(command, { timeout, maxBuffer: 4 * 1024 * 1024 });
+}
+
+/**
+ * POSIX single-quote shell escape. Inside single quotes EVERY byte
+ * is literal except the single quote itself, which we encode by
+ * closing the literal, emitting an escaped quote, and reopening:
+ *   foo'bar  →  'foo'\''bar'
+ * Safe against `$()`, backticks, `$VAR`, newlines, `;`, `&&`, `|`,
+ * etc. The route's argv builder passes every operator-supplied
+ * value through this helper before joining with spaces.
+ */
+function shellSingleQuote(s) {
+  if (s === undefined || s === null) return "''";
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -35,13 +54,21 @@ async function execOnHost(command, { timeout = 15000 } = {}) {
  * parse first; only treat exec errors that produced no JSON as fatal.
  */
 async function callProxypilot(args, { stdin, timeout } = {}) {
-  // args is a list of pre-validated, shell-safe tokens (we control
-  // every value going in). We pass them through `printf %q` style
-  // quoting via JSON.stringify so an unexpected character can't break
-  // out of the argv list.
-  const cmd = [`${JSON.stringify(PROXYPILOT_BIN)}`, '--json', 'ssh', 'access', ...args.map(a => JSON.stringify(a))].join(' ');
+  // Every token (including operator-supplied --label / --reason
+  // values) is wrapped in POSIX single-quote escaping so embedded
+  // shell metacharacters cannot break out of the argv list. Do NOT
+  // switch this back to JSON.stringify — JSON's double-quote form
+  // leaves $() and backticks live for shell command substitution,
+  // which would let a label like `$(rm -rf /)` execute as root in
+  // the host PID namespace.
+  const cmd = [shellSingleQuote(PROXYPILOT_BIN), '--json', 'ssh', 'access', ...args.map(shellSingleQuote)].join(' ');
+  // Heredoc sentinel includes a random-ish 64-bit suffix so a
+  // pubkey containing the literal sentinel string cannot terminate
+  // the heredoc early. The sentinel is single-quoted on the
+  // opener (`<<'TAG'`) so the shell does no expansion on the body.
+  const sentinel = `PP_SSH_PUBKEY_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14).toUpperCase()}`;
   const wrapped = stdin
-    ? `cat <<'PP_SSH_PUBKEY_HEREDOC' | ${cmd}\n${stdin}\nPP_SSH_PUBKEY_HEREDOC`
+    ? `cat <<'${sentinel}' | ${cmd}\n${stdin}\n${sentinel}`
     : cmd;
   let result;
   try {

@@ -35,9 +35,9 @@ ConditionPathExists=/var/lib/proxypilot
 
 [Service]
 Type=oneshot
-ExecStart=${PROXYPILOT_BIN} ssh access reconcile --dry-run
-# Touch invocation runs through the standalone bin so we can keep the
-# user-facing CLI surface to the seven documented subcommands.
+# Touch runs through a standalone bin so the user-facing CLI surface
+# stays at the seven documented subcommands. Best-effort: returns
+# exit 0 even when wtmp is empty so the timer never enters failure.
 ExecStart=/usr/bin/env node ${PROXYPILOT_INSTALL_DIR:-/opt/proxypilot}/cli/bin/proxypilot-ssh-access-touch.js
 SuccessExitStatus=0 1
 EOF

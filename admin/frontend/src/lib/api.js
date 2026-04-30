@@ -638,6 +638,36 @@ export const api = {
 
   getContainerFileDownloadUrl: (name, path) => `${API_BASE}/lxc/containers/${name}/files/download?path=${encodeURIComponent(path)}`,
 
+  // ── SSH access (per-device authorized_keys ledger) ─────────────────────
+  listSshAccess: (filter = 'active') =>
+    request(`/ssh-access?filter=${encodeURIComponent(filter)}`),
+  getSshAccess: (id) =>
+    request(`/ssh-access/${encodeURIComponent(id)}`),
+  getSshAccessBootstrapScript: (id, { user, server } = {}) => {
+    const params = new URLSearchParams();
+    if (user) params.set('user', user);
+    if (server) params.set('server', server);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return request(`/ssh-access/${encodeURIComponent(id)}/bootstrap-script${qs}`);
+  },
+  addSshAccess: (data) =>
+    request('/ssh-access', { method: 'POST', body: JSON.stringify(data) }),
+  revokeSshAccess: (id, body) =>
+    request(`/ssh-access/${encodeURIComponent(id)}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+  removeSshAccess: (id, body) =>
+    request(`/ssh-access/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body || {}),
+    }),
+  reconcileSshAccess: (dryRun = false) =>
+    request('/ssh-access/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: !!dryRun }),
+    }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

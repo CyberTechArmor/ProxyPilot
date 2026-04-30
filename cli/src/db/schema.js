@@ -236,6 +236,28 @@ export function initSchema(db) {
     );
   `);
 
+  // ── SSH access (per-device authorized_keys ledger) ─────────────────────
+  // Mirror of /var/lib/proxypilot/ssh-access.json. id is operator-supplied
+  // and is the revoke key. fingerprint is UNIQUE so the same physical key
+  // can't be added under two ids; revoked rows still occupy the
+  // fingerprint slot so re-adding a known-bad key forces the operator to
+  // pick a fresh keypair. Active rows have revoked_at IS NULL.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ssh_access (
+      id TEXT PRIMARY KEY,
+      unix_user TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      fingerprint TEXT NOT NULL UNIQUE,
+      device_label TEXT,
+      added_at TEXT NOT NULL,
+      added_by TEXT,
+      revoked_at TEXT,
+      revoked_by TEXT,
+      revoked_reason TEXT,
+      last_seen_at TEXT
+    );
+  `);
+
   // ── Profiles ────────────────────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (

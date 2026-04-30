@@ -597,5 +597,92 @@ vpnPeer
     await vpnPeerShowCommand(name, opts, globalOpts);
   });
 
+// ── ssh access command group ────────────────────────────────────────────────
+import {
+  addCommand as sshAccessAddCommand,
+  revokeCommand as sshAccessRevokeCommand,
+  removeCommand as sshAccessRemoveCommand,
+  listCommand as sshAccessListCommand,
+  showCommand as sshAccessShowCommand,
+  reconcileCommand as sshAccessReconcileCommand,
+  bootstrapScriptCommand as sshAccessBootstrapScriptCommand,
+} from '../src/commands/ssh-access/index.js';
+
+const ssh = program
+  .command('ssh')
+  .description('SSH host management (per-device authorized_keys ledger)');
+
+const sshAccess = ssh
+  .command('access')
+  .description('Per-device SSH access manager (add, revoke, list, reconcile, bootstrap)');
+
+sshAccess
+  .command('add <id>')
+  .description('Register a device pubkey under <id> for the given unix user')
+  .requiredOption('--user <unix-user>', 'Target unix user whose authorized_keys gets the line')
+  .requiredOption('--pubkey <path-or-stdin-or-->', 'Path to .pub file, "-" for stdin, or the literal key string')
+  .option('--label <text>', 'Free-text device label shown in list / dashboard')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessAddCommand(id, opts, globalOpts);
+  });
+
+sshAccess
+  .command('revoke <id>')
+  .description('Mark an entry revoked and drop its line from authorized_keys')
+  .option('--reason <text>', 'Optional revoke reason (lands in audit_log)')
+  .option('--force', 'Override the would-strand-the-account lockout guard (typed confirmation required)')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessRevokeCommand(id, opts, globalOpts);
+  });
+
+sshAccess
+  .command('remove <id>')
+  .description('Hard-delete an entry (audit row preserves the deleted fingerprint)')
+  .option('--force', 'Override the would-strand-the-account lockout guard (typed confirmation required)')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessRemoveCommand(id, opts, globalOpts);
+  });
+
+sshAccess
+  .command('list')
+  .description('List ssh-access entries with status, fingerprint, and last-seen')
+  .option('--all', 'Include revoked entries')
+  .option('--active', 'Active entries only (default)')
+  .option('--revoked', 'Revoked entries only')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessListCommand(opts, globalOpts);
+  });
+
+sshAccess
+  .command('show <id>')
+  .description('Show one entry with full pubkey, fingerprint, audit fields')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessShowCommand(id, opts, globalOpts);
+  });
+
+sshAccess
+  .command('reconcile')
+  .description('Re-render authorized_keys for every affected unix user (idempotent)')
+  .option('--dry-run', 'Plan the rewrite without touching disk')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessReconcileCommand(opts, globalOpts);
+  });
+
+sshAccess
+  .command('bootstrap-script <id>')
+  .description('Print a self-contained shell snippet the operator runs on the new device')
+  .option('--user <unix-user>', 'Substitute the unix user into the printed instructions')
+  .option('--server <host>', 'Substitute the operator hostname into the printed ssh -i line')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await sshAccessBootstrapScriptCommand(id, opts, globalOpts);
+  });
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

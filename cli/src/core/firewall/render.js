@@ -12,6 +12,10 @@ const LOCALHOST_V6 = '::1/128';
  * CIDR, egress rules must be regenerated — not in scope for this step.
  */
 const LXC_BRIDGE_CIDR = '10.0.100.0/24';
+// Host's address on the LXC bridge — the only target the
+// container_egress chain restricts. External egress (DNS, internet,
+// host's other interfaces) falls through to chain default-accept.
+const LXC_BRIDGE_GW = '10.0.100.1';
 
 /**
  * Named services the firewall manager knows how to gate. Each entry
@@ -129,10 +133,17 @@ function renderContainerEgress(state) {
       );
     }
   }
-  // Default-deny tail: anything from the bridge that wasn't allowed
-  // above gets dropped. Inter-container traffic on the bridge is
-  // unaffected (the bridge handles it before it hits this chain).
-  lines.push(`    ip saddr ${LXC_BRIDGE_CIDR} drop`);
+  // Default-deny tail: bridge → host services that weren't allowed
+  // above get dropped. Scoped to `daddr 10.0.100.1` (the host's
+  // bridge interface) so external egress — DNS, package mirrors,
+  // upstream APIs the LXC's apps depend on — falls through to chain
+  // default-accept. Without this scope every LXC outbound packet was
+  // dropped, which broke DHCP renewal, container startup scripts,
+  // and made Caddy-proxied LXC services time out on any backend that
+  // reached out (a 3-4s page-load stall the operator could see).
+  // Inter-container traffic on the bridge is unaffected — the Linux
+  // bridge handles it before it ever hits this forward-hook chain.
+  lines.push(`    ip saddr ${LXC_BRIDGE_CIDR} ip daddr ${LXC_BRIDGE_GW} drop`);
   return lines.join('\n');
 }
 

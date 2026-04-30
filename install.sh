@@ -317,15 +317,35 @@ install_docker() {
         apt-get update -y
         apt-get install -y ca-certificates curl gnupg lsb-release
 
+        # Pick the right Docker repo path. Hard-coding linux/ubuntu
+        # 404s on Debian (e.g. trixie has no Ubuntu equivalent), so
+        # branch on /etc/os-release's ID. Both distros use
+        # VERSION_CODENAME for the suite; only the path between
+        # download.docker.com/linux/ and the codename differs.
+        local docker_id docker_codename
+        docker_id=$(. /etc/os-release && echo "${ID:-}")
+        docker_codename=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+        case "${docker_id}" in
+            debian|ubuntu) ;;
+            *)
+                log_error "Unsupported distro '${docker_id}' for Docker (need debian or ubuntu)"
+                exit 1
+                ;;
+        esac
+        if [[ -z "${docker_codename}" ]]; then
+            log_error "VERSION_CODENAME missing from /etc/os-release; cannot configure Docker apt source"
+            exit 1
+        fi
+
         # Add Docker's official GPG key
         install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        curl -fsSL "https://download.docker.com/linux/${docker_id}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
         chmod a+r /etc/apt/keyrings/docker.gpg
 
         # Set up the repository
         echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${docker_id} \
+          ${docker_codename} stable" | \
           tee /etc/apt/sources.list.d/docker.list > /dev/null
 
         # Install Docker Engine
@@ -335,7 +355,7 @@ install_docker() {
         systemctl enable docker
         systemctl start docker
 
-        log_success "Docker installed successfully"
+        log_success "Docker installed successfully (${docker_id} ${docker_codename})"
     fi
 }
 

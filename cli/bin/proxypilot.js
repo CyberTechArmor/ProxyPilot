@@ -449,6 +449,8 @@ import {
   peerEnableCommand as vpnPeerEnableCommand,
   peerDisableCommand as vpnPeerDisableCommand,
   peerRemoveCommand as vpnPeerRemoveCommand,
+  peerListCommand as vpnPeerListCommand,
+  peerShowCommand as vpnPeerShowCommand,
 } from '../src/commands/vpn/index.js';
 
 const vpn = program
@@ -520,6 +522,23 @@ vpnPeer
   .action(async (name, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await vpnPeerRemoveCommand(name, opts, globalOpts);
+  });
+
+vpnPeer
+  .command('list')
+  .description('List all peers with live wg show data joined in')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerListCommand(opts, globalOpts);
+  });
+
+vpnPeer
+  .command('show <name>')
+  .description('Show peer status (refuses to reprint config — pass --rotate-first to issue a new key)')
+  .option('--rotate-first', 'Generate a new keypair and print the new client config + QR')
+  .action(async (name, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnPeerShowCommand(name, opts, globalOpts);
   });
 
 // ── parse and execute ───────────────────────────────────────────────────────

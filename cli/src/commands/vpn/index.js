@@ -5,3 +5,5 @@ export { peerRotateCommand } from './peer-rotate.js';
 export { peerEnableCommand } from './peer-enable.js';
 export { peerDisableCommand } from './peer-disable.js';
 export { peerRemoveCommand } from './peer-remove.js';
+export { peerListCommand } from './peer-list.js';
+export { peerShowCommand } from './peer-show.js';

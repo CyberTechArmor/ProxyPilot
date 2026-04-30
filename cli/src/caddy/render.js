@@ -90,7 +90,6 @@ export function renderRoute(route, peers = []) {
     path_prefix = '/',
     tls_auto = 1,
     vpn_only = 0,
-    id,
   } = route;
   if (!domain) throw new Error('renderRoute: route.domain is required');
   if (!upstream_address) throw new Error('renderRoute: route.upstream_address is required');
@@ -105,12 +104,15 @@ export function renderRoute(route, peers = []) {
   if (vpn_only) {
     const sources = resolveRoutePeers(route, peers);
     const matcherIps = sources.length > 0 ? sources : [NO_ALLOWED_PEERS_SENTINEL];
-    const matcherName = `@vpn-${id ?? 'route'}`;
-    // Caddyfile remote_ip matcher takes a space-separated list of
-    // CIDRs. Sorted-by-trailing-octet for determinism.
-    lines.push(`    ${matcherName} remote_ip ${matcherIps.join(' ')}`);
+    // Caddyfile matcher names are scoped per-site, so a fixed
+    // `@vpn` name is unambiguous regardless of how many vpn-only
+    // routes exist. Avoiding a per-route id also lets the
+    // imperative addRoute() path render the Caddyfile before the
+    // SQLite INSERT (which is where the id lives) without needing
+    // to reorder lxc create's all-or-nothing flow.
+    lines.push(`    @vpn remote_ip ${matcherIps.join(' ')}`);
     lines.push(``);
-    lines.push(`    handle ${matcherName} {`);
+    lines.push(`    handle @vpn {`);
     if (path_prefix !== '/') {
       lines.push(`        handle ${path_prefix}* {`);
       lines.push(`            reverse_proxy ${upstream_address}`);

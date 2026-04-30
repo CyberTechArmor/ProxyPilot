@@ -42,6 +42,8 @@ lxc
   .option('--cpu <cores>', 'CPU core limit', parseInt)
   .option('--memory <mb>', 'Memory limit in MB', parseInt)
   .option('--disk <mb>', 'Disk limit in MB', parseInt)
+  .option('--vpn-only', 'Render the route with an @vpn remote_ip matcher (per-peer L7 scope)')
+  .option('--service <name>', 'Service tag for vpn-only routes (joins to peer scope_services_json)')
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await lxcCommands.create(opts, globalOpts);

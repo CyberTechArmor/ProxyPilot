@@ -128,7 +128,7 @@ function runInitScript(incusName, scriptPath) {
 // ---------------------------------------------------------------------------
 
 async function createCommand(opts, globalOpts) {
-  const { name, image, template, profile: profileName, domain, port, path: pathPrefix, initScript, cpu, memory, disk } = opts;
+  const { name, image, template, profile: profileName, domain, port, path: pathPrefix, initScript, cpu, memory, disk, vpnOnly = false, service = null } = opts;
 
   // 1. Validate inputs
   if (!name) {
@@ -220,9 +220,11 @@ async function createCommand(opts, globalOpts) {
       await addRoute(domain, upstream, {
         pathPrefix: pathPrefix || '/',
         tlsAuto: true,
+        vpnOnly: !!vpnOnly,
+        service: service || null,
       });
       routeCreated = true;
-      output.success(`Route added: ${domain} -> ${upstream}`);
+      output.success(`Route added: ${domain} -> ${upstream}${vpnOnly ? ' [vpn-only]' : ''}${service ? ` (service=${service})` : ''}`);
     }
 
     // 10. If --init-script provided, copy and execute
@@ -252,9 +254,9 @@ async function createCommand(opts, globalOpts) {
 
       if (domain) {
         const routeResult = db.prepare(`
-          INSERT INTO routes (domain, upstream_type, upstream_address, path_prefix, tls_auto, enabled, created_at, updated_at)
-          VALUES (?, 'lxc', ?, ?, 1, 1, datetime('now'), datetime('now'))
-        `).run(domain, `${bridgeIp}:${appPort}`, pathPrefix || '/');
+          INSERT INTO routes (domain, upstream_type, upstream_address, path_prefix, tls_auto, enabled, vpn_only, service, created_at, updated_at)
+          VALUES (?, 'lxc', ?, ?, 1, 1, ?, ?, datetime('now'), datetime('now'))
+        `).run(domain, `${bridgeIp}:${appPort}`, pathPrefix || '/', vpnOnly ? 1 : 0, service || null);
 
         db.prepare(`
           INSERT INTO container_routes (container_id, route_id) VALUES (?, ?)

@@ -1,6 +1,9 @@
 import { writeFile, unlink, readdir, rename, access } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import { getDb } from '../db/index.js';
+import { renderRoute } from './render.js';
+import { atomicWrite } from '../core/vpn/server.js';
 
 const CADDY_SITES_DIR = '/etc/caddy/sites';
 const CADDY_CONFIG_FILE = '/etc/caddy/Caddyfile';
@@ -20,53 +23,63 @@ export async function getCaddyConfig() {
 }
 
 /**
- * Add a reverse proxy route for a domain.
- * Creates a Caddyfile-style site block in /etc/caddy/sites/{domain} and reloads.
+ * Add a reverse proxy route for a domain. Writes a Caddyfile site
+ * block to /etc/caddy/sites/{domain} and reloads.
+ *
+ * Routes the work through the pure renderer in render.js so the
+ * vpn-only matcher path and the public path share one code path.
+ * For vpn-only routes the renderer emits an `@vpn remote_ip ...`
+ * matcher whose IP list is computed from the current enabled-peer
+ * set; subsequent peer mutations call reconcileVpnRoutes() to
+ * regenerate the matcher without going through addRoute again.
  *
  * @param {string} domain - The domain name to route
  * @param {string} upstreamAddress - The upstream address (e.g. 10.0.100.10:3000)
  * @param {object} [options={}] - Route options
  * @param {string} [options.pathPrefix='/'] - URL path prefix
  * @param {boolean} [options.tlsAuto=true] - Whether to use automatic TLS
- * @param {object} [options.headers={}] - Additional headers to set
+ * @param {boolean} [options.vpnOnly=false] - Render with @vpn remote_ip matcher
+ *                                            (per-peer scope at L7)
+ * @param {string} [options.service] - Optional service tag joining the
+ *                                     route to peer scope_services_json
  */
 export async function addRoute(domain, upstreamAddress, options = {}) {
-  const { pathPrefix = '/', tlsAuto = true, headers = {} } = options;
+  const { pathPrefix = '/', tlsAuto = true, vpnOnly = false, service = null } = options;
 
-  const siteAddress = tlsAuto ? domain : `http://${domain}`;
-
-  let config = `# ProxyPilot Managed Route\n`;
-  config += `# Generated: ${new Date().toISOString()}\n\n`;
-  config += `${siteAddress} {\n`;
-
-  if (pathPrefix !== '/') {
-    config += `    handle ${pathPrefix}* {\n`;
-    config += `        reverse_proxy ${upstreamAddress}\n`;
-    config += `    }\n`;
-  } else {
-    config += `    reverse_proxy ${upstreamAddress}\n`;
+  // Resolve enabled peers if the route is vpn-only. For non-vpn-only
+  // routes we skip the SQLite read entirely — keeps `lxc create`
+  // independent of the VPN module on hosts where VPN isn't enabled.
+  let peers = [];
+  if (vpnOnly) {
+    try {
+      peers = getDb().prepare(`
+        SELECT name, allowed_ip, scope, scope_services_json
+        FROM vpn_peers
+        WHERE status = 'enabled'
+      `).all();
+    } catch {
+      // No vpn_peers table on a fresh install where VPN was never
+      // enabled — peers stays empty, the matcher renders with the
+      // sentinel, and the route is closed until VPN comes up.
+      peers = [];
+    }
   }
 
-  // Security headers
-  config += `\n    header {\n`;
-  config += `        X-Frame-Options "SAMEORIGIN"\n`;
-  config += `        X-Content-Type-Options "nosniff"\n`;
-  config += `        X-XSS-Protection "1; mode=block"\n`;
-  config += `        Referrer-Policy "strict-origin-when-cross-origin"\n`;
-  for (const [key, value] of Object.entries(headers)) {
-    config += `        ${key} "${value}"\n`;
-  }
-  config += `    }\n`;
-
-  config += `\n    log {\n`;
-  config += `        output file /var/log/caddy/${domain}.log\n`;
-  config += `    }\n`;
-  config += `}\n`;
+  const config = renderRoute({
+    domain,
+    upstream_address: upstreamAddress,
+    path_prefix: pathPrefix,
+    tls_auto: tlsAuto ? 1 : 0,
+    vpn_only: vpnOnly ? 1 : 0,
+    service,
+  }, peers);
 
   const configPath = `${CADDY_SITES_DIR}/${domain}`;
-  await writeFile(configPath, config);
+  // Atomic write — same .tmp + chmod + rename pattern wg0.conf and
+  // the firewall ruleset use, so a crash mid-write never leaves a
+  // partial site file that Caddy could pick up at the next reload.
+  atomicWrite(configPath, config, 0o644);
 
-  // Reload Caddy
   await reloadCaddy();
 }
 

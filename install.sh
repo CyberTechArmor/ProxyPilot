@@ -313,6 +313,18 @@ install_docker() {
     else
         log_info "Installing Docker..."
 
+        # Drop any stale docker.list / GPG key from a previous failed
+        # install before the first apt-get update. An older version of
+        # this script wrote linux/ubuntu unconditionally, which 404s on
+        # Debian; if that file is still on disk, `apt-get update` here
+        # aborts before we get a chance to rewrite it.
+        if [[ -f /etc/apt/sources.list.d/docker.list ]] && \
+           grep -q "download.docker.com/linux/ubuntu" /etc/apt/sources.list.d/docker.list 2>/dev/null && \
+           [[ "$(. /etc/os-release && echo "${ID:-}")" != "ubuntu" ]]; then
+            log_warn "Removing stale Docker apt source pointing at linux/ubuntu (this host is not Ubuntu)"
+            rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.gpg
+        fi
+
         # Install prerequisites
         apt-get update -y
         apt-get install -y ca-certificates curl gnupg lsb-release

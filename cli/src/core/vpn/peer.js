@@ -15,6 +15,42 @@ import {
 } from './server.js';
 import { dumpPeers, isOnline } from './status.js';
 import { readState as fwReadState } from '../firewall/state.js';
+import { reconcile as fwReconcile } from '../firewall/reconcile.js';
+
+/**
+ * Run a firewall reconcile after a peer mutation so any vpn-only
+ * rule's per-/32 source set picks up the new shape on the same
+ * call. We never call nft directly; reconcile is the single L4
+ * writer.
+ *
+ * If reconcile fails (lockout check, nft apply error, etc.) we do
+ * NOT throw — the SQLite mutation + audit row + wg syncconf are
+ * already durable, and a hard throw would mislead the CLI into
+ * reporting the whole peer mutation as failed when only the L4
+ * convergence step is incomplete. The operator can re-run
+ * `proxypilot firewall reconcile` to catch up. The firewall
+ * summary is returned so the CLI can surface a warning.
+ */
+async function reconcileAfterPeerMutation(actor) {
+  try {
+    const r = await fwReconcile({ actor });
+    return {
+      ok: r.ok,
+      checksum: r.checksum ?? null,
+      rule_count: r.ruleCount ?? null,
+      warnings: r.warnings ?? [],
+      rejection: r.rejection ?? null,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      checksum: null,
+      rule_count: null,
+      warnings: [],
+      rejection: { reason: e.message },
+    };
+  }
+}
 
 export const VPN_PEERS_DIR = '/var/lib/proxypilot/vpn-peers';
 const POOL_START_SUFFIX = 10;
@@ -202,7 +238,7 @@ function chownToInvoker(filePath) {
  * client config file at /var/lib/proxypilot/vpn-peers/<name>.conf, mode
  * 0600. It never reaches SQLite or the audit log.
  */
-export function addPeer({ name, scope = 'admin', services = null, actor } = {}) {
+export async function addPeer({ name, scope = 'admin', services = null, actor } = {}) {
   validatePeerName(name);
   validateScope(scope, services);
   const cfg = readVpnConfig();
@@ -269,6 +305,7 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
   });
 
   syncconfWg0();
+  const firewall = await reconcileAfterPeerMutation(actor);
 
   return {
     id,
@@ -280,6 +317,7 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
     privateKey: kp.private,
     configBody: confBody,
     configPath: confPath,
+    firewall,
   };
 }
 
@@ -288,7 +326,7 @@ export function addPeer({ name, scope = 'admin', services = null, actor } = {}) 
  * the IP, scope, and services. The old key is invalidated the moment
  * `wg syncconf` runs — no overlap window. Used when a device is lost.
  */
-export function rotatePeer({ name, actor } = {}) {
+export async function rotatePeer({ name, actor } = {}) {
   validatePeerName(name);
   const cfg = readVpnConfig();
   if (!cfg) {
@@ -337,6 +375,7 @@ export function rotatePeer({ name, actor } = {}) {
   // Belt-and-braces evict the old key in case syncconf raced with a
   // fresh handshake. Best-effort because syncconf already removed it.
   try { wgPeerRemove(peer.public_key); } catch { /* best-effort */ }
+  const firewall = await reconcileAfterPeerMutation(actor);
 
   return {
     id: peer.id,
@@ -348,6 +387,7 @@ export function rotatePeer({ name, actor } = {}) {
     privateKey: kp.private,
     configBody: confBody,
     configPath: confPath,
+    firewall,
   };
 }
 
@@ -363,7 +403,7 @@ function countEnabledPeers() {
  * and the live interface evicts it via wgPeerRemove. Re-enabling restores
  * the same key + IP.
  */
-export function disablePeer({ name, force = false, actor } = {}) {
+export async function disablePeer({ name, force = false, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -402,10 +442,11 @@ export function disablePeer({ name, force = false, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'disabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const firewall = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall };
 }
 
-export function enablePeer({ name, actor } = {}) {
+export async function enablePeer({ name, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -431,7 +472,8 @@ export function enablePeer({ name, actor } = {}) {
     before: { status: peer.status },
     after: { status: 'enabled', name, ip: peer.allowed_ip, public_key: peer.public_key },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const firewall = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall };
 }
 
 /**
@@ -440,7 +482,7 @@ export function enablePeer({ name, actor } = {}) {
  * Refuses without force if (a) the peer handshook in the last 24h, or
  * (b) it's the only enabled peer.
  */
-export function removePeer({ name, force = false, actor } = {}) {
+export async function removePeer({ name, force = false, actor } = {}) {
   validatePeerName(name);
   const peer = readPeerByName(name);
   if (!peer) throw new Error(`peer "${name}" not found`);
@@ -500,7 +542,8 @@ export function removePeer({ name, force = false, actor } = {}) {
       status: peer.status, public_key: peer.public_key,
     },
   });
-  return { ok: true, name, ip: peer.allowed_ip };
+  const firewall = await reconcileAfterPeerMutation(actor);
+  return { ok: true, name, ip: peer.allowed_ip, firewall };
 }
 
 /**
@@ -562,7 +605,7 @@ export function listPeers() {
  * Wiring fwReconcile into the mutation flow lands in the next commit
  * along with the parallel changes to addPeer / rotatePeer / etc.
  */
-export function setPeerScope({ name, scope, services = null, force = false, actor } = {}) {
+export async function setPeerScope({ name, scope, services = null, force = false, actor } = {}) {
   validatePeerName(name);
   validateScope(scope, services);
   const peer = readPeerByName(name);
@@ -633,12 +676,15 @@ export function setPeerScope({ name, scope, services = null, force = false, acto
     after: { scope, services: services ?? null },
   });
 
+  const firewall = await reconcileAfterPeerMutation(actor);
+
   return {
     ok: true,
     name,
     ip: peer.allowed_ip,
     before,
     after: { scope, services: services ?? null },
+    firewall,
   };
 }
 

@@ -1,5 +1,5 @@
 import { setPeerScope } from '../../core/vpn/index.js';
-import { reconcile as fwReconcile } from '../../core/firewall/index.js';
+import { surfaceFirewallResult } from './_firewall-feedback.js';
 import * as output from '../../output.js';
 
 const TYPED_PHRASE = 'demote the last admin peer';
@@ -14,10 +14,10 @@ function parseServices(raw) {
 
 /**
  * Update a peer's scope (full | admin | services [--services <list>]).
- * Persists the SQLite mutation, then reconciles the firewall so any
- * vpn-only rule's per-/32 source set picks up the new shape on the
- * same call. Reconcile is the single L4 mutation point; we never
- * touch nft directly here.
+ * The core mutation persists the SQLite change, writes the audit row,
+ * AND triggers a firewall reconcile so vpn-only rules' per-/32 source
+ * sets pick up the new shape on the same operator action. Reconcile
+ * is the single L4 mutation point; we never call nft directly.
  *
  * Lockout gate (LAST_FULL_ADMIN_DEMOTE) refuses to demote the only
  * enabled full|admin peer to scope=services when any vpn-only rule
@@ -32,7 +32,7 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
   try {
     let result;
     try {
-      result = setPeerScope({ name, scope, services, force: false, actor });
+      result = await setPeerScope({ name, scope, services, force: false, actor });
     } catch (e) {
       if (e.code !== 'LAST_FULL_ADMIN_DEMOTE') throw e;
       if (!opts.force) {
@@ -75,13 +75,8 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
         process.exitCode = 1;
         return;
       }
-      result = setPeerScope({ name, scope, services, force: true, actor });
+      result = await setPeerScope({ name, scope, services, force: true, actor });
     }
-
-    // Reconcile L4 so the new /32 set lands in the live nft ruleset.
-    // We pass actor through so the audit trail attributes the
-    // resulting firewall_reconciles row to the same operator.
-    const fw = await fwReconcile({ actor });
 
     if (globalOpts.json) {
       output.json({
@@ -90,12 +85,7 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
         ip: result.ip,
         before: result.before,
         after: result.after,
-        firewall: {
-          ok: fw.ok,
-          checksum: fw.checksum ?? null,
-          warnings: fw.warnings ?? [],
-          rejection: fw.rejection ?? null,
-        },
+        firewall: result.firewall ?? null,
       });
       return;
     }
@@ -105,13 +95,7 @@ export async function peerSetScopeCommand(name, scope, opts, globalOpts) {
       ` → ${result.after.scope}` +
       (result.after.services ? `(${result.after.services.join(',')})` : ''),
     );
-    for (const w of (fw.warnings ?? [])) output.warn(w);
-    if (!fw.ok) {
-      output.error(`firewall reconcile failed: ${fw.rejection?.reason ?? 'unknown'}`);
-      process.exitCode = 1;
-      return;
-    }
-    output.info(`firewall reconciled (${fw.ruleCount} enabled rules, ${fw.checksum})`);
+    surfaceFirewallResult(result.firewall);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message, code: e.code ?? null });

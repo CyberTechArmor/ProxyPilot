@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { addPeer, renderQrAnsi, renderQrPng, VPN_PEERS_DIR } from '../../core/vpn/index.js';
 import * as output from '../../output.js';
+import { surfaceFirewallResult } from './_firewall-feedback.js';
 
 /**
  * Print the post-add artifact bundle: client config text, ANSI QR for
@@ -38,7 +39,7 @@ export async function peerAddCommand(name, opts, globalOpts) {
     const services = opts.services
       ? String(opts.services).split(',').map(s => s.trim()).filter(Boolean)
       : null;
-    const result = addPeer({ name, scope: opts.scope ?? 'admin', services });
+    const result = await addPeer({ name, scope: opts.scope ?? 'admin', services });
     if (globalOpts.json) {
       output.json({
         ok: true,
@@ -53,10 +54,12 @@ export async function peerAddCommand(name, opts, globalOpts) {
         // the one-shot delivery channel and the JSON consumer is the
         // operator's own tooling. Never goes through audit log / SQLite.
         private_key: result.privateKey,
+        firewall: result.firewall ?? null,
       });
       return;
     }
     printPeerArtifact(result);
+    surfaceFirewallResult(result.firewall);
   } catch (e) {
     if (globalOpts.json) {
       output.json({ ok: false, error: e.message });

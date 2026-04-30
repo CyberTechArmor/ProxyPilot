@@ -100,10 +100,12 @@ export async function setScopeCommand(id, scope, opts, globalOpts) {
 
 export async function addManualCommand(opts, globalOpts) {
   const port = parseInt(opts.port, 10);
+  const portEnd = opts.portEnd != null ? parseInt(opts.portEnd, 10) : null;
   let result;
   try {
     result = addManual({
       port,
+      portEnd,
       proto: opts.proto,
       scope: opts.scope,
       reason: opts.reason,

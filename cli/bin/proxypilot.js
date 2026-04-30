@@ -369,7 +369,8 @@ firewall
 firewall
   .command('add-manual')
   .description('Add an operator-curated firewall rule for a non-discoverable listener')
-  .requiredOption('--port <p>', 'Port number', parseInt)
+  .requiredOption('--port <p>', 'Port number (or range start when --port-end is set)', parseInt)
+  .option('--port-end <p>', 'End of port range (inclusive)', parseInt)
   .requiredOption('--proto <tcp|udp>', 'Protocol')
   .requiredOption('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
   .requiredOption('--reason <text>', 'Why this port is open')

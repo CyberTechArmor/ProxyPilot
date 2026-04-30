@@ -99,16 +99,22 @@ export function setScope({ id, scope, sourceCidrs, actor }) {
  * in the same `discovered` array as scanned entries but with
  * source: 'manual'.
  */
-export function addManual({ port, proto, scope, reason, sourceCidrs, actor }) {
+export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, actor }) {
   if (!VALID_SCOPES.includes(scope)) throw new Error(`invalid scope: ${scope}`);
   if (proto !== 'tcp' && proto !== 'udp') throw new Error(`invalid proto: ${proto}`);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`invalid port: ${port}`);
   }
+  if (portEnd != null) {
+    if (!Number.isInteger(portEnd) || portEnd < port || portEnd > 65535) {
+      throw new Error(`invalid port range: ${port}-${portEnd}`);
+    }
+  }
   if (!reason) throw new Error('--reason is required for manual rules');
 
   const state = readState();
-  const id = `manual-host-operator-${port}-${proto}`;
+  const range = portEnd && portEnd !== port ? `${port}-${portEnd}` : `${port}`;
+  const id = `manual-host-operator-${range}-${proto}`;
   if (findRule(state, id)) {
     throw new Error(`a manual rule with id ${id} already exists`);
   }
@@ -119,7 +125,7 @@ export function addManual({ port, proto, scope, reason, sourceCidrs, actor }) {
     container: null,
     process: null,
     port_start: port,
-    port_end: null,
+    port_end: portEnd ?? null,
     proto,
     scope,
     enabled: true,

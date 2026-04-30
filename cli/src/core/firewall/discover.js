@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { readState, writeState } from './state.js';
 import { audit } from '../../db/audit.js';
+import { listInstances } from '../../incus/client.js';
+import { getCaddyConfig } from '../../caddy/client.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -154,10 +156,132 @@ export function reconcileDiscovery(discoveredSet, { now = new Date() } = {}) {
 }
 
 /**
- * Top-level entrypoint for the host scanner. Returns the same summary
- * as reconcileDiscovery so the CLI can print it.
+ * Walk listeners inside every running Incus instance via
+ * `incus exec <name> -- ss -H -tulnp`. Containers without `ss`
+ * available are silently skipped (a missing tool is not a discovery
+ * failure — the operator just won't see those rows).
  */
-export function scan() {
+export async function scanLxc() {
+  let instances;
+  try {
+    instances = await listInstances();
+  } catch {
+    return []; // incus unavailable → no lxc listeners; not an error here
+  }
+  const out = [];
+  for (const inst of instances) {
+    if (inst.status !== 'Running') continue;
+    const r = spawnSync('incus', ['exec', inst.name, '--', 'ss', '-H', '-tulnp'], {
+      encoding: 'utf-8',
+    });
+    if (r.status !== 0) continue;
+    const seen = new Set();
+    for (const line of r.stdout.split('\n')) {
+      if (!line.trim()) continue;
+      for (const rec of parseSsLine(line)) {
+        const key = `${rec.proto}:${rec.port}:${rec.process ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          source: 'lxc',
+          container: inst.name,
+          process: rec.process,
+          port_start: rec.port,
+          port_end: null,
+          proto: rec.proto,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * `docker ps --format json` lines look like:
+ *   {"Ports":"0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 0.0.0.0:50000-60000->50000-60000/udp",
+ *    "Names":"livekit", ...}
+ * We extract the *host-side* port (left of `->`) since that's what the
+ * host firewall actually gates. Ranges (`50000-60000`) are preserved
+ * as `port_end`.
+ */
+export function scanDocker() {
+  const r = spawnSync('docker', ['ps', '--format', '{{json .}}'], { encoding: 'utf-8' });
+  if (r.status !== 0) return [];
+  const out = [];
+  for (const line of r.stdout.split('\n')) {
+    if (!line.trim()) continue;
+    let json;
+    try { json = JSON.parse(line); } catch { continue; }
+    const ports = json.Ports ?? '';
+    const name = json.Names ?? json.ID ?? 'unknown';
+    const seen = new Set();
+    for (const piece of ports.split(',').map(p => p.trim()).filter(Boolean)) {
+      // host-side[->container-side]/proto, host-side may be omitted for unpublished ports
+      const m = piece.match(/^(?:([^:]+):)?(\d+(?:-\d+)?)->(\d+(?:-\d+)?)\/(tcp|udp)/);
+      if (!m) continue;
+      const host = m[1];
+      if (host === '127.0.0.1' || host === '[::1]') continue;
+      const [start, end] = m[2].split('-').map(n => parseInt(n, 10));
+      const proto = m[4];
+      const key = `${proto}:${start}:${end ?? start}:${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        source: 'docker',
+        container: name,
+        process: null,
+        port_start: start,
+        port_end: end ?? null,
+        proto,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk the Caddy admin API for caddy-l4 listeners. Caddy-L4 servers
+ * sit under `apps.layer4.servers.<name>.listen[]`; each listen entry
+ * is a string like `:3306` or `:50000-60000/udp`.
+ */
+export async function scanCaddyL4() {
+  let cfg;
+  try { cfg = await getCaddyConfig(); } catch { return []; }
+  const servers = cfg?.apps?.layer4?.servers ?? {};
+  const out = [];
+  for (const [name, server] of Object.entries(servers)) {
+    for (const spec of (server.listen ?? [])) {
+      // [host]:start[-end][/proto]; default proto tcp
+      const m = String(spec).match(/^([^:]*):(\d+(?:-\d+)?)(?:\/(tcp|udp))?$/);
+      if (!m) continue;
+      const host = m[1];
+      if (host === '127.0.0.1' || host === '[::1]') continue;
+      const [start, end] = m[2].split('-').map(n => parseInt(n, 10));
+      const proto = (m[3] ?? 'tcp');
+      out.push({
+        source: 'caddy-l4',
+        container: null,
+        process: name,
+        port_start: start,
+        port_end: end ?? null,
+        proto,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Top-level entrypoint. Runs all four scanners and feeds their union
+ * into reconcileDiscovery. A failing scanner does not abort the whole
+ * scan — its records are simply absent for this round and existing
+ * state for that source survives because reconcileDiscovery only GCs
+ * sources it actually scanned.
+ */
+export async function scan() {
   const host = scanHost();
-  return reconcileDiscovery(host);
+  const lxc = await scanLxc();
+  const docker = scanDocker();
+  const caddyL4 = await scanCaddyL4();
+  return reconcileDiscovery([...host, ...lxc, ...docker, ...caddyL4]);
 }

@@ -4,7 +4,7 @@ import * as output from '../../output.js';
 export async function scanCommand(opts, globalOpts) {
   let result;
   try {
-    result = scan();
+    result = await scan();
   } catch (err) {
     output.error(`Scan failed: ${err.message}`);
     process.exitCode = 1;

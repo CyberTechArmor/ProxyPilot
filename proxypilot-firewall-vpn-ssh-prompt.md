@@ -578,6 +578,27 @@ CREATE TABLE vpn_ip_pool (
 
 ## SSH Certificate Authority
 
+> **Spec deviation (2026-04-30):** The SSH CA chain (build sequence
+> steps 8 through 12, plus step 15's `harden-vpn-only` transition)
+> is **shelved indefinitely**. For ProxyPilot's current scale
+> (single-admin hosts, no fleet, no Infisical integration), the
+> CA's wins — short-lived credentials, federated trust, centralized
+> revocation across many hosts — don't justify its complexity.
+>
+> The replacement spec lives in
+> `## SSH Access Management (per-device authorized_keys)` below.
+> ProxyPilot manages a SQLite ledger of per-device public keys,
+> writes / removes them from `~/.ssh/authorized_keys` atomically,
+> ships a copy-pasteable bootstrap script for adding a new device,
+> and exposes a "revoke" surface through the CLI and the admin
+> dashboard.
+>
+> The SSH CA spec below is preserved for historical reference and
+> can be revisited when the operational surface changes (multiple
+> admins, fleet of hosts, or Infisical lands as a first-class
+> dependency). Do **not** implement steps 8 through 12 or step 15
+> until that spec deviation is reversed.
+
 ### Purpose
 
 Replaces the per-user `authorized_keys` model with an SSH user CA.
@@ -827,6 +848,241 @@ CREATE TABLE ssh_principals (
   PRIMARY KEY (principal, unix_user)
 );
 ```
+
+## SSH Access Management (per-device authorized_keys)
+
+> Replaces the SSH Certificate Authority section above (which is
+> shelved per the deviation note). This is the per-device access
+> manager ProxyPilot ships *today*, designed for single-admin /
+> few-device scale.
+
+### Purpose
+
+Wrap `~/.ssh/authorized_keys` with a SQLite ledger so the operator
+can:
+
+* Add a new device's public key in one CLI call (or one paste from
+  the dashboard) and have it land in the right user's
+  `authorized_keys` atomically.
+* Revoke a device's key in one call — the line is removed from
+  `authorized_keys`, the SQLite row is marked revoked, and audit
+  carries the actor + reason.
+* See every device that currently has SSH access, when each was
+  added, when each was last seen handshaking (best-effort, parsed
+  from `last` / `lastlog`), and who added it.
+* Generate a copy-pasteable bootstrap script the operator runs on
+  the new device — the script mints an ed25519 keypair locally,
+  prints the public key, and prints the exact `proxypilot ssh
+  access add` command to run on the server. The private key never
+  leaves the device.
+
+This ships on all profiles. It does **not** disable
+`PasswordAuthentication` itself; that's a one-line operator edit
+in `/etc/ssh/sshd_config` after the first device is registered
+and verified working. (We do not flip that bit automatically —
+the lockout risk is too high without operator confirmation.)
+
+### Source of Truth
+
+`/var/lib/proxypilot/ssh-access.json` mirrors the SQLite table for
+the same dual-write reasons firewall.json does: JSON is
+human-readable / git-restorable, SQLite is queryable. Schema:
+
+```jsonc
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "alice-laptop",
+      "unix_user": "root",
+      "public_key": "ssh-ed25519 AAAAC3Nza... alice@laptop",
+      "fingerprint": "SHA256:abcd...",
+      "device_label": "Alice's MacBook Pro",
+      "added_at": "2026-04-30T14:21:00Z",
+      "added_by": "alice",
+      "revoked_at": null,
+      "revoked_by": null,
+      "revoked_reason": null,
+      "last_seen_at": "2026-04-30T15:02:11Z"
+    }
+  ]
+}
+```
+
+`id` is operator-supplied, must be unique, and is what the
+revoke / list commands key on. `device_label` is a free-text
+description shown in the dashboard.
+
+### SQLite Schema
+
+```sql
+CREATE TABLE ssh_access (
+  id TEXT PRIMARY KEY,
+  unix_user TEXT NOT NULL,
+  public_key TEXT NOT NULL,                  -- the full pubkey line
+  fingerprint TEXT NOT NULL UNIQUE,          -- ssh-keygen -lf output
+  device_label TEXT,
+  added_at TEXT NOT NULL,
+  added_by TEXT,
+  revoked_at TEXT,
+  revoked_by TEXT,
+  revoked_reason TEXT,
+  last_seen_at TEXT
+);
+```
+
+Active rows have `revoked_at IS NULL`. Revoked rows are kept for
+audit (so historical "who had access in March" queries still
+work); they're not re-pushed to `authorized_keys` on reconcile.
+
+### Reconciliation
+
+`proxypilot ssh access reconcile` is the single function that
+rewrites `~/<unix_user>/.ssh/authorized_keys` for every distinct
+unix_user that has at least one active row in `ssh_access`. It:
+
+1. Reads `ssh_access.json`.
+2. For each active row, groups by `unix_user`.
+3. For each unix_user, reads the existing `authorized_keys`,
+   preserves any line that does **not** match a ProxyPilot
+   fingerprint (so operator-added keys outside ProxyPilot stay
+   put), then appends one line per active row in `id`-sorted
+   order. Each ProxyPilot-managed line carries a stable trailing
+   comment `# proxypilot:<id>` so the next reconcile can
+   identify and replace it.
+4. Atomic-writes the new file (`.tmp` + chmod 0600 + rename) and
+   chowns to the unix user's uid:gid.
+5. Writes an audit row per affected user with
+   `before_count` / `after_count`.
+
+Reconcile is triggered on every `add` / `remove` / `revoke`
+mutation. A timer-driven safety reconcile runs every 10 minutes
+to catch drift if the operator manually edited `authorized_keys`.
+
+### CLI Surface
+
+```
+proxypilot ssh access add <id> --user <unix-user>
+                               --pubkey <path-or-stdin-or-->
+                               [--label <text>]
+proxypilot ssh access revoke <id> [--reason <text>]
+proxypilot ssh access remove <id>            # hard delete (audit kept)
+proxypilot ssh access list [--all|--active|--revoked]
+proxypilot ssh access show <id>
+proxypilot ssh access reconcile [--dry-run]
+proxypilot ssh access bootstrap-script <id> [--user <unix-user>]
+                                            [--server <host>]
+```
+
+`add`:
+
+* Validates the public key by piping through `ssh-keygen -l -f -`;
+  rejects on parse failure or a fingerprint that already exists
+  in `ssh_access` (active or revoked).
+* Inserts the SQLite row, mirrors to JSON, reconciles. Audit
+  action `ssh.access.add`.
+
+`revoke`:
+
+* Marks the row revoked with timestamp + actor + optional reason.
+  Reconcile drops the line from `authorized_keys`. Audit action
+  `ssh.access.revoke`.
+* The unix user keeps existing SSH sessions — `authorized_keys`
+  is consulted at connection time only. Operator can `kill` the
+  session manually if they need an immediate eviction.
+
+`remove`:
+
+* Hard-deletes the SQLite row. Audit row references the deleted
+  fingerprint so the trail is recoverable. Reconcile re-renders.
+  Used when an entry was added by accident; revoke is the normal
+  path for a working entry.
+
+`bootstrap-script`:
+
+* Emits a self-contained shell snippet the operator copies to the
+  new device. The snippet:
+
+  ```sh
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  KEY_PATH="$HOME/.ssh/proxypilot_<id>_ed25519"
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  if [ -f "$KEY_PATH" ]; then
+    echo "Key already exists at $KEY_PATH — refusing to overwrite." >&2
+    exit 1
+  fi
+  ssh-keygen -t ed25519 -f "$KEY_PATH" -N "" \
+    -C "proxypilot:<id>@$(hostname -s)"
+
+  PUBKEY="$(cat "${KEY_PATH}.pub")"
+  cat <<EOF
+
+  ==== Public key generated. Run this command on the ProxyPilot host: ====
+
+  proxypilot ssh access add <id> --user <unix-user> \\
+    --label "$(hostname -s) ($(uname -s))" \\
+    --pubkey - <<KEY
+  ${PUBKEY}
+  KEY
+
+  ==== Then connect with: ====
+
+  ssh -i ${KEY_PATH} <unix-user>@<server>
+
+  EOF
+  ```
+
+* `--server` is optional; when set, the printed `ssh -i ...` line
+  uses the operator's hostname instead of `<server>`. Same for
+  `--user`.
+* The script never sends anything to the server. The operator
+  reads the printed pubkey and runs the printed command on the
+  server themselves — same trust model as `ssh-copy-id`, no
+  privileged channel required.
+
+### Dashboard
+
+A new "SSH Access" panel under the existing admin dashboard:
+
+* Table of active devices (id, user, label, added_at, last_seen).
+* "Add device" button → modal showing the bootstrap script with
+  a copy-to-clipboard button. The operator pastes the resulting
+  `proxypilot ssh access add` command into a server shell.
+* Per-row "Revoke" button with confirmation prompt; reason is
+  optional.
+* Filter / sort by user, label, added_at, last_seen.
+* Revoked devices view (separate tab) for audit.
+
+### Composition with the Firewall + VPN
+
+* The operator's typical "lock SSH down to VPN-only" flow is two
+  commands: `proxypilot vpn peer add my-laptop --scope admin`
+  followed by `proxypilot firewall set-scope base-ssh vpn-only`.
+  After both, port 22 is only reachable from inside the VPN
+  subnet. This composes the existing firewall manager + VPN
+  manager — no new code beyond what's shipped by step 7.
+* `ssh access` is layered on top: even with the firewall closed
+  to public, sshd still wants a key to authenticate. The access
+  manager makes the per-device key registration the operator
+  workflow.
+
+### What this DOES NOT do
+
+* No CA, no signed certs, no KRL. Revocation is per-pubkey via
+  `authorized_keys` line removal.
+* No `force-command`, no `source-address` cert options. If the
+  operator wants to restrict a key to a CIDR, they edit the
+  `authorized_keys` line by hand in the operator-managed section
+  (above the `# proxypilot-managed:` marker the reconcile
+  preserves).
+* No automatic `PasswordAuthentication no` flip. That's a one-
+  line `sshd_config` edit the operator does after their first
+  device is verified working — too lockout-prone to automate.
+* No principals / role mapping. Each row binds one pubkey to one
+  unix user. If the operator wants `alice` to log in as both
+  `root` and `deploy`, that's two `add` calls.
 
 ## Cross-Subsystem Integration
 

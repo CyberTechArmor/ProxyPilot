@@ -497,11 +497,20 @@ import {
   peerSetScopeCommand as vpnPeerSetScopeCommand,
   peerListCommand as vpnPeerListCommand,
   peerShowCommand as vpnPeerShowCommand,
+  statusCommand as vpnStatusCommand,
 } from '../src/commands/vpn/index.js';
 
 const vpn = program
   .command('vpn')
   .description('WireGuard VPN management (composes with firewall manager)');
+
+vpn
+  .command('status')
+  .description('Show server config (endpoint, listen port, public key) and live wg0 state')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnStatusCommand(opts, globalOpts);
+  });
 
 vpn
   .command('enable')

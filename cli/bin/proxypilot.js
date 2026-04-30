@@ -359,6 +359,7 @@ firewall
   .description('Enable a firewall rule and reconcile')
   .option('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
   .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .option('--yes', 'Skip the public-internet confirmation prompt')
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
@@ -377,6 +378,7 @@ firewall
   .command('set-scope <id> <scope>')
   .description('Change a rule\'s scope and reconcile')
   .option('--source-cidr <cidr>', 'Pin to source CIDR (repeatable; clears existing if omitted)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .action(async (id, scope, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallSetScopeCommand(id, scope, opts, globalOpts);
@@ -391,6 +393,7 @@ firewall
   .requiredOption('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
   .requiredOption('--reason <text>', 'Why this port is open')
   .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules (joins to peer scope_services_json)')
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallAddManualCommand(opts, globalOpts);

@@ -12,6 +12,12 @@ function fmtPort(r) {
  * check, nft errors) so the operator doesn't see "rule changed" while
  * silently leaving the live ruleset stale.
  */
+function surfaceRuleWarnings(result) {
+  const w = result?._warnings;
+  if (!Array.isArray(w)) return;
+  for (const line of w) output.warn(line);
+}
+
 async function applyAndReconcile({ result, action, globalOpts }) {
   let rec;
   try {
@@ -24,11 +30,24 @@ async function applyAndReconcile({ result, action, globalOpts }) {
   }
 
   if (globalOpts.json) {
-    output.json({ ok: rec.ok && rec.applied, action, rule: result, reconcile: { applied: rec.applied, checksum: rec.checksum, rule_count: rec.ruleCount, rejection: rec.rejection ?? null } });
+    output.json({
+      ok: rec.ok && rec.applied,
+      action,
+      rule: result,
+      warnings: [...(result?._warnings ?? []), ...(rec.warnings ?? [])],
+      reconcile: {
+        applied: rec.applied,
+        checksum: rec.checksum,
+        rule_count: rec.ruleCount,
+        rejection: rec.rejection ?? null,
+      },
+    });
     if (!rec.ok || !rec.applied) process.exitCode = 1;
     return;
   }
 
+  surfaceRuleWarnings(result);
+  for (const w of (rec.warnings ?? [])) output.warn(w);
   if (rec.ok && rec.applied) {
     output.success(`${action} ${result.id} → reconciled (${rec.ruleCount} rules, ${rec.checksum})`);
   } else if (!rec.ok) {
@@ -64,7 +83,7 @@ export async function enableCommand(id, opts, globalOpts) {
 
   let result;
   try {
-    result = enable({ id, scope, sourceCidrs });
+    result = enable({ id, scope, sourceCidrs, service: opts.service });
   } catch (err) {
     output.error(err.message);
     process.exitCode = 1;
@@ -89,7 +108,7 @@ export async function setScopeCommand(id, scope, opts, globalOpts) {
   const sourceCidrs = opts.sourceCidr ?? [];
   let result;
   try {
-    result = setScope({ id, scope, sourceCidrs });
+    result = setScope({ id, scope, sourceCidrs, service: opts.service });
   } catch (err) {
     output.error(err.message);
     process.exitCode = 1;
@@ -110,6 +129,7 @@ export async function addManualCommand(opts, globalOpts) {
       scope: opts.scope,
       reason: opts.reason,
       sourceCidrs: opts.sourceCidr ?? [],
+      service: opts.service,
     });
   } catch (err) {
     output.error(err.message);

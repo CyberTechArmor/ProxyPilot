@@ -91,6 +91,20 @@ export default function Firewall() {
   const [publicPhrase, setPublicPhrase] = useState('');
   const [publicBusy, setPublicBusy] = useState(false);
 
+  // Egress state. Loaded alongside firewall on initial mount and
+  // refreshed after every egress mutation. `egressServices` is the
+  // NAMED_SERVICES map keyed by service name (used to populate the
+  // "+ Add egress" modal's service dropdown).
+  const [egressEntries, setEgressEntries] = useState([]);
+  const [egressServices, setEgressServices] = useState({});
+  const [egressLoading, setEgressLoading] = useState(false);
+  const [egressPendingKey, setEgressPendingKey] = useState(null); // `${container}:${service}`
+  const [addEgressOpen, setAddEgressOpen] = useState(false);
+  const [addEgressBusy, setAddEgressBusy] = useState(false);
+  const [addEgressForm, setAddEgressForm] = useState({
+    container: '', service: '', reason: '', container_ip: '',
+  });
+
   // Manual-rule modal. Mirrors the manualSchema shape on the backend
   // (port_start/end ints, proto enum, scope enum, optional service for
   // vpn-only, csv source_cidrs parsed to array, required reason).
@@ -107,7 +121,10 @@ export default function Firewall() {
   });
 
   useEffect(() => {
-    if (isAdmin) loadAll();
+    if (isAdmin) {
+      loadAll();
+      loadEgress();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
@@ -123,6 +140,55 @@ export default function Firewall() {
       toast({ variant: 'destructive', title: 'Failed to load firewall', description: e.message });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadEgress() {
+    setEgressLoading(true);
+    try {
+      const r = await api.listFirewallEgress();
+      setEgressEntries(r.entries || []);
+      setEgressServices(r.services || {});
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Failed to load egress', description: e.message });
+    } finally {
+      setEgressLoading(false);
+    }
+  }
+
+  async function handleEgressDeny(container, service) {
+    const key = `${container}:${service}`;
+    setEgressPendingKey(key);
+    try {
+      await api.denyFirewallEgress({ container, service });
+      toast({ title: `Denied ${service} for ${container}` });
+      loadEgress();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Egress deny failed', description: e.message });
+    } finally {
+      setEgressPendingKey(null);
+    }
+  }
+
+  async function submitAddEgress() {
+    const container = addEgressForm.container.trim();
+    const service = addEgressForm.service.trim();
+    if (!container) { toast({ variant: 'destructive', title: 'Container required' }); return; }
+    if (!service) { toast({ variant: 'destructive', title: 'Service required' }); return; }
+    const body = { container, service };
+    if (addEgressForm.reason.trim()) body.reason = addEgressForm.reason.trim();
+    if (addEgressForm.container_ip.trim()) body.container_ip = addEgressForm.container_ip.trim();
+    setAddEgressBusy(true);
+    try {
+      await api.allowFirewallEgress(body);
+      toast({ title: `Allowed ${service} for ${container}` });
+      setAddEgressOpen(false);
+      setAddEgressForm({ container: '', service: '', reason: '', container_ip: '' });
+      loadEgress();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Egress allow failed', description: e.message });
+    } finally {
+      setAddEgressBusy(false);
     }
   }
 
@@ -417,10 +483,28 @@ export default function Firewall() {
               <TabsTrigger value="base">Base ({counts.base})</TabsTrigger>
               <TabsTrigger value="discovered">Discovered ({counts.discovered})</TabsTrigger>
               <TabsTrigger value="manual">Manual ({counts.manual})</TabsTrigger>
+              <TabsTrigger value="egress">Egress ({egressEntries.length})</TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {loading ? (
+          {tab === 'egress' ? (
+            <EgressPanel
+              loading={egressLoading}
+              entries={egressEntries}
+              services={egressServices}
+              pendingKey={egressPendingKey}
+              onDeny={handleEgressDeny}
+              onAdd={() => {
+                setAddEgressForm({
+                  container: '',
+                  service: Object.keys(egressServices)[0] ?? '',
+                  reason: '',
+                  container_ip: '',
+                });
+                setAddEgressOpen(true);
+              }}
+            />
+          ) : loading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
@@ -495,6 +579,74 @@ export default function Firewall() {
           )}
         </CardContent>
       </Card>
+
+      {/* Add per-container egress allow. Service dropdown is keyed
+          off NAMED_SERVICES from the egress endpoint's response. */}
+      <Dialog open={addEgressOpen} onOpenChange={(o) => { if (!o) setAddEgressOpen(false); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Allow container egress</DialogTitle>
+            <DialogDescription>
+              Default-deny applies to all bridge → host flows. Pick a named service the
+              container should be allowed to reach.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="eg-container">Container *</Label>
+              <Input
+                id="eg-container"
+                value={addEgressForm.container}
+                onChange={e => setAddEgressForm(f => ({ ...f, container: e.target.value }))}
+                placeholder="e.g. pp-app"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-service">Service *</Label>
+              <select
+                id="eg-service"
+                value={addEgressForm.service}
+                onChange={e => setAddEgressForm(f => ({ ...f, service: e.target.value }))}
+                className="h-9 w-full rounded border bg-background px-2 text-sm"
+              >
+                {Object.keys(egressServices).length === 0 && (
+                  <option value="">no named services available</option>
+                )}
+                {Object.keys(egressServices).map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-ip">Container IP (optional pin)</Label>
+              <Input
+                id="eg-ip"
+                value={addEgressForm.container_ip}
+                onChange={e => setAddEgressForm(f => ({ ...f, container_ip: e.target.value }))}
+                placeholder="leave blank to use whatever IP the container has now"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-reason">Reason (optional)</Label>
+              <Input
+                id="eg-reason"
+                value={addEgressForm.reason}
+                onChange={e => setAddEgressForm(f => ({ ...f, reason: e.target.value }))}
+                placeholder="why this container needs this service"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddEgressOpen(false)} disabled={addEgressBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitAddEgress} disabled={addEgressBusy}>
+              {addEgressBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Allow
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Add manual rule. Mirrors the backend's manualSchema: port
           range, proto, scope, optional service (required for
@@ -699,6 +851,76 @@ export default function Firewall() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function EgressPanel({ loading, entries, services, pendingKey, onDeny, onAdd }) {
+  const serviceCount = Object.keys(services).length;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs text-muted-foreground">
+          Default-deny on bridge → host. {serviceCount} named service{serviceCount === 1 ? '' : 's'} known.
+        </p>
+        <Button size="sm" variant="outline" onClick={onAdd} disabled={serviceCount === 0}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add egress
+        </Button>
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+        </div>
+      ) : entries.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No container-egress allow rules. Default-deny applies to every bridge → host flow.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b">
+                <th className="py-2 pr-3">Container</th>
+                <th className="py-2 pr-3">Allowed services</th>
+                <th className="py-2 pr-3">Reason</th>
+                <th className="py-2 pr-3">Container IP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(e => (
+                <tr key={e.container} className="border-b last:border-b-0 align-top">
+                  <td className="py-2 pr-3 font-mono text-xs">{e.container}</td>
+                  <td className="py-2 pr-3">
+                    <div className="flex flex-wrap gap-1">
+                      {(e.allow ?? []).map(svc => {
+                        const key = `${e.container}:${svc}`;
+                        const pending = pendingKey === key;
+                        return (
+                          <span key={svc} className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 text-xs">
+                            <span className="font-mono">{svc}</span>
+                            <button
+                              type="button"
+                              onClick={() => onDeny(e.container, svc)}
+                              disabled={pending}
+                              title={`Deny ${svc} for ${e.container}`}
+                              className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded hover:bg-destructive/20 disabled:opacity-50"
+                            >
+                              {pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="leading-none">×</span>}
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-3 text-xs">{e.reason ?? '—'}</td>
+                  <td className="py-2 pr-3 font-mono text-xs">{e.container_ip ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

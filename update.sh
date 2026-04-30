@@ -714,6 +714,36 @@ fi
 # Return to project root
 cd "$SCRIPT_DIR"
 
+# ── ProxyPilot CLI + firewall manager refresh ──────────────────────────
+# update.sh runs in-place under SCRIPT_DIR (typically /opt/proxypilot).
+# We refresh CLI deps, re-emit the /usr/local/bin/proxypilot wrapper to
+# point at the current source tree, and re-run install-firewall.sh to
+# ensure the latest unit files are in place. install-firewall.sh is
+# idempotent: it overwrites the unit files, runs daemon-reload, and
+# restarts the timers. It also runs `proxypilot firewall reconcile`,
+# which is a no-op when state and live are already in sync.
+if [[ -d "$SCRIPT_DIR/cli" ]]; then
+    log "${BLUE}Refreshing ProxyPilot CLI...${NC}"
+    cd "$SCRIPT_DIR/cli"
+    if ! $NPM_CMD install --omit=dev --silent 2>&1 | tee -a "$LOG_FILE"; then
+        log "${YELLOW}Warning: CLI dep install reported issues — see $LOG_FILE${NC}"
+    fi
+    cat > /usr/local/bin/proxypilot <<EOF
+#!/bin/sh
+exec /usr/bin/env node "${SCRIPT_DIR}/cli/bin/proxypilot.js" "\$@"
+EOF
+    chmod 0755 /usr/local/bin/proxypilot
+    cd "$SCRIPT_DIR"
+
+    if [[ -x "$SCRIPT_DIR/scripts/install-firewall.sh" ]]; then
+        log "${BLUE}Refreshing host firewall units...${NC}"
+        if ! PROXYPILOT_BIN=/usr/local/bin/proxypilot \
+            "$SCRIPT_DIR/scripts/install-firewall.sh" 2>&1 | tee -a "$LOG_FILE"; then
+            log "${YELLOW}Warning: firewall refresh reported issues — see $LOG_FILE${NC}"
+        fi
+    fi
+fi
+
 log ""
 log "${GREEN}========================================${NC}"
 log "${GREEN}       Update completed successfully!   ${NC}"

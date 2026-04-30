@@ -12,9 +12,10 @@ export async function bootstrapScriptCommand(id, opts, globalOpts) {
       id,
       user: opts.user ?? '<unix-user>',
       server: opts.server ?? '<server>',
+      shell: opts.shell ?? 'bash',
     });
     if (globalOpts.json) {
-      output.json({ ok: true, id, script });
+      output.json({ ok: true, id, shell: opts.shell ?? 'bash', script });
       return;
     }
     process.stdout.write(script);

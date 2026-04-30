@@ -100,7 +100,7 @@ function writeVpnConfig({ serverPublicKey, endpoint, listenPort, cidr, defaultIf
   `).run(serverPublicKey, endpoint, listenPort, cidr, defaultIface, dns);
 }
 
-function readEnabledPeers() {
+export function readEnabledPeers() {
   const db = getDb();
   return db.prepare(`
     SELECT id, name, public_key, allowed_ip, preshared_key_hash
@@ -130,7 +130,7 @@ export function renderWg0Conf({ privateKey, listenPort, serverIp, peers }) {
   return lines.join('\n') + '\n';
 }
 
-function atomicWrite(filePath, content, mode = 0o600) {
+export function atomicWrite(filePath, content, mode = 0o600) {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
@@ -146,6 +146,46 @@ function atomicWrite(filePath, content, mode = 0o600) {
 export function writeWg0Conf({ privateKey, listenPort, serverIp, peers }) {
   const body = renderWg0Conf({ privateKey, listenPort, serverIp, peers });
   atomicWrite(WG_CONFIG_FILE, body, 0o600);
+}
+
+/**
+ * Hot-apply the on-disk wg0.conf onto the live interface without bouncing
+ * it. The canonical idiom is `wg syncconf wg0 <(wg-quick strip wg0)` —
+ * `wg-quick strip` drops the [Interface] PostUp/PostDown lines that wg
+ * proper rejects, and process substitution feeds the result as a file.
+ *
+ * Process substitution is a bash feature, so we invoke bash explicitly
+ * rather than relying on the system /bin/sh (Debian's dash, for one,
+ * does not support it). The wg0.conf path is hard-coded and quoted; no
+ * caller-supplied data ever lands on the command line.
+ *
+ * Tolerates "interface not up" with a clear error so the caller can
+ * decide whether to surface it (e.g. peer add when wg0 hasn't been
+ * brought up yet should fail loudly; peer disable during teardown
+ * shouldn't).
+ */
+export function syncconfWg0() {
+  const r = run('bash', [
+    '-c',
+    `wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}")`,
+  ]);
+  if (r.status !== 0) {
+    throw new Error(`wg syncconf ${WG_INTERFACE} failed: ${spawnError(r)}`);
+  }
+}
+
+/**
+ * Evict a peer from the live interface immediately. wg syncconf already
+ * removes peers absent from the new config, but on disable we want the
+ * eviction to land even if the operator skips a follow-up syncconf.
+ * No-op (returns false) if wg can't talk to the interface.
+ */
+export function wgPeerRemove(publicKey) {
+  if (!publicKey || typeof publicKey !== 'string') {
+    throw new Error('wgPeerRemove: publicKey required');
+  }
+  const r = run('wg', ['set', WG_INTERFACE, 'peer', publicKey, 'remove']);
+  return r.status === 0;
 }
 
 function setNatIface(iface) {

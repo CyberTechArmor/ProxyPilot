@@ -102,3 +102,27 @@ export async function confirm(prompt) {
     });
   });
 }
+
+/**
+ * Typed-confirmation gate: prompt the operator to type an exact phrase
+ * before a destructive operation proceeds. Used wherever `--force` is
+ * the only escape from a lockout-class safeguard — the prompt is the
+ * speed bump that catches "I aliased --force into my shell" mistakes.
+ *
+ * Returns true iff stdin matches phrase exactly (whitespace-trimmed,
+ * case-sensitive). Non-TTY stdin (pipes, scripts) auto-fails so a
+ * scripted invocation can't bypass the prompt by accident.
+ */
+export async function confirmTyped(prompt, phrase) {
+  if (!process.stdin.isTTY) return false;
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(`${prompt}\nType "${phrase}" to proceed: `, (answer) => {
+      rl.close();
+      resolve(answer.trim() === phrase);
+    });
+  });
+}

@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, KeyRound, Copy, Check, Trash2, RefreshCw, ShieldOff } from 'lucide-react';
+import { Loader2, KeyRound, Copy, Check, Trash2, RefreshCw, ShieldOff, TerminalSquare } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
 const TYPED_PHRASE = 'i have another way into this account';
@@ -68,6 +68,10 @@ export default function SshAccess() {
   const [revokeWarning, setRevokeWarning] = useState(null);
   const [revokePhrase, setRevokePhrase] = useState('');
   const [revoking, setRevoking] = useState(false);
+
+  const [connectRow, setConnectRow] = useState(null);
+  const [connectServer, setConnectServer] = useState('');
+  const [connectCopied, setConnectCopied] = useState(null); // 'bash' | 'powershell' | null
 
   useEffect(() => {
     if (isAdmin) loadEntries();
@@ -205,6 +209,36 @@ export default function SshAccess() {
     setRevokePhrase('');
   }
 
+  function openConnect(row) {
+    setConnectRow(row);
+    setConnectServer(window.location.hostname);
+    setConnectCopied(null);
+  }
+
+  // The bootstrap script writes the private key to
+  //   ~/.ssh/proxypilot_<id>_ed25519
+  // (POSIX) or
+  //   $HOME\.ssh\proxypilot_<id>_ed25519
+  // (PowerShell). The dashboard never sees the private key, so the
+  // connect command is reconstructable purely from the row id +
+  // unix_user + the server the operator is dialing.
+  function bashConnectCommand(row, server) {
+    return `ssh -i ~/.ssh/proxypilot_${row.id}_ed25519 ${row.unix_user}@${server}`;
+  }
+  function powershellConnectCommand(row, server) {
+    return `ssh -i $HOME\\.ssh\\proxypilot_${row.id}_ed25519 ${row.unix_user}@${server}`;
+  }
+
+  async function copyConnect(which, text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setConnectCopied(which);
+      setTimeout(() => setConnectCopied(null), 2000);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Clipboard write failed', description: e.message });
+    }
+  }
+
   async function handleRevoke(force = false) {
     if (!revokeRow) return;
     setRevoking(true);
@@ -329,11 +363,23 @@ export default function SshAccess() {
                           : <span className="text-emerald-600">active</span>}
                       </td>
                       <td className="py-2 pr-3 text-right">
-                        {!row.revoked_at && (
-                          <Button size="sm" variant="outline" onClick={() => openRevoke(row)}>
-                            <Trash2 className="h-3.5 w-3.5 mr-1" /> Revoke
-                          </Button>
-                        )}
+                        <div className="flex justify-end gap-2">
+                          {!row.revoked_at && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openConnect(row)}
+                              title="Show ssh -i connect command for this device"
+                            >
+                              <TerminalSquare className="h-3.5 w-3.5 mr-1" /> Connect
+                            </Button>
+                          )}
+                          {!row.revoked_at && (
+                            <Button size="sm" variant="outline" onClick={() => openRevoke(row)}>
+                              <Trash2 className="h-3.5 w-3.5 mr-1" /> Revoke
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -544,6 +590,74 @@ export default function SshAccess() {
                 Force revoke
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Connect modal — shows the ssh -i command for the selected
+          device. Reconstructed client-side from row.id + row.unix_user
+          + an editable server hostname (defaults to the dashboard's
+          host). The dashboard never has access to the private key. */}
+      <Dialog open={!!connectRow} onOpenChange={(o) => { if (!o) setConnectRow(null); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Connect from "{connectRow?.id}"</DialogTitle>
+            <DialogDescription>
+              Run one of these on the device you registered as <code>{connectRow?.id}</code>.
+              The private key path matches what the bootstrap script wrote.
+            </DialogDescription>
+          </DialogHeader>
+          {connectRow && (
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="connect-server">server hostname</Label>
+                <Input
+                  id="connect-server"
+                  value={connectServer}
+                  onChange={e => setConnectServer(e.target.value)}
+                  placeholder="lxc.example.com"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">bash / zsh / git-bash / WSL</Label>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => copyConnect('bash', bashConnectCommand(connectRow, connectServer))}
+                  >
+                    {connectCopied === 'bash'
+                      ? <Check className="h-3.5 w-3.5 mr-1" />
+                      : <Copy className="h-3.5 w-3.5 mr-1" />}
+                    {connectCopied === 'bash' ? 'Copied' : 'Copy'}
+                  </Button>
+                </div>
+                <pre className="bg-muted p-2 rounded text-xs whitespace-pre-wrap break-all">
+                  {bashConnectCommand(connectRow, connectServer)}
+                </pre>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">PowerShell (Windows)</Label>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => copyConnect('powershell', powershellConnectCommand(connectRow, connectServer))}
+                  >
+                    {connectCopied === 'powershell'
+                      ? <Check className="h-3.5 w-3.5 mr-1" />
+                      : <Copy className="h-3.5 w-3.5 mr-1" />}
+                    {connectCopied === 'powershell' ? 'Copied' : 'Copy'}
+                  </Button>
+                </div>
+                <pre className="bg-muted p-2 rounded text-xs whitespace-pre-wrap break-all">
+                  {powershellConnectCommand(connectRow, connectServer)}
+                </pre>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConnectRow(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

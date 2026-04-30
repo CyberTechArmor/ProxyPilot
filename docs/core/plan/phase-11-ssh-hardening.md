@@ -1,6 +1,16 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 302-338) -->
 <!-- Index: docs/core/plan/README.md -->
 
+> **⚠ Superseded (2026-04-30):** This phase as originally written
+> (`authorized_keys`-per-user, `proxypilot access add/remove --ssh-key`)
+> is **replaced** by the SSH Certificate Authority upgrade. See
+> `proxypilot-firewall-vpn-ssh-prompt.md` (`## SSH Certificate
+> Authority`) for the new design: short-lived signed certs, principals
+> as roles, KRL revocation, signed host certs, and the
+> `migrate-from-authorized-keys` safe-transition command. The CA work
+> happens in steps 8–12 of that upgrade and depends on the firewall
+> manager (steps 1–4) being live first.
+
 ## Phase 11: SSH Hardening + Access Management
 
 **Goal:** Per-person SSH access with safe transition sequence.

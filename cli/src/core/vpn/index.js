@@ -17,3 +17,14 @@ export {
 } from './server.js';
 export { renderQrPng, renderQrAnsi } from './qr.js';
 export { dumpPeers, isOnline, ONLINE_HANDSHAKE_WINDOW_SECONDS } from './status.js';
+export {
+  addPeer,
+  rotatePeer,
+  enablePeer,
+  disablePeer,
+  removePeer,
+  listPeers,
+  showPeer,
+  validatePeerName,
+  VPN_PEERS_DIR,
+} from './peer.js';

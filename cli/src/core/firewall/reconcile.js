@@ -8,6 +8,22 @@ import { getDb } from '../../db/index.js';
 import { audit } from '../../db/audit.js';
 
 /**
+ * Sentinel CIDR for "no allowed peers". The original spec assumed
+ * `ip saddr { }` (empty inline anonymous set) is valid nft syntax —
+ * nft 1.0.9 (Debian Bookworm, the version on every host this ships
+ * to today) actually rejects it as a syntax error, which would
+ * cascade-fail the whole atomic reconcile and break every OTHER
+ * rule with it. Sentinel approach: render the closed rule with a
+ * single CIDR that is syntactically valid AND never appears as a
+ * legitimate source — 255.255.255.255/32, the limited broadcast
+ * address, fits both criteria. The rule stays visible in
+ * `nft list table inet proxypilot` so the operator can observe the
+ * closed state, and its presence is also noted in the warning the
+ * resolver returns.
+ */
+const NO_ALLOWED_PEERS_SENTINEL = '255.255.255.255/32';
+
+/**
  * Sort an array of /32 strings ("10.100.0.10") by trailing octet so
  * the rendered ruleset is byte-identical for identical peer sets.
  * Matches the IP-pool picker in cli/src/core/vpn/peer.js, which
@@ -85,11 +101,17 @@ export function resolveVpnSources(state) {
     }
 
     const sorted = sortIpsByTrailingOctet([...allowed]);
-    rule.source_cidrs = sorted;
     if (sorted.length === 0) {
+      // Render with sentinel rather than the empty array. See the
+      // NO_ALLOWED_PEERS_SENTINEL comment for why nft rejects literal
+      // empty inline sets and how the broadcast sentinel preserves
+      // operational closed-ness while keeping the rule visible.
+      rule.source_cidrs = [NO_ALLOWED_PEERS_SENTINEL];
       warnings.push(
-        `vpn-only rule "${rule.id}"${rule.service ? ` (service=${rule.service})` : ''} has no allowed peers — rule will reject every source`,
+        `vpn-only rule "${rule.id}"${rule.service ? ` (service=${rule.service})` : ''} has no allowed peers — rule rendered with broadcast sentinel and is effectively closed`,
       );
+    } else {
+      rule.source_cidrs = sorted;
     }
   }
 

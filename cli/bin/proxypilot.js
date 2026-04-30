@@ -300,11 +300,22 @@ import {
   egressAllowCommand as firewallEgressAllowCommand,
   egressDenyCommand as firewallEgressDenyCommand,
   egressListCommand as firewallEgressListCommand,
+  detectBridgeCommand as firewallDetectBridgeCommand,
 } from '../src/commands/firewall/index.js';
 
 const firewall = program
   .command('firewall')
   .description('Host firewall management (nftables, default-deny)');
+
+firewall
+  .command('detect-bridge')
+  .description('Auto-detect the host\'s managed Incus bridge and (with --apply) commit it to firewall.json')
+  .option('--apply', 'Write detected values to state.network')
+  .option('--force', 'Overwrite a different existing state.network value (with --apply)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallDetectBridgeCommand(opts, globalOpts);
+  });
 
 firewall
   .command('reconcile')

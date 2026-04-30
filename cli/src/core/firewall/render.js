@@ -16,6 +16,14 @@ const LXC_BRIDGE_CIDR = '10.0.100.0/24';
 // container_egress chain restricts. External egress (DNS, internet,
 // host's other interfaces) falls through to chain default-accept.
 const LXC_BRIDGE_GW = '10.0.100.1';
+// Bridge interface ProxyPilot creates for LXC containers. Hardcoded to
+// match config.network.bridge_name in cli/src/config.js. Trusted at
+// input — containers must reach the host's dnsmasq (DHCP UDP 67, DNS
+// UDP/TCP 53) on this interface to obtain IPs and resolve names. Without
+// this trust the host drops the very first DHCP DISCOVER and containers
+// boot with no IPv4 forever. The egress restriction in container_egress
+// (forward hook) still gates what containers can send OUT of the bridge.
+const LXC_BRIDGE_IFACE = 'pp-br0';
 
 /**
  * Named services the firewall manager knows how to gate. Each entry
@@ -187,6 +195,7 @@ table inet proxypilot {
   chain input_hook {
     type filter hook input priority filter - 10; policy drop;
     iif lo accept
+    iif "${LXC_BRIDGE_IFACE}" accept
     ct state established,related accept
     ct state invalid drop
     ip protocol icmp icmp type echo-request limit rate 5/second accept

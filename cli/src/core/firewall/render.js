@@ -49,10 +49,16 @@ export const NAMED_SERVICES = {
 
 /**
  * Resolve a rule's effective source restriction to a list of nft set
- * elements. `source_cidrs` overrides `scope` when present.
+ * elements. `source_cidrs` overrides `scope` whenever the field is
+ * present (Array.isArray). An explicit empty array means "no allowed
+ * sources" — used by the per-peer scope hook in reconcile.js when a
+ * vpn-only rule has zero matching peers; the rule renders with an
+ * empty inline set and is effectively closed. Falling through to
+ * `scope` in that case would silently re-open the full VPN subnet,
+ * which is the opposite of the operator's intent.
  */
 function sourcesFor(rule) {
-  if (rule.source_cidrs && rule.source_cidrs.length > 0) {
+  if (Array.isArray(rule.source_cidrs)) {
     return rule.source_cidrs;
   }
   switch (rule.scope) {

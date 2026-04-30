@@ -15,10 +15,15 @@ export async function reconcileCommand(opts, globalOpts) {
       checksum: result.checksum,
       rule_count: result.ruleCount,
       rejection: result.rejection ?? null,
+      warnings: result.warnings ?? [],
       ruleset: opts.dryRun ? result.ruleset : undefined,
     });
     if (!result.ok) process.exitCode = 1;
     return;
+  }
+
+  for (const w of (result.warnings ?? [])) {
+    output.warn(w);
   }
 
   if (!result.ok) {

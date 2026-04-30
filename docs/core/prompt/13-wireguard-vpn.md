@@ -1,6 +1,16 @@
 <!-- Split from proxypilot-core-infrastructure-prompt.md (lines 395-495) -->
 <!-- Index: docs/core/prompt/README.md -->
 
+> **⚠ Superseded (2026-04-30) by `proxypilot-firewall-vpn-ssh-prompt.md`
+> > `## VPN Manager`.** The paste-the-public-key peer flow and the
+> `iptables`-based PostUp/PostDown NAT are replaced by a full
+> lifecycle manager: ProxyPilot generates the peer keypair, renders a
+> QR code + ready-to-import config, supports enable/disable/rotate
+> without losing peer records, and enforces per-peer scope at the
+> firewall layer (no `iptables` anywhere — NAT is emitted into
+> `proxypilot.nat_postrouting` by the firewall manager). This document
+> is preserved for historical reference only.
+
 ## WireGuard VPN (Hardened/Compliant)
 
 ### Purpose

@@ -1,6 +1,20 @@
 <!-- Split from proxypilot-core-phased-plan.md (lines 339-374) -->
 <!-- Index: docs/core/plan/README.md -->
 
+> **⚠ Superseded (2026-04-30):** This phase as originally written
+> (paste-the-public-key peer flow, `iptables`-based NAT in PostUp/
+> PostDown, `proxypilot vpn add-peer/remove-peer/list/status`) is
+> **replaced** by the VPN Manager upgrade. See
+> `proxypilot-firewall-vpn-ssh-prompt.md` (`## VPN Manager`) for the
+> new design: ProxyPilot generates peer keypairs (no operator paste),
+> renders QR codes + ready-to-import configs, supports
+> enable/disable/rotate without losing peer records, and enforces
+> per-peer scope via firewall rules. NAT and forwarding are emitted by
+> the firewall manager (`nat_postrouting` chain in the
+> `inet/proxypilot` table), not by `iptables`. This work happens in
+> steps 5–7 of that upgrade and depends on the firewall manager
+> (steps 1–4) being live first.
+
 ## Phase 12: WireGuard VPN
 
 **Goal:** Admin VPN access with peer management.

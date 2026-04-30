@@ -1,6 +1,16 @@
 <!-- Split from proxypilot-core-infrastructure-prompt.md (lines 134-225) -->
 <!-- Index: docs/core/prompt/README.md -->
 
+> **⚠ Superseded (2026-04-30) by `proxypilot-firewall-vpn-ssh-prompt.md`
+> > `## SSH Certificate Authority`.** The per-user `authorized_keys`
+> model and the `proxypilot access add/remove --ssh-key` flow are
+> replaced by an SSH user CA: sshd trusts a single CA pubkey,
+> ProxyPilot issues short-lived (default 24h) certs signed by that CA,
+> principals act as roles, and revocation is centralized via a KRL.
+> This document is preserved for historical reference only — code in
+> the original sections should be removed once the migration command
+> (`proxypilot ssh migrate-from-authorized-keys`) ships.
+
 ## SSH Access Management
 
 ### Safe Transition Sequence

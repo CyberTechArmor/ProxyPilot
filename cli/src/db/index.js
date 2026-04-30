@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
 import { getConfig } from '../config.js';
+import { initSchema } from './schema.js';
 
 let _db = null;
 
@@ -41,6 +42,12 @@ export function getDb() {
 
   // Enable foreign key enforcement
   _db.pragma('foreign_keys = ON');
+
+  // Ensure schema exists. All CREATE TABLE statements use IF NOT EXISTS,
+  // so this is a no-op on a populated database. Doing it in getDb() means
+  // subsystems that depend on tables (firewall, audit_log, future VPN/SSH)
+  // do not require the operator to run `proxypilot init` first.
+  initSchema(_db);
 
   return _db;
 }

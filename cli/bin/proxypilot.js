@@ -284,5 +284,161 @@ program
     await certsCommand(globalOpts);
   });
 
+// ── firewall command group ──────────────────────────────────────────────────
+import {
+  reconcileCommand as firewallReconcileCommand,
+  firewallStatusCommand,
+  listCommand as firewallListCommand,
+  scanCommand as firewallScanCommand,
+  enableCommand as firewallEnableCommand,
+  disableCommand as firewallDisableCommand,
+  setScopeCommand as firewallSetScopeCommand,
+  addManualCommand as firewallAddManualCommand,
+  removeManualCommand as firewallRemoveManualCommand,
+  panicCloseCommand as firewallPanicCloseCommand,
+  panicOpenCommand as firewallPanicOpenCommand,
+  egressAllowCommand as firewallEgressAllowCommand,
+  egressDenyCommand as firewallEgressDenyCommand,
+  egressListCommand as firewallEgressListCommand,
+} from '../src/commands/firewall/index.js';
+
+const firewall = program
+  .command('firewall')
+  .description('Host firewall management (nftables, default-deny)');
+
+firewall
+  .command('reconcile')
+  .description('Apply firewall.json to live nftables')
+  .option('--dry-run', 'Render the ruleset without applying')
+  .option('--force-lockout-ok', 'Apply even if the lockout-safety check fails')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallReconcileCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('status')
+  .description('Show firewall backend, policy, rule counts, last reconcile')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallStatusCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('list')
+  .description('List firewall rules')
+  .option('--all', 'Show all rules')
+  .option('--enabled', 'Show only enabled rules')
+  .option('--needs-review', 'Show only newly discovered rules awaiting review')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallListCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('scan')
+  .description('Discover host listeners and update firewall state')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallScanCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('enable <id>')
+  .description('Enable a firewall rule and reconcile')
+  .option('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
+  .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--yes', 'Skip the public-internet confirmation prompt')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEnableCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('disable <id>')
+  .description('Disable a firewall rule and reconcile')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallDisableCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('set-scope <id> <scope>')
+  .description('Change a rule\'s scope and reconcile')
+  .option('--source-cidr <cidr>', 'Pin to source CIDR (repeatable; clears existing if omitted)', (v, prev) => [...(prev ?? []), v])
+  .action(async (id, scope, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallSetScopeCommand(id, scope, opts, globalOpts);
+  });
+
+firewall
+  .command('add-manual')
+  .description('Add an operator-curated firewall rule for a non-discoverable listener')
+  .requiredOption('--port <p>', 'Port number (or range start when --port-end is set)', parseInt)
+  .option('--port-end <p>', 'End of port range (inclusive)', parseInt)
+  .requiredOption('--proto <tcp|udp>', 'Protocol')
+  .requiredOption('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only')
+  .requiredOption('--reason <text>', 'Why this port is open')
+  .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallAddManualCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('remove-manual <id>')
+  .description('Remove an operator-curated firewall rule')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallRemoveManualCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('panic-close')
+  .description('Drop all discovered rules, reduce base allowlist to SSH (+ WireGuard if on)')
+  .option('--yes', 'Skip the confirmation prompt')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallPanicCloseCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('panic-open')
+  .description('Clear the panic-close flag (does NOT auto-restore previously enabled rules)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallPanicOpenCommand(opts, globalOpts);
+  });
+
+const egress = firewall
+  .command('egress')
+  .description('Per-container egress allow rules (LXC bridge → host services)');
+
+egress
+  .command('list')
+  .description('List container-egress entries')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressListCommand(opts, globalOpts);
+  });
+
+egress
+  .command('allow <container> <service>')
+  .description('Allow <container> to reach the named host-side <service> (e.g. pgbouncer)')
+  .option('--reason <text>', 'Why the access is granted')
+  .option('--container-ip <ip>', 'Pin the rule to this container IP (defaults to the whole bridge CIDR)')
+  .action(async (container, service, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressAllowCommand(container, service, opts, globalOpts);
+  });
+
+egress
+  .command('deny <container> <service>')
+  .description('Revoke a previously granted egress allow rule')
+  .action(async (container, service, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressDenyCommand(container, service, opts, globalOpts);
+  });
+
 // ── parse and execute ───────────────────────────────────────────────────────
 program.parseAsync(process.argv);

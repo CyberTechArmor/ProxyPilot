@@ -981,6 +981,32 @@ main() {
     fi
     log_success "Frontend built successfully"
 
+    # ── ProxyPilot CLI + firewall manager ─────────────────────────────────
+    # The CLI ships with the repo at cli/. We copy it under $INSTALL_DIR,
+    # install its (non-dev) deps, and drop a thin wrapper at
+    # /usr/local/bin/proxypilot so operators (and the firewall systemd
+    # units below) have a stable path to invoke.
+    if [[ -d "${SCRIPT_DIR}/cli" ]]; then
+        log_info "Installing ProxyPilot CLI..."
+        cp -r "${SCRIPT_DIR}/cli" "$INSTALL_DIR/"
+        (cd "$INSTALL_DIR/cli" && npm ci --omit=dev --silent) || \
+            (cd "$INSTALL_DIR/cli" && npm install --omit=dev --silent)
+        cat > /usr/local/bin/proxypilot <<EOF
+#!/bin/sh
+exec /usr/bin/env node "${INSTALL_DIR}/cli/bin/proxypilot.js" "\$@"
+EOF
+        chmod 0755 /usr/local/bin/proxypilot
+        log_success "ProxyPilot CLI installed at /usr/local/bin/proxypilot"
+
+        # Emit firewall systemd units and run the initial reconcile.
+        if [[ -x "${SCRIPT_DIR}/scripts/install-firewall.sh" ]]; then
+            log_info "Configuring host firewall (nftables)..."
+            PROXYPILOT_BIN=/usr/local/bin/proxypilot \
+                "${SCRIPT_DIR}/scripts/install-firewall.sh"
+            log_success "Host firewall configured"
+        fi
+    fi
+
     # Build and start Docker container
     log_info "Building and starting ProxyPilot..."
     cd "$INSTALL_DIR"

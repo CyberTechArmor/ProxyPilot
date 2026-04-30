@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,10 +21,13 @@ import {
   RefreshCw,
   AlertTriangle,
   Power,
+  PowerOff,
   Plus,
   Copy,
   Check,
   ShieldAlert,
+  Trash2,
+  Sliders,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -82,6 +85,31 @@ export default function Vpn() {
   // private_key }. Set once on add/rotate response, cleared on close.
   const [reveal, setReveal] = useState(null);
 
+  // Per-peer mutation guard so two clicks on the same row don't fire
+  // overlapping reconciles in the host CLI.
+  const [pendingPeer, setPendingPeer] = useState(null); // peer name | null
+
+  // Lockout-gate modal. The backend 409s with { code, requires_force }
+  // on certain destructive operations; we re-prompt with the action's
+  // typed phrase and re-issue with force:true on confirm. The CLI may
+  // still refuse a force (requires_typed_confirm: true) — that's the
+  // "interactive CLI session" exit and we surface it to the operator.
+  // gate shape: { peer, action, code, phrase, args }
+  const [gate, setGate] = useState(null);
+  const [gatePhrase, setGatePhrase] = useState('');
+  const [gateBusy, setGateBusy] = useState(false);
+
+  // Set-scope dialog. setScope.peer carries the peer being edited;
+  // form holds the next scope + services list.
+  const [setScope, setSetScope] = useState(null); // peer | null
+  const [setScopeForm, setSetScopeForm] = useState({ scope: 'admin', services: '' });
+  const [setScopeBusy, setSetScopeBusy] = useState(false);
+
+  // Remove confirm (no gate yet — the CLI returns 200 on a clean
+  // remove). When the gate trips, the lockout modal takes over.
+  const [removePeer, setRemovePeer] = useState(null); // peer | null
+  const [removeBusy, setRemoveBusy] = useState(false);
+
   useEffect(() => {
     if (isAdmin) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,6 +127,170 @@ export default function Vpn() {
       toast({ variant: 'destructive', title: 'Failed to load VPN', description: e.message });
     } finally {
       setLoading(false);
+    }
+  }
+
+  // ── Lockout-gate phrase mapping ─────────────────────────────────
+  // Codes come from the CLI's --json error envelope; the backend
+  // re-emits them as 409 with requires_force=true. Each code has a
+  // unique phrase the operator must type before the dashboard
+  // re-issues with force:true.
+  const LOCKOUT_PHRASES = {
+    LAST_ENABLED_PEER: 'I understand this locks everyone out',
+    RECENTLY_ACTIVE: 'remove this active peer',
+    LAST_FULL_ADMIN_DEMOTE: 'demote the last admin peer',
+  };
+
+  // Centralised lockout-gate dispatcher. `action` decides which API
+  // call to retry with force:true once the operator clears the
+  // typed-phrase modal. `args` carries the call's payload (e.g. the
+  // next scope + services for set-scope).
+  function tripGate({ peer, action, error, args = {} }) {
+    const code = error?.code;
+    const phrase = LOCKOUT_PHRASES[code];
+    if (!phrase) {
+      // Unknown gate code — surface the raw error and bail.
+      toast({ variant: 'destructive', title: 'Action refused', description: error?.message ?? error?.error ?? 'unknown' });
+      return;
+    }
+    setGate({ peer, action, code, phrase, args });
+    setGatePhrase('');
+  }
+
+  async function executeGated() {
+    if (!gate || gatePhrase !== gate.phrase) return;
+    setGateBusy(true);
+    try {
+      const { peer, action, args } = gate;
+      const body = { ...args, force: true };
+      let r;
+      if (action === 'disable') r = await api.disableVpnPeer(peer.name, body);
+      else if (action === 'remove') r = await api.removeVpnPeer(peer.name, body);
+      else if (action === 'set-scope') r = await api.setVpnPeerScope(peer.name, body);
+      else throw new Error(`unknown gated action: ${action}`);
+      toast({ title: `Forced ${action} on ${peer.name}` });
+      setGate(null);
+      setGatePhrase('');
+      // Close any other dialog that triggered the gate.
+      setSetScope(null);
+      setRemovePeer(null);
+      loadAll();
+    } catch (e) {
+      // Per the backend comment: the CLI may still refuse --force on
+      // these gates with requires_typed_confirm:true. There is no
+      // dashboard-side bypass for that — the operator has to use
+      // an interactive CLI session.
+      if (e instanceof ApiError && e.requires_typed_confirm) {
+        toast({
+          variant: 'destructive',
+          title: 'Force refused by CLI',
+          description: 'This gate requires an interactive CLI session. Use `proxypilot vpn …` on the host.',
+        });
+      } else {
+        toast({ variant: 'destructive', title: `Force ${gate.action} failed`, description: e.message });
+      }
+    } finally {
+      setGateBusy(false);
+    }
+  }
+
+  async function rotatePeer(peer) {
+    if (!confirm(`Rotate the keypair for "${peer.name}"? The current peer's installed config stops working until they re-import the new one.`)) return;
+    setPendingPeer(peer.name);
+    try {
+      const r = await api.rotateVpnPeer(peer.name);
+      // Same shape as add-peer — open the reveal dialog.
+      setReveal(r);
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Rotate failed', description: e.message });
+    } finally {
+      setPendingPeer(null);
+    }
+  }
+
+  async function enablePeer(peer) {
+    setPendingPeer(peer.name);
+    try {
+      await api.enableVpnPeer(peer.name);
+      toast({ title: `Enabled ${peer.name}` });
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Enable failed', description: e.message });
+    } finally {
+      setPendingPeer(null);
+    }
+  }
+
+  async function disablePeer(peer) {
+    setPendingPeer(peer.name);
+    try {
+      await api.disableVpnPeer(peer.name);
+      toast({ title: `Disabled ${peer.name}` });
+      loadAll();
+    } catch (e) {
+      if (e instanceof ApiError && e.requires_force) {
+        tripGate({ peer, action: 'disable', error: e });
+      } else {
+        toast({ variant: 'destructive', title: 'Disable failed', description: e.message });
+      }
+    } finally {
+      setPendingPeer(null);
+    }
+  }
+
+  async function confirmRemove() {
+    if (!removePeer) return;
+    setRemoveBusy(true);
+    try {
+      await api.removeVpnPeer(removePeer.name);
+      toast({ title: `Removed ${removePeer.name}` });
+      setRemovePeer(null);
+      loadAll();
+    } catch (e) {
+      if (e instanceof ApiError && e.requires_force) {
+        tripGate({ peer: removePeer, action: 'remove', error: e });
+      } else {
+        toast({ variant: 'destructive', title: 'Remove failed', description: e.message });
+      }
+    } finally {
+      setRemoveBusy(false);
+    }
+  }
+
+  function openSetScope(peer) {
+    setSetScopeForm({
+      scope: peer.scope ?? 'admin',
+      services: (peer.services ?? []).join(', '),
+    });
+    setSetScope(peer);
+  }
+
+  async function submitSetScope() {
+    if (!setScope) return;
+    const body = { scope: setScopeForm.scope };
+    if (setScopeForm.scope === 'services') {
+      const services = setScopeForm.services.split(',').map(s => s.trim()).filter(Boolean);
+      if (services.length === 0) {
+        toast({ variant: 'destructive', title: 'At least one service tag required' });
+        return;
+      }
+      body.services = services;
+    }
+    setSetScopeBusy(true);
+    try {
+      await api.setVpnPeerScope(setScope.name, body);
+      toast({ title: `${setScope.name} → scope=${body.scope}` });
+      setSetScope(null);
+      loadAll();
+    } catch (e) {
+      if (e instanceof ApiError && e.requires_force) {
+        tripGate({ peer: setScope, action: 'set-scope', error: e, args: body });
+      } else {
+        toast({ variant: 'destructive', title: 'Set scope failed', description: e.message });
+      }
+    } finally {
+      setSetScopeBusy(false);
     }
   }
 
@@ -278,34 +470,96 @@ export default function Vpn() {
                     <th className="py-2 pr-3">Handshake</th>
                     <th className="py-2 pr-3">RX</th>
                     <th className="py-2 pr-3">TX</th>
+                    <th className="py-2 pr-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {peers.map(p => (
-                    <tr key={p.name} className="border-b last:border-b-0 align-top">
-                      <td className="py-2 pr-3 font-mono text-xs">{p.name}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{p.ip}</td>
-                      <td className="py-2 pr-3 text-xs">
-                        <span className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 font-mono">
-                          {p.scope}
-                          {p.services?.length ? <span className="text-muted-foreground">({p.services.join(',')})</span> : null}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3 text-xs">
-                        <span className={p.status === 'enabled' ? 'text-emerald-600' : 'text-muted-foreground'}>
-                          {p.status}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3 text-xs">
-                        {p.online ? <span className="text-emerald-600">yes</span> : <span className="text-muted-foreground">no</span>}
-                      </td>
-                      <td className="py-2 pr-3 text-xs" title={p.lastHandshakeAt ?? ''}>
-                        {fmtRelative(p.lastHandshakeAt)}
-                      </td>
-                      <td className="py-2 pr-3 font-mono text-xs">{fmtBytes(p.rxBytes)}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{fmtBytes(p.txBytes)}</td>
-                    </tr>
-                  ))}
+                  {peers.map(p => {
+                    const pending = pendingPeer === p.name;
+                    return (
+                      <tr key={p.name} className="border-b last:border-b-0 align-top">
+                        <td className="py-2 pr-3 font-mono text-xs">{p.name}</td>
+                        <td className="py-2 pr-3 font-mono text-xs">{p.ip}</td>
+                        <td className="py-2 pr-3 text-xs">
+                          <span className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 font-mono">
+                            {p.scope}
+                            {p.services?.length ? <span className="text-muted-foreground">({p.services.join(',')})</span> : null}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 text-xs">
+                          <span className={p.status === 'enabled' ? 'text-emerald-600' : 'text-muted-foreground'}>
+                            {p.status}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 text-xs">
+                          {p.online ? <span className="text-emerald-600">yes</span> : <span className="text-muted-foreground">no</span>}
+                        </td>
+                        <td className="py-2 pr-3 text-xs" title={p.lastHandshakeAt ?? ''}>
+                          {fmtRelative(p.lastHandshakeAt)}
+                        </td>
+                        <td className="py-2 pr-3 font-mono text-xs">{fmtBytes(p.rxBytes)}</td>
+                        <td className="py-2 pr-3 font-mono text-xs">{fmtBytes(p.txBytes)}</td>
+                        <td className="py-2 pr-3">
+                          <div className="flex items-center gap-1">
+                            {pending && <Loader2 className="h-3 w-3 animate-spin" />}
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              title="Rotate keypair"
+                              onClick={() => rotatePeer(p)}
+                              disabled={pending}
+                              className="h-7 w-7"
+                            >
+                              <RefreshCw className="h-4 w-4" />
+                            </Button>
+                            {p.status === 'enabled' ? (
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                title="Disable peer"
+                                onClick={() => disablePeer(p)}
+                                disabled={pending}
+                                className="h-7 w-7"
+                              >
+                                <PowerOff className="h-4 w-4" />
+                              </Button>
+                            ) : (
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                title="Enable peer"
+                                onClick={() => enablePeer(p)}
+                                disabled={pending}
+                                className="h-7 w-7"
+                              >
+                                <Power className="h-4 w-4" />
+                              </Button>
+                            )}
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              title="Set scope"
+                              onClick={() => openSetScope(p)}
+                              disabled={pending}
+                              className="h-7 w-7"
+                            >
+                              <Sliders className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              title="Remove peer"
+                              onClick={() => setRemovePeer(p)}
+                              disabled={pending}
+                              className="h-7 w-7 text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -376,6 +630,122 @@ export default function Vpn() {
           responses. Closing this dialog DROPS the private key from
           React state — there is no second chance. */}
       <PeerRevealDialog reveal={reveal} onClose={() => setReveal(null)} />
+
+      {/* Set scope. Demoting the last full|admin peer trips
+          LAST_FULL_ADMIN_DEMOTE on the backend; the lockout gate
+          handles that path. */}
+      <Dialog open={!!setScope} onOpenChange={(o) => { if (!o) setSetScope(null); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Set scope for "{setScope?.name}"</DialogTitle>
+            <DialogDescription>
+              Scope controls which firewall paths the peer can reach. Demoting the only
+              full/admin peer to services-only triggers a lockout-gate confirmation.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="ss-scope">Scope</Label>
+              <select
+                id="ss-scope"
+                value={setScopeForm.scope}
+                onChange={e => setSetScopeForm(f => ({ ...f, scope: e.target.value }))}
+                className="h-9 w-full rounded border bg-background px-2 text-sm"
+              >
+                <option value="full">full</option>
+                <option value="admin">admin</option>
+                <option value="services">services</option>
+              </select>
+            </div>
+            {setScopeForm.scope === 'services' && (
+              <div className="space-y-1">
+                <Label htmlFor="ss-services">Service tags (comma-separated) *</Label>
+                <Input
+                  id="ss-services"
+                  value={setScopeForm.services}
+                  onChange={e => setSetScopeForm(f => ({ ...f, services: e.target.value }))}
+                  placeholder="caddy-admin, app-postgres"
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSetScope(null)} disabled={setScopeBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitSetScope} disabled={setScopeBusy}>
+              {setScopeBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove peer confirm. The lockout gate kicks in if this is the
+          only enabled peer (LAST_ENABLED_PEER) or recently active
+          (RECENTLY_ACTIVE). */}
+      <Dialog open={!!removePeer} onOpenChange={(o) => { if (!o) setRemovePeer(null); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove peer "{removePeer?.name}"?</DialogTitle>
+            <DialogDescription>
+              Drops the peer from wg0.conf and the database. The peer's installed config
+              stops working immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemovePeer(null)} disabled={removeBusy}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmRemove} disabled={removeBusy}>
+              {removeBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Lockout-gate typed-phrase modal. Phrase varies by gate code:
+            LAST_ENABLED_PEER     → 'I understand this locks everyone out'
+            RECENTLY_ACTIVE       → 'remove this active peer'
+            LAST_FULL_ADMIN_DEMOTE → 'demote the last admin peer' */}
+      <Dialog open={!!gate} onOpenChange={(o) => { if (!o) { setGate(null); setGatePhrase(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-red-600" />
+              {gate?.action === 'remove' ? 'Force remove' : gate?.action === 'disable' ? 'Force disable' : 'Force scope change'} "{gate?.peer?.name}"?
+            </DialogTitle>
+            <DialogDescription>
+              The CLI refused this action because: <code>{gate?.code}</code>. Confirm by
+              typing the exact phrase below — this bypasses the lockout safeguard.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="gate-phrase">type to confirm: <code>{gate?.phrase}</code></Label>
+            <Input
+              id="gate-phrase"
+              autoFocus
+              value={gatePhrase}
+              onChange={e => setGatePhrase(e.target.value)}
+              placeholder={gate?.phrase ?? ''}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setGate(null); setGatePhrase(''); }} disabled={gateBusy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={executeGated}
+              disabled={gateBusy || gatePhrase !== gate?.phrase}
+            >
+              {gateBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Confirm and {gate?.action ?? 'force'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Enable VPN. The CLI generates the server keypair, writes
           wg0.conf, brings up wg-quick@wg0, and creates the

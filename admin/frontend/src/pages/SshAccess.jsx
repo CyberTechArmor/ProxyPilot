@@ -346,7 +346,7 @@ export default function SshAccess() {
 
       {/* Add device modal */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-[min(96vw,80rem)] max-h-[90vh] overflow-y-auto overflow-x-hidden">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-[95vw] max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle>Add device</DialogTitle>
             <DialogDescription>

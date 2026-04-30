@@ -17,8 +17,15 @@ function findRule(state, id) {
  * updated rule. Throws if the id doesn't exist or the mutation is
  * disallowed (e.g. trying to remove a base entry — base is allowlist-only).
  */
+function panicGuard(state, action) {
+  if (state.panic_close && (action === 'enable' || action === 'set-scope' || action === 'add-manual')) {
+    throw new Error('firewall is in panic-close. Run `proxypilot firewall panic-open` first.');
+  }
+}
+
 function mutate({ id, action, fn, actor }) {
   const state = readState();
+  panicGuard(state, action);
   const before = findRule(state, id);
   if (!before) {
     const err = new Error(`no rule with id ${id}`);
@@ -113,6 +120,7 @@ export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, ac
   if (!reason) throw new Error('--reason is required for manual rules');
 
   const state = readState();
+  panicGuard(state, 'add-manual');
   const range = portEnd && portEnd !== port ? `${port}-${portEnd}` : `${port}`;
   const id = `manual-host-operator-${range}-${proto}`;
   if (findRule(state, id)) {

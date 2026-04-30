@@ -295,6 +295,11 @@ import {
   setScopeCommand as firewallSetScopeCommand,
   addManualCommand as firewallAddManualCommand,
   removeManualCommand as firewallRemoveManualCommand,
+  panicCloseCommand as firewallPanicCloseCommand,
+  panicOpenCommand as firewallPanicOpenCommand,
+  egressAllowCommand as firewallEgressAllowCommand,
+  egressDenyCommand as firewallEgressDenyCommand,
+  egressListCommand as firewallEgressListCommand,
 } from '../src/commands/firewall/index.js';
 
 const firewall = program
@@ -386,6 +391,53 @@ firewall
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallRemoveManualCommand(id, opts, globalOpts);
+  });
+
+firewall
+  .command('panic-close')
+  .description('Drop all discovered rules, reduce base allowlist to SSH (+ WireGuard if on)')
+  .option('--yes', 'Skip the confirmation prompt')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallPanicCloseCommand(opts, globalOpts);
+  });
+
+firewall
+  .command('panic-open')
+  .description('Clear the panic-close flag (does NOT auto-restore previously enabled rules)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallPanicOpenCommand(opts, globalOpts);
+  });
+
+const egress = firewall
+  .command('egress')
+  .description('Per-container egress allow rules (LXC bridge → host services)');
+
+egress
+  .command('list')
+  .description('List container-egress entries')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressListCommand(opts, globalOpts);
+  });
+
+egress
+  .command('allow <container> <service>')
+  .description('Allow <container> to reach the named host-side <service> (e.g. pgbouncer)')
+  .option('--reason <text>', 'Why the access is granted')
+  .option('--container-ip <ip>', 'Pin the rule to this container IP (defaults to the whole bridge CIDR)')
+  .action(async (container, service, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressAllowCommand(container, service, opts, globalOpts);
+  });
+
+egress
+  .command('deny <container> <service>')
+  .description('Revoke a previously granted egress allow rule')
+  .action(async (container, service, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallEgressDenyCommand(container, service, opts, globalOpts);
   });
 
 // ── parse and execute ───────────────────────────────────────────────────────

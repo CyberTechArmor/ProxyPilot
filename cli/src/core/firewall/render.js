@@ -159,6 +159,18 @@ export function render(state) {
   const enabledBase = state.base.filter(r => r.enabled);
   const enabledDiscovered = state.discovered.filter(r => r.enabled);
 
+  // Bridge iface name. State override exists for hosts whose Incus
+  // bridge isn't named `pp-br0` (legacy `incusbr0` installs, operator
+  // renamed bridges, etc.); validate hard against an iface-safe regex
+  // so a junk value can never reach nft. The match below uses
+  // `iifname` (string match) rather than `iif` (numeric index) so the
+  // rule loads even when the bridge isn't up yet — at boot the
+  // firewall comes up before the bridge, with `iif` nft would reject.
+  const bridgeIface = state.network?.bridge_iface ?? LXC_BRIDGE_IFACE;
+  if (!/^[A-Za-z0-9_.-]{1,15}$/.test(bridgeIface)) {
+    throw new Error(`invalid network.bridge_iface: ${bridgeIface}`);
+  }
+
   // Loopback, ct state, and ICMP are handled in input_hook before we
   // jump here, so base_input only carries the operator-facing
   // allowlist. Keeping it focused makes diffs and audit reads easier.
@@ -195,7 +207,7 @@ table inet proxypilot {
   chain input_hook {
     type filter hook input priority filter - 10; policy drop;
     iif lo accept
-    iif "${LXC_BRIDGE_IFACE}" accept
+    iifname "${bridgeIface}" accept
     ct state established,related accept
     ct state invalid drop
     ip protocol icmp icmp type echo-request limit rate 5/second accept

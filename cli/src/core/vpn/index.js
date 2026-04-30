@@ -15,3 +15,5 @@ export {
   WG_DEFAULT_DNS,
   WG_SERVER_IP,
 } from './server.js';
+export { renderQrPng, renderQrAnsi } from './qr.js';
+export { dumpPeers, isOnline, ONLINE_HANDSHAKE_WINDOW_SECONDS } from './status.js';

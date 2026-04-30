@@ -456,6 +456,35 @@ egress
     await firewallEgressDenyCommand(container, service, opts, globalOpts);
   });
 
+// ── route command group ─────────────────────────────────────────────────────
+import {
+  routeUpdateCommand,
+  routeReconcileCommand,
+} from '../src/commands/route/index.js';
+
+const route = program
+  .command('route')
+  .description('Per-route Caddy management (vpn-only matchers, manual reconcile)');
+
+route
+  .command('update <domain>')
+  .description('Toggle vpn-only or change service tag on an existing route')
+  .option('--vpn-only', 'Render the route with an @vpn remote_ip matcher')
+  .option('--no-vpn-only', 'Drop the matcher and serve publicly')
+  .option('--service <name>', 'Service tag (empty string clears the tag)')
+  .action(async (domain, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await routeUpdateCommand(domain, opts, globalOpts);
+  });
+
+route
+  .command('reconcile')
+  .description('Re-render every vpn-only route\'s site file and reload Caddy')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await routeReconcileCommand(opts, globalOpts);
+  });
+
 // ── vpn command group ───────────────────────────────────────────────────────
 import {
   enableCommand as vpnEnableCommand,

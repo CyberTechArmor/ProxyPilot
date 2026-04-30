@@ -6,18 +6,35 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import {
   Loader2,
   Shield,
+  ShieldAlert,
+  ShieldOff,
   RefreshCw,
   ScanLine,
   Globe,
   Wifi,
   Lock,
   HomeIcon,
+  AlertTriangle,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
+
+// Typed-phrase gates. The CLI always receives --yes from the backend
+// (interactive y/N is meaningless over JSON), so the dashboard is the
+// only place these confirmations actually happen.
+const PANIC_CLOSE_PHRASE = 'close everything to recovery state';
+const PUBLIC_OPEN_PHRASE = 'open this port to the public internet';
 
 // Scope chip rendering. The CLI's renderer enforces the same set on
 // the wire so an unknown value here would have failed at the API
@@ -59,6 +76,19 @@ export default function Firewall() {
   // Per-row mutation flag so concurrent toggles don't overlap a
   // reconcile-after-write storm in the host CLI.
   const [pendingId, setPendingId] = useState(null);
+
+  // Panic-close typed-phrase gate. panicOpen is just a confirm.
+  const [panicCloseOpen, setPanicCloseOpen] = useState(false);
+  const [panicClosePhrase, setPanicClosePhrase] = useState('');
+  const [panicCloseBusy, setPanicCloseBusy] = useState(false);
+  const [panicOpenOpen, setPanicOpenOpen] = useState(false);
+  const [panicOpenBusy, setPanicOpenBusy] = useState(false);
+
+  // Public-internet enable confirm: rule + typed phrase. The actual
+  // enable() call is deferred until the operator types the phrase.
+  const [publicConfirm, setPublicConfirm] = useState(null); // rule | null
+  const [publicPhrase, setPublicPhrase] = useState('');
+  const [publicBusy, setPublicBusy] = useState(false);
 
   useEffect(() => {
     if (isAdmin) loadAll();
@@ -118,25 +148,89 @@ export default function Firewall() {
   }
 
   async function toggleRule(rule) {
-    setPendingId(rule.id);
-    try {
-      if (rule.enabled) {
+    if (rule.enabled) {
+      setPendingId(rule.id);
+      try {
         await api.disableFirewallRule(rule.id);
         toast({ title: `Disabled ${rule.id}` });
-      } else {
-        // Public scope on enable would normally trip the CLI's y/N
-        // prompt; the backend always passes --yes. The dashboard
-        // could add a typed-phrase guard here later, but the operator
-        // already sees the scope chip + reason so the UI signal is
-        // present.
-        await api.enableFirewallRule(rule.id, {});
-        toast({ title: `Enabled ${rule.id}` });
+        loadAll();
+      } catch (e) {
+        toast({ variant: 'destructive', title: 'Toggle failed', description: e.message });
+      } finally {
+        setPendingId(null);
       }
+      return;
+    }
+    // Enable path. Public scope opens the port to the public internet
+    // (the backend always passes --yes); the typed-phrase modal is
+    // the only place the operator confirms. Anything else enables
+    // immediately.
+    if (rule.scope === 'public') {
+      setPublicConfirm(rule);
+      setPublicPhrase('');
+      return;
+    }
+    setPendingId(rule.id);
+    try {
+      await api.enableFirewallRule(rule.id, {});
+      toast({ title: `Enabled ${rule.id}` });
       loadAll();
     } catch (e) {
       toast({ variant: 'destructive', title: 'Toggle failed', description: e.message });
     } finally {
       setPendingId(null);
+    }
+  }
+
+  async function confirmPublicEnable() {
+    if (!publicConfirm || publicPhrase !== PUBLIC_OPEN_PHRASE) return;
+    setPublicBusy(true);
+    try {
+      await api.enableFirewallRule(publicConfirm.id, { confirm: true });
+      toast({ title: `Enabled ${publicConfirm.id} (public)` });
+      setPublicConfirm(null);
+      setPublicPhrase('');
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Toggle failed', description: e.message });
+    } finally {
+      setPublicBusy(false);
+    }
+  }
+
+  async function handlePanicClose() {
+    if (panicClosePhrase !== PANIC_CLOSE_PHRASE) return;
+    setPanicCloseBusy(true);
+    try {
+      const r = await api.panicCloseFirewall();
+      toast({
+        variant: 'destructive',
+        title: 'Panic-close engaged',
+        description: `${r.rule_count ?? '?'} rules · ${r.checksum ?? ''}`,
+      });
+      setPanicCloseOpen(false);
+      setPanicClosePhrase('');
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Panic-close failed', description: e.message });
+    } finally {
+      setPanicCloseBusy(false);
+    }
+  }
+
+  async function handlePanicOpen() {
+    setPanicOpenBusy(true);
+    try {
+      const r = await api.panicOpenFirewall();
+      toast({
+        title: r.alreadyOpen ? 'Already in normal state' : 'Panic-close cleared',
+      });
+      setPanicOpenOpen(false);
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Panic-open failed', description: e.message });
+    } finally {
+      setPanicOpenBusy(false);
     }
   }
 
@@ -195,9 +289,32 @@ export default function Firewall() {
               {reconciling ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
               Reconcile
             </Button>
+            {status?.panic_close ? (
+              <Button variant="outline" onClick={() => setPanicOpenOpen(true)}>
+                <ShieldOff className="h-4 w-4 mr-2" />
+                Panic open
+              </Button>
+            ) : (
+              <Button variant="destructive" onClick={() => { setPanicClosePhrase(''); setPanicCloseOpen(true); }}>
+                <ShieldAlert className="h-4 w-4 mr-2" />
+                Panic close
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {status?.panic_close && (
+            <div className="flex items-start gap-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div>
+                <div className="font-semibold text-amber-700 dark:text-amber-300">Panic-close active</div>
+                <div className="text-muted-foreground">
+                  All non-recovery rules are dropped. Use <strong>Panic open</strong> to restore normal
+                  operation when the incident is resolved.
+                </div>
+              </div>
+            </div>
+          )}
           {status && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
               <StatusCell label="Backend" value={`${status.backend ?? 'nftables'} (${status.table ?? 'inet/proxypilot'})`} />
@@ -302,6 +419,103 @@ export default function Firewall() {
           )}
         </CardContent>
       </Card>
+
+      {/* Public-internet enable confirm. The CLI's interactive y/N
+          is bypassed by --yes from the backend; this is the only
+          place the operator confirms exposing the port. */}
+      <Dialog open={!!publicConfirm} onOpenChange={(o) => { if (!o) { setPublicConfirm(null); setPublicPhrase(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Open {publicConfirm?.id} to the public internet?</DialogTitle>
+            <DialogDescription>
+              This rule will accept traffic from any source IP. Make sure you understand the
+              listener — port <code>{publicConfirm ? fmtPort(publicConfirm) : ''}</code> /
+              <code>{publicConfirm?.proto}</code>{publicConfirm?.service ? ` (${publicConfirm.service})` : ''}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="public-phrase">type to confirm: <code>{PUBLIC_OPEN_PHRASE}</code></Label>
+            <Input
+              id="public-phrase"
+              autoFocus
+              value={publicPhrase}
+              onChange={e => setPublicPhrase(e.target.value)}
+              placeholder={PUBLIC_OPEN_PHRASE}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setPublicConfirm(null); setPublicPhrase(''); }} disabled={publicBusy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmPublicEnable}
+              disabled={publicBusy || publicPhrase !== PUBLIC_OPEN_PHRASE}
+            >
+              {publicBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Open to public
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Panic-close: drop everything except the recovery rules. */}
+      <Dialog open={panicCloseOpen} onOpenChange={(o) => { if (!o) { setPanicCloseOpen(false); setPanicClosePhrase(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Engage panic-close?</DialogTitle>
+            <DialogDescription>
+              Every non-recovery rule is dropped immediately. SSH from the recovery CIDR set
+              keeps working; everything else stops. Use this for active incidents only.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="panic-phrase">type to confirm: <code>{PANIC_CLOSE_PHRASE}</code></Label>
+            <Input
+              id="panic-phrase"
+              autoFocus
+              value={panicClosePhrase}
+              onChange={e => setPanicClosePhrase(e.target.value)}
+              placeholder={PANIC_CLOSE_PHRASE}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setPanicCloseOpen(false); setPanicClosePhrase(''); }} disabled={panicCloseBusy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handlePanicClose}
+              disabled={panicCloseBusy || panicClosePhrase !== PANIC_CLOSE_PHRASE}
+            >
+              {panicCloseBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Engage panic-close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Panic-open: clear panic-close, restore the saved ruleset. */}
+      <Dialog open={panicOpenOpen} onOpenChange={(o) => { if (!o) setPanicOpenOpen(false); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Clear panic-close?</DialogTitle>
+            <DialogDescription>
+              Restore the saved ruleset. Rules that were enabled before panic-close come back
+              to whatever state they were in.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPanicOpenOpen(false)} disabled={panicOpenBusy}>
+              Cancel
+            </Button>
+            <Button onClick={handlePanicOpen} disabled={panicOpenBusy}>
+              {panicOpenBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Clear panic-close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

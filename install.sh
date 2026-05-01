@@ -939,6 +939,19 @@ create_docker_compose() {
 
     log_info "Creating Docker Compose configuration..."
 
+    # Resolve the proxypilot-agent group's numeric GID on the host so
+    # the container can join it via group_add. We use the GID rather
+    # than the name because Docker resolves group_add names against
+    # /etc/group inside the container — the proxypilot-admin image
+    # doesn't carry a proxypilot-agent group, and even if we baked
+    # one in the GID would have to match the host's, which differs
+    # per install. A numeric GID is portable and works without
+    # touching the Dockerfile.
+    local agent_gid=""
+    if getent group proxypilot-agent >/dev/null 2>&1; then
+        agent_gid=$(getent group proxypilot-agent | cut -d: -f3)
+    fi
+
     cat > "${install_dir}/docker-compose.yml" <<EOF
 version: '3.8'
 
@@ -957,7 +970,7 @@ services:
     # The kernel-level requirement is CAP_SYS_ADMIN; the userspace-
     # policy requirements are NO AppArmor profile and NO seccomp filter.
     #
-    # `privileged: true` grants all of the above in one switch. We
+    # \`privileged: true\` grants all of the above in one switch. We
     # tried a finer-grained cap_drop:ALL + cap_add:[SYS_ADMIN, SYS_PTRACE]
     # + security_opt:[no-new-privileges, apparmor:unconfined] approach
     # and it surfaced edge after edge (default seccomp blocks setns
@@ -967,7 +980,10 @@ services:
     # root. Restoring privileged:true gives the bulletproof posture
     # Docker has tested for a decade; the only real isolation win
     # comes from a future host-side-agent architecture that removes
-    # the nsenter-from-container model entirely (out of scope today).
+    # the nsenter-from-container model entirely. Phase A scaffolds
+    # that agent (see docs/features/security-completion/master-spec.md);
+    # Phase F is what drops privileged:true once Phases B-E have
+    # migrated every host-call onto the agent socket below.
     privileged: true
     pid: host
     ports:
@@ -978,11 +994,23 @@ services:
       - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
+      # Phase A host-side agent socket (read+write — :ro would block
+      # the bidirectional unix-socket traffic). Owned by the
+      # proxypilot-agent group on the host; the container joins that
+      # group via group_add below so it can connect.
+      - /run/proxypilot-agent.sock:/run/proxypilot-agent.sock
+    group_add:
+      # Numeric GID of the host's proxypilot-agent group, so the
+      # container's processes are members of the group that owns
+      # /run/proxypilot-agent.sock (mode 0660). install.sh creates
+      # the group before this file is generated.
+      - "${agent_gid}"
     environment:
       - NODE_ENV=production
       - SERVICES_DATA_DIR=/data/services
       - CADDY_STATIC_ROOT=${INSTALL_DIR}/data/services
       - DOCKER_CONTAINER=true
+      - PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent.sock
     env_file:
       - .env
     networks:
@@ -998,6 +1026,10 @@ networks:
   proxypilot-net:
     driver: bridge
 EOF
+
+    if [[ -z "$agent_gid" ]]; then
+        log_warn "proxypilot-agent group not found at compose-write time; group_add line is empty. Phase A agent will be unreachable from the container until install.sh creates the group and re-runs create_docker_compose."
+    fi
 
     log_success "Docker Compose file created"
 }

@@ -82,10 +82,6 @@ export default function Profile() {
   const [creatingUser, setCreatingUser] = useState(false);
   const [createdUser, setCreatedUser] = useState(null);
   const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'user' });
-  const [deleteUserOpen, setDeleteUserOpen] = useState(false);
-  const [userToDelete, setUserToDelete] = useState(null);
-  const [deleteTotpCode, setDeleteTotpCode] = useState('');
-  const [deletingUser, setDeletingUser] = useState(false);
   const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [userAccess, setUserAccess] = useState([]);
@@ -529,34 +525,6 @@ export default function Profile() {
       });
     } finally {
       setCreatingUser(false);
-    }
-  };
-
-  const handleDeleteUser = async (passkeyAssertion = null) => {
-    if (!userToDelete) return;
-    if (!passkeyAssertion && deleteTotpCode.length !== 6) return;
-
-    setDeletingUser(true);
-    try {
-      await api.deleteUser(userToDelete.id, passkeyAssertion
-        ? { passkeyAssertion }
-        : { totpCode: deleteTotpCode });
-      toast({
-        title: 'Success',
-        description: 'User deleted successfully',
-      });
-      setDeleteUserOpen(false);
-      setUserToDelete(null);
-      setDeleteTotpCode('');
-      fetchUsers();
-    } catch (error) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: error.message,
-      });
-    } finally {
-      setDeletingUser(false);
     }
   };
 

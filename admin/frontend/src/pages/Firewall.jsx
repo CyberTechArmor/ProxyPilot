@@ -27,6 +27,7 @@ import {
   Lock,
   HomeIcon,
   AlertTriangle,
+  Plus,
 } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
@@ -90,8 +91,40 @@ export default function Firewall() {
   const [publicPhrase, setPublicPhrase] = useState('');
   const [publicBusy, setPublicBusy] = useState(false);
 
+  // Egress state. Loaded alongside firewall on initial mount and
+  // refreshed after every egress mutation. `egressServices` is the
+  // NAMED_SERVICES map keyed by service name (used to populate the
+  // "+ Add egress" modal's service dropdown).
+  const [egressEntries, setEgressEntries] = useState([]);
+  const [egressServices, setEgressServices] = useState({});
+  const [egressLoading, setEgressLoading] = useState(false);
+  const [egressPendingKey, setEgressPendingKey] = useState(null); // `${container}:${service}`
+  const [addEgressOpen, setAddEgressOpen] = useState(false);
+  const [addEgressBusy, setAddEgressBusy] = useState(false);
+  const [addEgressForm, setAddEgressForm] = useState({
+    container: '', service: '', reason: '', container_ip: '',
+  });
+
+  // Manual-rule modal. Mirrors the manualSchema shape on the backend
+  // (port_start/end ints, proto enum, scope enum, optional service for
+  // vpn-only, csv source_cidrs parsed to array, required reason).
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualForm, setManualForm] = useState({
+    port_start: '',
+    port_end: '',
+    proto: 'tcp',
+    scope: 'lan-only',
+    service: '',
+    source_cidrs: '',
+    reason: '',
+  });
+
   useEffect(() => {
-    if (isAdmin) loadAll();
+    if (isAdmin) {
+      loadAll();
+      loadEgress();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
@@ -107,6 +140,55 @@ export default function Firewall() {
       toast({ variant: 'destructive', title: 'Failed to load firewall', description: e.message });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadEgress() {
+    setEgressLoading(true);
+    try {
+      const r = await api.listFirewallEgress();
+      setEgressEntries(r.entries || []);
+      setEgressServices(r.services || {});
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Failed to load egress', description: e.message });
+    } finally {
+      setEgressLoading(false);
+    }
+  }
+
+  async function handleEgressDeny(container, service) {
+    const key = `${container}:${service}`;
+    setEgressPendingKey(key);
+    try {
+      await api.denyFirewallEgress({ container, service });
+      toast({ title: `Denied ${service} for ${container}` });
+      loadEgress();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Egress deny failed', description: e.message });
+    } finally {
+      setEgressPendingKey(null);
+    }
+  }
+
+  async function submitAddEgress() {
+    const container = addEgressForm.container.trim();
+    const service = addEgressForm.service.trim();
+    if (!container) { toast({ variant: 'destructive', title: 'Container required' }); return; }
+    if (!service) { toast({ variant: 'destructive', title: 'Service required' }); return; }
+    const body = { container, service };
+    if (addEgressForm.reason.trim()) body.reason = addEgressForm.reason.trim();
+    if (addEgressForm.container_ip.trim()) body.container_ip = addEgressForm.container_ip.trim();
+    setAddEgressBusy(true);
+    try {
+      await api.allowFirewallEgress(body);
+      toast({ title: `Allowed ${service} for ${container}` });
+      setAddEgressOpen(false);
+      setAddEgressForm({ container: '', service: '', reason: '', container_ip: '' });
+      loadEgress();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Egress allow failed', description: e.message });
+    } finally {
+      setAddEgressBusy(false);
     }
   }
 
@@ -218,6 +300,62 @@ export default function Firewall() {
     }
   }
 
+  function resetManualForm() {
+    setManualForm({
+      port_start: '', port_end: '', proto: 'tcp', scope: 'lan-only',
+      service: '', source_cidrs: '', reason: '',
+    });
+  }
+
+  async function submitManual() {
+    const portStart = Number(manualForm.port_start);
+    if (!Number.isInteger(portStart) || portStart < 1 || portStart > 65535) {
+      toast({ variant: 'destructive', title: 'Invalid port', description: 'Start port must be 1–65535.' });
+      return;
+    }
+    let portEnd = null;
+    if (manualForm.port_end !== '') {
+      portEnd = Number(manualForm.port_end);
+      if (!Number.isInteger(portEnd) || portEnd < portStart || portEnd > 65535) {
+        toast({ variant: 'destructive', title: 'Invalid port range', description: 'End port must be ≥ start and ≤ 65535.' });
+        return;
+      }
+    }
+    if (!manualForm.reason.trim()) {
+      toast({ variant: 'destructive', title: 'Reason required' });
+      return;
+    }
+    if (manualForm.scope === 'vpn-only' && !manualForm.service.trim()) {
+      toast({ variant: 'destructive', title: 'Service required for vpn-only' });
+      return;
+    }
+    const cidrs = manualForm.source_cidrs
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const body = {
+      port_start: portStart,
+      port_end: portEnd,
+      proto: manualForm.proto,
+      scope: manualForm.scope,
+      reason: manualForm.reason.trim(),
+    };
+    if (manualForm.scope === 'vpn-only') body.service = manualForm.service.trim();
+    if (cidrs.length) body.source_cidrs = cidrs;
+    setManualBusy(true);
+    try {
+      const r = await api.addFirewallManualRule(body);
+      toast({ title: `Added manual rule ${r.rule?.id ?? ''}` });
+      setManualOpen(false);
+      resetManualForm();
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Add manual rule failed', description: e.message });
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   async function handlePanicOpen() {
     setPanicOpenBusy(true);
     try {
@@ -281,6 +419,10 @@ export default function Firewall() {
             </CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => { resetManualForm(); setManualOpen(true); }}>
+              <Plus className="h-4 w-4 mr-2" />
+              Add manual rule
+            </Button>
             <Button variant="outline" onClick={handleScan} disabled={scanning}>
               {scanning ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <ScanLine className="h-4 w-4 mr-2" />}
               Scan now
@@ -341,10 +483,28 @@ export default function Firewall() {
               <TabsTrigger value="base">Base ({counts.base})</TabsTrigger>
               <TabsTrigger value="discovered">Discovered ({counts.discovered})</TabsTrigger>
               <TabsTrigger value="manual">Manual ({counts.manual})</TabsTrigger>
+              <TabsTrigger value="egress">Egress ({egressEntries.length})</TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {loading ? (
+          {tab === 'egress' ? (
+            <EgressPanel
+              loading={egressLoading}
+              entries={egressEntries}
+              services={egressServices}
+              pendingKey={egressPendingKey}
+              onDeny={handleEgressDeny}
+              onAdd={() => {
+                setAddEgressForm({
+                  container: '',
+                  service: Object.keys(egressServices)[0] ?? '',
+                  reason: '',
+                  container_ip: '',
+                });
+                setAddEgressOpen(true);
+              }}
+            />
+          ) : loading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
@@ -419,6 +579,181 @@ export default function Firewall() {
           )}
         </CardContent>
       </Card>
+
+      {/* Add per-container egress allow. Service dropdown is keyed
+          off NAMED_SERVICES from the egress endpoint's response. */}
+      <Dialog open={addEgressOpen} onOpenChange={(o) => { if (!o) setAddEgressOpen(false); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Allow container egress</DialogTitle>
+            <DialogDescription>
+              Default-deny applies to all bridge → host flows. Pick a named service the
+              container should be allowed to reach.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="eg-container">Container *</Label>
+              <Input
+                id="eg-container"
+                value={addEgressForm.container}
+                onChange={e => setAddEgressForm(f => ({ ...f, container: e.target.value }))}
+                placeholder="e.g. pp-app"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-service">Service *</Label>
+              <select
+                id="eg-service"
+                value={addEgressForm.service}
+                onChange={e => setAddEgressForm(f => ({ ...f, service: e.target.value }))}
+                className="h-9 w-full rounded border bg-background px-2 text-sm"
+              >
+                {Object.keys(egressServices).length === 0 && (
+                  <option value="">no named services available</option>
+                )}
+                {Object.keys(egressServices).map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-ip">Container IP (optional pin)</Label>
+              <Input
+                id="eg-ip"
+                value={addEgressForm.container_ip}
+                onChange={e => setAddEgressForm(f => ({ ...f, container_ip: e.target.value }))}
+                placeholder="leave blank to use whatever IP the container has now"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="eg-reason">Reason (optional)</Label>
+              <Input
+                id="eg-reason"
+                value={addEgressForm.reason}
+                onChange={e => setAddEgressForm(f => ({ ...f, reason: e.target.value }))}
+                placeholder="why this container needs this service"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddEgressOpen(false)} disabled={addEgressBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitAddEgress} disabled={addEgressBusy}>
+              {addEgressBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Allow
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add manual rule. Mirrors the backend's manualSchema: port
+          range, proto, scope, optional service (required for
+          vpn-only), comma-separated source CIDRs, and a free-form
+          reason that ends up in the audit row + the rule's
+          `reason` field. */}
+      <Dialog open={manualOpen} onOpenChange={(o) => { if (!o) { setManualOpen(false); resetManualForm(); } }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add manual firewall rule</DialogTitle>
+            <DialogDescription>
+              Manual rules live alongside discovered listeners. Reconcile runs after submit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 py-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="m-port-start">Port (start) *</Label>
+                <Input
+                  id="m-port-start"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={manualForm.port_start}
+                  onChange={e => setManualForm(f => ({ ...f, port_start: e.target.value }))}
+                  placeholder="22"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="m-port-end">Port (end, optional)</Label>
+                <Input
+                  id="m-port-end"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={manualForm.port_end}
+                  onChange={e => setManualForm(f => ({ ...f, port_end: e.target.value }))}
+                  placeholder=""
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="m-proto">Proto *</Label>
+                <select
+                  id="m-proto"
+                  value={manualForm.proto}
+                  onChange={e => setManualForm(f => ({ ...f, proto: e.target.value }))}
+                  className="h-9 w-full rounded border bg-background px-2 text-sm"
+                >
+                  <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="m-scope">Scope *</Label>
+                <select
+                  id="m-scope"
+                  value={manualForm.scope}
+                  onChange={e => setManualForm(f => ({ ...f, scope: e.target.value }))}
+                  className="h-9 w-full rounded border bg-background px-2 text-sm"
+                >
+                  {SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+            {manualForm.scope === 'vpn-only' && (
+              <div className="space-y-1">
+                <Label htmlFor="m-service">Service tag * (vpn-only requires it)</Label>
+                <Input
+                  id="m-service"
+                  value={manualForm.service}
+                  onChange={e => setManualForm(f => ({ ...f, service: e.target.value }))}
+                  placeholder="e.g. caddy-admin"
+                />
+              </div>
+            )}
+            <div className="space-y-1">
+              <Label htmlFor="m-cidrs">Source CIDRs (comma-separated, optional)</Label>
+              <Input
+                id="m-cidrs"
+                value={manualForm.source_cidrs}
+                onChange={e => setManualForm(f => ({ ...f, source_cidrs: e.target.value }))}
+                placeholder="10.0.0.0/8, 192.168.1.0/24"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="m-reason">Reason *</Label>
+              <Input
+                id="m-reason"
+                value={manualForm.reason}
+                onChange={e => setManualForm(f => ({ ...f, reason: e.target.value }))}
+                placeholder="why this rule exists — surfaces in the audit log"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setManualOpen(false); resetManualForm(); }} disabled={manualBusy}>
+              Cancel
+            </Button>
+            <Button onClick={submitManual} disabled={manualBusy}>
+              {manualBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Add rule
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Public-internet enable confirm. The CLI's interactive y/N
           is bypassed by --yes from the backend; this is the only
@@ -516,6 +851,76 @@ export default function Firewall() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function EgressPanel({ loading, entries, services, pendingKey, onDeny, onAdd }) {
+  const serviceCount = Object.keys(services).length;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs text-muted-foreground">
+          Default-deny on bridge → host. {serviceCount} named service{serviceCount === 1 ? '' : 's'} known.
+        </p>
+        <Button size="sm" variant="outline" onClick={onAdd} disabled={serviceCount === 0}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add egress
+        </Button>
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+        </div>
+      ) : entries.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No container-egress allow rules. Default-deny applies to every bridge → host flow.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b">
+                <th className="py-2 pr-3">Container</th>
+                <th className="py-2 pr-3">Allowed services</th>
+                <th className="py-2 pr-3">Reason</th>
+                <th className="py-2 pr-3">Container IP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(e => (
+                <tr key={e.container} className="border-b last:border-b-0 align-top">
+                  <td className="py-2 pr-3 font-mono text-xs">{e.container}</td>
+                  <td className="py-2 pr-3">
+                    <div className="flex flex-wrap gap-1">
+                      {(e.allow ?? []).map(svc => {
+                        const key = `${e.container}:${svc}`;
+                        const pending = pendingKey === key;
+                        return (
+                          <span key={svc} className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 text-xs">
+                            <span className="font-mono">{svc}</span>
+                            <button
+                              type="button"
+                              onClick={() => onDeny(e.container, svc)}
+                              disabled={pending}
+                              title={`Deny ${svc} for ${e.container}`}
+                              className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded hover:bg-destructive/20 disabled:opacity-50"
+                            >
+                              {pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="leading-none">×</span>}
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-3 text-xs">{e.reason ?? '—'}</td>
+                  <td className="py-2 pr-3 font-mono text-xs">{e.container_ip ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

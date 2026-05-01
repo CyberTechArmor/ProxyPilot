@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
-  Server, Play, Square, RefreshCw, Trash2, Plus, Info,
+  Server, Play, Square, RefreshCw, RotateCw, Trash2, Plus, Info,
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
@@ -496,6 +496,10 @@ export default function LxcContainers() {
         case 'restart':
           await api.restartLxcContainer(name);
           toast({ title: 'Container restarted', description: `${name} is restarting.` });
+          break;
+        case 'reboot':
+          await api.rebootLxcContainer(name);
+          toast({ title: 'Reboot requested', description: `${name} is rebooting gracefully.` });
           break;
       }
       await fetchContainers();
@@ -1401,6 +1405,22 @@ export default function LxcContainers() {
                         <RefreshCw className="h-4 w-4" />
                       )}
                     </Button>
+                    {ct.type === 'virtual-machine' && ct.status === 'running' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-cyan-500 hover:text-cyan-600"
+                        onClick={() => handleAction('reboot', ct.name)}
+                        disabled={actionLoading[`${ct.name}-reboot`]}
+                        title="Reboot (graceful, ACPI shutdown)"
+                      >
+                        {actionLoading[`${ct.name}-reboot`] ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RotateCw className="h-4 w-4" />
+                        )}
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -2764,6 +2784,11 @@ export default function LxcContainers() {
                 value={resizeForm.memory}
                 onChange={(e) => setResizeForm((f) => ({ ...f, memory: e.target.value }))}
               />
+              {selectedContainer?.type === 'virtual-machine' && (
+                <p className="text-xs text-muted-foreground">
+                  VM memory changes apply on next boot. Use Reboot to apply now.
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>

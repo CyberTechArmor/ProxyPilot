@@ -1915,6 +1915,42 @@ lxcRouter.post('/containers/:name/restart', async (req, res) => {
   }
 });
 
+// POST /containers/:name/reboot - Graceful reboot (VMs use ACPI shutdown)
+//
+// `incus restart` without --force sends a graceful shutdown signal:
+//   - VMs: ACPI shutdown so the guest flushes dirty buffers, runs init
+//     shutdown scripts, and exits cleanly before the VM is started again.
+//     A naive Stop+Start power-cycles the VM (ungraceful), which can
+//     corrupt the guest filesystem on dirty caches.
+//   - Containers: SIGPWR/SIGTERM into the init process; functionally
+//     equivalent to the existing /restart endpoint without --force, but
+//     containers stay on the existing button for now.
+lxcRouter.post('/containers/:name/reboot', async (req, res) => {
+  const { name } = req.params;
+
+  if (!validateName(name)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid container name. Only alphanumeric characters and hyphens are allowed.',
+    });
+  }
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    console.log(`[LXC] Reboot (graceful) requested for ${incusName}`);
+    await execOnHost(`incus restart ${incusName} 2>&1`);
+    ensureNetworkNat().catch(() => {});
+    ensureDns(incusName).catch(() => {});
+    res.json({ success: true, message: `Instance '${name}' is rebooting.` });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to reboot instance '${name}': ${(error.stderr || error.message || '').trim()}`,
+      details: error.stderr || error.message,
+    });
+  }
+});
+
 // POST /containers/:name/resize - Resize container resource limits
 lxcRouter.post('/containers/:name/resize', async (req, res) => {
   const { name } = req.params;

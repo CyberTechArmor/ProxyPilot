@@ -445,6 +445,18 @@ export default function LxcContainers() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
 
+  // Live image catalog for the Create dialog dropdown. Populated on
+  // dialog open from GET /lxc/images (already-pulled local images),
+  // each row annotated with `supports: ['container'|'virtual-machine']`
+  // by the backend so we can filter by createForm.type. PRESET_IMAGES
+  // below is the fallback when the live fetch fails (incus daemon
+  // down, network glitch on the proxy hop, etc.) — without it the
+  // operator gets locked out of creating an instance during a
+  // degraded-but-not-down condition.
+  const [imageCatalog, setImageCatalog] = useState(null);
+  const [imageCatalogLoading, setImageCatalogLoading] = useState(false);
+  const [imageCatalogError, setImageCatalogError] = useState(null);
+
   // Check Incus status on mount
   useEffect(() => {
     api.getLxcStatus()
@@ -457,6 +469,32 @@ export default function LxcContainers() {
         setIncusAvailable(false);
       });
   }, []);
+
+  // Fetch the live image catalog whenever the Create dialog opens.
+  // Re-fetches on every open (cheap; one shell-out, ~10ms) so a fresh
+  // image pull from the Image Cache page shows up without a page
+  // reload. Errors don't block the dialog — the Select falls back to
+  // PRESET_IMAGES below.
+  useEffect(() => {
+    if (!createOpen) return;
+    let cancelled = false;
+    setImageCatalogLoading(true);
+    setImageCatalogError(null);
+    api.getLxcImages()
+      .then((res) => {
+        if (cancelled) return;
+        setImageCatalog(Array.isArray(res?.images) ? res.images : []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setImageCatalog(null);
+        setImageCatalogError(err?.message || 'Failed to load image catalog');
+      })
+      .finally(() => {
+        if (!cancelled) setImageCatalogLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [createOpen]);
 
   // Fetch containers
   const fetchContainers = useCallback(async () => {
@@ -1581,29 +1619,93 @@ export default function LxcContainers() {
                 </div>
                 <div className="space-y-2">
                   <Label>Image *</Label>
-                  <Select
-                    value={imageSelection}
-                    onValueChange={(val) => {
-                      setImageSelection(val);
-                      if (val !== '__custom__') {
-                        setCreateForm((f) => ({ ...f, image: val }));
-                      } else {
-                        setCreateForm((f) => ({ ...f, image: '' }));
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select an image..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {PRESET_IMAGES.map((img) => (
-                        <SelectItem key={img.value} value={img.value}>
-                          {img.label}
-                        </SelectItem>
-                      ))}
-                      <SelectItem value="__custom__">Custom image...</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  {(() => {
+                    // Build the dropdown options. When the live catalog
+                    // loaded, filter by createForm.type using the
+                    // backend-annotated supports[] array and sort by
+                    // os/release. When the fetch failed, fall back to
+                    // PRESET_IMAGES — the operator stays unblocked
+                    // during a degraded incus-list condition. Flat
+                    // sorted list (not grouped sections) by design;
+                    // grouping was deemed out-of-scope for this pass.
+                    const liveAvailable = Array.isArray(imageCatalog) && imageCatalog.length > 0;
+                    let liveOptions = [];
+                    if (liveAvailable) {
+                      liveOptions = imageCatalog
+                        .filter((img) => Array.isArray(img.supports) && img.supports.includes(createForm.type))
+                        .map((img) => {
+                          const alias = Array.isArray(img.aliases) && img.aliases[0]?.name;
+                          const fp = (img.fingerprint || '').slice(0, 12);
+                          const value = alias || img.fingerprint || '';
+                          const os = img.properties?.os || '';
+                          const release = img.properties?.release || '';
+                          const desc = img.properties?.description;
+                          const label = desc || alias || fp;
+                          return { value, label, os, release, alias, fp };
+                        })
+                        .filter((o) => o.value)
+                        .sort((a, b) => {
+                          const oa = (a.os || '~').toLowerCase();
+                          const ob = (b.os || '~').toLowerCase();
+                          if (oa !== ob) return oa.localeCompare(ob);
+                          return String(a.release).localeCompare(String(b.release), undefined, { numeric: true });
+                        });
+                    }
+                    const showFallback = !imageCatalogLoading && (imageCatalogError || !liveAvailable);
+                    return (
+                      <>
+                        <Select
+                          value={imageSelection}
+                          onValueChange={(val) => {
+                            setImageSelection(val);
+                            if (val !== '__custom__') {
+                              setCreateForm((f) => ({ ...f, image: val }));
+                            } else {
+                              setCreateForm((f) => ({ ...f, image: '' }));
+                            }
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder={imageCatalogLoading ? 'Loading images...' : 'Select an image...'} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {imageCatalogLoading && (
+                              <div className="px-2 py-3 text-xs text-muted-foreground flex items-center gap-2">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Loading image catalog...
+                              </div>
+                            )}
+                            {!imageCatalogLoading && liveOptions.length > 0 && liveOptions.map((opt) => (
+                              <SelectItem key={opt.value} value={opt.value}>
+                                <div className="flex flex-col">
+                                  <span>{opt.label}</span>
+                                  {opt.alias && opt.alias !== opt.label && (
+                                    <span className="text-xs text-muted-foreground">{opt.alias}</span>
+                                  )}
+                                </div>
+                              </SelectItem>
+                            ))}
+                            {!imageCatalogLoading && liveAvailable && liveOptions.length === 0 && (
+                              <div className="px-2 py-3 text-xs text-muted-foreground">
+                                No cached {createForm.type === 'virtual-machine' ? 'VM' : 'container'} images. Use Custom image below to pull one.
+                              </div>
+                            )}
+                            {showFallback && PRESET_IMAGES.map((img) => (
+                              <SelectItem key={img.value} value={img.value}>
+                                {img.label}
+                              </SelectItem>
+                            ))}
+                            <SelectItem value="__custom__">Custom image...</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {imageCatalogError && (
+                          <p className="text-xs text-amber-500">
+                            Couldn't load cached image list ({imageCatalogError}). Showing built-in presets.
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                   {imageSelection === '__custom__' && (
                     <Input
                       placeholder="images:ubuntu/24.04 or ubuntu:24.04"
@@ -1612,11 +1714,12 @@ export default function LxcContainers() {
                     />
                   )}
                   <p className="text-xs text-muted-foreground">
-                    Images are pulled from the{' '}
+                    Cached images appear automatically. For something not yet pulled, use{' '}
+                    <span className="font-mono text-foreground/80">Custom image...</span> with an{' '}
                     <a href="https://images.linuxcontainers.org" target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:underline">
-                      linuxcontainers.org
+                      images:
                     </a>{' '}
-                    image server.
+                    reference like <span className="font-mono text-foreground/80">images:ubuntu/24.04</span>.
                   </p>
                 </div>
                 {/* Services / Port Mappings */}

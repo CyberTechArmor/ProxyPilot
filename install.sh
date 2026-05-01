@@ -994,11 +994,17 @@ services:
       - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
-      # Phase A host-side agent socket (read+write — :ro would block
-      # the bidirectional unix-socket traffic). Owned by the
-      # proxypilot-agent group on the host; the container joins that
-      # group via group_add below so it can connect.
-      - /run/proxypilot-agent.sock:/run/proxypilot-agent.sock
+      # Phase A host-side agent. We bind-mount the systemd-managed
+      # RuntimeDirectory rather than the socket file itself so the
+      # mount survives the agent restarting (which recreates the
+      # socket inode). Mounting the directory also avoids the
+      # boot-time race where Docker would auto-create a missing
+      # source path as an empty directory and then prevent the agent
+      # from listening there. Owned by the proxypilot-agent group
+      # (mode 0750); the container joins that group via group_add
+      # below so it can traverse the directory and connect to the
+      # socket inside it.
+      - /run/proxypilot-agent:/run/proxypilot-agent
     group_add:
       # Numeric GID of the host's proxypilot-agent group, so the
       # container's processes are members of the group that owns
@@ -1010,7 +1016,7 @@ services:
       - SERVICES_DATA_DIR=/data/services
       - CADDY_STATIC_ROOT=${INSTALL_DIR}/data/services
       - DOCKER_CONTAINER=true
-      - PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent.sock
+      - PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock
     env_file:
       - .env
     networks:

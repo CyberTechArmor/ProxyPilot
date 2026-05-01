@@ -19,7 +19,7 @@
 
 import net from 'node:net';
 
-const DEFAULT_SOCKET = '/run/proxypilot-agent.sock';
+const DEFAULT_SOCKET = '/run/proxypilot-agent/proxypilot-agent.sock';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 

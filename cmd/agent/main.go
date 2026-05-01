@@ -32,7 +32,11 @@ import (
 )
 
 const (
-	defaultSocket = "/run/proxypilot-agent.sock"
+	// Default socket path. Lives inside a systemd-managed
+	// RuntimeDirectory (see deploy/proxypilot-agent.service) so the
+	// directory always exists before ExecStart runs and Docker's
+	// bind-mount of the parent directory survives socket recreations.
+	defaultSocket = "/run/proxypilot-agent/proxypilot-agent.sock"
 )
 
 func main() {

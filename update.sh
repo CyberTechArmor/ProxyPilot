@@ -988,24 +988,38 @@ PYEOF
         fi
 
         # Phase A — patch the deployed docker-compose.yml so the
-        # container can reach /run/proxypilot-agent.sock. Three
-        # additions, each idempotent (skip if marker already present):
+        # container can reach the host-side agent. Two idempotent
+        # passes:
         #
-        #   * volume bind:  /run/proxypilot-agent.sock:/run/proxypilot-agent.sock
-        #   * group_add:    [<numeric-gid-of-proxypilot-agent>]
-        #   * env var:      PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent.sock
+        #   FRESH INSTALL (no agent wiring yet):
+        #     * volume bind:  /run/proxypilot-agent:/run/proxypilot-agent
+        #     * group_add:    [<numeric-gid-of-proxypilot-agent>]
+        #     * env var:      PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock
+        #
+        #   MIGRATION from the original layout (single-file mount of
+        #   /run/proxypilot-agent.sock at the root of /run): the file
+        #   mount races with Docker on host reboot, so move to a
+        #   directory mount that's stable under
+        #   systemd RuntimeDirectory.
+        #     * /run/proxypilot-agent.sock:/run/proxypilot-agent.sock
+        #         → /run/proxypilot-agent:/run/proxypilot-agent
+        #     * PROXYPILOT_AGENT_SOCKET old path → new path
         #
         # Phase A is dual-tracked, so this socket isn't called by any
         # production code path yet — the container can connect and
-        # ping the agent, but nsenter still drives every host op. The
-        # socket needs to exist BEFORE a Phase B feature flag flips,
-        # which is why we wire it in now.
+        # ping the agent, but nsenter still drives every host op.
         if [ -f "$COMPOSE_FILE" ] && getent group proxypilot-agent >/dev/null 2>&1; then
             AGENT_GID=$(getent group proxypilot-agent | cut -d: -f3)
-            if ! grep -q '/run/proxypilot-agent.sock' "$COMPOSE_FILE" \
-                || ! grep -q 'group_add' "$COMPOSE_FILE" \
-                || ! grep -q 'PROXYPILOT_AGENT_SOCKET' "$COMPOSE_FILE"; then
-                log "${YELLOW}Patching docker-compose.yml: wiring host-side agent socket${NC}"
+            NEEDS_PATCH=false
+            # Fresh-install markers
+            grep -q '/run/proxypilot-agent:/run/proxypilot-agent' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            grep -q 'group_add' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            grep -q 'PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            # Migration markers — old file-mount layout still present?
+            grep -q '/run/proxypilot-agent\.sock:/run/proxypilot-agent\.sock' "$COMPOSE_FILE" && NEEDS_PATCH=true
+
+            if [ "$NEEDS_PATCH" = true ]; then
+                log "${YELLOW}Patching docker-compose.yml: wiring host-side agent (directory mount)${NC}"
                 AGENT_GID="$AGENT_GID" python3 - "$COMPOSE_FILE" <<'PYEOF' || true
 import os, sys, re
 path = sys.argv[1]
@@ -1015,17 +1029,31 @@ if not gid:
 with open(path) as f:
     text = f.read()
 
-# 1. Volume bind. Append after the docker.sock mount line if missing.
-if "/run/proxypilot-agent.sock" not in text:
+# A. Migrate the old single-file mount to the new directory mount.
+text = re.sub(
+    r"(?m)^([ \t]+)- /run/proxypilot-agent\.sock:/run/proxypilot-agent\.sock\s*\n",
+    lambda m: f"{m.group(1)}- /run/proxypilot-agent:/run/proxypilot-agent\n",
+    text,
+)
+
+# B. Migrate the old socket path env var to the new directory path.
+text = re.sub(
+    r"(?m)^([ \t]+)- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent\.sock\s*$",
+    lambda m: f"{m.group(1)}- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock",
+    text,
+)
+
+# C. Fresh install: ensure the directory mount is present. Insert
+#    after the docker.sock line if not already there.
+if "/run/proxypilot-agent:/run/proxypilot-agent" not in text:
     text = re.sub(
         r"(?m)^([ \t]+)- /var/run/docker\.sock:/var/run/docker\.sock\s*\n",
-        lambda m: f"{m.group(0)}{m.group(1)}- /run/proxypilot-agent.sock:/run/proxypilot-agent.sock\n",
+        lambda m: f"{m.group(0)}{m.group(1)}- /run/proxypilot-agent:/run/proxypilot-agent\n",
         text,
         count=1,
     )
 
-# 2. group_add block. Insert before the `environment:` line under the
-#    proxypilot service if no group_add: key is present anywhere.
+# D. Fresh install: group_add block before environment: if missing.
 if not re.search(r"(?m)^[ \t]+group_add:[ \t]*$", text):
     text = re.sub(
         r"(?m)^([ \t]+)environment:[ \t]*\n",
@@ -1034,12 +1062,11 @@ if not re.search(r"(?m)^[ \t]+group_add:[ \t]*$", text):
         count=1,
     )
 
-# 3. PROXYPILOT_AGENT_SOCKET env var. Append after DOCKER_CONTAINER=true
-#    inside the environment list if missing.
+# E. Fresh install: env var after DOCKER_CONTAINER=true if missing.
 if "PROXYPILOT_AGENT_SOCKET" not in text:
     text = re.sub(
         r"(?m)^([ \t]+)- DOCKER_CONTAINER=true\s*\n",
-        lambda m: f"{m.group(0)}{m.group(1)}- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent.sock\n",
+        lambda m: f"{m.group(0)}{m.group(1)}- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock\n",
         text,
         count=1,
     )
@@ -1047,8 +1074,22 @@ if "PROXYPILOT_AGENT_SOCKET" not in text:
 with open(path, "w") as f:
     f.write(text)
 PYEOF
-                log "${GREEN}docker-compose.yml: agent socket wired (gid=${AGENT_GID})${NC}"
+                log "${GREEN}docker-compose.yml: agent directory mount wired (gid=${AGENT_GID})${NC}"
             fi
+        fi
+
+        # Legacy path cleanup. The original Phase A layout put the
+        # socket at /run/proxypilot-agent.sock; the new layout uses
+        # /run/proxypilot-agent/proxypilot-agent.sock inside a
+        # systemd-managed RuntimeDirectory. Anything left at the old
+        # path is stale — it could be a stale socket file from the
+        # old agent, or a directory from a Docker auto-create race.
+        # Either way, nothing should reference it after this update,
+        # so remove it. Safe regardless of file type because the
+        # currently-running agent is on the new path.
+        if [[ -e /run/proxypilot-agent.sock ]]; then
+            log "Removing legacy /run/proxypilot-agent.sock (now uses /run/proxypilot-agent/proxypilot-agent.sock)"
+            rm -rf /run/proxypilot-agent.sock
         fi
 
         # Rebuild frontend at the install location

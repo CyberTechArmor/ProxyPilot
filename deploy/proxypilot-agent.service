@@ -1,11 +1,29 @@
 # proxypilot-agent — host-side RPC bridge for the ProxyPilot admin
 # dashboard. The dashboard container connects via the Unix socket at
-# /run/proxypilot-agent.sock; this service binary listens there and
-# dispatches incoming JSON-line RPC requests.
+# /run/proxypilot-agent/proxypilot-agent.sock; this service binary
+# listens there and dispatches incoming JSON-line RPC requests.
 #
 # Phase A — service ships installed and enabled, but the dashboard's
 # production code paths still use nsenter. The agent is dual-tracked
 # until Phases B-E migrate methods onto it behind feature flags.
+#
+# IMPORTANT — boot-time race fix.
+# The socket lives INSIDE a systemd-managed RuntimeDirectory rather
+# than at /run/proxypilot-agent.sock directly. The original layout
+# put the socket at the root of /run, which races with Docker on
+# host reboot: if the dashboard container starts before this unit
+# binds the socket, Docker's bind-mount auto-creates the path as an
+# empty DIRECTORY, and the agent then fails to listen there with
+# "bind: address already in use". The container then mounts an empty
+# directory instead of a socket — both halves break.
+#
+# RuntimeDirectory=proxypilot-agent makes systemd create
+# /run/proxypilot-agent/ as a real directory (mode 0750, owned by
+# proxypilot-agent:proxypilot-agent) BEFORE ExecStart runs. Docker
+# bind-mounts the directory rather than the socket file, so the
+# socket inode is allowed to come and go inside it without affecting
+# the mount. Before=docker.service makes systemd-managed Docker
+# wait for us on boot.
 #
 # Hardening directives below are Phase A baseline. The
 # ReadWritePaths list intentionally covers every host path a future
@@ -16,14 +34,30 @@
 [Unit]
 Description=ProxyPilot host-side agent
 After=network.target
+# Boot order: agent must be ready before docker so the dashboard
+# container's bind-mount of /run/proxypilot-agent/ resolves to the
+# systemd-created RuntimeDirectory and not a Docker auto-create.
+# `Before=docker.service` is silently ignored on hosts where Docker
+# is not under systemd (e.g. snap-installed Docker).
+Before=docker.service
 
 [Service]
 Type=simple
 User=proxypilot-agent
 Group=proxypilot-agent
-ExecStart=/usr/local/bin/proxypilot-agent --socket=/run/proxypilot-agent.sock
+ExecStart=/usr/local/bin/proxypilot-agent --socket=/run/proxypilot-agent/proxypilot-agent.sock
 Restart=on-failure
 RestartSec=2
+
+# RuntimeDirectory is created by systemd at unit-start with the
+# right ownership and mode, before ExecStart runs. The path is
+# /run/<RuntimeDirectory>, so /run/proxypilot-agent/.
+# RuntimeDirectoryPreserve=yes keeps the directory across systemctl
+# stop/start cycles so Docker's bind-mount of the directory inode
+# never goes stale.
+RuntimeDirectory=proxypilot-agent
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 # Hardening
 NoNewPrivileges=true

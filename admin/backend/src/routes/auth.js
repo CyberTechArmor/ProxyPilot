@@ -680,6 +680,107 @@ authRouter.post('/logout', authenticateToken, (req, res) => {
   res.json({ success: true });
 });
 
+// Sudo gate — passkey path. Same contract as /sudo (password+totp):
+// on success, stamp sudo_until on the current session row. Caller
+// must already be authenticated; passkey-from-cold-start is the
+// /passkey/authenticate/* flow above which sets sudo as a side
+// effect of login. The two paths converge on the same session-row
+// update so the requireSudo middleware doesn't need to know which
+// factor was used.
+authRouter.post('/sudo/passkey/begin', authenticateToken, async (req, res) => {
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    const allowCredentials = listCredentialDescriptors(user.id);
+    if (allowCredentials.length === 0) {
+      return res.status(400).json({ error: 'No passkeys registered.' });
+    }
+
+    const options = await generateAuthenticationOptions({
+      rpID: getRpId(req),
+      allowCredentials,
+      userVerification: 'preferred',
+    });
+
+    putChallenge(`sudo:${req.user.jti}`, {
+      challenge: options.challenge,
+      userId: user.id,
+    });
+
+    res.json(options);
+  } catch (e) {
+    console.error('sudo passkey begin error:', e);
+    res.status(500).json({ error: 'Could not start passkey sudo' });
+  }
+});
+
+authRouter.post('/sudo/passkey/verify', authenticateToken, async (req, res) => {
+  try {
+    const { response } = z.object({ response: z.any() }).parse(req.body);
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    const lockState = checkLockout(user);
+    if (lockState.locked) {
+      return res
+        .status(429)
+        .set('Retry-After', String(lockState.retryAfterSec))
+        .json({
+          error: 'Account temporarily locked.',
+          lockedUntil: lockState.until,
+          retryAfterSec: lockState.retryAfterSec,
+        });
+    }
+
+    const entry = takeChallenge(`sudo:${req.user.jti}`);
+    if (!entry || entry.userId !== user.id) {
+      return res.status(400).json({ error: 'Challenge expired or missing. Try again.' });
+    }
+
+    const credentialId = req.body?.response?.id;
+    if (!credentialId) return res.status(400).json({ error: 'Assertion missing credential id' });
+    const stored = getCredentialById(credentialId);
+    if (!stored || stored.user_id !== user.id) {
+      logAudit(user.id, 'SUDO_DENIED', 'user', user.id, { reason: 'unknown_passkey' }, req.ip);
+      return res.status(401).json({ error: 'Unknown credential' });
+    }
+
+    const result = await verifyAssertion({
+      response,
+      expectedChallenge: entry.challenge,
+      expectedOrigins: getExpectedOrigins(req),
+      expectedRPID: getRpId(req),
+      credential: stored,
+    });
+
+    if (!result.ok) {
+      recordLoginFailure(db, user, req);
+      logAudit(user.id, 'SUDO_DENIED', 'user', user.id, { reason: result.reason }, req.ip);
+      return res.status(401).json({ error: 'Passkey verification failed' });
+    }
+
+    updateCredentialCounter(stored.credential_id, result.info.newCounter);
+    resetLoginFailures(db, user.id);
+
+    const sudoUntilISO = new Date(Date.now() + SUDO_GRANT_HOURS * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `UPDATE sessions SET sudo_until = ? WHERE id = ? AND revoked_at IS NULL`
+    ).run(sudoUntilISO, req.user.jti);
+    logAudit(user.id, 'SUDO_GRANTED', 'session', req.user.jti, { sudo_until: sudoUntilISO, factor: 'passkey' }, req.ip);
+
+    res.json({ success: true, sudoUntil: sudoUntilISO });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('sudo passkey verify error:', error);
+    res.status(500).json({ error: 'Sudo passkey verification failed' });
+  }
+});
+
 // =============================================================================
 // Passkey (WebAuthn) endpoints
 // =============================================================================

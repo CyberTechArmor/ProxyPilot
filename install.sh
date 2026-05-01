@@ -926,6 +926,10 @@ CADDY_SITES_DIR=/etc/caddy/sites
 CADDY_CONFIG_FILE=/etc/caddy/Caddyfile
 CADDY_CUSTOM_DIR=/etc/caddy/custom
 ACME_EMAIL=${ACME_EMAIL}
+
+# Phase B host-side agent: dual-track flag for Caddy adapt + reload.
+# Leave false until Phase F flips defaults after burn-in.
+PROXYPILOT_USE_AGENT_FOR_CADDY=false
 EOF
 
     chmod 600 "${install_dir}/.env"

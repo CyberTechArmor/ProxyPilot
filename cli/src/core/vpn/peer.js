@@ -251,7 +251,7 @@ function renderClientConfig({ peerPrivateKey, peerIp, scope, cfg }) {
     `AllowedIPs = ${allowedIpsFor(scope)}`,
     `Endpoint = ${cfg.endpoint}`,
     'PersistentKeepalive = 25',
-  ];
+  );
   return lines.join('\n') + '\n';
 }
 

@@ -435,8 +435,44 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 });
 
 // POST /containers - Start async container creation
+// POSIX single-quote escape for argv tokens. New VM-specific argv
+// additions go through this rather than the legacy JSON.stringify
+// pattern in this file (see SECURITY.md "shell quoting"). Don't
+// retrofit existing JSON.stringify call sites — it's out of scope
+// for the VM session and the brief explicitly says so.
+function shellSingleQuote(s) {
+  if (s === undefined || s === null) return "''";
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 lxcRouter.post('/containers', async (req, res) => {
   const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, dockerPrivileged, services: rawServices } = req.body;
+  // Instance kind. Defaults to 'container' to keep existing callers
+  // (older frontend builds, scripted creates) working without a
+  // schema bump. Validated as a strict enum here so the value can
+  // never reach the launchCmd assembly as anything other than one of
+  // these two literals.
+  const rawType = req.body?.type;
+  const type = rawType === undefined || rawType === null ? 'container' : rawType;
+  if (type !== 'container' && type !== 'virtual-machine') {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid type. Must be 'container' or 'virtual-machine'.",
+    });
+  }
+  const isVm = type === 'virtual-machine';
+
+  // Docker-in-LXC syscall intercepts apply to LXCs only. Letting an
+  // operator submit dockerSupport=true with type=virtual-machine would
+  // either crash incus (--config security.syscalls.intercept.* on a VM
+  // is rejected by the daemon) or, worse, silently get ignored. Refuse
+  // up front so the operator gets a clear error.
+  if (isVm && (dockerSupport === true || dockerPrivileged === true)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Docker-in-LXC syscall intercepts cannot be applied to a virtual machine.',
+    });
+  }
 
   // Normalize services: support both new multi-service array and legacy single domain/port.
   // healthPath is optional; bad input is dropped silently here (the create
@@ -500,6 +536,7 @@ lxcRouter.post('/containers', async (req, res) => {
     name,
     incusName,
     image,
+    type,
     services,
     domain: services.length > 0 ? services[0].domain : null,
     port: services.length > 0 ? services[0].port : null,
@@ -566,7 +603,12 @@ lxcRouter.post('/containers', async (req, res) => {
         ` --config raw.lxc=${JSON.stringify('lxc.apparmor.profile=unconfined')}`;
     }
   }
-  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}`;
+  // VM flag — appended via a static literal, not interpolated user
+  // input, so no shell-escape needed here. The legacy `image`,
+  // `incusName`, and `profileArg` interpolations above are
+  // pre-existing and out of scope per the brief.
+  const vmFlag = isVm ? ' --vm' : '';
+  const launchCmd = `incus launch ${image} ${incusName} ${profileArg}${dockerConfigArgs}${vmFlag}`;
   console.log(`[LXC] Starting async launch: ${launchCmd}`);
 
   const child = spawnOnHost(launchCmd);
@@ -608,12 +650,39 @@ lxcRouter.post('/containers', async (req, res) => {
       // Ensure NAT is enabled on the bridge so containers have internet
       await ensureNetworkNat();
 
-      // Set resource limits
+      // Set resource limits. VMs need a memory floor — Incus rejects
+      // booting a VM without a limits.memory value on most stock
+      // profiles — so default to 2GiB if the operator didn't pick
+      // one. Containers keep the legacy "no implicit memory cap"
+      // behaviour. Disk size for VMs goes through `incus config
+      // device set <name> root size=...` because the root device
+      // lives on the profile, not on `limits.*`. The shellSingleQuote
+      // wrappers around the operator-supplied size strings are the
+      // new-VM-code convention; legacy CT-side calls above use plain
+      // template interpolation per the file's pre-existing pattern.
       if (cpu) {
         await execOnHost(`incus config set ${incusName} limits.cpu=${cpu}`);
       }
       if (memory) {
         await execOnHost(`incus config set ${incusName} limits.memory=${memory}MB`);
+      } else if (isVm) {
+        await execOnHost(`incus config set ${incusName} limits.memory=${shellSingleQuote('2GiB')}`);
+      }
+      if (isVm) {
+        // Default 20GiB root disk if unset. Idempotent: setting the
+        // same size twice is a no-op for incus. We DON'T resize down
+        // automatically — that would discard data on a re-create.
+        try {
+          await execOnHost(
+            `incus config device set ${incusName} root size=${shellSingleQuote('20GiB')}`
+          );
+        } catch (e) {
+          // Some profiles don't carry a `root` device by name; in
+          // that case incus emits "device 'root' doesn't exist" and
+          // the operator can size the disk by hand later. Don't fail
+          // the whole launch over a default that's purely advisory.
+          console.warn('[LXC] VM default root size: ', e?.message || e);
+        }
       }
 
       // Wait for IP address

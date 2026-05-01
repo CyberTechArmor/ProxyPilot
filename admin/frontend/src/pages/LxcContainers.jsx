@@ -300,6 +300,11 @@ export default function LxcContainers() {
 
   // Containers
   const [containers, setContainers] = useState([]);
+  // 'all' | 'container' | 'virtual-machine'. Drives the filter chips
+  // above the grid. Stored in component state (not URL/localStorage)
+  // because the operator's intent is per-session — a CT-only operator
+  // shouldn't see "VM" sticky-filtered the next time they hit the page.
+  const [typeFilter, setTypeFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
@@ -1197,9 +1202,17 @@ export default function LxcContainers() {
             <Box className="h-6 w-6 text-cyan-500" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold truncate">LXC Containers</h1>
+            <h1 className="text-2xl font-bold truncate">Incus Instances</h1>
             <p className="text-sm text-muted-foreground">
-              {containers.length} container{containers.length !== 1 ? 's' : ''}
+              {(() => {
+                const ctN = containers.filter((c) => (c.type || 'container') === 'container').length;
+                const vmN = containers.filter((c) => c.type === 'virtual-machine').length;
+                const parts = [];
+                if (ctN) parts.push(`${ctN} CT`);
+                if (vmN) parts.push(`${vmN} VM`);
+                if (parts.length === 0) parts.push('0 instances');
+                return parts.join(' \u2022 ');
+              })()}
               {incusVersion && ` \u2022 Incus ${incusVersion}`}
             </p>
           </div>
@@ -1219,10 +1232,34 @@ export default function LxcContainers() {
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
-            Create Container
+            Create Instance
           </Button>
         </div>
       </div>
+
+      {/* Type filter chips */}
+      {containers.length > 0 && (
+        <div className="flex items-center gap-2 text-sm">
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'container', label: 'Containers' },
+            { id: 'virtual-machine', label: 'VMs' },
+          ].map((chip) => (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => setTypeFilter(chip.id)}
+              className={`px-3 py-1 rounded-full border transition-colors ${
+                typeFilter === chip.id
+                  ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-300'
+                  : 'border-border text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Init Warning */}
       {incusInitWarning && (
@@ -1235,14 +1272,14 @@ export default function LxcContainers() {
         </div>
       )}
 
-      {/* Container Grid */}
+      {/* Instance Grid */}
       {containers.length === 0 ? (
         <Card className="p-12">
           <div className="flex flex-col items-center justify-center gap-3 text-center">
             <Server className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="font-medium">No containers yet</p>
-              <p className="text-sm text-muted-foreground">Create your first LXC container or import a backup to get started.</p>
+              <p className="font-medium">No instances yet</p>
+              <p className="text-sm text-muted-foreground">Create your first Incus instance or import a backup to get started.</p>
             </div>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
@@ -1251,14 +1288,25 @@ export default function LxcContainers() {
               </Button>
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="h-4 w-4 mr-2" />
-                Create Container
+                Create Instance
               </Button>
             </div>
           </div>
         </Card>
-      ) : (
+      ) : (() => {
+        const filtered = typeFilter === 'all'
+          ? containers
+          : containers.filter((c) => (c.type || 'container') === typeFilter);
+        if (filtered.length === 0) {
+          return (
+            <Card className="p-8 text-center text-sm text-muted-foreground">
+              No {typeFilter === 'virtual-machine' ? 'VMs' : 'containers'} match this filter.
+            </Card>
+          );
+        }
+        return (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-          {containers.map((ct) => (
+          {filtered.map((ct) => (
             <Card
               key={ct.name}
               className="border-dashed border-cyan-500/30 cursor-pointer hover:border-cyan-500/60 transition-colors"
@@ -1268,6 +1316,16 @@ export default function LxcContainers() {
                 <div className="flex items-start justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2 min-w-0">
                     <StatusBadge status={ct.status} />
+                    <span
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                        ct.type === 'virtual-machine'
+                          ? 'bg-purple-500/15 text-purple-400 border border-purple-500/40'
+                          : 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/40'
+                      }`}
+                      title={ct.type === 'virtual-machine' ? 'Virtual machine' : 'Container'}
+                    >
+                      {ct.type === 'virtual-machine' ? 'VM' : 'CT'}
+                    </span>
                     <CardTitle className="text-lg truncate">{ct.name}</CardTitle>
                   </div>
                   <div className="flex gap-1 flex-wrap justify-end" onClick={(e) => e.stopPropagation()}>
@@ -1374,9 +1432,10 @@ export default function LxcContainers() {
             </Card>
           ))}
         </div>
-      )}
+        );
+      })()}
 
-      {/* Create Container Dialog */}
+      {/* Create Instance Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
           <DialogHeader>

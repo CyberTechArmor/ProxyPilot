@@ -1,0 +1,41 @@
+# proxypilot-agent — host-side RPC bridge for the ProxyPilot admin
+# dashboard. The dashboard container connects via the Unix socket at
+# /run/proxypilot-agent.sock; this service binary listens there and
+# dispatches incoming JSON-line RPC requests.
+#
+# Phase A — service ships installed and enabled, but the dashboard's
+# production code paths still use nsenter. The agent is dual-tracked
+# until Phases B-E migrate methods onto it behind feature flags.
+#
+# Hardening directives below are Phase A baseline. The
+# ReadWritePaths list intentionally covers every host path a future
+# Phase B-E method will need to drive (caddy reload, incus calls,
+# docker socket); it's harmless now since agent.ping is the only
+# method wired and it touches nothing.
+
+[Unit]
+Description=ProxyPilot host-side agent
+After=network.target
+
+[Service]
+Type=simple
+User=proxypilot-agent
+Group=proxypilot-agent
+ExecStart=/usr/local/bin/proxypilot-agent --socket=/run/proxypilot-agent.sock
+Restart=on-failure
+RestartSec=2
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
+
+# Read/write paths the agent needs to drive caddy + incus + docker
+ReadWritePaths=/etc/caddy /run /var/lib/incus /var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target

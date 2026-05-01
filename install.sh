@@ -443,6 +443,177 @@ install_dependencies() {
     log_success "Dependencies installed"
 }
 
+# Required Go toolchain version for building the host-side agent.
+# Bumping this is a deliberate decision — anything older predates
+# language features the agent relies on.
+AGENT_GO_VERSION="1.21.13"
+
+# Print the installed Go version (e.g. "1.22.4") on stdout, or empty
+# string if Go isn't available. Used by the version comparison below
+# so we don't reinstall a working toolchain.
+detect_go_version() {
+    local raw
+    if raw=$(go version 2>/dev/null); then
+        # `go version` prints e.g. `go version go1.22.4 linux/amd64`.
+        echo "$raw" | awk '{print $3}' | sed 's/^go//'
+    elif raw=$(/usr/local/go/bin/go version 2>/dev/null); then
+        echo "$raw" | awk '{print $3}' | sed 's/^go//'
+    else
+        echo ""
+    fi
+}
+
+# Returns 0 if $1 (have) >= $2 (want), 1 otherwise. Pure-bash semver
+# compare on dotted numeric strings.
+go_version_ge() {
+    local have="$1" want="$2"
+    [[ -z "$have" ]] && return 1
+    # `sort -V` on two lines: if `want` sorts first or equal, we're OK.
+    if [[ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" == "$want" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Install (or upgrade) the Go toolchain to AGENT_GO_VERSION when the
+# system Go is missing or too old. Drops the official upstream
+# tarball into /usr/local/go and exposes it via /usr/local/go/bin/go.
+# Idempotent: re-running a second time is a no-op.
+ensure_go_toolchain() {
+    local current
+    current=$(detect_go_version)
+    if go_version_ge "$current" "$AGENT_GO_VERSION"; then
+        log_info "Go ${current} already installed (>= ${AGENT_GO_VERSION})"
+        return 0
+    fi
+
+    log_info "Installing Go ${AGENT_GO_VERSION} for proxypilot-agent build..."
+    local arch
+    case "$(uname -m)" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l|armv6l) arch="armv6l" ;;
+        *) log_error "Unsupported architecture for Go install: $(uname -m)"; exit 1 ;;
+    esac
+
+    local tarball="go${AGENT_GO_VERSION}.linux-${arch}.tar.gz"
+    local url="https://go.dev/dl/${tarball}"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    if ! curl -fsSL -o "${tmpdir}/${tarball}" "$url"; then
+        log_error "Failed to download Go from $url"
+        rm -rf "$tmpdir"
+        exit 1
+    fi
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "${tmpdir}/${tarball}"
+    rm -rf "$tmpdir"
+
+    local installed
+    installed=$(detect_go_version)
+    if ! go_version_ge "$installed" "$AGENT_GO_VERSION"; then
+        log_error "Go installation appears to have failed (detected: '${installed}')"
+        exit 1
+    fi
+    log_success "Go ${installed} installed at /usr/local/go"
+}
+
+# Resolve a working `go` binary path, preferring an existing one in
+# PATH so an operator-managed install (Snap, Homebrew, apt) wins.
+resolve_go_bin() {
+    if command -v go >/dev/null 2>&1; then
+        command -v go
+    elif [[ -x /usr/local/go/bin/go ]]; then
+        echo "/usr/local/go/bin/go"
+    else
+        echo ""
+    fi
+}
+
+# Install the host-side agent — Phase A scaffold of the future B1
+# fix. The agent is dual-tracked in this phase: the systemd service
+# runs on the host and binds /run/proxypilot-agent.sock, but no
+# production code path inside the dashboard container actually calls
+# it yet. nsenter still drives caddy / incus / docker. Phases B-E
+# migrate methods onto the agent behind feature flags; Phase F drops
+# `privileged: true` once those flags have flipped and burned in.
+#
+# This function is idempotent — every step gates on "already done"
+# before mutating, so re-runs of install.sh (or update.sh, which
+# delegates to the same building blocks) leave a working install
+# alone.
+install_proxypilot_agent() {
+    local script_dir=$1
+    local agent_src="${script_dir}/cmd/agent"
+
+    if [[ ! -d "$agent_src" ]]; then
+        log_warn "cmd/agent not found at ${agent_src}, skipping agent install"
+        return 0
+    fi
+
+    log_info "Installing ProxyPilot host-side agent (Phase A scaffold)..."
+
+    # 1. Toolchain.
+    ensure_go_toolchain
+    local go_bin
+    go_bin=$(resolve_go_bin)
+    if [[ -z "$go_bin" ]]; then
+        log_error "Go toolchain not found after install; refusing to continue"
+        exit 1
+    fi
+
+    # 2. System user + group. The systemd unit runs ExecStart as this
+    #    user; the Docker container will join the group via group_add
+    #    in docker-compose.yml so it can read the 0660 socket.
+    if ! getent group proxypilot-agent >/dev/null 2>&1; then
+        groupadd --system proxypilot-agent
+        log_info "Created system group: proxypilot-agent"
+    fi
+    if ! getent passwd proxypilot-agent >/dev/null 2>&1; then
+        useradd --system --gid proxypilot-agent --no-create-home \
+            --home-dir /nonexistent --shell /usr/sbin/nologin \
+            proxypilot-agent
+        log_info "Created system user: proxypilot-agent"
+    fi
+
+    # 3. Build the binary. `go build` is content-addressable enough
+    #    that re-running on an unchanged source tree is fast (cache
+    #    hit), so we don't bother gating on mtime.
+    log_info "Building proxypilot-agent binary..."
+    (
+        cd "$agent_src"
+        # GOFLAGS=-mod=mod so the build doesn't fail under a missing
+        # vendor/ tree; the module has zero external deps so this is
+        # equivalent to `-mod=readonly` in practice.
+        GOFLAGS=-mod=mod "$go_bin" build -o /usr/local/bin/proxypilot-agent .
+    )
+    chmod 0755 /usr/local/bin/proxypilot-agent
+    log_success "Agent binary installed at /usr/local/bin/proxypilot-agent"
+
+    # 4. Systemd unit. Compare deploy/proxypilot-agent.service against
+    #    the deployed copy and only rewrite + daemon-reload on diff.
+    local unit_src="${script_dir}/deploy/proxypilot-agent.service"
+    local unit_dst="/etc/systemd/system/proxypilot-agent.service"
+    if [[ ! -f "$unit_src" ]]; then
+        log_error "Missing systemd unit at ${unit_src}"
+        exit 1
+    fi
+    if ! cmp -s "$unit_src" "$unit_dst"; then
+        cp "$unit_src" "$unit_dst"
+        chmod 0644 "$unit_dst"
+        systemctl daemon-reload
+        log_info "Installed systemd unit: ${unit_dst}"
+    fi
+
+    # 5. Enable + start. After a binary refresh we restart so the new
+    #    bytes are running; on a first install `--now` covers both.
+    if ! systemctl is-enabled --quiet proxypilot-agent 2>/dev/null; then
+        systemctl enable proxypilot-agent
+    fi
+    systemctl restart proxypilot-agent
+    log_success "proxypilot-agent service started"
+}
+
 # Create secure landing page for when ProxyPilot is secured/stopped
 create_secure_landing_page() {
     local install_dir=$1
@@ -973,6 +1144,12 @@ main() {
     log_info "Copying ProxyPilot files..."
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
+
+    # Install host-side agent (Phase A scaffold). Runs before
+    # docker-compose creation so the Compose file can reference the
+    # already-existing socket path + group. Dual-tracked: nsenter
+    # path stays the production code path until Phases B-E migrate.
+    install_proxypilot_agent "$SCRIPT_DIR"
 
     # Create configuration files
     ACME_EMAIL="$EMAIL"

@@ -65,13 +65,24 @@ export default function Vpn() {
   // about the port suffix.
   const [enableOpen, setEnableOpen] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
-  // Default DNS is a public resolver, NOT the WG server's tunnel IP.
-  // 10.100.0.1 was the previous default but ProxyPilot doesn't run a
-  // resolver on the WG interface; peers that took it ended up with
-  // dead DNS the moment the tunnel came up (page loads stalled, ssh
-  // hostname resolution failed). Operators who want internal-name
-  // resolution through the tunnel can override this with whatever
-  // resolver they actually run on the host.
+  // The default below is a public resolver, but operators MUST be
+  // aware: any DNS value that isn't covered by a peer's AllowedIPs
+  // breaks name resolution on that peer.
+  //
+  // - scope=full peers: AllowedIPs = 0.0.0.0/0, so 1.1.1.1 (or any
+  //   public resolver) routes through the tunnel and works (assuming
+  //   the host's masquerade rule is up).
+  // - scope=admin/services peers: AllowedIPs = 10.100.0.0/24 only.
+  //   1.1.1.1 isn't in that range, so DNS queries get stuck — Windows
+  //   NRPT redirects them to the tunnel, the tunnel has no route to
+  //   1.1.1.1, queries silently fail. Operators using these scopes
+  //   should DELETE the DNS line from each peer's local wg config
+  //   after import (or run a resolver on the tunnel address; see
+  //   the "vpn dns" follow-up prompt).
+  //
+  // The proper fix is a CLI/backend change to allow null DNS so
+  // peers ship without a `DNS =` line at all. That's prompted out
+  // separately.
   const [enableForm, setEnableForm] = useState({
     endpoint: '', port: '51820', dns: '1.1.1.1',
   });
@@ -116,6 +127,14 @@ export default function Vpn() {
   // remove). When the gate trips, the lockout modal takes over.
   const [removePeer, setRemovePeer] = useState(null); // peer | null
   const [removeBusy, setRemoveBusy] = useState(false);
+
+  // Rotate confirm. Rotate is destructive in the sense that the
+  // peer's currently-installed config stops working until they
+  // re-import the new one. Use a styled Dialog rather than
+  // window.confirm() so it matches the rest of the page and works
+  // inside the dashboard modal stack.
+  const [rotateConfirmPeer, setRotateConfirmPeer] = useState(null);
+  const [rotateBusy, setRotateBusy] = useState(false);
 
   useEffect(() => {
     if (isAdmin) loadAll();
@@ -201,17 +220,25 @@ export default function Vpn() {
     }
   }
 
-  async function rotatePeer(peer) {
-    if (!confirm(`Rotate the keypair for "${peer.name}"? The current peer's installed config stops working until they re-import the new one.`)) return;
+  function rotatePeer(peer) {
+    setRotateConfirmPeer(peer);
+  }
+
+  async function confirmRotate() {
+    if (!rotateConfirmPeer) return;
+    const peer = rotateConfirmPeer;
+    setRotateBusy(true);
     setPendingPeer(peer.name);
     try {
       const r = await api.rotateVpnPeer(peer.name);
+      setRotateConfirmPeer(null);
       // Same shape as add-peer — open the reveal dialog.
       setReveal(r);
       loadAll();
     } catch (e) {
       toast({ variant: 'destructive', title: 'Rotate failed', description: e.message });
     } finally {
+      setRotateBusy(false);
       setPendingPeer(null);
     }
   }
@@ -688,6 +715,32 @@ export default function Vpn() {
         </DialogContent>
       </Dialog>
 
+      {/* Rotate confirm. Reissues the peer's keypair; the currently-
+          installed config on the operator's client stops working
+          until they re-import the new one shown in the reveal
+          dialog that opens after this confirm. */}
+      <Dialog open={!!rotateConfirmPeer} onOpenChange={(o) => { if (!o) setRotateConfirmPeer(null); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rotate keypair for "{rotateConfirmPeer?.name}"?</DialogTitle>
+            <DialogDescription>
+              Issues a fresh keypair and IP for this peer. The current installed config
+              stops working immediately — the operator must re-import the new config that
+              appears after you confirm. The new private key is shown only once.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRotateConfirmPeer(null)} disabled={rotateBusy}>
+              Cancel
+            </Button>
+            <Button onClick={confirmRotate} disabled={rotateBusy}>
+              {rotateBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Rotate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Remove peer confirm. The lockout gate kicks in if this is the
           only enabled peer (LAST_ENABLED_PEER) or recently active
           (RECENTLY_ACTIVE). */}
@@ -797,8 +850,11 @@ export default function Vpn() {
                   onChange={e => setEnableForm(f => ({ ...f, dns: e.target.value }))}
                 />
                 <p className="text-[10px] text-muted-foreground">
-                  Resolver clients use while the tunnel is up. Set to a public resolver
-                  unless you actually run DNS on this host's WireGuard interface.
+                  Goes into every peer's [Interface] block. For <strong>admin</strong> /
+                  <strong> services</strong> scope peers (AllowedIPs = 10.100.0.0/24),
+                  delete the <code>DNS =</code> line from the local wg config after
+                  import — otherwise the OS routes DNS through the tunnel and resolution
+                  fails. For <strong>full</strong> scope peers a public resolver works.
                 </p>
               </div>
             </div>

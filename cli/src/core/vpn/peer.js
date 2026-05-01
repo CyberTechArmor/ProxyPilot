@@ -231,7 +231,20 @@ function renderClientConfig({ peerPrivateKey, peerIp, scope, cfg }) {
     '[Interface]',
     `PrivateKey = ${peerPrivateKey}`,
     `Address = ${peerIp}/32`,
-    `DNS = ${cfg.dns}`,
+  ];
+  // Only emit `DNS = ...` for full-scope peers. For admin / services
+  // peers, AllowedIPs is just 10.100.0.0/24, so any DNS server outside
+  // that range can't be reached through the tunnel — the client OS
+  // (Windows NRPT, Linux's wg-quick resolv.conf rewrite) hijacks DNS
+  // to the tunnel adapter, queries dead-end, and name resolution
+  // silently fails. Without the DNS line, the client keeps its
+  // existing resolver and the tunnel just carries 10.100.0.0/24
+  // traffic. Operators who actually run a resolver on the tunnel can
+  // override this from the dashboard once that feature lands.
+  if (scope === 'full' && cfg.dns) {
+    lines.push(`DNS = ${cfg.dns}`);
+  }
+  lines.push(
     '',
     '[Peer]',
     `PublicKey = ${cfg.server_public_key}`,

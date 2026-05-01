@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'rea
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
+import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -1460,12 +1461,15 @@ export default function Dashboard() {
     }
   };
 
-  const handleDeleteService = async () => {
-    if (!serviceToDelete || !totpCode) return;
+  const handleDeleteService = async (passkeyAssertion = null) => {
+    if (!serviceToDelete) return;
+    if (!passkeyAssertion && !totpCode) return;
     setSubmitting(true);
 
     try {
-      await api.deleteService(serviceToDelete.id, totpCode);
+      await api.deleteService(serviceToDelete.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode });
       toast({
         title: 'Success',
         description: 'Service deleted successfully',
@@ -1624,12 +1628,15 @@ export default function Dashboard() {
     setRemoveCertDialogOpen(true);
   };
 
-  const confirmRemoveCertificate = async () => {
-    if (!serviceToRemoveCert || !totpCode) return;
+  const confirmRemoveCertificate = async (passkeyAssertion = null) => {
+    if (!serviceToRemoveCert) return;
+    if (!passkeyAssertion && !totpCode) return;
 
     setSubmitting(true);
     try {
-      await api.removeCertificate(serviceToRemoveCert.id, totpCode);
+      await api.removeCertificate(serviceToRemoveCert.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode });
       toast({
         title: 'Certificate Removed',
         description: `SSL certificate for ${serviceToRemoveCert.domain} has been removed`,
@@ -2002,14 +2009,15 @@ export default function Dashboard() {
     setDestroyDialogOpen(true);
   };
 
-  const handleDestroyProject = async () => {
-    if (!projectToDestroy || destroyTotpCode.length !== 6) return;
+  const handleDestroyProject = async (passkeyAssertion = null) => {
+    if (!projectToDestroy) return;
+    if (!passkeyAssertion && destroyTotpCode.length !== 6) return;
 
     setDestroyingProject(true);
     try {
       const result = await api.dockerComposeDestroy(
         projectToDestroy.composePath,
-        destroyTotpCode,
+        passkeyAssertion ? { passkeyAssertion } : { totpCode: destroyTotpCode },
         destroyOptions
       );
       toast({
@@ -2370,12 +2378,14 @@ export default function Dashboard() {
   };
 
   // Kill Switch Function
-  const handleSecureSystem = async () => {
-    if (!totpCode || totpCode.length !== 6) return;
+  const handleSecureSystem = async (passkeyAssertion = null) => {
+    if (!passkeyAssertion && (!totpCode || totpCode.length !== 6)) return;
     setSecuringSystem(true);
 
     try {
-      await api.secureSystem(totpCode);
+      await api.secureSystem(passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode });
       toast({
         title: 'System Secured',
         description: 'ProxyPilot is being secured. The dashboard will become unavailable.',
@@ -5038,6 +5048,12 @@ volumes:
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
+            <PasskeyConfirmButton
+              hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
+              onAssertion={(assertion) => handleDeleteService(assertion)}
+              disabled={submitting}
+              className="w-full"
+            />
             <div className="space-y-2">
               <Label htmlFor="deleteTotp">TOTP Code</Label>
               <Input id="deleteTotp" value={totpCode} onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Enter 6-digit code" maxLength={6} />
@@ -5045,7 +5061,7 @@ volumes:
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
-            <Button variant="destructive" onClick={handleDeleteService} disabled={totpCode.length !== 6 || submitting}>
+            <Button variant="destructive" onClick={() => handleDeleteService()} disabled={totpCode.length !== 6 || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Deleting...</> : 'Delete Service'}
             </Button>
           </DialogFooter>
@@ -5063,6 +5079,12 @@ volumes:
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
+            <PasskeyConfirmButton
+              hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
+              onAssertion={(assertion) => confirmRemoveCertificate(assertion)}
+              disabled={submitting}
+              className="w-full"
+            />
             <div className="space-y-2">
               <Label htmlFor="removeCertTotp">TOTP Code</Label>
               <Input
@@ -5076,7 +5098,7 @@ volumes:
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRemoveCertDialogOpen(false)}>Cancel</Button>
-            <Button variant="destructive" onClick={confirmRemoveCertificate} disabled={totpCode.length !== 6 || submitting}>
+            <Button variant="destructive" onClick={() => confirmRemoveCertificate()} disabled={totpCode.length !== 6 || submitting}>
               {submitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Removing...</> : 'Remove Certificate'}
             </Button>
           </DialogFooter>
@@ -5139,7 +5161,13 @@ volumes:
               </div>
             </div>
             <div className="space-y-2 pt-2 border-t">
-              <Label htmlFor="destroyTotp">TOTP Code (required)</Label>
+              <PasskeyConfirmButton
+                hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
+                onAssertion={(assertion) => handleDestroyProject(assertion)}
+                disabled={destroyingProject}
+                className="w-full"
+              />
+              <Label htmlFor="destroyTotp">TOTP Code</Label>
               <Input
                 id="destroyTotp"
                 value={destroyTotpCode}
@@ -5153,7 +5181,7 @@ volumes:
             <Button variant="outline" onClick={() => setDestroyDialogOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleDestroyProject}
+              onClick={() => handleDestroyProject()}
               disabled={destroyTotpCode.length !== 6 || destroyingProject}
             >
               {destroyingProject ? (
@@ -6703,6 +6731,12 @@ volumes:
                 <li>To restore, run: <code className="bg-muted px-1 rounded">docker start proxypilot-admin</code></li>
               </ul>
             </div>
+            <PasskeyConfirmButton
+              hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
+              onAssertion={(assertion) => handleSecureSystem(assertion)}
+              disabled={securingSystem}
+              className="w-full"
+            />
             <div className="space-y-2">
               <Label htmlFor="killSwitchTotp">TOTP Code</Label>
               <Input
@@ -6718,7 +6752,7 @@ volumes:
             <Button variant="outline" onClick={() => setKillSwitchDialogOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleSecureSystem}
+              onClick={() => handleSecureSystem()}
               disabled={totpCode.length !== 6 || securingSystem}
             >
               {securingSystem ? (

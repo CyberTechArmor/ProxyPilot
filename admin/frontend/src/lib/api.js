@@ -190,10 +190,15 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  deleteService: (id, totpCode) => request(`/services/${id}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  deleteService: (id, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/services/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   toggleFavorite: (id) => request(`/services/${id}/favorite`, {
     method: 'POST',
@@ -246,10 +251,15 @@ export const api = {
     method: 'POST',
   }),
 
-  removeCertificate: (serviceId, totpCode) => request(`/services/${serviceId}/certificate`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  removeCertificate: (serviceId, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/services/${serviceId}/certificate`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
@@ -339,10 +349,15 @@ export const api = {
     body: JSON.stringify({ action, path, serviceName, options }),
   }),
 
-  dockerComposeDestroy: (path, totpCode, options = {}) => request('/services/docker/compose/destroy', {
-    method: 'POST',
-    body: JSON.stringify({ path, totpCode, options }),
-  }),
+  dockerComposeDestroy: (path, totpOrPayload, options = {}) => {
+    const confirm = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request('/services/docker/compose/destroy', {
+      method: 'POST',
+      body: JSON.stringify({ path, ...confirm, options }),
+    });
+  },
 
   // User
   getProfile: () => request('/user/profile'),
@@ -407,10 +422,15 @@ export const api = {
   }),
 
   // System Security
-  secureSystem: (totpCode) => request('/services/system/secure', {
-    method: 'POST',
-    body: JSON.stringify({ totpCode }),
-  }),
+  secureSystem: (totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request('/services/system/secure', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
 
   // Discover existing sites
   discoverCaddySites: () => request('/services/discover/caddy-sites'),

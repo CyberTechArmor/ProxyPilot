@@ -96,11 +96,22 @@ function formatDuration(ms) {
 // install scripts (XRay, n8n, …) replaced the apt one-liner — the
 // button was a footgun on Alpine/CentOS and added no value for
 // operators running real install scripts.
-function LxcTerminalPanel({ containerName, initialCwd }) {
+function LxcTerminalPanel({ containerName, initialCwd, instanceType }) {
+  // Pass `?type=vm` to the WS upgrade when the selected instance is a
+  // virtual machine. The backend uses that hint to run a guest-agent
+  // probe and falls back to `incus console` when no agent is talking.
+  const wsPath = instanceType === 'virtual-machine'
+    ? `/api/terminal/lxc/${containerName}?type=vm`
+    : `/api/terminal/lxc/${containerName}`;
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      {instanceType === 'virtual-machine' && (
+        <div className="px-3 py-2 text-xs bg-purple-500/10 border-b border-purple-500/30 text-purple-300">
+          VM console — agent shortcuts disabled. Resize is supported but limited.
+        </div>
+      )}
       <InteractiveTerminal
-        wsPath={`/api/terminal/lxc/${containerName}`}
+        wsPath={wsPath}
         initialCwd={initialCwd}
       />
     </div>
@@ -2482,6 +2493,7 @@ export default function LxcContainers() {
                 <LxcTerminalPanel
                   containerName={selectedContainer.name}
                   initialCwd={terminalCwd}
+                  instanceType={selectedContainer.type}
                 />
               </TabsContent>
 

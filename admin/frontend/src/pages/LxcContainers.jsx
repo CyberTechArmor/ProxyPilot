@@ -96,11 +96,22 @@ function formatDuration(ms) {
 // install scripts (XRay, n8n, …) replaced the apt one-liner — the
 // button was a footgun on Alpine/CentOS and added no value for
 // operators running real install scripts.
-function LxcTerminalPanel({ containerName, initialCwd }) {
+function LxcTerminalPanel({ containerName, initialCwd, instanceType }) {
+  // Pass `?type=vm` to the WS upgrade when the selected instance is a
+  // virtual machine. The backend uses that hint to run a guest-agent
+  // probe and falls back to `incus console` when no agent is talking.
+  const wsPath = instanceType === 'virtual-machine'
+    ? `/api/terminal/lxc/${containerName}?type=vm`
+    : `/api/terminal/lxc/${containerName}`;
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      {instanceType === 'virtual-machine' && (
+        <div className="px-3 py-2 text-xs bg-purple-500/10 border-b border-purple-500/30 text-purple-300">
+          VM console — agent shortcuts disabled. Resize is supported but limited.
+        </div>
+      )}
       <InteractiveTerminal
-        wsPath={`/api/terminal/lxc/${containerName}`}
+        wsPath={wsPath}
         initialCwd={initialCwd}
       />
     </div>
@@ -300,6 +311,11 @@ export default function LxcContainers() {
 
   // Containers
   const [containers, setContainers] = useState([]);
+  // 'all' | 'container' | 'virtual-machine'. Drives the filter chips
+  // above the grid. Stored in component state (not URL/localStorage)
+  // because the operator's intent is per-session — a CT-only operator
+  // shouldn't see "VM" sticky-filtered the next time they hit the page.
+  const [typeFilter, setTypeFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
@@ -411,7 +427,8 @@ export default function LxcContainers() {
   // Operators who want stricter isolation untick before creating.
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', cpu: '', memory: '', initScript: '',
+    name: '', image: '', type: 'container',
+    cpu: '', memory: '', initScript: '',
     dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
@@ -518,15 +535,19 @@ export default function LxcContainers() {
           ...(s.healthPath && s.healthPath.trim() && { healthPath: s.healthPath.trim() }),
         }));
 
+      const isVm = createForm.type === 'virtual-machine';
       const data = {
         name: createForm.name,
         image: createForm.image,
+        type: createForm.type,
         ...(validServices.length > 0 && { services: validServices }),
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
         ...(createForm.initScript && { initScript: createForm.initScript }),
-        ...(createForm.dockerSupport && { dockerSupport: true }),
-        ...(createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
+        // Docker-in-LXC syscall intercepts are CT-only (the backend
+        // refuses them with 400 for VMs); never send them when type=vm.
+        ...(!isVm && createForm.dockerSupport && { dockerSupport: true }),
+        ...(!isVm && createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
       };
       await api.createLxcContainer(data);
 
@@ -544,7 +565,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setCreateForm({ name: '', image: '', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -1197,9 +1218,17 @@ export default function LxcContainers() {
             <Box className="h-6 w-6 text-cyan-500" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold truncate">LXC Containers</h1>
+            <h1 className="text-2xl font-bold truncate">Incus Instances</h1>
             <p className="text-sm text-muted-foreground">
-              {containers.length} container{containers.length !== 1 ? 's' : ''}
+              {(() => {
+                const ctN = containers.filter((c) => (c.type || 'container') === 'container').length;
+                const vmN = containers.filter((c) => c.type === 'virtual-machine').length;
+                const parts = [];
+                if (ctN) parts.push(`${ctN} CT`);
+                if (vmN) parts.push(`${vmN} VM`);
+                if (parts.length === 0) parts.push('0 instances');
+                return parts.join(' \u2022 ');
+              })()}
               {incusVersion && ` \u2022 Incus ${incusVersion}`}
             </p>
           </div>
@@ -1219,10 +1248,34 @@ export default function LxcContainers() {
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
-            Create Container
+            Create Instance
           </Button>
         </div>
       </div>
+
+      {/* Type filter chips */}
+      {containers.length > 0 && (
+        <div className="flex items-center gap-2 text-sm">
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'container', label: 'Containers' },
+            { id: 'virtual-machine', label: 'VMs' },
+          ].map((chip) => (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => setTypeFilter(chip.id)}
+              className={`px-3 py-1 rounded-full border transition-colors ${
+                typeFilter === chip.id
+                  ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-300'
+                  : 'border-border text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Init Warning */}
       {incusInitWarning && (
@@ -1235,14 +1288,14 @@ export default function LxcContainers() {
         </div>
       )}
 
-      {/* Container Grid */}
+      {/* Instance Grid */}
       {containers.length === 0 ? (
         <Card className="p-12">
           <div className="flex flex-col items-center justify-center gap-3 text-center">
             <Server className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="font-medium">No containers yet</p>
-              <p className="text-sm text-muted-foreground">Create your first LXC container or import a backup to get started.</p>
+              <p className="font-medium">No instances yet</p>
+              <p className="text-sm text-muted-foreground">Create your first Incus instance or import a backup to get started.</p>
             </div>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
@@ -1251,14 +1304,25 @@ export default function LxcContainers() {
               </Button>
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="h-4 w-4 mr-2" />
-                Create Container
+                Create Instance
               </Button>
             </div>
           </div>
         </Card>
-      ) : (
+      ) : (() => {
+        const filtered = typeFilter === 'all'
+          ? containers
+          : containers.filter((c) => (c.type || 'container') === typeFilter);
+        if (filtered.length === 0) {
+          return (
+            <Card className="p-8 text-center text-sm text-muted-foreground">
+              No {typeFilter === 'virtual-machine' ? 'VMs' : 'containers'} match this filter.
+            </Card>
+          );
+        }
+        return (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-          {containers.map((ct) => (
+          {filtered.map((ct) => (
             <Card
               key={ct.name}
               className="border-dashed border-cyan-500/30 cursor-pointer hover:border-cyan-500/60 transition-colors"
@@ -1268,6 +1332,16 @@ export default function LxcContainers() {
                 <div className="flex items-start justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2 min-w-0">
                     <StatusBadge status={ct.status} />
+                    <span
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                        ct.type === 'virtual-machine'
+                          ? 'bg-purple-500/15 text-purple-400 border border-purple-500/40'
+                          : 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/40'
+                      }`}
+                      title={ct.type === 'virtual-machine' ? 'Virtual machine' : 'Container'}
+                    >
+                      {ct.type === 'virtual-machine' ? 'VM' : 'CT'}
+                    </span>
                     <CardTitle className="text-lg truncate">{ct.name}</CardTitle>
                   </div>
                   <div className="flex gap-1 flex-wrap justify-end" onClick={(e) => e.stopPropagation()}>
@@ -1374,9 +1448,10 @@ export default function LxcContainers() {
             </Card>
           ))}
         </div>
-      )}
+        );
+      })()}
 
-      {/* Create Container Dialog */}
+      {/* Create Instance Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg" onInteractOutside={(e) => { if (creating) e.preventDefault(); }}>
           <DialogHeader>
@@ -1453,10 +1528,33 @@ export default function LxcContainers() {
             <>
               <div className="space-y-4 py-2">
                 <div className="space-y-2">
+                  <Label>Type *</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'container', label: 'Container', hint: 'Lightweight, shares host kernel' },
+                      { id: 'virtual-machine', label: 'Virtual machine', hint: 'Full VM with its own kernel' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setCreateForm((f) => ({ ...f, type: opt.id }))}
+                        className={`text-left p-3 rounded border transition-colors ${
+                          createForm.type === opt.id
+                            ? 'border-cyan-500 bg-cyan-500/10 text-foreground'
+                            : 'border-border text-muted-foreground hover:bg-muted'
+                        }`}
+                      >
+                        <div className="font-medium text-sm">{opt.label}</div>
+                        <div className="text-xs mt-0.5">{opt.hint}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
                   <Label htmlFor="ct-name">Name *</Label>
                   <Input
                     id="ct-name"
-                    placeholder="my-container"
+                    placeholder={createForm.type === 'virtual-machine' ? 'my-vm' : 'my-container'}
                     value={createForm.name}
                     onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
                   />
@@ -1605,10 +1703,16 @@ export default function LxcContainers() {
                     <Input
                       id="ct-memory"
                       type="number"
-                      placeholder="2048"
+                      placeholder={createForm.type === 'virtual-machine' ? '2048 (default)' : '2048'}
                       value={createForm.memory}
                       onChange={(e) => setCreateForm((f) => ({ ...f, memory: e.target.value }))}
                     />
+                    {createForm.type === 'virtual-machine' && (
+                      <p className="text-xs text-muted-foreground">
+                        VMs require a memory cap. Defaults to 2048 MB if left blank;
+                        root disk defaults to 20 GiB.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -1658,33 +1762,43 @@ export default function LxcContainers() {
                   <p className="text-xs text-muted-foreground">
                     Runs automatically after container is created and has network. Takes up to 5 minutes.
                   </p>
-                  <label className="flex items-start gap-2 pt-1 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5 cursor-pointer"
-                      checked={createForm.dockerSupport}
-                      onChange={(e) => setCreateForm((f) => ({
-                        ...f,
-                        dockerSupport: e.target.checked,
-                        dockerPrivileged: e.target.checked ? f.dockerPrivileged : false,
-                      }))}
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + the mknod / setxattr / bpf / bpf.devices syscall intercepts so dockerd + BuildKit can mount overlayfs and run native-postinstall packages (bcrypt, sharp, node-pty, etc.). Auto-enabled by the Docker-in-LXC template.
-                    </span>
-                  </label>
-                  {createForm.dockerSupport && (
-                    <label className="flex items-start gap-2 pl-6 pt-1 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5 cursor-pointer"
-                        checked={createForm.dockerPrivileged}
-                        onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
-                      </span>
-                    </label>
+                  {createForm.type !== 'virtual-machine' && (
+                    <>
+                      <label className="flex items-start gap-2 pt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 cursor-pointer"
+                          checked={createForm.dockerSupport}
+                          onChange={(e) => setCreateForm((f) => ({
+                            ...f,
+                            dockerSupport: e.target.checked,
+                            dockerPrivileged: e.target.checked ? f.dockerPrivileged : false,
+                          }))}
+                        />
+                        <span className="text-xs text-muted-foreground">
+                          <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + the mknod / setxattr / bpf / bpf.devices syscall intercepts so dockerd + BuildKit can mount overlayfs and run native-postinstall packages (bcrypt, sharp, node-pty, etc.). Auto-enabled by the Docker-in-LXC template.
+                        </span>
+                      </label>
+                      {createForm.dockerSupport && (
+                        <label className="flex items-start gap-2 pl-6 pt-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 cursor-pointer"
+                            checked={createForm.dockerPrivileged}
+                            onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
+                          />
+                          <span className="text-xs text-muted-foreground">
+                            <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
+                          </span>
+                        </label>
+                      )}
+                    </>
+                  )}
+                  {createForm.type === 'virtual-machine' && (
+                    <p className="text-xs text-muted-foreground pt-1">
+                      Docker-in-LXC syscall intercepts don't apply to virtual machines.
+                      Run Docker inside the VM the normal way after install.
+                    </p>
                   )}
                 </div>
                 {createForm.services.some((s) => s.domain.trim()) && (
@@ -2379,6 +2493,7 @@ export default function LxcContainers() {
                 <LxcTerminalPanel
                   containerName={selectedContainer.name}
                   initialCwd={terminalCwd}
+                  instanceType={selectedContainer.type}
                 />
               </TabsContent>
 

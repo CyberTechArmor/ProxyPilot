@@ -35,15 +35,21 @@ export function translateContainerPathToHost(p) {
   return p;
 }
 
-// spawnTerminalPty({ kind, target, cols, rows, cwd }) — returns a node-pty
-// IPty.
+// spawnTerminalPty({ kind, target, mode, cols, rows, cwd }) — returns a
+// node-pty IPty.
 //
-// kind='lxc'   : opens a PTY into `incus exec -t pp-<target> -- bash`. When
-//                running inside the admin Docker container we pivot to the
-//                host's mount/PID/UTS/net/IPC namespaces via nsenter (host
-//                holds the incus binary + socket). The CAP_SYS_ADMIN +
-//                CAP_SYS_PTRACE granted by hardening B1 is what makes the
-//                nsenter step legal without running privileged.
+// kind='lxc'   : opens a PTY into `incus exec -t pp-<target> -- bash`
+//                (mode='exec', the default — works for containers and for
+//                VMs whose guest agent is up) or `incus console pp-<target>`
+//                (mode='console' — used for VMs without a guest agent
+//                because `incus exec` against an agent-less VM fails
+//                immediately with "VM agent isn't currently running").
+//                When running inside the admin Docker container we
+//                pivot to the host's mount/PID/UTS/net/IPC namespaces
+//                via nsenter (host holds the incus binary + socket).
+//                The CAP_SYS_ADMIN + CAP_SYS_PTRACE granted by
+//                hardening B1 is what makes the nsenter step legal
+//                without running privileged.
 //
 // kind='host'  : opens a PTY into `bash -l` on the host (admin-only). Same
 //                nsenter pivot when in Docker; falls through to a plain
@@ -56,7 +62,7 @@ export function translateContainerPathToHost(p) {
 //
 // Defaults: cols=80, rows=24, name='xterm-256color'. The TERM env var is
 // forced to xterm-256color so colour and alt-screen apps work consistently.
-export function spawnTerminalPty({ kind, target, cols = 80, rows = 24, cwd } = {}) {
+export function spawnTerminalPty({ kind, target, mode = 'exec', cols = 80, rows = 24, cwd } = {}) {
   let cmd;
   let args;
 
@@ -64,13 +70,24 @@ export function spawnTerminalPty({ kind, target, cols = 80, rows = 24, cwd } = {
     if (!validInstanceName(target)) {
       throw new Error('Invalid container target');
     }
+    if (mode !== 'exec' && mode !== 'console') {
+      throw new Error('Invalid PTY mode for kind=lxc');
+    }
     const incusName = `${INSTANCE_PREFIX}${target}`;
+    // Console mode: `incus console pp-<name>` attaches to the VM's
+    // serial console. Resize works (limited) and there is no shell
+    // shortcut equivalent — operators land at the guest's getty / boot
+    // prompt. No `--` form because the console subcommand takes no
+    // post-`--` argv.
+    const incusArgs = mode === 'console'
+      ? ['console', incusName]
+      : ['exec', '-t', incusName, '--', 'bash'];
     if (isInDocker) {
       cmd = 'nsenter';
-      args = ['-t', '1', '-m', '-u', '-n', '-i', 'incus', 'exec', '-t', incusName, '--', 'bash'];
+      args = ['-t', '1', '-m', '-u', '-n', '-i', 'incus', ...incusArgs];
     } else {
       cmd = 'incus';
-      args = ['exec', '-t', incusName, '--', 'bash'];
+      args = incusArgs;
     }
   } else if (kind === 'host') {
     if (isInDocker) {

@@ -1,4 +1,7 @@
 import { WebSocketServer } from 'ws';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { existsSync } from 'fs';
 import { verifyWsUpgrade } from '../middleware/wsAuth.js';
 import { spawnTerminalPty } from '../lib/pty.js';
 import {
@@ -6,6 +9,41 @@ import {
   AUDIT_TERMINAL_SESSION_START,
   AUDIT_TERMINAL_SESSION_END,
 } from '../db.js';
+
+const execAsync = promisify(exec);
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+
+// Run `incus info pp-<name> --format json` with a hard 3s budget and
+// return true iff the instance reports at least one routable IPv4 on a
+// non-loopback interface. That's the closest "guest agent is talking"
+// signal Incus exposes — agentless VMs report state but no `network`
+// payload because the agent is the source of that data.
+//
+// Returns false on any error (timeout, parse failure, missing
+// instance) so the caller falls back to the safer `incus console`
+// path. We never throw out of here.
+async function vmHasGuestAgent(name) {
+  const cmd = isInDocker
+    ? `nsenter -t 1 -m -u -n -i incus info ${name} --format json`
+    : `incus info ${name} --format json`;
+  try {
+    const { stdout } = await execAsync(cmd, { timeout: 3000, encoding: 'utf8' });
+    const info = JSON.parse(stdout || '{}');
+    const networks = info?.state?.network || info?.network || {};
+    for (const [iface, n] of Object.entries(networks)) {
+      if (iface === 'lo') continue;
+      const addrs = n?.addresses || [];
+      for (const a of addrs) {
+        if (a?.family === 'inet' && a?.scope !== 'link' && a?.scope !== 'local' && a?.address) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 const MAX_SESSIONS_PER_USER = parseInt(process.env.TERMINAL_MAX_SESSIONS || '3', 10);
 const IDLE_TIMEOUT_MS = parseInt(process.env.TERMINAL_IDLE_TIMEOUT_MS || `${15 * 60_000}`, 10);
@@ -51,14 +89,17 @@ function rejectUpgrade(socket, statusCode, reason) {
 }
 
 // Parse `/api/terminal/lxc/<name>` or `/api/terminal/host` from the
-// upgrade URL plus the optional `?cwd=<absolute-path>` query. Returns
-// null on no-match for the path. The cwd is sanity-checked so bogus
-// values don't make it to pty.spawn.
+// upgrade URL plus the optional `?cwd=<absolute-path>` and `?type=vm`
+// query. Returns null on no-match for the path. The cwd is sanity-checked
+// so bogus values don't make it to pty.spawn. `type` is a hint from the
+// frontend — when set to 'vm' the WS handler runs an agent probe and
+// chooses between `incus exec` (agent up) and `incus console` (agentless).
 function parseTarget(rawUrl) {
   const [pathPart, queryPart = ''] = (rawUrl || '').split('?');
   const url = pathPart.replace(/\/+$/, '');
 
   let cwd = null;
+  let typeHint = null;
   try {
     const params = new URLSearchParams(queryPart);
     const raw = params.get('cwd');
@@ -68,11 +109,13 @@ function parseTarget(rawUrl) {
     if (raw && raw.startsWith('/') && raw.length <= 4096 && !/[\0\n\r]/.test(raw)) {
       cwd = raw;
     }
-  } catch { /* malformed query → no cwd */ }
+    const t = params.get('type');
+    if (t === 'vm' || t === 'virtual-machine') typeHint = 'vm';
+  } catch { /* malformed query → no cwd / typeHint */ }
 
-  if (url === '/api/terminal/host') return { kind: 'host', target: null, cwd };
+  if (url === '/api/terminal/host') return { kind: 'host', target: null, cwd, typeHint: null };
   const m = url.match(/^\/api\/terminal\/lxc\/([a-zA-Z0-9_-]{1,64})$/);
-  if (m) return { kind: 'lxc', target: m[1], cwd };
+  if (m) return { kind: 'lxc', target: m[1], cwd, typeHint };
   return null;
 }
 
@@ -106,14 +149,17 @@ export function attachTerminalServer(httpServer) {
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      handleSession(ws, req, user, target);
+      handleSession(ws, req, user, target).catch((e) => {
+        try { ws.send(JSON.stringify({ type: 'closed', reason: 'spawn-failed', error: e?.message })); } catch {}
+        try { ws.close(1011, 'PTY spawn failed'); } catch {}
+      });
     });
   });
 
   return wss;
 }
 
-function handleSession(ws, req, user, target) {
+async function handleSession(ws, req, user, target) {
   const startedAt = Date.now();
   const remoteIp = req.socket?.remoteAddress || null;
   let bytesIn = 0;
@@ -122,17 +168,38 @@ function handleSession(ws, req, user, target) {
   let paused = false;
   let closed = false;
 
+  // VM-aware mode selection. The frontend signals VM-ness via the
+  // `?type=vm` query param (see Step 7); we then decide `exec` vs
+  // `console` by probing the guest agent. The probe is bounded to
+  // 3s so a long timeout never wedges session start. Containers and
+  // host shells skip this path entirely.
+  let mode = 'exec';
+  let banner = null;
+  if (target.kind === 'lxc' && target.typeHint === 'vm') {
+    const incusName = `pp-${target.target}`;
+    const agentUp = await vmHasGuestAgent(incusName);
+    if (!agentUp) {
+      mode = 'console';
+      banner = '\r\n\x1b[33m[VM console — agent shortcuts disabled]\x1b[0m\r\n';
+    }
+  }
+
   let term;
   try {
     term = spawnTerminalPty({
       kind: target.kind,
       target: target.target,
+      mode,
       cwd: target.cwd || undefined,
     });
   } catch (e) {
     try { ws.send(JSON.stringify({ type: 'closed', reason: 'spawn-failed', error: e.message })); } catch {}
     try { ws.close(1011, 'PTY spawn failed'); } catch {}
     return;
+  }
+
+  if (banner) {
+    try { ws.send(Buffer.from(banner, 'utf8')); } catch { /* socket may be gone */ }
   }
 
   incSessions(user.id);

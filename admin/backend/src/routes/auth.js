@@ -7,6 +7,23 @@ import crypto from 'crypto';
 import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAssertion,
+  putChallenge,
+  takeChallenge,
+  getRpId,
+  getRpName,
+  getExpectedOrigins,
+  getOrCreateUserHandle,
+  findUserByHandle,
+  listCredentialDescriptors,
+  getCredentialById,
+  insertCredential,
+  updateCredentialCounter,
+} from '../lib/webauthn.js';
 
 // Account lockout knobs. Defaults: after 10 failed login attempts
 // inside a 30-minute window the user is locked for 30 minutes. The
@@ -661,4 +678,306 @@ authRouter.post('/logout', authenticateToken, (req, res) => {
   logAudit(req.user.id, 'LOGOUT', 'user', req.user.id, { jti: req.user.jti }, req.ip);
   clearAuthCookies(res);
   res.json({ success: true });
+});
+
+// =============================================================================
+// Passkey (WebAuthn) endpoints
+// =============================================================================
+// Registration flow (authenticated; gated on a fresh TOTP code by the
+// frontend before the begin call):
+//   POST /auth/passkey/register/begin    -> returns PublicKeyCredentialCreationOptions
+//   POST /auth/passkey/register/verify   -> verifies attestation, stores the credential
+//
+// Authentication flow (unauthenticated; called from Login or from the
+// SudoModal's passkey path via /auth/sudo/passkey/* below):
+//   POST /auth/passkey/authenticate/begin    -> returns PublicKeyCredentialRequestOptions
+//   POST /auth/passkey/authenticate/verify   -> verifies assertion, sets pp_token + sudo cookie
+//
+// Challenges live in an in-memory map (lib/webauthn.js) keyed by:
+//   - register: the user's session jti (must be authenticated)
+//   - authenticate: a UUID returned in the begin response and echoed
+//     back by the client. The map entry is single-use — taken and
+//     deleted on /verify so a replayed request fails immediately.
+// =============================================================================
+
+const passkeyRegisterVerifySchema = z.object({
+  response: z.any(),                 // AuthenticatorAttestationResponse
+  label: z.string().max(64).optional(),
+});
+
+const passkeyAuthBeginSchema = z.object({
+  username: z.string().min(1).max(128).optional(),
+});
+
+const passkeyAuthVerifySchema = z.object({
+  challengeId: z.string().min(1),
+  response: z.any(),                 // AuthenticatorAssertionResponse
+  registerDevice: z.boolean().optional(),
+});
+
+authRouter.post('/passkey/register/begin', authenticateToken, async (req, res) => {
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    // Enforce: TOTP must already be set up. Passkey is ADDITIVE on top
+    // of TOTP, never a replacement for it.
+    if (!user.totp_enabled || !user.totp_secret) {
+      return res.status(400).json({ error: 'Set up TOTP before registering a passkey.' });
+    }
+
+    const handle = getOrCreateUserHandle(user.id);
+    const excluded = listCredentialDescriptors(user.id);
+
+    const options = await generateRegistrationOptions({
+      rpName: getRpName(),
+      rpID: getRpId(req),
+      userID: handle,
+      userName: user.username,
+      userDisplayName: user.display_name || user.username,
+      attestationType: 'none',
+      excludeCredentials: excluded,
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+    });
+
+    putChallenge(`reg:${req.user.jti}`, {
+      challenge: options.challenge,
+      userId: user.id,
+    });
+
+    res.json(options);
+  } catch (e) {
+    console.error('passkey register begin error:', e);
+    res.status(500).json({ error: 'Could not start passkey registration' });
+  }
+});
+
+authRouter.post('/passkey/register/verify', authenticateToken, async (req, res) => {
+  try {
+    const { response, label } = passkeyRegisterVerifySchema.parse(req.body);
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    const entry = takeChallenge(`reg:${req.user.jti}`);
+    if (!entry || entry.userId !== user.id) {
+      return res.status(400).json({ error: 'Challenge expired or missing. Try again.' });
+    }
+
+    const expectedOrigins = getExpectedOrigins(req);
+    const expectedRPID = getRpId(req);
+
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response,
+        expectedChallenge: entry.challenge,
+        expectedOrigin: expectedOrigins,
+        expectedRPID,
+        requireUserVerification: false,
+      });
+    } catch (e) {
+      logAudit(user.id, 'PASSKEY_REGISTER_FAILED', 'user', user.id, { reason: e?.message }, req.ip);
+      return res.status(400).json({ error: 'Passkey registration failed verification.' });
+    }
+
+    if (!verification.verified || !verification.registrationInfo) {
+      logAudit(user.id, 'PASSKEY_REGISTER_FAILED', 'user', user.id, { reason: 'not_verified' }, req.ip);
+      return res.status(400).json({ error: 'Passkey could not be verified.' });
+    }
+
+    const info = verification.registrationInfo;
+    const cred = info.credential || {};
+    const credentialID = cred.id; // base64url string in v13+
+    const publicKey = cred.publicKey; // Uint8Array
+    const counter = cred.counter ?? 0;
+    const transports = response?.response?.transports || cred.transports;
+    const aaguid = info.aaguid;
+
+    if (!credentialID || !publicKey) {
+      return res.status(400).json({ error: 'Attestation missing credential material.' });
+    }
+
+    try {
+      insertCredential({
+        userId: user.id,
+        credentialId: credentialID,
+        publicKey,
+        counter,
+        transports,
+        label,
+        aaguid,
+      });
+    } catch (e) {
+      // UNIQUE(credential_id) — already registered (somehow). Treat as
+      // success without re-inserting; the frontend will still get the
+      // credential row from list.
+      if (!String(e?.message || '').includes('UNIQUE')) throw e;
+    }
+
+    logAudit(user.id, 'PASSKEY_REGISTERED', 'user', user.id, { credentialId: credentialID, label: label || null }, req.ip);
+
+    res.json({ success: true, credentialId: credentialID });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('passkey register verify error:', error);
+    res.status(500).json({ error: 'Passkey registration failed' });
+  }
+});
+
+authRouter.post('/passkey/authenticate/begin', async (req, res) => {
+  try {
+    const { username } = passkeyAuthBeginSchema.parse(req.body || {});
+    const db = getDb();
+
+    let allowCredentials;
+    let userId = null;
+    if (username) {
+      const user = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+      if (user) {
+        userId = user.id;
+        allowCredentials = listCredentialDescriptors(user.id);
+      }
+    }
+
+    const options = await generateAuthenticationOptions({
+      rpID: getRpId(req),
+      allowCredentials, // undefined => discoverable credentials path
+      userVerification: 'preferred',
+    });
+
+    const challengeId = uuidv4();
+    putChallenge(`auth:${challengeId}`, {
+      challenge: options.challenge,
+      username: username || null,
+      userId,
+    });
+
+    // NEVER return whether `username` matched a real user — same
+    // response shape regardless. Otherwise this becomes a username
+    // enumeration oracle.
+    res.json({ ...options, challengeId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('passkey authenticate begin error:', error);
+    res.status(500).json({ error: 'Could not start passkey authentication' });
+  }
+});
+
+authRouter.post('/passkey/authenticate/verify', async (req, res) => {
+  try {
+    const { challengeId, response, registerDevice } = passkeyAuthVerifySchema.parse(req.body);
+    const db = getDb();
+
+    const entry = takeChallenge(`auth:${challengeId}`);
+    if (!entry) {
+      return res.status(400).json({ error: 'Challenge expired or missing. Try again.' });
+    }
+
+    // Resolve the credential row from the assertion's credential id.
+    const credentialId = response?.id;
+    if (!credentialId) return res.status(400).json({ error: 'Assertion missing credential id' });
+
+    const stored = getCredentialById(credentialId);
+    if (!stored) {
+      logAudit(null, 'PASSKEY_AUTH_FAILED', 'user', null, { reason: 'unknown_credential' }, req.ip);
+      return res.status(401).json({ error: 'Unknown credential' });
+    }
+
+    // If the begin call constrained the credential set to a specific
+    // username, refuse if the assertion is for a different user.
+    if (entry.userId && stored.user_id !== entry.userId) {
+      logAudit(null, 'PASSKEY_AUTH_FAILED', 'user', stored.user_id, { reason: 'user_mismatch' }, req.ip);
+      return res.status(401).json({ error: 'Credential does not match user' });
+    }
+
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(stored.user_id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    // Lockout still applies — passkey is a stronger factor but a hot
+    // device sitting on someone's desk shouldn't bypass account locks.
+    const lockState = checkLockout(user);
+    if (lockState.locked) {
+      return res
+        .status(429)
+        .set('Retry-After', String(lockState.retryAfterSec))
+        .json({
+          error: 'Account temporarily locked.',
+          lockedUntil: lockState.until,
+          retryAfterSec: lockState.retryAfterSec,
+        });
+    }
+
+    const result = await verifyAssertion({
+      response,
+      expectedChallenge: entry.challenge,
+      expectedOrigins: getExpectedOrigins(req),
+      expectedRPID: getRpId(req),
+      credential: stored,
+    });
+
+    if (!result.ok) {
+      recordLoginFailure(db, user, req);
+      logAudit(user.id, 'PASSKEY_AUTH_FAILED', 'user', user.id, { reason: result.reason }, req.ip);
+      return res.status(401).json({ error: 'Passkey verification failed' });
+    }
+
+    updateCredentialCounter(stored.credential_id, result.info.newCounter);
+    resetLoginFailures(db, user.id);
+
+    // Optional device registration — same machinery as TOTP login.
+    if (registerDevice) {
+      const deviceId = uuidv4();
+      const deviceName = getDeviceName(req.headers['user-agent']);
+      const fingerprint = generateDeviceFingerprint(req);
+      try {
+        db.prepare(`
+          INSERT INTO authenticated_devices (id, user_id, device_name, device_fingerprint, user_agent, ip_address)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(deviceId, user.id, deviceName, fingerprint, req.headers['user-agent'], req.ip);
+        logAudit(user.id, 'DEVICE_REGISTERED', 'device', deviceId, { deviceName }, req.ip);
+      } catch (e) { /* duplicate */ }
+    }
+
+    // Mint the session AND open sudo in one shot. A fresh passkey
+    // assertion is at least as strong as password+TOTP, so it
+    // satisfies both the login and the sudo gate.
+    const token = generateToken(user, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    setAuthCookies(res, token);
+    const sudoUntilISO = new Date(Date.now() + SUDO_GRANT_HOURS * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `UPDATE sessions SET sudo_until = ? WHERE user_id = ? AND id = (
+         SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
+       )`
+    ).run(sudoUntilISO, user.id, user.id);
+
+    logAudit(user.id, 'PASSKEY_LOGIN_SUCCESS', 'user', user.id, { credentialId: stored.credential_id }, req.ip);
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        displayName: user.display_name,
+        role: user.role || 'admin',
+        totpEnabled: !!user.totp_enabled,
+        passwordChangeRequired: !!user.password_change_required,
+      },
+      sudoUntil: sudoUntilISO,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('passkey authenticate verify error:', error);
+    res.status(500).json({ error: 'Passkey verification failed' });
+  }
 });

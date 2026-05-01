@@ -299,11 +299,30 @@ lxcRouter.get('/containers/with-ip', async (req, res) => {
   }
 });
 
-// GET /images - List available images
+// GET /images - List available images.
+//
+// We augment each row with a `supports` array — one of:
+//   ['container']
+//   ['virtual-machine']
+//   ['container', 'virtual-machine']  (rare; older / multi-arch
+//                                      distro images that incus
+//                                      reports both for)
+//
+// The frontend's create wizard uses this to filter the image
+// dropdown by the operator's selected instance type (Step 6). Modern
+// Incus reports a single `type` value per image row; we also check
+// `properties.type` since some remote registries put it there
+// instead. If neither field is set we conservatively report
+// container — that matches the historical behaviour where
+// everything was a CT.
 lxcRouter.get('/images', async (req, res) => {
   try {
     const result = await execOnHost('incus image list --format json 2>/dev/null');
-    const images = JSON.parse(result.stdout);
+    const raw = JSON.parse(result.stdout);
+    const images = Array.isArray(raw) ? raw.map((img) => {
+      const supports = deriveImageSupports(img);
+      return { ...img, supports };
+    }) : raw;
     res.json({ success: true, images });
   } catch (error) {
     res.status(500).json({
@@ -313,6 +332,28 @@ lxcRouter.get('/images', async (req, res) => {
     });
   }
 });
+
+// Derive the `supports: string[]` array for one `incus image list`
+// row. Reads `image.type` and `image.properties.type`; collapses
+// 'virtual_machine' / 'vm' aliases to the canonical
+// 'virtual-machine' string the rest of the codebase uses. Unknown
+// values default to 'container' so the wizard never hides a row by
+// mistake.
+function deriveImageSupports(img) {
+  const claimed = new Set();
+  const candidates = [img?.type, img?.properties?.type];
+  for (const c of candidates) {
+    if (typeof c !== 'string') continue;
+    const v = c.toLowerCase().trim();
+    if (v === 'virtual-machine' || v === 'virtual_machine' || v === 'vm') {
+      claimed.add('virtual-machine');
+    } else if (v === 'container' || v === 'ct' || v === 'lxc') {
+      claimed.add('container');
+    }
+  }
+  if (claimed.size === 0) return ['container'];
+  return Array.from(claimed);
+}
 
 // GET /containers/:name - Get detailed info for a container
 lxcRouter.get('/containers/:name', async (req, res) => {

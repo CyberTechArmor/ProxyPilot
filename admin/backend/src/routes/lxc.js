@@ -12,6 +12,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure } from './services.js';
+import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
 
@@ -476,16 +477,12 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
 });
 
 // POST /containers - Start async container creation
-// POSIX single-quote escape for argv tokens. New VM-specific argv
-// additions go through this rather than the legacy JSON.stringify
-// pattern in this file (see SECURITY.md "shell quoting"). Don't
-// retrofit existing JSON.stringify call sites — it's out of scope
-// for the VM session and the brief explicitly says so.
-function shellSingleQuote(s) {
-  if (s === undefined || s === null) return "''";
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
-}
-
+// shellSingleQuote is imported from ../lib/shell-quote.js. New
+// VM-specific argv additions go through it rather than the legacy
+// JSON.stringify pattern in this file (see SECURITY.md
+// "shell quoting"). Don't retrofit existing JSON.stringify call
+// sites — it's out of scope for the VM session and the brief
+// explicitly says so.
 lxcRouter.post('/containers', async (req, res) => {
   const { name, image, profile, domain, port, cpu, memory, initScript, dockerSupport, dockerPrivileged, services: rawServices } = req.body;
   // Instance kind. Defaults to 'container' to keep existing callers

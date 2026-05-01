@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { existsSync } from 'fs';
 import { logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
 
@@ -30,20 +31,6 @@ async function execOnHost(command, { timeout = 15000 } = {}) {
     return execAsync(hostCommand, { timeout, maxBuffer: 4 * 1024 * 1024 });
   }
   return execAsync(command, { timeout, maxBuffer: 4 * 1024 * 1024 });
-}
-
-/**
- * POSIX single-quote shell escape. Inside single quotes EVERY byte
- * is literal except the single quote itself, which we encode by
- * closing the literal, emitting an escaped quote, and reopening:
- *   foo'bar  →  'foo'\''bar'
- * Safe against `$()`, backticks, `$VAR`, newlines, `;`, `&&`, `|`,
- * etc. The route's argv builder passes every operator-supplied
- * value through this helper before joining with spaces.
- */
-function shellSingleQuote(s) {
-  if (s === undefined || s === null) return "''";
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
 /**

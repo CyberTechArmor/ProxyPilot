@@ -118,6 +118,53 @@ export const api = {
       body: JSON.stringify({ password, totpCode }),
     }, false),
 
+  // Passkey (WebAuthn). The server-issued options come back from /begin
+  // and are passed verbatim to startRegistration / startAuthentication
+  // by lib/passkey.js — this layer is just transport.
+  passkeyRegisterBegin: () => request('/auth/passkey/register/begin', { method: 'POST' }),
+
+  passkeyRegisterVerify: ({ response, label }) => request('/auth/passkey/register/verify', {
+    method: 'POST',
+    body: JSON.stringify({ response, label }),
+  }),
+
+  passkeyAuthBegin: ({ username } = {}) => request('/auth/passkey/authenticate/begin', {
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  }),
+
+  passkeyAuthVerify: ({ challengeId, response, registerDevice }) => request('/auth/passkey/authenticate/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId, response, registerDevice }),
+  }),
+
+  // Sudo via passkey. Always passes _retryOnSudo=false for the same
+  // reason as the password+TOTP `sudo` above — this IS the sudo path.
+  sudoPasskeyBegin: () => request('/auth/sudo/passkey/begin', { method: 'POST' }, false),
+
+  sudoPasskeyVerify: ({ response }) => request('/auth/sudo/passkey/verify', {
+    method: 'POST',
+    body: JSON.stringify({ response }),
+  }, false),
+
+  // Per-action confirmation challenge (Step 7). Returns a fresh
+  // PublicKeyCredentialRequestOptions plus a challengeId; the caller
+  // attaches the resulting assertion to the destructive request as
+  // `passkeyAssertion`.
+  passkeyChallengeForAction: () => request('/user/passkey/challenge', { method: 'POST' }),
+
+  listPasskeys: () => request('/user/passkeys'),
+
+  renamePasskey: (id, label) => request(`/user/passkeys/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ label }),
+  }),
+
+  deletePasskey: (id, { totpCode, passkeyAssertion } = {}) => request(`/user/passkeys/${id}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totpCode, passkeyAssertion }),
+  }),
+
   // Services. Phase 2b audit: a service now represents one logical workload
   // (typically an LXC or Docker container) that can expose multiple HTTP
   // routes via a nested `routes: [...]` array on every GET response. The

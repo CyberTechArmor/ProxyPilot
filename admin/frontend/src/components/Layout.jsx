@@ -5,26 +5,12 @@ import { api } from '@/lib/api';
 import { useToast, getNotificationHistory } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import {
   LayoutDashboard,
   User,
   Users,
   LogOut,
   Rocket,
   Server,
-  Download,
-  X,
-  Loader2,
-  CheckCircle,
-  AlertCircle,
-  RefreshCw,
   Bell,
   Menu,
   TerminalSquare,
@@ -92,137 +78,21 @@ export default function Layout() {
     return d.toLocaleDateString();
   };
 
-  // Version and update state
+  // Version display only. The update-check / auto-update flow was
+  // removed — operators update via `git pull && npm run build` on
+  // the host (or whatever deploy mechanism they use). The sidebar
+  // still shows the running version for identification.
   const [version, setVersion] = useState('');
-  const [updateInfo, setUpdateInfo] = useState(null);
-  const [updateDismissed, setUpdateDismissed] = useState(false);
-  const [dismissedVersion, setDismissedVersion] = useState('');
-  const [showUpdateBanner, setShowUpdateBanner] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   // Check admin status from user context and localStorage fallback
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
-  // Fetch version and check for updates on mount
   useEffect(() => {
-    fetchVersionInfo();
+    api.getVersion()
+      .then(v => setVersion(v.version))
+      .catch(e => console.error('Error fetching version:', e));
   }, []);
-
-  // Poll for update progress when updating
-  useEffect(() => {
-    let interval;
-    if (updating) {
-      interval = setInterval(async () => {
-        try {
-          const progress = await api.getUpdateProgress();
-          setUpdateProgress(progress);
-
-          if (progress.status === 'success' || progress.status === 'error') {
-            setUpdating(false);
-          }
-        } catch (e) {
-          console.error('Error fetching update progress:', e);
-        }
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [updating]);
-
-  const fetchVersionInfo = async () => {
-    try {
-      const versionData = await api.getVersion();
-      setVersion(versionData.version);
-      setUpdateDismissed(versionData.updateDismissed);
-      setDismissedVersion(versionData.dismissedVersion);
-
-      // Check for updates
-      checkForUpdates(versionData.updateDismissed, versionData.dismissedVersion);
-    } catch (e) {
-      console.error('Error fetching version:', e);
-    }
-  };
-
-  const checkForUpdates = async (dismissed = updateDismissed, dismissedVer = dismissedVersion) => {
-    setCheckingUpdate(true);
-    try {
-      const update = await api.checkForUpdates();
-      setUpdateInfo(update);
-
-      // Show banner if update available and not dismissed for this version
-      if (update.updateAvailable && (!dismissed || dismissedVer !== update.latestVersion)) {
-        setShowUpdateBanner(true);
-      } else {
-        setShowUpdateBanner(false);
-      }
-    } catch (e) {
-      console.error('Error checking for updates:', e);
-    } finally {
-      setCheckingUpdate(false);
-    }
-  };
-
-  const handleDismiss = async () => {
-    try {
-      await api.dismissUpdate(updateInfo?.latestVersion);
-      setShowUpdateBanner(false);
-      setUpdateDismissed(true);
-      setDismissedVersion(updateInfo?.latestVersion);
-    } catch (e) {
-      console.error('Error dismissing update:', e);
-    }
-  };
-
-  const handleUpdate = async () => {
-    setUpdateDialogOpen(true);
-    setUpdating(true);
-    setUpdateProgress({ status: 'running', message: 'Starting update...', logs: [] });
-
-    try {
-      await api.performUpdate();
-    } catch (e) {
-      console.error('Error starting update:', e);
-      setUpdateProgress({ status: 'error', message: e.message, logs: [] });
-      setUpdating(false);
-    }
-  };
-
-  const [restarting, setRestarting] = useState(false);
-
-  const handleCloseUpdateDialog = async () => {
-    if (updateProgress?.status === 'success') {
-      // Reset and refresh the page to load new version
-      await api.resetUpdateStatus();
-      window.location.reload();
-    } else if (updateProgress?.status === 'error') {
-      await api.resetUpdateStatus();
-      setUpdateDialogOpen(false);
-      setUpdateProgress(null);
-    }
-  };
-
-  const handleRestart = async () => {
-    setRestarting(true);
-    try {
-      await api.restartApplication();
-      // Show message that restart is in progress
-      setUpdateProgress({
-        status: 'success',
-        message: 'Restart initiated. The page will reload in a few seconds...',
-        logs: ['Restart script executed', 'Waiting for application to restart...'],
-      });
-      // Wait a bit for the server to restart, then reload
-      setTimeout(() => {
-        window.location.reload();
-      }, 5000);
-    } catch (e) {
-      console.error('Error restarting:', e);
-      setRestarting(false);
-    }
-  };
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -258,28 +128,6 @@ export default function Layout() {
         </div>
       </header>
 
-      {/* Update Banner */}
-      {showUpdateBanner && updateInfo?.updateAvailable && (
-        <div className="fixed top-14 md:top-0 left-0 md:left-64 right-0 z-30 bg-primary text-primary-foreground px-4 py-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <Download className="h-4 w-4 shrink-0" />
-            <span className="text-sm">
-              Update available: v{updateInfo.latestVersion} (current: v{version})
-              {' '}<span className="opacity-75 hidden sm:inline">- Update via command line: git pull && npm run build</span>
-            </span>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleDismiss}
-            className="text-primary-foreground hover:bg-primary/80 shrink-0"
-            title="Dismiss"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      )}
-
       {/* Mobile sidebar backdrop (click to close) */}
       {sidebarOpen && (
         <div
@@ -308,14 +156,6 @@ export default function Layout() {
               <span className="text-xs text-muted-foreground">
                 v{version || '...'}
               </span>
-              {updateInfo?.updateAvailable && !showUpdateBanner && (
-                <span className="text-xs text-primary cursor-pointer hover:underline" onClick={() => setShowUpdateBanner(true)}>
-                  (update available)
-                </span>
-              )}
-              {checkingUpdate && (
-                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-              )}
             </div>
           </div>
 
@@ -424,96 +264,18 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* Main content */}
-      <main
-        className={cn(
-          "pl-0 md:pl-64 pt-14 md:pt-0",
-          // Fill the viewport so pages that opt into a flex layout
-          // (HostShell, LxcContainers terminal tab) can size their
-          // children with flex-1. Pages with normal stacked content
-          // are unaffected — they just get a tall main area instead
-          // of an auto-sized one.
-          "min-h-screen flex flex-col",
-          showUpdateBanner && updateInfo?.updateAvailable && "md:pt-10"
-        )}
-      >
-        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0">
+      {/* Main content. Anchored to viewport height (h-screen) rather
+          than min-h-screen so flex-1 children inside Outlet (HostShell
+          terminal, LxcContainers terminal tab) get a definite parent
+          height to compute against. With min-h-screen the flex chain
+          falls back to content-sized heights and pages like Host Shell
+          render their terminal short. Stacked-content pages scroll
+          inside the inner div via overflow-y-auto. */}
+      <main className="pl-0 md:pl-64 pt-14 md:pt-0 h-screen flex flex-col">
+        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
           <Outlet />
         </div>
       </main>
-
-      {/* Update Progress Dialog */}
-      <Dialog open={updateDialogOpen} onOpenChange={() => {}}>
-        <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              {updateProgress?.status === 'running' && (
-                <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  Updating ProxyPilot
-                </>
-              )}
-              {updateProgress?.status === 'success' && (
-                <>
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                  Update Complete
-                </>
-              )}
-              {updateProgress?.status === 'error' && (
-                <>
-                  <AlertCircle className="h-5 w-5 text-red-500" />
-                  Update Failed
-                </>
-              )}
-            </DialogTitle>
-            <DialogDescription>
-              {updateProgress?.message}
-            </DialogDescription>
-          </DialogHeader>
-
-          {/* Progress logs */}
-          {updateProgress?.logs && updateProgress.logs.length > 0 && (
-            <div className="bg-muted p-3 rounded-md max-h-48 overflow-auto">
-              <pre className="text-xs font-mono whitespace-pre-wrap">
-                {updateProgress.logs.join('\n')}
-              </pre>
-            </div>
-          )}
-
-          {updateProgress?.status === 'running' && (
-            <div className="flex justify-center py-4">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <RefreshCw className="h-4 w-4 animate-spin" />
-                Please wait, do not close this window...
-              </div>
-            </div>
-          )}
-
-          <DialogFooter className="flex-col sm:flex-row gap-2">
-            {updateProgress?.status === 'success' && !restarting && (
-              <>
-                <Button variant="outline" onClick={handleCloseUpdateDialog}>
-                  Reload Page Only
-                </Button>
-                <Button onClick={handleRestart}>
-                  Restart Application
-                </Button>
-              </>
-            )}
-            {restarting && (
-              <Button disabled>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Restarting...
-              </Button>
-            )}
-            {updateProgress?.status === 'error' && (
-              <Button variant="outline" onClick={handleCloseUpdateDialog}>
-                Close
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

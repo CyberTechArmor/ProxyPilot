@@ -17,7 +17,7 @@ phase, mark it ✅, commit, push, stop. Operator gates between phases.
 | # | Phase | Status |
 |---|---|---|
 | 0 | Revert broken docker-compose security_opt → restore working dashboard | ⏳ |
-| A | Host-side agent: design + scaffold | ⏳ |
+| A | Host-side agent: design + scaffold | 🟡 |
 | B | Host-side agent: Caddy methods | ⏳ |
 | C | Host-side agent: Incus methods | ⏳ |
 | D | Host-side agent: Docker methods | ⏳ |
@@ -196,12 +196,23 @@ export async function agentCall(method, params = {}, opts = {}) {
 
 **Acceptance tests (operator runs on disposable VM).**
 
-- [ ] A.V1 — `systemctl status proxypilot-agent` shows active (running).
-- [ ] A.V2 — `echo '{"id":1,"method":"agent.ping","params":{}}' | nc -U /run/proxypilot-agent.sock` returns `{"id":1,"result":"pong"}`.
-- [ ] A.V3 — Inside the proxypilot Docker container: `nc -U /run/proxypilot-agent.sock < ping.json` works (the bind mount + group is wired).
-- [ ] A.V4 — `node -e "import('./admin/backend/src/lib/agent.js').then(m => m.agentCall('agent.ping')).then(console.log)"` from inside the container prints `pong`.
-- [ ] A.V5 — Dashboard still works end-to-end (Add Service, Incus page, Caddy reload — all going through nsenter, agent NOT YET in the production path).
-- [ ] A.V6 — `update.sh` on an existing install picks up the agent: builds binary, enables service, mounts socket, container restarts cleanly. Health check passes.
+Status legend below: 🤖 = auto-runnable in any sandbox with a Go
+toolchain + Node 20+. 👤 = requires a real VM with systemd, Docker,
+the deployed install, etc.; the operator runs these by hand.
+
+- [ ] A.V1 👤 — `systemctl status proxypilot-agent` shows active (running).
+- [x] A.V2 🤖 — `echo '{"id":1,"method":"agent.ping","params":{}}' | nc -U <socket>` returns `{"id":1,"result":"pong"}`. Verified locally during 3.1 + 3.7 with a binary built from cmd/agent/.
+- [ ] A.V3 👤 — Inside the proxypilot Docker container: `nc -U /run/proxypilot-agent.sock < ping.json` works (the bind mount + group is wired). Cannot be exercised without a running container; docker-compose changes (3.4 / 3.6) need the operator's deployed VM to verify.
+- [x] A.V4 🤖 — `agentCall('agent.ping')` from `admin/backend/src/lib/agent.js` returns `'pong'`. Verified locally during 3.7 against the real Go binary on a tmp socket. The full V4 (running INSIDE the container) is 👤.
+- [ ] A.V5 👤 — Dashboard still works end-to-end (Add Service, Incus page, Caddy reload — all going through nsenter, agent NOT YET in the production path). Phase A is dual-track; no production code path imports lib/agent.js, so V5 is conceptually a regression test that the install/update changes didn't break the existing nsenter flow.
+- [ ] A.V6 👤 — `update.sh` on an existing install picks up the agent: builds binary, enables service, mounts socket, container restarts cleanly. Health check passes. The Python compose-mutation logic was idempotency-tested locally against a synthetic legacy compose file (3.6).
+
+**Auto-coverage so far.** V2 (round-trip on a tmp socket) and V4
+(Node client → real binary) both pass on the build sandbox. The
+node:test suite for `lib/agent.js` covers four code paths (success,
+AgentError envelope, hung-server timeout, missing-socket transport
+error). V1, V3, V5, V6 require a real disposable VM and are
+operator gates before Phase A flips to ✅.
 
 **Commits (one per checklist item).**
 
@@ -212,10 +223,12 @@ feat(agent): A.3 install.sh creates user, builds binary, installs unit
 feat(agent): A.4 docker-compose socket bind-mount + group_add
 feat(agent): A.5 Node client lib + smoke test
 fix(update): A.6 in-place migration installs agent on existing deploys
-docs(spec): A.V1-V6 verified, Phase A ✅
+docs(spec): A.7 Phase A scaffold complete, awaiting operator V1-V6
 ```
 
-When A.V1-V6 pass, mark Phase A ✅. Operator confirms before Phase B.
+Phase A is currently 🟡 — scaffold shipped, V2 + V4 auto-verified.
+Final flip to ✅ happens once the operator runs V1, V3, V5, V6 on a
+disposable VM and confirms in chat. Operator confirms before Phase B.
 
 ---
 

@@ -667,6 +667,143 @@ REPOEOF
 fi
 log ""
 
+# Phase A host-side agent — in-place migration on existing deploys.
+#
+# install.sh installs the agent on fresh boxes; update.sh's job is to
+# bring an existing install up to the same posture. Five idempotent
+# steps:
+#
+#   1. Install Go (>= AGENT_GO_VERSION) if missing or too old.
+#   2. Create proxypilot-agent system user + group if missing.
+#   3. Build /usr/local/bin/proxypilot-agent from cmd/agent/.
+#   4. Install + enable the systemd unit, restart on binary refresh.
+#   5. Patch the deployed docker-compose.yml to add the socket bind
+#      mount, group_add, and PROXYPILOT_AGENT_SOCKET env var. Step 5
+#      runs further down where INSTALL_DIR is known.
+#
+# Phase A is dual-track: nothing in the dashboard's production code
+# path actually calls the agent yet. The migration is a scaffold so
+# Phases B-E can flip individual operations onto the agent behind
+# feature flags without touching the deploy mechanics.
+log "${BLUE}[3.5/7] Installing host-side agent (Phase A scaffold)...${NC}"
+
+AGENT_GO_VERSION="1.21.13"
+
+# Detect installed Go version (system PATH first, then /usr/local/go).
+# Returns empty string if absent.
+agent_detect_go_version() {
+    local raw
+    if raw=$(go version 2>/dev/null); then
+        echo "$raw" | awk '{print $3}' | sed 's/^go//'
+    elif raw=$(/usr/local/go/bin/go version 2>/dev/null); then
+        echo "$raw" | awk '{print $3}' | sed 's/^go//'
+    else
+        echo ""
+    fi
+}
+
+# Returns 0 if $1 (have) >= $2 (want), 1 otherwise.
+agent_go_ge() {
+    local have="$1" want="$2"
+    [[ -z "$have" ]] && return 1
+    if [[ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" == "$want" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+agent_resolve_go_bin() {
+    if command -v go >/dev/null 2>&1; then
+        command -v go
+    elif [[ -x /usr/local/go/bin/go ]]; then
+        echo "/usr/local/go/bin/go"
+    else
+        echo ""
+    fi
+}
+
+# 1. Toolchain.
+CURRENT_GO=$(agent_detect_go_version)
+if agent_go_ge "$CURRENT_GO" "$AGENT_GO_VERSION"; then
+    log "${GREEN}Go ${CURRENT_GO} already installed (>= ${AGENT_GO_VERSION})${NC}"
+else
+    log "${YELLOW}Installing Go ${AGENT_GO_VERSION} for proxypilot-agent build...${NC}"
+    case "$(uname -m)" in
+        x86_64|amd64) GO_ARCH="amd64" ;;
+        aarch64|arm64) GO_ARCH="arm64" ;;
+        armv7l|armv6l) GO_ARCH="armv6l" ;;
+        *) log "${RED}Unsupported architecture for Go install: $(uname -m)${NC}"; exit 1 ;;
+    esac
+    GO_TARBALL="go${AGENT_GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    GO_TMPDIR=$(mktemp -d)
+    if ! curl -fsSL -o "${GO_TMPDIR}/${GO_TARBALL}" "https://go.dev/dl/${GO_TARBALL}" 2>&1 | tee -a "$LOG_FILE"; then
+        log "${RED}Failed to download Go tarball${NC}"
+        rm -rf "$GO_TMPDIR"
+        exit 1
+    fi
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "${GO_TMPDIR}/${GO_TARBALL}"
+    rm -rf "$GO_TMPDIR"
+    INSTALLED_GO=$(agent_detect_go_version)
+    if ! agent_go_ge "$INSTALLED_GO" "$AGENT_GO_VERSION"; then
+        log "${RED}Go installation appears to have failed (detected: '${INSTALLED_GO}')${NC}"
+        exit 1
+    fi
+    log "${GREEN}Go ${INSTALLED_GO} installed at /usr/local/go${NC}"
+fi
+GO_BIN=$(agent_resolve_go_bin)
+if [[ -z "$GO_BIN" ]]; then
+    log "${RED}Go toolchain not found after install; refusing to continue${NC}"
+    exit 1
+fi
+
+# 2. System user + group.
+if ! getent group proxypilot-agent >/dev/null 2>&1; then
+    groupadd --system proxypilot-agent
+    log "Created system group: proxypilot-agent"
+fi
+if ! getent passwd proxypilot-agent >/dev/null 2>&1; then
+    useradd --system --gid proxypilot-agent --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin \
+        proxypilot-agent
+    log "Created system user: proxypilot-agent"
+fi
+
+# 3. Build the binary from the source tree we just pulled.
+AGENT_SRC="${SCRIPT_DIR}/cmd/agent"
+if [[ ! -d "$AGENT_SRC" ]]; then
+    log "${YELLOW}cmd/agent not found at ${AGENT_SRC}; this build of update.sh predates Phase A — skipping agent install${NC}"
+else
+    log "Building proxypilot-agent..."
+    (
+        cd "$AGENT_SRC"
+        GOFLAGS=-mod=mod "$GO_BIN" build -o /usr/local/bin/proxypilot-agent .
+    )
+    chmod 0755 /usr/local/bin/proxypilot-agent
+    log "${GREEN}Agent binary at /usr/local/bin/proxypilot-agent${NC}"
+
+    # 4. Systemd unit.
+    UNIT_SRC="${SCRIPT_DIR}/deploy/proxypilot-agent.service"
+    UNIT_DST="/etc/systemd/system/proxypilot-agent.service"
+    if [[ ! -f "$UNIT_SRC" ]]; then
+        log "${YELLOW}Missing systemd unit at ${UNIT_SRC}${NC}"
+    else
+        if ! cmp -s "$UNIT_SRC" "$UNIT_DST" 2>/dev/null; then
+            cp "$UNIT_SRC" "$UNIT_DST"
+            chmod 0644 "$UNIT_DST"
+            systemctl daemon-reload
+            log "Installed systemd unit: ${UNIT_DST}"
+        fi
+        if ! systemctl is-enabled --quiet proxypilot-agent 2>/dev/null; then
+            systemctl enable proxypilot-agent 2>&1 | tee -a "$LOG_FILE"
+        fi
+        # Restart so the freshly-built binary is the running one.
+        systemctl restart proxypilot-agent
+        log "${GREEN}proxypilot-agent service running${NC}"
+    fi
+fi
+log ""
+
 # Detect Docker deployment so we can skip the host-side backend npm
 # install. node-pty's prebuild falls back to node-gyp rebuild on hosts
 # without make/g++, which prints a noisy gyp ERR! block even though the
@@ -848,6 +985,111 @@ with open(path, "w") as f:
 PYEOF
                 log "${GREEN}docker-compose.yml patched. Container will pick up on rebuild.${NC}"
             fi
+        fi
+
+        # Phase A — patch the deployed docker-compose.yml so the
+        # container can reach the host-side agent. Two idempotent
+        # passes:
+        #
+        #   FRESH INSTALL (no agent wiring yet):
+        #     * volume bind:  /run/proxypilot-agent:/run/proxypilot-agent
+        #     * group_add:    [<numeric-gid-of-proxypilot-agent>]
+        #     * env var:      PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock
+        #
+        #   MIGRATION from the original layout (single-file mount of
+        #   /run/proxypilot-agent.sock at the root of /run): the file
+        #   mount races with Docker on host reboot, so move to a
+        #   directory mount that's stable under
+        #   systemd RuntimeDirectory.
+        #     * /run/proxypilot-agent.sock:/run/proxypilot-agent.sock
+        #         → /run/proxypilot-agent:/run/proxypilot-agent
+        #     * PROXYPILOT_AGENT_SOCKET old path → new path
+        #
+        # Phase A is dual-tracked, so this socket isn't called by any
+        # production code path yet — the container can connect and
+        # ping the agent, but nsenter still drives every host op.
+        if [ -f "$COMPOSE_FILE" ] && getent group proxypilot-agent >/dev/null 2>&1; then
+            AGENT_GID=$(getent group proxypilot-agent | cut -d: -f3)
+            NEEDS_PATCH=false
+            # Fresh-install markers
+            grep -q '/run/proxypilot-agent:/run/proxypilot-agent' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            grep -q 'group_add' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            grep -q 'PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock' "$COMPOSE_FILE" || NEEDS_PATCH=true
+            # Migration markers — old file-mount layout still present?
+            grep -q '/run/proxypilot-agent\.sock:/run/proxypilot-agent\.sock' "$COMPOSE_FILE" && NEEDS_PATCH=true
+
+            if [ "$NEEDS_PATCH" = true ]; then
+                log "${YELLOW}Patching docker-compose.yml: wiring host-side agent (directory mount)${NC}"
+                AGENT_GID="$AGENT_GID" python3 - "$COMPOSE_FILE" <<'PYEOF' || true
+import os, sys, re
+path = sys.argv[1]
+gid = os.environ.get("AGENT_GID", "").strip()
+if not gid:
+    sys.exit(0)
+with open(path) as f:
+    text = f.read()
+
+# A. Migrate the old single-file mount to the new directory mount.
+text = re.sub(
+    r"(?m)^([ \t]+)- /run/proxypilot-agent\.sock:/run/proxypilot-agent\.sock\s*\n",
+    lambda m: f"{m.group(1)}- /run/proxypilot-agent:/run/proxypilot-agent\n",
+    text,
+)
+
+# B. Migrate the old socket path env var to the new directory path.
+text = re.sub(
+    r"(?m)^([ \t]+)- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent\.sock\s*$",
+    lambda m: f"{m.group(1)}- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock",
+    text,
+)
+
+# C. Fresh install: ensure the directory mount is present. Insert
+#    after the docker.sock line if not already there.
+if "/run/proxypilot-agent:/run/proxypilot-agent" not in text:
+    text = re.sub(
+        r"(?m)^([ \t]+)- /var/run/docker\.sock:/var/run/docker\.sock\s*\n",
+        lambda m: f"{m.group(0)}{m.group(1)}- /run/proxypilot-agent:/run/proxypilot-agent\n",
+        text,
+        count=1,
+    )
+
+# D. Fresh install: group_add block before environment: if missing.
+if not re.search(r"(?m)^[ \t]+group_add:[ \t]*$", text):
+    text = re.sub(
+        r"(?m)^([ \t]+)environment:[ \t]*\n",
+        lambda m: f"{m.group(1)}group_add:\n{m.group(1)}  - \"{gid}\"\n{m.group(0)}",
+        text,
+        count=1,
+    )
+
+# E. Fresh install: env var after DOCKER_CONTAINER=true if missing.
+if "PROXYPILOT_AGENT_SOCKET" not in text:
+    text = re.sub(
+        r"(?m)^([ \t]+)- DOCKER_CONTAINER=true\s*\n",
+        lambda m: f"{m.group(0)}{m.group(1)}- PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock\n",
+        text,
+        count=1,
+    )
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+                log "${GREEN}docker-compose.yml: agent directory mount wired (gid=${AGENT_GID})${NC}"
+            fi
+        fi
+
+        # Legacy path cleanup. The original Phase A layout put the
+        # socket at /run/proxypilot-agent.sock; the new layout uses
+        # /run/proxypilot-agent/proxypilot-agent.sock inside a
+        # systemd-managed RuntimeDirectory. Anything left at the old
+        # path is stale — it could be a stale socket file from the
+        # old agent, or a directory from a Docker auto-create race.
+        # Either way, nothing should reference it after this update,
+        # so remove it. Safe regardless of file type because the
+        # currently-running agent is on the new path.
+        if [[ -e /run/proxypilot-agent.sock ]]; then
+            log "Removing legacy /run/proxypilot-agent.sock (now uses /run/proxypilot-agent/proxypilot-agent.sock)"
+            rm -rf /run/proxypilot-agent.sock
         fi
 
         # Rebuild frontend at the install location

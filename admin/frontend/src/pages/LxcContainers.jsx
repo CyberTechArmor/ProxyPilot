@@ -416,7 +416,8 @@ export default function LxcContainers() {
   // Operators who want stricter isolation untick before creating.
   const [imageSelection, setImageSelection] = useState('');
   const [createForm, setCreateForm] = useState({
-    name: '', image: '', cpu: '', memory: '', initScript: '',
+    name: '', image: '', type: 'container',
+    cpu: '', memory: '', initScript: '',
     dockerSupport: true, dockerPrivileged: true,
     services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }],
   });
@@ -523,15 +524,19 @@ export default function LxcContainers() {
           ...(s.healthPath && s.healthPath.trim() && { healthPath: s.healthPath.trim() }),
         }));
 
+      const isVm = createForm.type === 'virtual-machine';
       const data = {
         name: createForm.name,
         image: createForm.image,
+        type: createForm.type,
         ...(validServices.length > 0 && { services: validServices }),
         ...(createForm.cpu && { cpu: parseInt(createForm.cpu, 10) }),
         ...(createForm.memory && { memory: parseInt(createForm.memory, 10) }),
         ...(createForm.initScript && { initScript: createForm.initScript }),
-        ...(createForm.dockerSupport && { dockerSupport: true }),
-        ...(createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
+        // Docker-in-LXC syscall intercepts are CT-only (the backend
+        // refuses them with 400 for VMs); never send them when type=vm.
+        ...(!isVm && createForm.dockerSupport && { dockerSupport: true }),
+        ...(!isVm && createForm.dockerSupport && createForm.dockerPrivileged && { dockerPrivileged: true }),
       };
       await api.createLxcContainer(data);
 
@@ -549,7 +554,7 @@ export default function LxcContainers() {
             setCreating(false);
             setCreateProgress(null);
             setCreateOpen(false);
-            setCreateForm({ name: '', image: '', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
+            setCreateForm({ name: '', image: '', type: 'container', cpu: '', memory: '', initScript: '', dockerSupport: true, dockerPrivileged: true, services: [{ domain: '', port: '', obtainCert: true, healthPath: '' }] });
             setImageSelection('');
             setTemplateSelection('');
             if (status.initScriptWarning) {
@@ -1512,10 +1517,33 @@ export default function LxcContainers() {
             <>
               <div className="space-y-4 py-2">
                 <div className="space-y-2">
+                  <Label>Type *</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'container', label: 'Container', hint: 'Lightweight, shares host kernel' },
+                      { id: 'virtual-machine', label: 'Virtual machine', hint: 'Full VM with its own kernel' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setCreateForm((f) => ({ ...f, type: opt.id }))}
+                        className={`text-left p-3 rounded border transition-colors ${
+                          createForm.type === opt.id
+                            ? 'border-cyan-500 bg-cyan-500/10 text-foreground'
+                            : 'border-border text-muted-foreground hover:bg-muted'
+                        }`}
+                      >
+                        <div className="font-medium text-sm">{opt.label}</div>
+                        <div className="text-xs mt-0.5">{opt.hint}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
                   <Label htmlFor="ct-name">Name *</Label>
                   <Input
                     id="ct-name"
-                    placeholder="my-container"
+                    placeholder={createForm.type === 'virtual-machine' ? 'my-vm' : 'my-container'}
                     value={createForm.name}
                     onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
                   />
@@ -1664,10 +1692,16 @@ export default function LxcContainers() {
                     <Input
                       id="ct-memory"
                       type="number"
-                      placeholder="2048"
+                      placeholder={createForm.type === 'virtual-machine' ? '2048 (default)' : '2048'}
                       value={createForm.memory}
                       onChange={(e) => setCreateForm((f) => ({ ...f, memory: e.target.value }))}
                     />
+                    {createForm.type === 'virtual-machine' && (
+                      <p className="text-xs text-muted-foreground">
+                        VMs require a memory cap. Defaults to 2048 MB if left blank;
+                        root disk defaults to 20 GiB.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -1717,33 +1751,43 @@ export default function LxcContainers() {
                   <p className="text-xs text-muted-foreground">
                     Runs automatically after container is created and has network. Takes up to 5 minutes.
                   </p>
-                  <label className="flex items-start gap-2 pt-1 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5 cursor-pointer"
-                      checked={createForm.dockerSupport}
-                      onChange={(e) => setCreateForm((f) => ({
-                        ...f,
-                        dockerSupport: e.target.checked,
-                        dockerPrivileged: e.target.checked ? f.dockerPrivileged : false,
-                      }))}
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + the mknod / setxattr / bpf / bpf.devices syscall intercepts so dockerd + BuildKit can mount overlayfs and run native-postinstall packages (bcrypt, sharp, node-pty, etc.). Auto-enabled by the Docker-in-LXC template.
-                    </span>
-                  </label>
-                  {createForm.dockerSupport && (
-                    <label className="flex items-start gap-2 pl-6 pt-1 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5 cursor-pointer"
-                        checked={createForm.dockerPrivileged}
-                        onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
-                      </span>
-                    </label>
+                  {createForm.type !== 'virtual-machine' && (
+                    <>
+                      <label className="flex items-start gap-2 pt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 cursor-pointer"
+                          checked={createForm.dockerSupport}
+                          onChange={(e) => setCreateForm((f) => ({
+                            ...f,
+                            dockerSupport: e.target.checked,
+                            dockerPrivileged: e.target.checked ? f.dockerPrivileged : false,
+                          }))}
+                        />
+                        <span className="text-xs text-muted-foreground">
+                          <span className="text-foreground">Enable Docker support</span> — adds <code className="font-mono">security.nesting=true</code> + the mknod / setxattr / bpf / bpf.devices syscall intercepts so dockerd + BuildKit can mount overlayfs and run native-postinstall packages (bcrypt, sharp, node-pty, etc.). Auto-enabled by the Docker-in-LXC template.
+                        </span>
+                      </label>
+                      {createForm.dockerSupport && (
+                        <label className="flex items-start gap-2 pl-6 pt-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 cursor-pointer"
+                            checked={createForm.dockerPrivileged}
+                            onChange={(e) => setCreateForm((f) => ({ ...f, dockerPrivileged: e.target.checked }))}
+                          />
+                          <span className="text-xs text-muted-foreground">
+                            <span className="text-yellow-500">Privileged Docker (advanced)</span> — sets <code className="font-mono">security.privileged=true</code> <span className="text-foreground">and</span> <code className="font-mono">raw.lxc=lxc.apparmor.profile=unconfined</code>. Required for Docker images that touch sysctls during init (n8n, most node:N-alpine bases — the "open sysctl … reopen fd N: permission denied" runc error) and BuildKit syscalls like <code className="font-mono">spawn sh</code> with bcrypt-style native postinstalls. The container runs at host-root capability with no AppArmor profile — only enable on hosts where you trust everything inside this LXC.
+                          </span>
+                        </label>
+                      )}
+                    </>
+                  )}
+                  {createForm.type === 'virtual-machine' && (
+                    <p className="text-xs text-muted-foreground pt-1">
+                      Docker-in-LXC syscall intercepts don't apply to virtual machines.
+                      Run Docker inside the VM the normal way after install.
+                    </p>
                   )}
                 </div>
                 {createForm.services.some((s) => s.domain.trim()) && (

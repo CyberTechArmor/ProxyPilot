@@ -2764,6 +2764,11 @@ export default function LxcContainers() {
                 value={resizeForm.memory}
                 onChange={(e) => setResizeForm((f) => ({ ...f, memory: e.target.value }))}
               />
+              {selectedContainer?.type === 'virtual-machine' && (
+                <p className="text-xs text-muted-foreground">
+                  VM memory changes apply on next boot. Use Reboot to apply now.
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>

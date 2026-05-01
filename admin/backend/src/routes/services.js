@@ -11,6 +11,7 @@ import * as OTPAuth from 'otpauth';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 
 const execAsync = promisify(exec);
 
@@ -319,9 +320,17 @@ const createServiceSchema = z.object({
   targetIp: z.string().optional(),
 });
 
+// Destructive-confirm schema. EITHER a 6-digit TOTP OR a fresh passkey
+// assertion is enough — the verifier (user.js#verifyConfirmationFactor)
+// routes on whichever field is populated. The .refine() makes sure at
+// least one is present so we never silently accept an empty body.
 const deleteServiceSchema = z.object({
-  totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
-});
+  totpCode: z.string().length(6).optional(),
+  passkeyAssertion: z.object({
+    challengeId: z.string(),
+    response: z.any(),
+  }).optional(),
+}).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'TOTP code or passkey required' });
 
 const fileSchema = z.object({
   filename: z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/, 'Invalid filename'),
@@ -584,7 +593,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 // failure. TOTP check remains as the destructive-action guard.
 servicesRouter.delete('/:id/certificate', async (req, res) => {
   try {
-    const { totpCode } = deleteServiceSchema.parse(req.body);
+    const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
     const serviceId = req.params.id;
 
@@ -595,25 +604,9 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
       return res.status(404).json({ error: 'Service not found' });
     }
 
-    // Verify TOTP
-    const user = db
-      .prepare('SELECT totp_secret FROM users WHERE id = ?')
-      .get(req.user.id);
-    if (user && user.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Snapshot pre-flip state so rollback reverts row-by-row.
     const preRoutes = db
@@ -3394,10 +3387,10 @@ servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
   }
 });
 
-// Delete service (requires TOTP)
+// Delete service (requires TOTP or passkey)
 servicesRouter.delete('/:id', requireSudo, async (req, res) => {
   try {
-    const { totpCode } = deleteServiceSchema.parse(req.body);
+    const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
 
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
@@ -3409,23 +3402,9 @@ servicesRouter.delete('/:id', requireSudo, async (req, res) => {
       return res.status(403).json({ error: 'Cannot delete admin service' });
     }
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user && user.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Phase 2b: a service can span multiple domains via its routes
     // (one service, many `service_http_routes` rows). Collect EVERY
@@ -4824,34 +4803,16 @@ servicesRouter.post('/docker/compose', async (req, res) => {
 // Docker Compose destroy with TOTP verification (for dangerous operations)
 servicesRouter.post('/docker/compose/destroy', async (req, res) => {
   try {
-    const { path, totpCode, options } = req.body;
+    const { path, totpCode, passkeyAssertion, options } = req.body;
 
     if (!path) {
       return res.status(400).json({ error: 'Compose file path required' });
     }
 
-    if (!totpCode || totpCode.length !== 6) {
-      return res.status(400).json({ error: 'TOTP code required for destroy operation' });
-    }
-
-    // Verify TOTP
     const db = getDb();
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user && user.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Check if compose file exists first
     try {
@@ -5113,26 +5074,12 @@ servicesRouter.get('/system/stats', async (req, res) => {
 // Kill switch - secure the ProxyPilot dashboard (requires TOTP)
 servicesRouter.post('/system/secure', async (req, res) => {
   try {
-    const { totpCode } = deleteServiceSchema.parse(req.body);
+    const { totpCode, passkeyAssertion } = deleteServiceSchema.parse(req.body);
     const db = getDb();
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user && user.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     logAudit(req.user.id, 'SYSTEM_SECURED', 'system', null, { action: 'kill_switch' }, req.ip);
 

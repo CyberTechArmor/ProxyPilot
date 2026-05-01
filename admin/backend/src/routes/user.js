@@ -8,19 +8,15 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import {
   generateAuthenticationOptions,
-  verifyAssertion,
   putChallenge,
-  takeChallenge,
   getRpId,
-  getExpectedOrigins,
   listCredentialDescriptors,
   listCredentialsForUI,
-  getCredentialById,
-  updateCredentialCounter,
   deleteCredentialByDbId,
   renameCredentialByDbId,
   userHasPasskey,
 } from '../lib/webauthn.js';
+import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
@@ -324,60 +320,6 @@ userRouter.post('/passkey/challenge', (req, res) => {
   }
 });
 
-// Shared verifier for per-action confirmation. Either a fresh TOTP
-// code or a fresh passkey assertion is enough. Used by Step 7
-// destructive endpoints (deleteService, removeCertificate, ...).
-// Exported so other route files can import without re-implementing.
-export async function verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion }) {
-  // Passkey takes priority if present — it's the stronger factor.
-  if (passkeyAssertion) {
-    const entry = takeChallenge(`act:${passkeyAssertion.challengeId}`);
-    if (!entry || entry.userId !== user.id) {
-      return { ok: false, error: 'Passkey challenge expired. Try again.' };
-    }
-    const credentialId = passkeyAssertion.response?.id;
-    if (!credentialId) return { ok: false, error: 'Assertion missing credential id' };
-    const stored = getCredentialById(credentialId);
-    if (!stored || stored.user_id !== user.id) {
-      logAudit(user.id, 'CONFIRM_FAILED', 'user', user.id, { reason: 'unknown_passkey' }, req.ip);
-      return { ok: false, error: 'Unknown credential' };
-    }
-    const result = await verifyAssertion({
-      response: passkeyAssertion.response,
-      expectedChallenge: entry.challenge,
-      expectedOrigins: getExpectedOrigins(req),
-      expectedRPID: getRpId(req),
-      credential: stored,
-    });
-    if (!result.ok) {
-      logAudit(user.id, 'CONFIRM_FAILED', 'user', user.id, { factor: 'passkey', reason: result.reason }, req.ip);
-      return { ok: false, error: 'Passkey verification failed' };
-    }
-    updateCredentialCounter(stored.credential_id, result.info.newCounter);
-    return { ok: true, factor: 'passkey' };
-  }
-
-  if (!totpCode) {
-    return { ok: false, error: 'Confirmation required' };
-  }
-  if (!user.totp_enabled || !user.totp_secret) {
-    return { ok: false, error: 'TOTP not configured' };
-  }
-  const totp = new OTPAuth.TOTP({
-    issuer: 'ProxyPilot',
-    label: user.username,
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-  });
-  const delta = totp.validate({ token: totpCode, window: 1 });
-  if (delta === null) {
-    logAudit(user.id, 'CONFIRM_FAILED', 'user', user.id, { factor: 'totp', reason: 'invalid' }, req.ip);
-    return { ok: false, error: 'Invalid TOTP code' };
-  }
-  return { ok: true, factor: 'totp' };
-}
 
 // Change password
 userRouter.post('/change-password', async (req, res) => {
@@ -555,9 +497,10 @@ userRouter.get('/devices', (req, res) => {
 // Revoke an authenticated device
 userRouter.delete('/devices/:deviceId', async (req, res) => {
   try {
-    const { totpCode } = z.object({
-      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
-    }).parse(req.body);
+    const { totpCode, passkeyAssertion } = z.object({
+      totpCode: z.string().length(6).optional(),
+      passkeyAssertion: z.object({ challengeId: z.string(), response: z.any() }).optional(),
+    }).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'TOTP or passkey required' }).parse(req.body);
 
     const db = getDb();
 
@@ -570,23 +513,9 @@ userRouter.delete('/devices/:deviceId', async (req, res) => {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user?.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Delete device
     db.prepare('DELETE FROM authenticated_devices WHERE id = ?').run(req.params.deviceId);
@@ -606,30 +535,17 @@ userRouter.delete('/devices/:deviceId', async (req, res) => {
 // Revoke all devices except current one (logout everywhere else)
 userRouter.post('/devices/revoke-all', async (req, res) => {
   try {
-    const { totpCode, keepCurrent } = z.object({
-      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
+    const { totpCode, passkeyAssertion, keepCurrent } = z.object({
+      totpCode: z.string().length(6).optional(),
+      passkeyAssertion: z.object({ challengeId: z.string(), response: z.any() }).optional(),
       keepCurrent: z.string().optional(), // Device fingerprint to keep
-    }).parse(req.body);
+    }).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'TOTP or passkey required' }).parse(req.body);
 
     const db = getDb();
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user?.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Delete all devices except current
     if (keepCurrent) {
@@ -898,28 +814,15 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
 });
 
 // Delete user
-userRouter.delete('/users/:id', requireAdmin, requireSudo, (req, res) => {
+userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { id } = req.params;
-    const { totpCode } = req.body;
+    const { totpCode, passkeyAssertion } = req.body || {};
     const db = getDb();
 
-    // Verify TOTP for dangerous action
     const adminUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    if (adminUser.totp_enabled && adminUser.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: adminUser.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(adminUser.totp_secret)),
-      });
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const verified = await verifyConfirmationFactor({ req, user: adminUser, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!user) {

@@ -368,15 +368,28 @@ export const api = {
   // Device Management
   getDevices: () => request('/user/devices'),
 
-  revokeDevice: (deviceId, totpCode) => request(`/user/devices/${deviceId}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  // Confirm-payload accepts either a 6-digit totpCode string OR an
+  // object { totpCode, passkeyAssertion }. The string form is the
+  // pre-passkey shape kept for backwards compatibility.
+  revokeDevice: (deviceId, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/user/devices/${deviceId}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
-  revokeAllDevices: (totpCode, keepCurrent) => request('/user/devices/revoke-all', {
-    method: 'POST',
-    body: JSON.stringify({ totpCode, keepCurrent }),
-  }),
+  revokeAllDevices: (totpOrPayload, keepCurrent) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload, keepCurrent }
+      : { ...(totpOrPayload || {}), keepCurrent };
+    return request('/user/devices/revoke-all', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
 
   // Service Config Versions
   getConfigVersions: (serviceId) => request(`/services/${serviceId}/config-versions`),
@@ -425,10 +438,15 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  deleteUser: (id, totpCode) => request(`/user/users/${id}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  deleteUser: (id, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/user/users/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   getUserAccess: (id) => request(`/user/users/${id}/access`),
 

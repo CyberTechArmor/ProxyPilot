@@ -25,6 +25,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff, Smartphone, Monitor, LogOut, Fingerprint, Plus } from 'lucide-react';
 import QRCode from 'qrcode';
 import { registerPasskey, defaultPasskeyLabel, isPasskeySupported } from '@/lib/passkey';
+import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 
 export default function Profile() {
   const { user: authUser } = useAuth();
@@ -341,12 +342,15 @@ export default function Profile() {
     }
   };
 
-  const handleRevokeDevice = async () => {
-    if (!deviceToRevoke || revokeDeviceTotpCode.length !== 6) return;
+  const handleRevokeDevice = async (passkeyAssertion = null) => {
+    if (!deviceToRevoke) return;
+    if (!passkeyAssertion && revokeDeviceTotpCode.length !== 6) return;
 
     setRevokingDevice(true);
     try {
-      await api.revokeDevice(deviceToRevoke.id, revokeDeviceTotpCode);
+      await api.revokeDevice(deviceToRevoke.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: revokeDeviceTotpCode });
       toast({
         title: 'Success',
         description: 'Device has been revoked',
@@ -366,12 +370,14 @@ export default function Profile() {
     }
   };
 
-  const handleRevokeAllDevices = async () => {
-    if (revokeAllTotpCode.length !== 6) return;
+  const handleRevokeAllDevices = async (passkeyAssertion = null) => {
+    if (!passkeyAssertion && revokeAllTotpCode.length !== 6) return;
 
     setRevokingAll(true);
     try {
-      await api.revokeAllDevices(revokeAllTotpCode);
+      await api.revokeAllDevices(passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: revokeAllTotpCode });
       toast({
         title: 'Success',
         description: 'All other devices have been logged out',
@@ -526,12 +532,15 @@ export default function Profile() {
     }
   };
 
-  const handleDeleteUser = async () => {
-    if (!userToDelete || deleteTotpCode.length !== 6) return;
+  const handleDeleteUser = async (passkeyAssertion = null) => {
+    if (!userToDelete) return;
+    if (!passkeyAssertion && deleteTotpCode.length !== 6) return;
 
     setDeletingUser(true);
     try {
-      await api.deleteUser(userToDelete.id, deleteTotpCode);
+      await api.deleteUser(userToDelete.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: deleteTotpCode });
       toast({
         title: 'Success',
         description: 'User deleted successfully',
@@ -1121,6 +1130,13 @@ export default function Profile() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <PasskeyConfirmButton
+              hasPasskey={!!profile?.hasPasskey}
+              onAssertion={(assertion) => handleRevokeDevice(assertion)}
+              disabled={revokingDevice}
+              className="w-full"
+              label="Verify with passkey"
+            />
             <div className="space-y-2">
               <Label>Your TOTP Code</Label>
               <Input
@@ -1135,7 +1151,7 @@ export default function Profile() {
             <Button variant="outline" onClick={() => setRevokeDeviceOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleRevokeDevice}
+              onClick={() => handleRevokeDevice()}
               disabled={revokingDevice || revokeDeviceTotpCode.length !== 6}
             >
               {revokingDevice ? (
@@ -1158,6 +1174,13 @@ export default function Profile() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <PasskeyConfirmButton
+              hasPasskey={!!profile?.hasPasskey}
+              onAssertion={(assertion) => handleRevokeAllDevices(assertion)}
+              disabled={revokingAll}
+              className="w-full"
+              label="Verify with passkey"
+            />
             <div className="space-y-2">
               <Label>Your TOTP Code</Label>
               <Input
@@ -1172,7 +1195,7 @@ export default function Profile() {
             <Button variant="outline" onClick={() => setRevokeAllOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleRevokeAllDevices}
+              onClick={() => handleRevokeAllDevices()}
               disabled={revokingAll || revokeAllTotpCode.length !== 6}
             >
               {revokingAll ? (

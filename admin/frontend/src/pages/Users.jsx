@@ -24,6 +24,7 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
+import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 
 export default function UsersPage() {
   const { user: authUser } = useAuth();
@@ -111,12 +112,15 @@ export default function UsersPage() {
     }
   };
 
-  const handleDeleteUser = async () => {
-    if (!userToDelete || deleteTotpCode.length !== 6) return;
+  const handleDeleteUser = async (passkeyAssertion = null) => {
+    if (!userToDelete) return;
+    if (!passkeyAssertion && deleteTotpCode.length !== 6) return;
 
     setDeletingUser(true);
     try {
-      await api.deleteUser(userToDelete.id, deleteTotpCode);
+      await api.deleteUser(userToDelete.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: deleteTotpCode });
       toast({
         title: 'Success',
         description: 'User deleted successfully',
@@ -466,6 +470,13 @@ export default function UsersPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <PasskeyConfirmButton
+              hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
+              onAssertion={(assertion) => handleDeleteUser(assertion)}
+              disabled={deletingUser}
+              className="w-full"
+              label="Verify with passkey"
+            />
             <div className="space-y-2">
               <Label>Your TOTP Code</Label>
               <Input
@@ -480,7 +491,7 @@ export default function UsersPage() {
             <Button variant="outline" onClick={() => setDeleteUserOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleDeleteUser}
+              onClick={() => handleDeleteUser()}
               disabled={deletingUser || deleteTotpCode.length !== 6}
             >
               {deletingUser ? (

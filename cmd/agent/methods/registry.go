@@ -78,5 +78,6 @@ func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register("agent.ping", AgentPing)
 	r.Register("caddy.adapt", CaddyAdapt)
+	r.Register("caddy.reload", CaddyReload)
 	return r
 }

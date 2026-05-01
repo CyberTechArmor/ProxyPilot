@@ -60,6 +60,7 @@ export function getDb() {
 //   5   B5 — encrypt plaintext totp_secret rows at rest
 //   6   M  — sessions table (revocable JWT jti, sliding last_used_at, sudo_until)
 //   7   J  — user lockout columns (failed_attempts, last_failed_at, locked_until)
+//   8   N  — webauthn_credentials table + users.webauthn_user_handle
 //   100 reserved start of Phase 2c migrations (port forwards)
 const SCHEMA_MIGRATIONS = [];
 
@@ -529,6 +530,35 @@ export function initDatabase() {
     d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);`);
     d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_revoked_at ON sessions(revoked_at);`);
     d.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_last_used_at ON sessions(last_used_at);`);
+  });
+
+  // Version 8: N — passkey (WebAuthn) support. Adds the credentials
+  // table plus a stable per-user random handle on the users row that
+  // we hand to the authenticator as `user.id`. The handle is a random
+  // 32-byte buffer (NOT the username, NOT the user.id UUID) so a
+  // credential leak never reveals the operator's account name.
+  // Idempotent: PRAGMA table_info gates the ALTER TABLE so a
+  // re-run can't duplicate the column.
+  runMigration(db, 8, 'n_webauthn_credentials', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS webauthn_credentials (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        credential_id TEXT NOT NULL UNIQUE,
+        public_key BLOB NOT NULL,
+        counter INTEGER NOT NULL DEFAULT 0,
+        transports TEXT,
+        label TEXT,
+        aaguid TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_used_at TEXT
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(user_id)`);
+    const cols = d.prepare(`PRAGMA table_info(users)`).all().map((c) => c.name);
+    if (!cols.includes('webauthn_user_handle')) {
+      d.exec(`ALTER TABLE users ADD COLUMN webauthn_user_handle BLOB`);
+    }
   });
 
   // Create file versions table for version control

@@ -22,8 +22,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff, Smartphone, Monitor, LogOut } from 'lucide-react';
+import { Loader2, Key, Shield, QrCode, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Github, Download, Bell, BellOff, Smartphone, Monitor, LogOut, Fingerprint, Plus } from 'lucide-react';
 import QRCode from 'qrcode';
+import { registerPasskey, defaultPasskeyLabel, isPasskeySupported } from '@/lib/passkey';
+import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 
 export default function Profile() {
   const { user: authUser } = useAuth();
@@ -47,6 +49,19 @@ export default function Profile() {
     password: '',
     verificationCode: '',
   });
+
+  // Passkey management state
+  const [passkeys, setPasskeys] = useState([]);
+  const [loadingPasskeys, setLoadingPasskeys] = useState(false);
+  const [registerPasskeyOpen, setRegisterPasskeyOpen] = useState(false);
+  const [registerPasskeyTotp, setRegisterPasskeyTotp] = useState('');
+  const [registerPasskeyLabel, setRegisterPasskeyLabel] = useState('');
+  const [registeringPasskey, setRegisteringPasskey] = useState(false);
+  const [revokePasskeyOpen, setRevokePasskeyOpen] = useState(false);
+  const [passkeyToRevoke, setPasskeyToRevoke] = useState(null);
+  const [revokePasskeyPhrase, setRevokePasskeyPhrase] = useState('');
+  const [revokePasskeyTotp, setRevokePasskeyTotp] = useState('');
+  const [revokingPasskey, setRevokingPasskey] = useState(false);
 
   // Device management state
   const [devices, setDevices] = useState([]);
@@ -327,12 +342,15 @@ export default function Profile() {
     }
   };
 
-  const handleRevokeDevice = async () => {
-    if (!deviceToRevoke || revokeDeviceTotpCode.length !== 6) return;
+  const handleRevokeDevice = async (passkeyAssertion = null) => {
+    if (!deviceToRevoke) return;
+    if (!passkeyAssertion && revokeDeviceTotpCode.length !== 6) return;
 
     setRevokingDevice(true);
     try {
-      await api.revokeDevice(deviceToRevoke.id, revokeDeviceTotpCode);
+      await api.revokeDevice(deviceToRevoke.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: revokeDeviceTotpCode });
       toast({
         title: 'Success',
         description: 'Device has been revoked',
@@ -352,12 +370,14 @@ export default function Profile() {
     }
   };
 
-  const handleRevokeAllDevices = async () => {
-    if (revokeAllTotpCode.length !== 6) return;
+  const handleRevokeAllDevices = async (passkeyAssertion = null) => {
+    if (!passkeyAssertion && revokeAllTotpCode.length !== 6) return;
 
     setRevokingAll(true);
     try {
-      await api.revokeAllDevices(revokeAllTotpCode);
+      await api.revokeAllDevices(passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: revokeAllTotpCode });
       toast({
         title: 'Success',
         description: 'All other devices have been logged out',
@@ -380,8 +400,86 @@ export default function Profile() {
   useEffect(() => {
     if (profile) {
       fetchDevices();
+      fetchPasskeys();
     }
   }, [profile]);
+
+  // Passkey management
+  const fetchPasskeys = async () => {
+    setLoadingPasskeys(true);
+    try {
+      const { passkeys } = await api.listPasskeys();
+      setPasskeys(passkeys || []);
+      // Keep the localStorage hint in sync — Login uses it to decide
+      // whether to show the "Sign in with passkey" button.
+      if (passkeys && passkeys.length > 0) {
+        localStorage.setItem('pp_has_passkey', 'true');
+      } else {
+        localStorage.removeItem('pp_has_passkey');
+      }
+    } catch (error) {
+      console.error('Error fetching passkeys:', error);
+    } finally {
+      setLoadingPasskeys(false);
+    }
+  };
+
+  const openRegisterPasskey = () => {
+    setRegisterPasskeyTotp('');
+    setRegisterPasskeyLabel(defaultPasskeyLabel());
+    setRegisterPasskeyOpen(true);
+  };
+
+  const handleRegisterPasskey = async () => {
+    if (registerPasskeyTotp.length !== 6) return;
+    setRegisteringPasskey(true);
+    try {
+      const result = await registerPasskey({
+        totpCode: registerPasskeyTotp,
+        label: registerPasskeyLabel.trim() || defaultPasskeyLabel(),
+      });
+      if (!result.ok) {
+        toast({
+          variant: 'destructive',
+          title: result.code === 'CANCELLED' ? 'Cancelled' : 'Could not register passkey',
+          description: result.message,
+        });
+        return;
+      }
+      toast({ title: 'Passkey registered', description: 'You can now sign in with this passkey.' });
+      setRegisterPasskeyOpen(false);
+      fetchPasskeys();
+    } finally {
+      setRegisteringPasskey(false);
+    }
+  };
+
+  const openRevokePasskey = (pk) => {
+    setPasskeyToRevoke(pk);
+    setRevokePasskeyPhrase('');
+    setRevokePasskeyTotp('');
+    setRevokePasskeyOpen(true);
+  };
+
+  const REVOKE_PASSKEY_PHRASE = 'I no longer have access to this device';
+
+  const handleRevokePasskey = async () => {
+    if (!passkeyToRevoke) return;
+    if (revokePasskeyPhrase !== REVOKE_PASSKEY_PHRASE) return;
+    if (revokePasskeyTotp.length !== 6) return;
+    setRevokingPasskey(true);
+    try {
+      await api.deletePasskey(passkeyToRevoke.id, { totpCode: revokePasskeyTotp });
+      toast({ title: 'Passkey revoked' });
+      setRevokePasskeyOpen(false);
+      setPasskeyToRevoke(null);
+      fetchPasskeys();
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message });
+    } finally {
+      setRevokingPasskey(false);
+    }
+  };
 
   // User management functions (admin only)
   const fetchUsers = async () => {
@@ -434,12 +532,15 @@ export default function Profile() {
     }
   };
 
-  const handleDeleteUser = async () => {
-    if (!userToDelete || deleteTotpCode.length !== 6) return;
+  const handleDeleteUser = async (passkeyAssertion = null) => {
+    if (!userToDelete) return;
+    if (!passkeyAssertion && deleteTotpCode.length !== 6) return;
 
     setDeletingUser(true);
     try {
-      await api.deleteUser(userToDelete.id, deleteTotpCode);
+      await api.deleteUser(userToDelete.id, passkeyAssertion
+        ? { passkeyAssertion }
+        : { totpCode: deleteTotpCode });
       toast({
         title: 'Success',
         description: 'User deleted successfully',
@@ -848,6 +949,177 @@ export default function Profile() {
         </CardContent>
       </Card>
 
+      {/* Passkeys */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Fingerprint className="h-5 w-5" />
+                Passkeys
+              </CardTitle>
+              <CardDescription>
+                Optional second factor. Once registered, sign-in and
+                destructive-action prompts default to passkey instead of TOTP.
+                TOTP stays available as a fallback.
+              </CardDescription>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={fetchPasskeys} disabled={loadingPasskeys}>
+                <RefreshCw className={`h-4 w-4 ${loadingPasskeys ? 'animate-spin' : ''}`} />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={openRegisterPasskey}
+                disabled={!isPasskeySupported()}
+                title={!isPasskeySupported() ? 'Passkeys are not supported on this browser' : ''}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Register passkey
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loadingPasskeys ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : passkeys.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              <Fingerprint className="h-12 w-12 mx-auto mb-2 opacity-50" />
+              <p>No passkeys registered</p>
+              <p className="text-sm mt-1">
+                {isPasskeySupported()
+                  ? 'Click "Register passkey" to add this device as a second factor.'
+                  : 'This browser does not support passkeys.'}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {passkeys.map((pk) => (
+                <div key={pk.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Fingerprint className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="font-medium truncate">{pk.label || 'Unnamed passkey'}</span>
+                      {Array.isArray(pk.transports) && pk.transports.length > 0 && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                          {pk.transports.join(' / ')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 mt-1 text-sm text-muted-foreground">
+                      <span>Created: {new Date(pk.createdAt).toLocaleString()}</span>
+                      <span>Last used: {pk.lastUsedAt ? new Date(pk.lastUsedAt).toLocaleString() : 'never'}</span>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-11 w-11 sm:h-9 sm:w-9 p-0 self-end sm:self-auto shrink-0"
+                    onClick={() => openRevokePasskey(pk)}
+                    title="Revoke passkey"
+                  >
+                    <Trash2 className="h-4 w-4 text-red-500" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Register Passkey Dialog (TOTP gate) */}
+      <Dialog open={registerPasskeyOpen} onOpenChange={setRegisterPasskeyOpen}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Register a passkey</DialogTitle>
+            <DialogDescription>
+              Confirm with your current TOTP code, then your browser will prompt
+              you to create the passkey on this device.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Label</Label>
+              <Input
+                value={registerPasskeyLabel}
+                onChange={(e) => setRegisterPasskeyLabel(e.target.value.slice(0, 64))}
+                placeholder={defaultPasskeyLabel()}
+                disabled={registeringPasskey}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Your TOTP Code</Label>
+              <Input
+                value={registerPasskeyTotp}
+                onChange={(e) => setRegisterPasskeyTotp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="Enter your 6-digit code"
+                maxLength={6}
+                disabled={registeringPasskey}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRegisterPasskeyOpen(false)} disabled={registeringPasskey}>Cancel</Button>
+            <Button
+              onClick={handleRegisterPasskey}
+              disabled={registeringPasskey || registerPasskeyTotp.length !== 6}
+            >
+              {registeringPasskey ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Registering...</> : 'Register'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoke Passkey Dialog */}
+      <Dialog open={revokePasskeyOpen} onOpenChange={setRevokePasskeyOpen}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Revoke passkey</DialogTitle>
+            <DialogDescription>
+              This permanently removes <strong>{passkeyToRevoke?.label || 'this passkey'}</strong>.
+              The credential on the device itself isn't deleted, but the
+              dashboard will no longer accept assertions from it. Type the
+              phrase below to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Type to confirm: <code className="text-xs">{REVOKE_PASSKEY_PHRASE}</code></Label>
+              <Input
+                value={revokePasskeyPhrase}
+                onChange={(e) => setRevokePasskeyPhrase(e.target.value)}
+                placeholder={REVOKE_PASSKEY_PHRASE}
+                disabled={revokingPasskey}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Your TOTP Code</Label>
+              <Input
+                value={revokePasskeyTotp}
+                onChange={(e) => setRevokePasskeyTotp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="Enter your 6-digit code"
+                maxLength={6}
+                disabled={revokingPasskey}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokePasskeyOpen(false)} disabled={revokingPasskey}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={handleRevokePasskey}
+              disabled={revokingPasskey || revokePasskeyPhrase !== REVOKE_PASSKEY_PHRASE || revokePasskeyTotp.length !== 6}
+            >
+              {revokingPasskey ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Revoking...</> : 'Revoke passkey'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Revoke Device Dialog */}
       <Dialog open={revokeDeviceOpen} onOpenChange={setRevokeDeviceOpen}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
@@ -858,6 +1130,13 @@ export default function Profile() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <PasskeyConfirmButton
+              hasPasskey={!!profile?.hasPasskey}
+              onAssertion={(assertion) => handleRevokeDevice(assertion)}
+              disabled={revokingDevice}
+              className="w-full"
+              label="Verify with passkey"
+            />
             <div className="space-y-2">
               <Label>Your TOTP Code</Label>
               <Input
@@ -872,7 +1151,7 @@ export default function Profile() {
             <Button variant="outline" onClick={() => setRevokeDeviceOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleRevokeDevice}
+              onClick={() => handleRevokeDevice()}
               disabled={revokingDevice || revokeDeviceTotpCode.length !== 6}
             >
               {revokingDevice ? (
@@ -895,6 +1174,13 @@ export default function Profile() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <PasskeyConfirmButton
+              hasPasskey={!!profile?.hasPasskey}
+              onAssertion={(assertion) => handleRevokeAllDevices(assertion)}
+              disabled={revokingAll}
+              className="w-full"
+              label="Verify with passkey"
+            />
             <div className="space-y-2">
               <Label>Your TOTP Code</Label>
               <Input
@@ -909,7 +1195,7 @@ export default function Profile() {
             <Button variant="outline" onClick={() => setRevokeAllOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={handleRevokeAllDevices}
+              onClick={() => handleRevokeAllDevices()}
               disabled={revokingAll || revokeAllTotpCode.length !== 6}
             >
               {revokingAll ? (

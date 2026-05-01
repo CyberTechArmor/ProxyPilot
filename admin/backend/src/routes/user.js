@@ -6,6 +6,17 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
+import {
+  generateAuthenticationOptions,
+  putChallenge,
+  getRpId,
+  listCredentialDescriptors,
+  listCredentialsForUI,
+  deleteCredentialByDbId,
+  renameCredentialByDbId,
+  userHasPasskey,
+} from '../lib/webauthn.js';
+import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
@@ -192,6 +203,7 @@ userRouter.get('/profile', (req, res) => {
         displayName: user.display_name,
         role: user.role || 'admin',
         totpEnabled: !!user.totp_enabled,
+        hasPasskey: userHasPasskey(user.id),
         createdAt: user.created_at,
         updatedAt: user.updated_at,
       },
@@ -201,6 +213,113 @@ userRouter.get('/profile', (req, res) => {
     res.status(500).json({ error: 'Failed to fetch profile' });
   }
 });
+
+// Passkey management. List / rename / delete are all gated on
+// requireSudo so the credential set can't be tampered with from a
+// stolen-but-not-elevated session. The challenge endpoint is the
+// per-action begin used by destructive dialogs (Step 7).
+userRouter.get('/passkeys', (req, res) => {
+  try {
+    res.json({ passkeys: listCredentialsForUI(req.user.id) });
+  } catch (e) {
+    console.error('list passkeys error:', e);
+    res.status(500).json({ error: 'Failed to list passkeys' });
+  }
+});
+
+userRouter.put('/passkeys/:id', requireSudo, (req, res) => {
+  try {
+    const { label } = z.object({ label: z.string().min(1).max(64) }).parse(req.body);
+    const dbId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(dbId)) return res.status(400).json({ error: 'Bad id' });
+    const changes = renameCredentialByDbId(req.user.id, dbId, label);
+    if (!changes) return res.status(404).json({ error: 'Passkey not found' });
+    logAudit(req.user.id, 'PASSKEY_RENAMED', 'passkey', String(dbId), { label }, req.ip);
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('rename passkey error:', error);
+    res.status(500).json({ error: 'Failed to rename passkey' });
+  }
+});
+
+// Passkey delete. EITHER a fresh TOTP code OR a fresh passkey
+// assertion proves the operator is in front of the device. We DO NOT
+// allow deleting your only TOTP — TOTP is the floor — but deleting
+// the last passkey just falls back to TOTP for sudo, so no minimum
+// passkey count is enforced here.
+userRouter.delete('/passkeys/:id', async (req, res) => {
+  try {
+    const dbId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(dbId)) return res.status(400).json({ error: 'Bad id' });
+
+    const schema = z.object({
+      totpCode: z.string().length(6).optional(),
+      passkeyAssertion: z.object({
+        challengeId: z.string(),
+        response: z.any(),
+      }).optional(),
+    }).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'Confirm with TOTP or passkey' });
+    const { totpCode, passkeyAssertion } = schema.parse(req.body || {});
+
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const verified = await verifyConfirmationFactor({
+      req, user,
+      totpCode, passkeyAssertion,
+    });
+    if (!verified.ok) {
+      return res.status(401).json({ error: verified.error });
+    }
+
+    const changes = deleteCredentialByDbId(req.user.id, dbId);
+    if (!changes) return res.status(404).json({ error: 'Passkey not found' });
+    logAudit(req.user.id, 'PASSKEY_REVOKED', 'passkey', String(dbId), {}, req.ip);
+    res.json({ success: true, hasPasskey: userHasPasskey(req.user.id) });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('delete passkey error:', error);
+    res.status(500).json({ error: 'Failed to delete passkey' });
+  }
+});
+
+// Per-action passkey challenge. Returns
+// PublicKeyCredentialRequestOptions plus an opaque challengeId; the
+// destructive endpoint validates the assertion against this challenge
+// (single-use, 5-minute TTL) before going through.
+userRouter.post('/passkey/challenge', (req, res) => {
+  try {
+    const allowCredentials = listCredentialDescriptors(req.user.id);
+    if (allowCredentials.length === 0) {
+      return res.status(400).json({ error: 'No passkeys registered.' });
+    }
+    return generateAuthenticationOptions({
+      rpID: getRpId(req),
+      allowCredentials,
+      userVerification: 'preferred',
+    }).then((options) => {
+      const challengeId = uuidv4();
+      putChallenge(`act:${challengeId}`, {
+        challenge: options.challenge,
+        userId: req.user.id,
+      });
+      res.json({ ...options, challengeId });
+    }).catch((e) => {
+      console.error('action passkey challenge error:', e);
+      res.status(500).json({ error: 'Could not create challenge' });
+    });
+  } catch (e) {
+    console.error('action passkey challenge error:', e);
+    res.status(500).json({ error: 'Could not create challenge' });
+  }
+});
+
 
 // Change password
 userRouter.post('/change-password', async (req, res) => {
@@ -378,9 +497,10 @@ userRouter.get('/devices', (req, res) => {
 // Revoke an authenticated device
 userRouter.delete('/devices/:deviceId', async (req, res) => {
   try {
-    const { totpCode } = z.object({
-      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
-    }).parse(req.body);
+    const { totpCode, passkeyAssertion } = z.object({
+      totpCode: z.string().length(6).optional(),
+      passkeyAssertion: z.object({ challengeId: z.string(), response: z.any() }).optional(),
+    }).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'TOTP or passkey required' }).parse(req.body);
 
     const db = getDb();
 
@@ -393,23 +513,9 @@ userRouter.delete('/devices/:deviceId', async (req, res) => {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user?.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Delete device
     db.prepare('DELETE FROM authenticated_devices WHERE id = ?').run(req.params.deviceId);
@@ -429,30 +535,17 @@ userRouter.delete('/devices/:deviceId', async (req, res) => {
 // Revoke all devices except current one (logout everywhere else)
 userRouter.post('/devices/revoke-all', async (req, res) => {
   try {
-    const { totpCode, keepCurrent } = z.object({
-      totpCode: z.string().length(6, 'TOTP code must be 6 digits'),
+    const { totpCode, passkeyAssertion, keepCurrent } = z.object({
+      totpCode: z.string().length(6).optional(),
+      passkeyAssertion: z.object({ challengeId: z.string(), response: z.any() }).optional(),
       keepCurrent: z.string().optional(), // Device fingerprint to keep
-    }).parse(req.body);
+    }).refine((v) => v.totpCode || v.passkeyAssertion, { message: 'TOTP or passkey required' }).parse(req.body);
 
     const db = getDb();
 
-    // Verify TOTP
-    const user = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(req.user.id);
-    if (user?.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: req.user.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
-      });
-
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const verified = await verifyConfirmationFactor({ req, user, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     // Delete all devices except current
     if (keepCurrent) {
@@ -721,28 +814,15 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
 });
 
 // Delete user
-userRouter.delete('/users/:id', requireAdmin, requireSudo, (req, res) => {
+userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { id } = req.params;
-    const { totpCode } = req.body;
+    const { totpCode, passkeyAssertion } = req.body || {};
     const db = getDb();
 
-    // Verify TOTP for dangerous action
     const adminUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    if (adminUser.totp_enabled && adminUser.totp_secret) {
-      const totp = new OTPAuth.TOTP({
-        issuer: 'ProxyPilot',
-        label: adminUser.username,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: OTPAuth.Secret.fromBase32(decryptSecret(adminUser.totp_secret)),
-      });
-      const delta = totp.validate({ token: totpCode, window: 1 });
-      if (delta === null) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
-      }
-    }
+    const verified = await verifyConfirmationFactor({ req, user: adminUser, totpCode, passkeyAssertion });
+    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!user) {

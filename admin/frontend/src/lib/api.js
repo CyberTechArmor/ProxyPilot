@@ -118,6 +118,56 @@ export const api = {
       body: JSON.stringify({ password, totpCode }),
     }, false),
 
+  // Passkey (WebAuthn). The server-issued options come back from /begin
+  // and are passed verbatim to startRegistration / startAuthentication
+  // by lib/passkey.js — this layer is just transport.
+  passkeyRegisterBegin: ({ totpCode } = {}) => request('/auth/passkey/register/begin', {
+    method: 'POST',
+    body: JSON.stringify({ totpCode }),
+  }),
+
+  passkeyRegisterVerify: ({ response, label }) => request('/auth/passkey/register/verify', {
+    method: 'POST',
+    body: JSON.stringify({ response, label }),
+  }),
+
+  passkeyAuthBegin: ({ username } = {}) => request('/auth/passkey/authenticate/begin', {
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  }),
+
+  passkeyAuthVerify: ({ challengeId, response, registerDevice }) => request('/auth/passkey/authenticate/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId, response, registerDevice }),
+  }),
+
+  // Sudo via passkey. Always passes _retryOnSudo=false for the same
+  // reason as the password+TOTP `sudo` above — this IS the sudo path.
+  sudoPasskeyBegin: () => request('/auth/sudo/passkey/begin', { method: 'POST' }, false),
+
+  sudoPasskeyVerify: ({ response }) => request('/auth/sudo/passkey/verify', {
+    method: 'POST',
+    body: JSON.stringify({ response }),
+  }, false),
+
+  // Per-action confirmation challenge (Step 7). Returns a fresh
+  // PublicKeyCredentialRequestOptions plus a challengeId; the caller
+  // attaches the resulting assertion to the destructive request as
+  // `passkeyAssertion`.
+  passkeyChallengeForAction: () => request('/user/passkey/challenge', { method: 'POST' }),
+
+  listPasskeys: () => request('/user/passkeys'),
+
+  renamePasskey: (id, label) => request(`/user/passkeys/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ label }),
+  }),
+
+  deletePasskey: (id, { totpCode, passkeyAssertion } = {}) => request(`/user/passkeys/${id}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totpCode, passkeyAssertion }),
+  }),
+
   // Services. Phase 2b audit: a service now represents one logical workload
   // (typically an LXC or Docker container) that can expose multiple HTTP
   // routes via a nested `routes: [...]` array on every GET response. The
@@ -140,10 +190,15 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  deleteService: (id, totpCode) => request(`/services/${id}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  deleteService: (id, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/services/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   toggleFavorite: (id) => request(`/services/${id}/favorite`, {
     method: 'POST',
@@ -196,10 +251,15 @@ export const api = {
     method: 'POST',
   }),
 
-  removeCertificate: (serviceId, totpCode) => request(`/services/${serviceId}/certificate`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  removeCertificate: (serviceId, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/services/${serviceId}/certificate`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   // File Management
   getFiles: (serviceId) => request(`/services/${serviceId}/files`),
@@ -289,10 +349,15 @@ export const api = {
     body: JSON.stringify({ action, path, serviceName, options }),
   }),
 
-  dockerComposeDestroy: (path, totpCode, options = {}) => request('/services/docker/compose/destroy', {
-    method: 'POST',
-    body: JSON.stringify({ path, totpCode, options }),
-  }),
+  dockerComposeDestroy: (path, totpOrPayload, options = {}) => {
+    const confirm = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request('/services/docker/compose/destroy', {
+      method: 'POST',
+      body: JSON.stringify({ path, ...confirm, options }),
+    });
+  },
 
   // User
   getProfile: () => request('/user/profile'),
@@ -318,15 +383,28 @@ export const api = {
   // Device Management
   getDevices: () => request('/user/devices'),
 
-  revokeDevice: (deviceId, totpCode) => request(`/user/devices/${deviceId}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  // Confirm-payload accepts either a 6-digit totpCode string OR an
+  // object { totpCode, passkeyAssertion }. The string form is the
+  // pre-passkey shape kept for backwards compatibility.
+  revokeDevice: (deviceId, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/user/devices/${deviceId}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
-  revokeAllDevices: (totpCode, keepCurrent) => request('/user/devices/revoke-all', {
-    method: 'POST',
-    body: JSON.stringify({ totpCode, keepCurrent }),
-  }),
+  revokeAllDevices: (totpOrPayload, keepCurrent) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload, keepCurrent }
+      : { ...(totpOrPayload || {}), keepCurrent };
+    return request('/user/devices/revoke-all', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
 
   // Service Config Versions
   getConfigVersions: (serviceId) => request(`/services/${serviceId}/config-versions`),
@@ -344,10 +422,15 @@ export const api = {
   }),
 
   // System Security
-  secureSystem: (totpCode) => request('/services/system/secure', {
-    method: 'POST',
-    body: JSON.stringify({ totpCode }),
-  }),
+  secureSystem: (totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request('/services/system/secure', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
 
   // Discover existing sites
   discoverCaddySites: () => request('/services/discover/caddy-sites'),
@@ -375,10 +458,15 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  deleteUser: (id, totpCode) => request(`/user/users/${id}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ totpCode }),
-  }),
+  deleteUser: (id, totpOrPayload) => {
+    const body = typeof totpOrPayload === 'string'
+      ? { totpCode: totpOrPayload }
+      : (totpOrPayload || {});
+    return request(`/user/users/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    });
+  },
 
   getUserAccess: (id) => request(`/user/users/${id}/access`),
 

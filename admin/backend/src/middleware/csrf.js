@@ -21,6 +21,12 @@ const CSRF_EXEMPT_PREFIXES = [
   '/api/auth/initial-setup',
   '/api/auth/complete-totp-setup',
   '/api/auth/setup-status',
+  // Passkey login is the WebAuthn equivalent of /login: callers don't
+  // yet have a session and therefore can't have a pp_csrf cookie.
+  // The challenge (returned from /begin, echoed back to /verify) is
+  // the binding token here — no CSRF cookie is necessary.
+  '/api/auth/passkey/authenticate/begin',
+  '/api/auth/passkey/authenticate/verify',
 ];
 
 export function csrfProtection(req, res, next) {

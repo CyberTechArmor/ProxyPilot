@@ -65,8 +65,15 @@ export default function Vpn() {
   // about the port suffix.
   const [enableOpen, setEnableOpen] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
+  // Default DNS is a public resolver, NOT the WG server's tunnel IP.
+  // 10.100.0.1 was the previous default but ProxyPilot doesn't run a
+  // resolver on the WG interface; peers that took it ended up with
+  // dead DNS the moment the tunnel came up (page loads stalled, ssh
+  // hostname resolution failed). Operators who want internal-name
+  // resolution through the tunnel can override this with whatever
+  // resolver they actually run on the host.
   const [enableForm, setEnableForm] = useState({
-    endpoint: '', port: '51820', dns: '10.100.0.1',
+    endpoint: '', port: '51820', dns: '1.1.1.1',
   });
 
   // Add-peer modal — has TWO phases on a single Dialog:
@@ -789,6 +796,10 @@ export default function Vpn() {
                   value={enableForm.dns}
                   onChange={e => setEnableForm(f => ({ ...f, dns: e.target.value }))}
                 />
+                <p className="text-[10px] text-muted-foreground">
+                  Resolver clients use while the tunnel is up. Set to a public resolver
+                  unless you actually run DNS on this host's WireGuard interface.
+                </p>
               </div>
             </div>
           </div>

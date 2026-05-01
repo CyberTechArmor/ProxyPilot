@@ -539,6 +539,10 @@ export const api = {
     method: 'POST',
   }),
 
+  rebootLxcContainer: (name) => request(`/lxc/containers/${name}/reboot`, {
+    method: 'POST',
+  }),
+
   deleteLxcContainer: (name) => request(`/lxc/containers/${name}`, {
     method: 'DELETE',
   }),

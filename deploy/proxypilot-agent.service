@@ -34,8 +34,14 @@ RestrictAddressFamilies=AF_UNIX
 LockPersonality=true
 RestrictRealtime=true
 
-# Read/write paths the agent needs to drive caddy + incus + docker
-ReadWritePaths=/etc/caddy /run /var/lib/incus /var/run/docker.sock
+# Read/write paths the agent needs to drive caddy + incus + docker.
+# /etc/caddy and /run are mandatory — Caddy is required, /run always
+# exists. /var/lib/incus and /var/run/docker.sock are prefixed with
+# `-` so a missing path is non-fatal: a minimal-install host without
+# Incus (or a non-Docker host) won't refuse to start the unit. The
+# methods that touch those paths land in Phases C and D — by then
+# either the path exists, or the relevant feature flag stays off.
+ReadWritePaths=/etc/caddy /run -/var/lib/incus -/var/run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

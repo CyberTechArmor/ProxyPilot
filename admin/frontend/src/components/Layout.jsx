@@ -264,9 +264,15 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* Main content */}
-      <main className="pl-0 md:pl-64 pt-14 md:pt-0 min-h-screen flex flex-col">
-        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0">
+      {/* Main content. Anchored to viewport height (h-screen) rather
+          than min-h-screen so flex-1 children inside Outlet (HostShell
+          terminal, LxcContainers terminal tab) get a definite parent
+          height to compute against. With min-h-screen the flex chain
+          falls back to content-sized heights and pages like Host Shell
+          render their terminal short. Stacked-content pages scroll
+          inside the inner div via overflow-y-auto. */}
+      <main className="pl-0 md:pl-64 pt-14 md:pt-0 h-screen flex flex-col">
+        <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
           <Outlet />
         </div>
       </main>

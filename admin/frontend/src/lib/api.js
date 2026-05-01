@@ -121,7 +121,10 @@ export const api = {
   // Passkey (WebAuthn). The server-issued options come back from /begin
   // and are passed verbatim to startRegistration / startAuthentication
   // by lib/passkey.js — this layer is just transport.
-  passkeyRegisterBegin: () => request('/auth/passkey/register/begin', { method: 'POST' }),
+  passkeyRegisterBegin: ({ totpCode } = {}) => request('/auth/passkey/register/begin', {
+    method: 'POST',
+    body: JSON.stringify({ totpCode }),
+  }),
 
   passkeyRegisterVerify: ({ response, label }) => request('/auth/passkey/register/verify', {
     method: 'POST',

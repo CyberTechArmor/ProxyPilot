@@ -816,8 +816,13 @@ const passkeyAuthVerifySchema = z.object({
   registerDevice: z.boolean().optional(),
 });
 
+const passkeyRegisterBeginSchema = z.object({
+  totpCode: z.string().length(6).optional(),
+});
+
 authRouter.post('/passkey/register/begin', authenticateToken, async (req, res) => {
   try {
+    const { totpCode } = passkeyRegisterBeginSchema.parse(req.body || {});
     const db = getDb();
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
     if (!user) return res.status(401).json({ error: 'User not found' });
@@ -826,6 +831,27 @@ authRouter.post('/passkey/register/begin', authenticateToken, async (req, res) =
     // of TOTP, never a replacement for it.
     if (!user.totp_enabled || !user.totp_secret) {
       return res.status(400).json({ error: 'Set up TOTP before registering a passkey.' });
+    }
+
+    // Provisioning a passkey is itself a sensitive op — require a
+    // fresh TOTP code so a stolen-but-not-elevated session can't
+    // silently add a new auth credential. The frontend Profile UI
+    // collects this in its dedicated TOTP-gate dialog before kicking
+    // off the WebAuthn ceremony.
+    if (!totpCode) {
+      return res.status(401).json({ error: 'TOTP code required to register a passkey' });
+    }
+    const totp = new OTPAuth.TOTP({
+      issuer: 'ProxyPilot',
+      label: user.username,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: OTPAuth.Secret.fromBase32(decryptSecret(user.totp_secret)),
+    });
+    if (totp.validate({ token: totpCode, window: 1 }) === null) {
+      logAudit(user.id, 'PASSKEY_REGISTER_FAILED', 'user', user.id, { reason: 'bad_totp' }, req.ip);
+      return res.status(401).json({ error: 'Invalid TOTP code' });
     }
 
     const handle = getOrCreateUserHandle(user.id);

@@ -36,14 +36,14 @@ function isCancellation(err) {
   return name === 'NotAllowedError' || name === 'AbortError';
 }
 
-export async function registerPasskey({ label } = {}) {
+export async function registerPasskey({ label, totpCode } = {}) {
   if (!isPasskeySupported()) {
     return fail('UNSUPPORTED', 'Passkeys are not supported on this browser.');
   }
 
   let options;
   try {
-    options = await api.passkeyRegisterBegin();
+    options = await api.passkeyRegisterBegin({ totpCode });
   } catch (err) {
     return fail('BEGIN_FAILED', err?.message || 'Could not start registration');
   }

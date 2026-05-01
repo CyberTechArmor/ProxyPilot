@@ -339,7 +339,7 @@ lxcRouter.get('/images', async (req, res) => {
 // 'virtual-machine' string the rest of the codebase uses. Unknown
 // values default to 'container' so the wizard never hides a row by
 // mistake.
-function deriveImageSupports(img) {
+export function deriveImageSupports(img) {
   const claimed = new Set();
   const candidates = [img?.type, img?.properties?.type];
   for (const c of candidates) {
@@ -556,6 +556,36 @@ lxcRouter.post('/containers', async (req, res) => {
     });
   } catch {
     // Container doesn't exist — good
+  }
+
+  // Pre-flight image-type check for VMs. `incus launch` against a
+  // CT-only image with `--vm` errors with a wall of stderr ("Failed
+  // to fetch image: image is not a virtual-machine image" or similar
+  // depending on remote / version) which the operator never sees
+  // until they poll create-status. Fail fast here with a clean 400
+  // when we can establish the image's type up front. We tolerate
+  // lookup failures (timeouts, missing remote, etc.) — they fall
+  // through to the launch path and the operator gets the underlying
+  // error via create-status as before.
+  if (isVm) {
+    try {
+      const probe = await execOnHost(
+        `incus image info ${image} --format json 2>/dev/null`,
+        { timeout: 5000 }
+      );
+      const meta = JSON.parse(probe.stdout || '{}');
+      const supports = deriveImageSupports(meta);
+      if (!supports.includes('virtual-machine')) {
+        return res.status(400).json({
+          success: false,
+          error: `Image '${image}' is not bootable as a virtual machine.`,
+        });
+      }
+    } catch {
+      // Image lookup failed — could be a private remote / typo / no
+      // network. Don't block: the launch will surface the underlying
+      // error in stderr.
+    }
   }
 
   // Check if a creation is already in progress for this name

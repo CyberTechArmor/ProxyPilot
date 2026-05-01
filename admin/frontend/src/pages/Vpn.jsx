@@ -128,6 +128,14 @@ export default function Vpn() {
   const [removePeer, setRemovePeer] = useState(null); // peer | null
   const [removeBusy, setRemoveBusy] = useState(false);
 
+  // Rotate confirm. Rotate is destructive in the sense that the
+  // peer's currently-installed config stops working until they
+  // re-import the new one. Use a styled Dialog rather than
+  // window.confirm() so it matches the rest of the page and works
+  // inside the dashboard modal stack.
+  const [rotateConfirmPeer, setRotateConfirmPeer] = useState(null);
+  const [rotateBusy, setRotateBusy] = useState(false);
+
   useEffect(() => {
     if (isAdmin) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,17 +220,25 @@ export default function Vpn() {
     }
   }
 
-  async function rotatePeer(peer) {
-    if (!confirm(`Rotate the keypair for "${peer.name}"? The current peer's installed config stops working until they re-import the new one.`)) return;
+  function rotatePeer(peer) {
+    setRotateConfirmPeer(peer);
+  }
+
+  async function confirmRotate() {
+    if (!rotateConfirmPeer) return;
+    const peer = rotateConfirmPeer;
+    setRotateBusy(true);
     setPendingPeer(peer.name);
     try {
       const r = await api.rotateVpnPeer(peer.name);
+      setRotateConfirmPeer(null);
       // Same shape as add-peer — open the reveal dialog.
       setReveal(r);
       loadAll();
     } catch (e) {
       toast({ variant: 'destructive', title: 'Rotate failed', description: e.message });
     } finally {
+      setRotateBusy(false);
       setPendingPeer(null);
     }
   }
@@ -694,6 +710,32 @@ export default function Vpn() {
             <Button onClick={submitSetScope} disabled={setScopeBusy}>
               {setScopeBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rotate confirm. Reissues the peer's keypair; the currently-
+          installed config on the operator's client stops working
+          until they re-import the new one shown in the reveal
+          dialog that opens after this confirm. */}
+      <Dialog open={!!rotateConfirmPeer} onOpenChange={(o) => { if (!o) setRotateConfirmPeer(null); }}>
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rotate keypair for "{rotateConfirmPeer?.name}"?</DialogTitle>
+            <DialogDescription>
+              Issues a fresh keypair and IP for this peer. The current installed config
+              stops working immediately — the operator must re-import the new config that
+              appears after you confirm. The new private key is shown only once.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRotateConfirmPeer(null)} disabled={rotateBusy}>
+              Cancel
+            </Button>
+            <Button onClick={confirmRotate} disabled={rotateBusy}>
+              {rotateBusy && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Rotate
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -17,7 +17,7 @@ phase, mark it ✅, commit, push, stop. Operator gates between phases.
 | # | Phase | Status |
 |---|---|---|
 | 0 | Revert broken docker-compose security_opt → restore working dashboard | ⏳ |
-| A | Host-side agent: design + scaffold | 🟡 |
+| A | Host-side agent: design + scaffold | ✅ |
 | B | Host-side agent: Caddy methods | ⏳ |
 | C | Host-side agent: Incus methods | ⏳ |
 | D | Host-side agent: Docker methods | ⏳ |
@@ -194,25 +194,26 @@ export async function agentCall(method, params = {}, opts = {}) {
 }
 ```
 
-**Acceptance tests (operator runs on disposable VM).**
+**Acceptance tests — verified on edge.fractionate.ai.**
 
-Status legend below: 🤖 = auto-runnable in any sandbox with a Go
-toolchain + Node 20+. 👤 = requires a real VM with systemd, Docker,
-the deployed install, etc.; the operator runs these by hand.
+- [x] A.V1 — `systemctl status proxypilot-agent` shows active (running). Verified post-reboot, 24s uptime.
+- [x] A.V2 — Host-side `nc -U /run/proxypilot-agent/proxypilot-agent.sock` round-trip returns `{"id":1,"result":"pong"}`.
+- [x] A.V3 — From inside the proxypilot-admin container: Node connection to the socket via the bind-mount → `pong`. Confirms group_add wiring.
+- [x] A.V4 — From inside the container: `agentCall('agent.ping')` via `lib/agent.js` → `pong`. Confirms the Node client lib + env var path.
+- [x] A.V5 — Dashboard works end-to-end via existing nsenter (Add Service, Incus page, Caddy reload). Dual-track invariant held — no production code path uses the agent yet.
+- [x] A.V6 — `update.sh` on the existing edge.fractionate.ai install picked up Phase A cleanly: built the binary, enabled the unit, migrated the docker-compose.yml from the original single-file mount to the directory mount, restarted the container, container came up healthy. The reboot test post-update produced a clean steady state — directory at `/run/proxypilot-agent/`, socket at `/run/proxypilot-agent/proxypilot-agent.sock`, agent active, container reachable.
 
-- [ ] A.V1 👤 — `systemctl status proxypilot-agent` shows active (running).
-- [x] A.V2 🤖 — `echo '{"id":1,"method":"agent.ping","params":{}}' | nc -U <socket>` returns `{"id":1,"result":"pong"}`. Verified locally during 3.1 + 3.7 with a binary built from cmd/agent/.
-- [ ] A.V3 👤 — Inside the proxypilot Docker container: `nc -U /run/proxypilot-agent.sock < ping.json` works (the bind mount + group is wired). Cannot be exercised without a running container; docker-compose changes (3.4 / 3.6) need the operator's deployed VM to verify.
-- [x] A.V4 🤖 — `agentCall('agent.ping')` from `admin/backend/src/lib/agent.js` returns `'pong'`. Verified locally during 3.7 against the real Go binary on a tmp socket. The full V4 (running INSIDE the container) is 👤.
-- [ ] A.V5 👤 — Dashboard still works end-to-end (Add Service, Incus page, Caddy reload — all going through nsenter, agent NOT YET in the production path). Phase A is dual-track; no production code path imports lib/agent.js, so V5 is conceptually a regression test that the install/update changes didn't break the existing nsenter flow.
-- [ ] A.V6 👤 — `update.sh` on an existing install picks up the agent: builds binary, enables service, mounts socket, container restarts cleanly. Health check passes. The Python compose-mutation logic was idempotency-tested locally against a synthetic legacy compose file (3.6).
-
-**Auto-coverage so far.** V2 (round-trip on a tmp socket) and V4
-(Node client → real binary) both pass on the build sandbox. The
-node:test suite for `lib/agent.js` covers four code paths (success,
-AgentError envelope, hung-server timeout, missing-socket transport
-error). V1, V3, V5, V6 require a real disposable VM and are
-operator gates before Phase A flips to ✅.
+**Boot-time race — fixed during V1-V6.** The original layout put
+the socket directly at `/run/proxypilot-agent.sock`, which raced
+with Docker on host reboot: the agent (running as a non-root user)
+couldn't bind directly under `/run/`, AND Docker's bind-mount
+auto-created the path as an empty directory if it beat the agent.
+Two stacked failure modes confirmed via journalctl. Fixed in
+commit `6f41783` by relocating the socket inside a systemd-managed
+RuntimeDirectory: systemd creates `/run/proxypilot-agent/` with
+correct ownership before ExecStart, and Docker bind-mounts the
+parent directory rather than the socket file. Survived a real
+reboot cleanly.
 
 **Commits (one per checklist item).**
 
@@ -226,9 +227,9 @@ fix(update): A.6 in-place migration installs agent on existing deploys
 docs(spec): A.7 Phase A scaffold complete, awaiting operator V1-V6
 ```
 
-Phase A is currently 🟡 — scaffold shipped, V2 + V4 auto-verified.
-Final flip to ✅ happens once the operator runs V1, V3, V5, V6 on a
-disposable VM and confirms in chat. Operator confirms before Phase B.
+Phase A ✅ — V1-V6 verified on edge.fractionate.ai. Phase B (Caddy
+methods on the agent behind a feature flag) opens once the operator
+gives the go in a fresh session.
 
 ---
 

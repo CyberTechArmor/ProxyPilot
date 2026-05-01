@@ -8,8 +8,9 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, Smartphone, KeyRound, Eye, EyeOff } from 'lucide-react';
+import { Rocket, Loader2, ShieldCheck, QrCode, Copy, Check, Smartphone, KeyRound, Eye, EyeOff, Fingerprint } from 'lucide-react';
 import QRCode from 'qrcode';
+import { authenticateWithPasskey, isPasskeySupported } from '@/lib/passkey';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -23,6 +24,16 @@ export default function Login() {
   const [rememberDevice, setRememberDevice] = useState(false);
   const [deviceFingerprint, setDeviceFingerprint] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  // Passkey fast-path button is only shown if the user has registered
+  // a passkey on this device (signaled by Profile after a successful
+  // passkey use). NEVER auto-trigger startAuthentication on page load
+  // — that produces a UA modal on every visit, which trains users to
+  // click through prompts.
+  const [hasPasskey] = useState(() => {
+    try { return localStorage.getItem('pp_has_passkey') === 'true'; }
+    catch { return false; }
+  });
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
   // Account lockout state — populated when the login API returns 429
   // with a `lockedUntil` ISO timestamp. The banner below ticks down
   // every second and clears itself when the lock window elapses.
@@ -244,6 +255,35 @@ export default function Login() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Passkey fast-path. Calls /auth/passkey/authenticate/* directly,
+  // bypassing the normal username+password+TOTP flow. On success the
+  // backend has set BOTH the session cookie and the sudo grant, so we
+  // just cache the user metadata and navigate.
+  const handlePasskeyLogin = async () => {
+    setPasskeyLoading(true);
+    try {
+      const result = await authenticateWithPasskey({
+        username: username || undefined,
+        registerDevice: rememberDevice,
+      });
+      if (!result.ok) {
+        if (result.code !== 'CANCELLED') {
+          toast({
+            variant: 'destructive',
+            title: 'Passkey sign-in failed',
+            description: result.message,
+          });
+        }
+        return;
+      }
+      localStorage.setItem('user', JSON.stringify(result.user));
+      localStorage.setItem('pp_has_passkey', 'true');
+      window.location.href = '/';
+    } finally {
+      setPasskeyLoading(false);
     }
   };
 
@@ -507,6 +547,22 @@ export default function Login() {
                     autoComplete="username"
                   />
                 </div>
+
+                {hasPasskey && isPasskeySupported() && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={handlePasskeyLogin}
+                    disabled={passkeyLoading || loading || !!lockedUntil}
+                  >
+                    {passkeyLoading ? (
+                      <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Verifying passkey...</>
+                    ) : (
+                      <><Fingerprint className="mr-2 h-4 w-4" />Sign in with passkey</>
+                    )}
+                  </Button>
+                )}
 
                 <div className="space-y-2">
                   <Label htmlFor="password">Password</Label>

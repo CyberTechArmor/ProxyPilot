@@ -270,9 +270,13 @@ lxcRouter.get('/containers', async (req, res) => {
 
 // Phase 2b E.1: GET /containers/with-ip — compact listing used by the
 // Add Service wizard's LXC dropdown. Returns `{containers: [{name,
-// status, ipv4, ipv6}]}` with the `pp-` instance prefix stripped so the
-// caller sees the operator-facing name directly. Reuses the same
-// `incus list --format json` call + extract helpers as GET /containers.
+// status, type, ipv4, ipv6}]}` with the `pp-` instance prefix
+// stripped so the caller sees the operator-facing name directly.
+// `type` is one of `'container'` or `'virtual-machine'` per Incus's
+// own taxonomy; surfacing it here lets the wizard hide CT-only knobs
+// (docker-privileged, etc.) when the operator picks a VM target.
+// Reuses the same `incus list --format json` call + extract helpers
+// as GET /containers.
 lxcRouter.get('/containers/with-ip', async (req, res) => {
   try {
     const result = await execOnHost('incus list --format json');
@@ -282,6 +286,7 @@ lxcRouter.get('/containers/with-ip', async (req, res) => {
       .map((c) => ({
         name: c.name.replace(new RegExp(`^${INSTANCE_PREFIX}`), ''),
         status: c.status.toLowerCase(),
+        type: c.type || 'container',
         ipv4: extractIPv4(c),
         ipv6: extractIPv6(c),
       }));

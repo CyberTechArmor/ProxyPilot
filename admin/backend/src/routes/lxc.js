@@ -45,6 +45,16 @@ const NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 // In-memory tracking of active container creation jobs
 const activeCreations = new Map();
 
+// In-memory tracking of active snapshot creation jobs.
+// Key: jobId. Value: { name, snapshotName, startedAt, status, error?,
+// estimateMs, finishedAt? }. Synchronous `incus snapshot create` runs
+// for several minutes on Docker-in-LXC and database containers (Postgres
+// data dir, overlayfs layers) — beyond any reasonable HTTP timeout.
+// The frontend kicks off the job, then polls a status endpoint for
+// elapsed time + ETA, so the request itself returns immediately.
+const activeSnapshots = new Map();
+const SNAPSHOT_JOB_TTL_MS = 30 * 60 * 1000; // keep finished jobs around for 30 min so the UI can settle
+
 // Check if running in Docker container
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
@@ -2290,7 +2300,57 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export', async (req, res
   });
 });
 
-// POST /containers/:name/snapshot - Create a snapshot
+// Estimate how long the next snapshot of `name` will take, in ms.
+// Strategy: average the most recent durations recorded for this
+// container, then fall back to a size-based heuristic, then a fixed
+// default. Returns null when nothing is available.
+async function estimateSnapshotMs(name, incusName) {
+  try {
+    const db = getDb();
+    const rows = db.prepare(
+      'SELECT duration_ms FROM snapshot_durations WHERE container_name = ? ORDER BY created_at DESC LIMIT 5'
+    ).all(name);
+    if (rows.length) {
+      const avg = rows.reduce((s, r) => s + r.duration_ms, 0) / rows.length;
+      return Math.max(5_000, Math.round(avg));
+    }
+  } catch {}
+  // Size-based fallback: read the live container's disk usage and
+  // assume ~50 MB/s — a conservative rate that covers dir-backed pools
+  // (the slowest realistic case). ZFS/btrfs snapshots are basically
+  // instant, so over-estimating here is harmless.
+  try {
+    const r = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+    const instance = JSON.parse(r.stdout || '{}');
+    const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+    if (pool) {
+      const used = await readVolumeUsedBytes(pool, `container/${incusName}`);
+      if (used) {
+        const ms = Math.round((used / (50 * 1024 * 1024)) * 1000);
+        return Math.max(15_000, Math.min(30 * 60 * 1000, ms));
+      }
+    }
+  } catch {}
+  return null;
+}
+
+// Sweep finished snapshot jobs older than the TTL so activeSnapshots
+// doesn't grow unbounded across long-lived backend processes.
+function pruneSnapshotJobs() {
+  const now = Date.now();
+  for (const [id, job] of activeSnapshots.entries()) {
+    if (job.finishedAt && now - job.finishedAt > SNAPSHOT_JOB_TTL_MS) {
+      activeSnapshots.delete(id);
+    }
+  }
+}
+
+// POST /containers/:name/snapshot - Kick off snapshot creation in the
+// background. Returns a jobId immediately so the client can poll
+// /containers/:name/snapshot-jobs/:jobId for elapsed time + ETA.
+// The previous synchronous version SIGTERMed at 5 min, which is too
+// short for snapshots of large or busy containers (Postgres LXC
+// reproduced the failure shown in the bug report).
 lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   const { name } = req.params;
   const { snapshotName, note } = req.body;
@@ -2309,28 +2369,116 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
     });
   }
 
-  // Snapshot create copies the container's filesystem; on running
-  // Docker-in-LXC instances with overlay layers this routinely runs
-  // longer than execOnHost's 30s default. SIGTERM at 30s leaves stderr
-  // empty and the operator stares at the bare nsenter wrapper command
-  // with no signal as to what happened. 5 min covers realistic worst
-  // cases without pinning the request indefinitely.
-  const SNAPSHOT_TIMEOUT_MS = 5 * 60 * 1000;
+  pruneSnapshotJobs();
 
-  try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
-    await execOnHost(`incus snapshot create ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
-    // Set description if note provided
-    if (note) {
-      await execOnHost(`incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`).catch(() => {});
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const jobId = randomUUID();
+  const estimateMs = await estimateSnapshotMs(name, incusName);
+  const job = {
+    id: jobId,
+    name,
+    snapshotName,
+    startedAt: Date.now(),
+    finishedAt: null,
+    status: 'running',
+    error: null,
+    estimateMs,
+  };
+  activeSnapshots.set(jobId, job);
+
+  // spawnOnHost has no built-in timeout; we let incus take as long as
+  // it needs and report progress via the status endpoint instead.
+  const child = spawnOnHost(`incus snapshot create ${incusName} ${snapshotName}`);
+  let stderr = '';
+  let stdout = '';
+  child.stderr.on('data', (d) => { stderr += d.toString(); });
+  child.stdout.on('data', (d) => { stdout += d.toString(); });
+  child.on('error', (err) => {
+    job.status = 'error';
+    job.error = `Failed to start incus snapshot create: ${err.message}`;
+    job.finishedAt = Date.now();
+  });
+  child.on('close', async (code) => {
+    if (code === 0) {
+      // Set description if note provided. Best-effort; failure here
+      // shouldn't fail the snapshot itself.
+      if (note) {
+        await execOnHost(
+          `incus config set ${incusName}/snapshots/${snapshotName} user.note=${JSON.stringify(note)} 2>&1`,
+          { timeout: 10000 }
+        ).catch(() => {});
+      }
+      job.status = 'done';
+      job.finishedAt = Date.now();
+      // Record duration for ETA on subsequent snapshots of this container.
+      try {
+        const db = getDb();
+        const duration = job.finishedAt - job.startedAt;
+        let sizeBytes = null;
+        try {
+          const r = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
+          const instance = JSON.parse(r.stdout || '{}');
+          const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
+          if (pool) sizeBytes = await readVolumeUsedBytes(pool, `container/${incusName}`);
+        } catch {}
+        db.prepare(
+          'INSERT INTO snapshot_durations (container_name, duration_ms, size_bytes) VALUES (?, ?, ?)'
+        ).run(name, duration, sizeBytes);
+        // Keep at most the 20 most recent rows per container.
+        db.prepare(`
+          DELETE FROM snapshot_durations
+          WHERE container_name = ?
+            AND id NOT IN (
+              SELECT id FROM snapshot_durations
+              WHERE container_name = ?
+              ORDER BY created_at DESC
+              LIMIT 20
+            )
+        `).run(name, name);
+      } catch (err) {
+        console.error('[LXC] failed to record snapshot duration:', err.message);
+      }
+    } else {
+      job.status = 'error';
+      const out = (stderr || stdout || '').trim();
+      job.error = out
+        ? `Failed to create snapshot for container '${name}': ${out}`
+        : `Failed to create snapshot for container '${name}': incus exited with code ${code}.`;
+      job.finishedAt = Date.now();
     }
-    res.json({
-      success: true,
-      message: `Snapshot '${snapshotName}' created for container '${name}'.`,
-    });
-  } catch (error) {
-    res.status(500).json(formatSnapshotError(`Failed to create snapshot for container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
+  });
+
+  res.json({
+    success: true,
+    jobId,
+    estimateMs,
+    message: `Snapshot '${snapshotName}' creation started for container '${name}'.`,
+  });
+});
+
+// GET /containers/:name/snapshot-jobs/:jobId - Poll snapshot progress.
+// Returns elapsedMs (always) and estimateMs (when an estimate exists).
+// Once status is 'done' or 'error' the job stays around for a while so
+// the UI can render a final state on the next poll.
+lxcRouter.get('/containers/:name/snapshot-jobs/:jobId', (req, res) => {
+  const { name, jobId } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
   }
+  const job = activeSnapshots.get(jobId);
+  if (!job || job.name !== name) {
+    return res.status(404).json({ success: false, error: 'Snapshot job not found.' });
+  }
+  const now = job.finishedAt || Date.now();
+  res.json({
+    success: true,
+    jobId: job.id,
+    snapshotName: job.snapshotName,
+    status: job.status,
+    elapsedMs: now - job.startedAt,
+    estimateMs: job.estimateMs,
+    error: job.error,
+  });
 });
 
 // POST /containers/:name/snapshot/:snapshotName/restore - Restore a snapshot

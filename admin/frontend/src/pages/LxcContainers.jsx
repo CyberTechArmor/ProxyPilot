@@ -334,6 +334,10 @@ export default function LxcContainers() {
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  // Progress for the in-flight `Create snapshot` job. Driven by polling
+  // /lxc/containers/:name/snapshot-jobs/:jobId. Shape:
+  // { containerName, snapshotName, elapsedMs, estimateMs, status }.
+  const [snapshotProgress, setSnapshotProgress] = useState(null);
   const [snapshotNotes, setSnapshotNotes] = useState({}); // { snapName: [notes] }
   const [expandedSnapshot, setExpandedSnapshot] = useState(null);
   const [newNoteText, setNewNoteText] = useState('');
@@ -456,6 +460,22 @@ export default function LxcContainers() {
   const [imageCatalog, setImageCatalog] = useState(null);
   const [imageCatalogLoading, setImageCatalogLoading] = useState(false);
   const [imageCatalogError, setImageCatalogError] = useState(null);
+
+  // Smooth local timer for the snapshot progress panel. The poll loop
+  // in handleCreateSnapshot only refreshes every second; this ticks
+  // the elapsed display in between so it counts up steadily instead of
+  // freezing. Running while a snapshot job is active and pinned to its
+  // start time so we don't drift.
+  useEffect(() => {
+    if (!snapshotProgress || snapshotProgress.status !== 'running' || !snapshotProgress.startedAt) return;
+    const tick = setInterval(() => {
+      setSnapshotProgress((p) => {
+        if (!p || p.status !== 'running' || !p.startedAt) return p;
+        return { ...p, elapsedMs: Date.now() - p.startedAt };
+      });
+    }, 500);
+    return () => clearInterval(tick);
+  }, [snapshotProgress?.status, snapshotProgress?.startedAt]);
 
   // Check Incus status on mount
   useEffect(() => {
@@ -1112,20 +1132,62 @@ export default function LxcContainers() {
     }
   };
 
+  // Snapshot creation is async on the backend — POST returns a jobId
+  // immediately, then we poll for status. The previous synchronous path
+  // SIGTERMed at 5min, which the Postgres LXC consistently outran.
+  // While polling we update `snapshotProgress` so the UI can render an
+  // elapsed timer and an ETA when one is available.
   const handleCreateSnapshot = async () => {
     if (!selectedContainer || !snapshotName.trim()) return;
+    const ctName = selectedContainer.name;
+    const sName = snapshotName.trim();
     setSnapshotLoading(true);
+    const startedAt = Date.now();
+    setSnapshotProgress({
+      containerName: ctName,
+      snapshotName: sName,
+      startedAt,
+      elapsedMs: 0,
+      estimateMs: null,
+      status: 'running',
+    });
     try {
-      await api.createLxcSnapshot(selectedContainer.name, snapshotName.trim(), snapshotNote.trim());
-      toast({ title: 'Snapshot created', description: `Snapshot "${snapshotName}" created.` });
+      const start = await api.createLxcSnapshot(ctName, sName, snapshotNote.trim());
+      const jobId = start?.jobId;
+      if (!jobId) {
+        // Older backend without async support — treat the response as
+        // immediate completion.
+        toast({ title: 'Snapshot created', description: `Snapshot "${sName}" created.` });
+      } else {
+        setSnapshotProgress((p) => p && p.containerName === ctName
+          ? { ...p, estimateMs: start.estimateMs ?? null }
+          : p);
+        // Poll until done/error. 1s cadence is light on the backend
+        // (in-memory map lookup) and tight enough for a smooth timer.
+        let last;
+        while (true) {
+          await new Promise((r) => setTimeout(r, 1000));
+          last = await api.getLxcSnapshotJob(ctName, jobId).catch(() => null);
+          if (!last) continue;
+          setSnapshotProgress((p) => p && p.containerName === ctName
+            ? { ...p, elapsedMs: last.elapsedMs ?? p.elapsedMs, estimateMs: last.estimateMs ?? p.estimateMs, status: last.status }
+            : p);
+          if (last.status === 'done' || last.status === 'error') break;
+        }
+        if (last.status === 'error') {
+          throw new Error(last.error || 'Snapshot failed.');
+        }
+        toast({ title: 'Snapshot created', description: `Snapshot "${sName}" created in ${formatDuration(last.elapsedMs || 0)}.` });
+      }
       setSnapshotName('');
       setSnapshotNote('');
-      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      const snapRes = await api.getLxcSnapshots(ctName);
       setSnapshots(snapRes.snapshots || []);
     } catch (err) {
       toast({ title: 'Snapshot failed', description: err.message, variant: 'destructive' });
     } finally {
       setSnapshotLoading(false);
+      setSnapshotProgress(null);
     }
   };
 
@@ -2459,6 +2521,48 @@ export default function LxcContainers() {
                         )}
                       </Button>
                     </div>
+                    {/* In-flight snapshot progress: elapsed timer plus a
+                        remaining-time hint when the backend has prior
+                        durations to estimate from. Stays scoped to the
+                        currently-selected container so opening another
+                        LXC mid-snapshot doesn't inherit the indicator. */}
+                    {snapshotProgress && selectedContainer && snapshotProgress.containerName === selectedContainer.name && (
+                      <div className="rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-blue-400 flex items-center gap-1.5">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Creating snapshot "{snapshotProgress.snapshotName}"…
+                          </span>
+                          <span className="font-mono text-muted-foreground">
+                            {formatDuration(snapshotProgress.elapsedMs || 0)}
+                            {Number.isFinite(snapshotProgress.estimateMs) && snapshotProgress.estimateMs > 0 && (
+                              <> / ~{formatDuration(snapshotProgress.estimateMs)}</>
+                            )}
+                          </span>
+                        </div>
+                        {Number.isFinite(snapshotProgress.estimateMs) && snapshotProgress.estimateMs > 0 ? (
+                          <>
+                            <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                              <div
+                                className="h-full bg-blue-500 transition-[width] duration-700"
+                                style={{
+                                  width: `${Math.min(99, Math.max(2, ((snapshotProgress.elapsedMs || 0) / snapshotProgress.estimateMs) * 100))}%`,
+                                }}
+                              />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                              {snapshotProgress.elapsedMs >= snapshotProgress.estimateMs
+                                ? 'Taking longer than usual — large or busy containers can need several minutes.'
+                                : `~${formatDuration(Math.max(0, snapshotProgress.estimateMs - (snapshotProgress.elapsedMs || 0)))} remaining (estimate)`}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground">
+                            No prior runs for this container — duration depends on size and storage backend.
+                          </p>
+                        )}
+                      </div>
+                    )}
                     {snapshots.length === 0 ? (
                       <p className="text-xs text-muted-foreground py-2">No snapshots yet.</p>
                     ) : (

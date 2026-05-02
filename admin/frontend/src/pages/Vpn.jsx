@@ -959,6 +959,25 @@ function PeerRevealDialog({ reveal, onClose }) {
                 )}
               </div>
             </div>
+
+            <div className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <div className="font-semibold text-amber-700 dark:text-amber-300">
+                Hosts-file reminder for service domains
+              </div>
+              <div className="text-xs text-muted-foreground mt-1 space-y-1">
+                <p>
+                  To resolve a service domain on this peer, edit the client's
+                  hosts file (<code>C:\Windows\System32\drivers\etc\hosts</code>
+                  on Windows, <code>/etc/hosts</code> on Linux/macOS):
+                </p>
+                <ol className="list-decimal pl-5 space-y-0.5">
+                  <li>Add the <strong>public</strong> record first — the service
+                    keeps working when the VPN is disconnected.</li>
+                  <li>Add the internal <strong>10.x.y.z</strong> record second —
+                    used while the VPN is up so traffic stays on the tunnel.</li>
+                </ol>
+              </div>
+            </div>
           </div>
         )}
 

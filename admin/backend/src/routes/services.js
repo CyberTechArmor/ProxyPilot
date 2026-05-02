@@ -12,6 +12,7 @@ import { getDb, logAudit, getAdminDomain } from '../db.js';
 import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
+import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 
 const execAsync = promisify(exec);
 
@@ -344,7 +345,7 @@ async function reloadCaddy() {
     await ensureCaddyStructure();
 
     // Validate Caddy configuration first (on host)
-    const testResult = await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+    const testResult = await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     console.log('Caddy validate output:', testResult.stdout, testResult.stderr);
 
     // Check if Caddy is running
@@ -369,7 +370,7 @@ async function reloadCaddy() {
       console.log('Caddy is running, reloading...');
       try {
         // Use --force to avoid hanging if admin API is unresponsive
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
+        await caddyReload({ configPath: CADDY_CONFIG_FILE });
         console.log('Caddy reloaded successfully');
       } catch (reloadErr) {
         // Try systemctl as fallback
@@ -536,9 +537,7 @@ servicesRouter.post('/:id/obtain-certificate', async (req, res) => {
 
     // (5) Validate via caddy adapt before reloading.
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testError) {
       await rollback();
       return res.status(400).json({
@@ -704,9 +703,7 @@ servicesRouter.delete('/:id/certificate', async (req, res) => {
 
     // (5) Validate via caddy adapt.
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testError) {
       await rollback();
       return res.status(400).json({
@@ -993,7 +990,7 @@ servicesRouter.post('/caddy/regenerate-all', async (req, res) => {
     // Validate Caddy config before reload
     let testPassed = false;
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
       testPassed = true;
     } catch (testError) {
       console.error('Caddy config validation failed:', testError.stderr || testError.message);
@@ -1540,7 +1537,7 @@ services:
 
     // Validate Caddy config
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testErr) {
       await rollbackCreate();
       return res.status(400).json({ error: 'Invalid Caddy configuration generated: ' + (testErr.stderr || testErr.message) });
@@ -1917,7 +1914,7 @@ servicesRouter.put('/:id', async (req, res) => {
 
     // Validate Caddy config before reload
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testError) {
       await rollbackUpdate();
       return res.status(400).json({
@@ -1928,10 +1925,10 @@ servicesRouter.put('/:id', async (req, res) => {
 
     // Reload Caddy with failsafe
     try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
+      await caddyReload({ configPath: CADDY_CONFIG_FILE });
     } catch (reloadError) {
       await rollbackUpdate();
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
+      await caddyReload({ configPath: CADDY_CONFIG_FILE }).catch(() => {});
       return res.status(400).json({
         error: 'Caddy reload failed - reverted to previous config',
         details: reloadError.stderr || reloadError.message,
@@ -2163,7 +2160,7 @@ servicesRouter.post('/:id/revert-config/:versionId', async (req, res) => {
 
     // Validate and reload Caddy
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (e) {
       console.error('Revert: caddy adapt failed', e);
     }
@@ -2263,7 +2260,7 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 
     // Validate Caddy config
     try {
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testError) {
       // Config validation failed - revert to backup
       if (backupConfig) {
@@ -2277,12 +2274,12 @@ servicesRouter.put('/:id/caddy-config', async (req, res) => {
 
     // Try to reload Caddy
     try {
-      await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`);
+      await caddyReload({ configPath: CADDY_CONFIG_FILE });
     } catch (reloadError) {
       // Reload failed - revert to backup
       if (backupConfig) {
         await writeCaddyConfig(configPath, backupConfig);
-        await execOnHost(`caddy reload --config ${CADDY_CONFIG_FILE} --force 2>&1`).catch(() => {});
+        await caddyReload({ configPath: CADDY_CONFIG_FILE }).catch(() => {});
       }
       return res.status(400).json({
         error: 'Caddy reload failed - reverted to previous config',
@@ -2492,9 +2489,7 @@ servicesRouter.post('/:id/refresh-ip', async (req, res) => {
 
     // Validate + reload Caddy.
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testError) {
       await rollback();
       return res.status(400).json({
@@ -2867,9 +2862,7 @@ servicesRouter.post('/:id/routes', async (req, res) => {
 
     // (7) Validate Caddy config.
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testErr) {
       await rollbackRouteCreate();
       return res.status(400).json({
@@ -3177,9 +3170,7 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
 
     // (6) Validate Caddy config.
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testErr) {
       await rollbackRouteUpdate();
       return res.status(400).json({
@@ -3341,9 +3332,7 @@ servicesRouter.delete('/:id/routes/:routeId', async (req, res) => {
     }
 
     try {
-      await execOnHost(
-        `caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`
-      );
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
     } catch (testErr) {
       await rollbackRouteDelete();
       return res.status(400).json({
@@ -5340,7 +5329,7 @@ servicesRouter.post('/discover/import', async (req, res) => {
       await regenerateDomainCaddyConfig(db, domain);
 
       // Validate and reload Caddy
-      await execOnHost(`caddy adapt --config ${CADDY_CONFIG_FILE} > /dev/null 2>&1`);
+      await caddyAdapt({ configPath: CADDY_CONFIG_FILE });
       await reloadCaddy();
     } catch (caddyError) {
       console.error('Error generating Caddy config for imported site:', caddyError);

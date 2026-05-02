@@ -77,5 +77,10 @@ func (r *Registry) Lookup(name string) (Handler, bool) {
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register("agent.ping", AgentPing)
+	r.Register("caddy.adapt", CaddyAdapt)
+	r.Register("caddy.reload", CaddyReload)
+	r.Register("caddy.fmt", CaddyFmt)
+	r.Register("caddy.list_modules", CaddyListModules)
+	r.Register("caddy.version", CaddyVersion)
 	return r
 }

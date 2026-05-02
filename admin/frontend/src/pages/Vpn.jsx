@@ -65,24 +65,13 @@ export default function Vpn() {
   // about the port suffix.
   const [enableOpen, setEnableOpen] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
-  // The default below is a public resolver, but operators MUST be
-  // aware: any DNS value that isn't covered by a peer's AllowedIPs
-  // breaks name resolution on that peer.
-  //
-  // - scope=full peers: AllowedIPs = 0.0.0.0/0, so 1.1.1.1 (or any
-  //   public resolver) routes through the tunnel and works (assuming
-  //   the host's masquerade rule is up).
-  // - scope=admin/services peers: AllowedIPs = 10.100.0.0/24 only.
-  //   1.1.1.1 isn't in that range, so DNS queries get stuck — Windows
-  //   NRPT redirects them to the tunnel, the tunnel has no route to
-  //   1.1.1.1, queries silently fail. Operators using these scopes
-  //   should DELETE the DNS line from each peer's local wg config
-  //   after import (or run a resolver on the tunnel address; see
-  //   the "vpn dns" follow-up prompt).
-  //
-  // The proper fix is a CLI/backend change to allow null DNS so
-  // peers ship without a `DNS =` line at all. That's prompted out
-  // separately.
+  // The DNS field is currently stored on the server config but is
+  // NOT emitted into rendered peer configs — every scope (including
+  // full) routes only 10.100.0.0/24, so a public resolver outside
+  // that range would dead-end through the tunnel adapter on Windows
+  // NRPT / Linux resolv.conf rewrite. Operators who run a resolver
+  // ON the VPN subnet (10.100.0.x) can hand-add a `DNS =` line to a
+  // peer's config after import.
   const [enableForm, setEnableForm] = useState({
     endpoint: '', port: '51820', dns: '1.1.1.1',
   });
@@ -850,11 +839,12 @@ export default function Vpn() {
                   onChange={e => setEnableForm(f => ({ ...f, dns: e.target.value }))}
                 />
                 <p className="text-[10px] text-muted-foreground">
-                  Goes into every peer's [Interface] block. For <strong>admin</strong> /
-                  <strong> services</strong> scope peers (AllowedIPs = 10.100.0.0/24),
-                  delete the <code>DNS =</code> line from the local wg config after
-                  import — otherwise the OS routes DNS through the tunnel and resolution
-                  fails. For <strong>full</strong> scope peers a public resolver works.
+                  Stored on the server config but currently not emitted into
+                  rendered peer configs. Every scope routes only
+                  <code> 10.100.0.0/24</code>, so a resolver outside that range
+                  would dead-end through the tunnel. Hand-add a <code>DNS =</code>
+                  line to a peer config only if you run a resolver on the VPN
+                  subnet itself.
                 </p>
               </div>
             </div>
@@ -967,6 +957,25 @@ function PeerRevealDialog({ reveal, onClose }) {
                     generating…
                   </div>
                 )}
+              </div>
+            </div>
+
+            <div className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <div className="font-semibold text-amber-700 dark:text-amber-300">
+                Hosts-file reminder for service domains
+              </div>
+              <div className="text-xs text-muted-foreground mt-1 space-y-1">
+                <p>
+                  To resolve a service domain on this peer, edit the client's
+                  hosts file (<code>C:\Windows\System32\drivers\etc\hosts</code>
+                  on Windows, <code>/etc/hosts</code> on Linux/macOS):
+                </p>
+                <ol className="list-decimal pl-5 space-y-0.5">
+                  <li>Add the <strong>public</strong> record first — the service
+                    keeps working when the VPN is disconnected.</li>
+                  <li>Add the internal <strong>10.x.y.z</strong> record second —
+                    used while the VPN is up so traffic stays on the tunnel.</li>
+                </ol>
               </div>
             </div>
           </div>

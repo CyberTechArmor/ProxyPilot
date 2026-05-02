@@ -18,7 +18,7 @@ phase, mark it ✅, commit, push, stop. Operator gates between phases.
 |---|---|---|
 | 0 | Revert broken docker-compose security_opt → restore working dashboard | ⏳ |
 | A | Host-side agent: design + scaffold | 🟡 |
-| B | Host-side agent: Caddy methods | ⏳ |
+| B | Host-side agent: Caddy methods | 🟡 |
 | C | Host-side agent: Incus methods | ⏳ |
 | D | Host-side agent: Docker methods | ⏳ |
 | E | Host-side agent: misc methods (git / npm / systemd) | ⏳ |
@@ -268,13 +268,53 @@ Phase F flips the default to `true`.
 
 **Acceptance tests.**
 
-- [ ] B.V1 — Flag OFF: existing dashboard behavior unchanged. Add Service still triggers Caddy reload via nsenter.
-- [ ] B.V2 — Flag ON: Add Service triggers Caddy reload via agent. Verified by `journalctl -u proxypilot-agent --since "1 min ago"` showing the method call.
-- [ ] B.V3 — Flag ON: malformed Caddyfile produces `caddy.adapt` error response, dashboard surfaces clean error message.
-- [ ] B.V4 — `agent.ping` continues to work alongside the new methods.
-- [ ] B.V5 — `update.sh` picks up the new methods on an existing deploy without operator intervention.
+Legend (carried over from Phase A): 🤖 = auto-runnable in this
+sandbox. 👤 = requires a real disposable VM with systemd, Docker,
+and the full deploy.
 
-When B.V1-V5 pass, mark Phase B ✅. Operator approves Phase C.
+- [ ] B.V1 👤 — Flag OFF: existing dashboard behavior unchanged. Add Service still triggers Caddy reload via nsenter. `journalctl -u proxypilot-agent --since "1 min ago"` shows no agent calls during a service add.
+- [ ] B.V2 👤 — Flag ON (`PROXYPILOT_USE_AGENT_FOR_CADDY=true` in .env, container restarted): Add Service triggers Caddy reload via agent. Verified by `journalctl -u proxypilot-agent --since "1 min ago"` showing `caddy.reload` entries.
+- [ ] B.V3 👤 — Flag ON: malformed Caddyfile (e.g. paste a bad route into Edit Service) produces `caddy.adapt` ok=false → dashboard surfaces a clean error toast (not a 500 / nsenter exception trace).
+- [x] B.V4 🤖 — `agent.ping` continues to work alongside the new methods. `TestDefaultRegistryHasAllCaddyMethods` in `cmd/agent/methods/caddy_test.go` locks in the registration contract for all six methods (agent.ping + caddy.adapt/reload/fmt/list_modules/version); duplicate-Register would panic at startup.
+- [ ] B.V5 👤 — `update.sh` on an existing deploy: rebuilds the agent binary with the new methods, container restarts, `.env` gets `PROXYPILOT_USE_AGENT_FOR_CADDY=false` appended by `sync_env_keys()`, dashboard still works flag-OFF.
+
+**Auto-coverage so far.** The Go test suite at
+`cmd/agent/methods/caddy_test.go` covers all five caddy methods
+with table-driven cases for success, oversized config_text,
+malformed JSON, /etc/caddy traversal + shell-metachar config_path,
+invalid Caddyfile → structured ok=false carrying stderr,
+caddy fmt exit-1 (formatting differed) → still returns text, and
+missing-binary → graceful caddy_exec_failed envelope on every
+method (no crash). 28 sub-tests, all green.
+
+The backend driver at `admin/backend/src/lib/caddy-driver.js` is
+covered by `admin/backend/src/__tests__/caddy-driver.test.js`:
+flag-OFF fallthrough, flag-ON forwarding for both methods,
+agent-side ok=false → exec-like error shape, transport error →
+exec-like error shape, and a defence-in-depth check that only the
+literal string `"true"` enables the agent path. 7 sub-tests.
+
+Total npm test count: 25 → 32. V1, V2, V3, V5 all require the
+disposable VM and are operator gates before Phase B flips to ✅.
+
+**Commits (one per checklist item).**
+
+```
+feat(agent): B.1 caddy.adapt — validate Caddyfile via tmpfile + exec
+feat(agent): B.2 caddy.reload — strict /etc/caddy path validation + force reload
+feat(agent): B.3 caddy.fmt + caddy.list_modules + caddy.version
+test(agent): B.4 table-driven coverage for all five caddy methods
+feat(backend): B.5 caddy-driver dual-track helper + migrate services.js
+feat(install): B.6 PROXYPILOT_USE_AGENT_FOR_CADDY=false plumbed everywhere
+docs(spec): B.7 Phase B scaffold complete, awaiting operator V1-V5
+```
+
+Phase B is currently 🟡 — methods + driver + flag plumbing
+shipped, V4 auto-verified. Final flip to ✅ happens once the
+operator runs V1, V2, V3, V5 on a disposable VM and confirms in
+chat. Phase B keeps `PROXYPILOT_USE_AGENT_FOR_CADDY=false` by
+default; Phase F flips defaults to true after burn-in. Operator
+approves Phase C only after B is ✅.
 
 ---
 

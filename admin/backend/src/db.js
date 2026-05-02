@@ -695,6 +695,25 @@ export function initDatabase() {
     ON snapshot_notes(container_name, snapshot_name, created_at DESC)
   `);
 
+  // Rolling history of completed snapshot durations. Used to give the
+  // operator an ETA the next time they snapshot the same container.
+  // Pruned to the most recent N rows per container at write time so
+  // it can't grow without bound.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS snapshot_durations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      container_name TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      size_bytes INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_snapshot_durations_container
+    ON snapshot_durations(container_name, created_at DESC)
+  `);
+
   // Check if admin user exists, create if not
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
 

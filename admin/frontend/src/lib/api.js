@@ -576,6 +576,10 @@ export const api = {
     body: JSON.stringify({ snapshotName, note }),
   }),
 
+  // Poll an in-flight snapshot job kicked off by createLxcSnapshot.
+  // Returns { status, elapsedMs, estimateMs, error? }.
+  getLxcSnapshotJob: (name, jobId) => request(`/lxc/containers/${name}/snapshot-jobs/${jobId}`),
+
   restoreLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}/restore`, {
     method: 'POST',
   }),

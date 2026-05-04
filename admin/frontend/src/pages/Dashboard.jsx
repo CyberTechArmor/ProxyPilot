@@ -2828,6 +2828,8 @@ volumes:
           ? String(route.writeTimeoutSeconds)
           : '',
       hostHeaderOverride: route.hostHeaderOverride || '',
+      allowFraming: !!route.allowFraming,
+      frameAncestors: route.frameAncestors || '',
     });
   };
 
@@ -2851,6 +2853,8 @@ volumes:
       readTimeoutSeconds: '',
       writeTimeoutSeconds: '',
       hostHeaderOverride: '',
+      allowFraming: false,
+      frameAncestors: '',
     });
   };
 
@@ -2887,6 +2891,10 @@ volumes:
           : null,
         hostHeaderOverride: editingRouteDraft.hostHeaderOverride
           ? editingRouteDraft.hostHeaderOverride
+          : null,
+        allowFraming: !!editingRouteDraft.allowFraming,
+        frameAncestors: editingRouteDraft.frameAncestors
+          ? editingRouteDraft.frameAncestors
           : null,
       };
       if (editingRouteId === 'new') {
@@ -3009,6 +3017,44 @@ volumes:
             placeholder="(pass through)"
           />
         </div>
+        {/* Phase 2c: framing escape hatch. Caddy's `header` directive
+            is per-site, so this toggle on any single route on the
+            domain flips the whole site to emit -X-Frame-Options +
+            Content-Security-Policy: frame-ancestors. Default off:
+            most apps want the deny-iframe posture. Required for
+            embeddable apps (MEET meeting page, OAuth popups). */}
+        <div className="flex items-center justify-between">
+          <div>
+            <Label className="text-xs">Allow framing (iframe-embeddable)</Label>
+            <div className="text-xs text-muted-foreground">
+              Site-level: removes X-Frame-Options, adds frame-ancestors CSP.
+            </div>
+          </div>
+          <Switch
+            checked={!!editingRouteDraft.allowFraming}
+            onCheckedChange={(checked) =>
+              setEditingRouteDraft({ ...editingRouteDraft, allowFraming: checked })
+            }
+          />
+        </div>
+        {editingRouteDraft.allowFraming && (
+          <div className="space-y-1">
+            <Label htmlFor={`${idPrefix}-frame-ancestors`} className="text-xs">
+              frame-ancestors (comma-separated, blank = *)
+            </Label>
+            <Input
+              id={`${idPrefix}-frame-ancestors`}
+              value={editingRouteDraft.frameAncestors || ''}
+              onChange={(e) =>
+                setEditingRouteDraft({
+                  ...editingRouteDraft,
+                  frameAncestors: e.target.value,
+                })
+              }
+              placeholder="* (allow any embedder)"
+            />
+          </div>
+        )}
       </>
     );
   };
@@ -6794,6 +6840,8 @@ volumes:
                     readTimeoutSeconds: '',
                     writeTimeoutSeconds: '',
                     hostHeaderOverride: '',
+                    allowFraming: false,
+                    frameAncestors: '',
                   });
                 }}
               />

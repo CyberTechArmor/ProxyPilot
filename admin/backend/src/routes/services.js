@@ -2690,6 +2690,19 @@ const createRouteSchema = z.object({
     .regex(/^[A-Za-z0-9._-]+(:[0-9]{1,5})?$/, 'Host header must be a hostname[:port]')
     .nullable()
     .optional(),
+  // Phase 2c (migration 104): site-level framing escape hatch. Caddy's
+  // `header` directive is per-site, so any single route on the domain
+  // having allowFraming=true flips the whole site's header block to
+  // emit `-X-Frame-Options` + `Content-Security-Policy: frame-ancestors`.
+  // frameAncestors accepts a comma-separated origin list ("https://a,
+  // https://b") that becomes the CSP value verbatim; empty/null
+  // collapses to '*'.
+  allowFraming: z.boolean().optional(),
+  frameAncestors: z
+    .string()
+    .max(2048)
+    .nullable()
+    .optional(),
 });
 
 // List routes for a service.
@@ -2712,6 +2725,7 @@ servicesRouter.get('/:id/routes', (req, res) => {
                 websocket_enabled, ssl_enabled, force_https,
                 max_upload_size, strip_prefix, read_timeout_seconds,
                 write_timeout_seconds, max_body_bytes, host_header_override,
+                allow_framing, frame_ancestors,
                 created_at
            FROM service_http_routes
           WHERE service_id = ?
@@ -2734,6 +2748,8 @@ servicesRouter.get('/:id/routes', (req, res) => {
       writeTimeoutSeconds: r.write_timeout_seconds ?? null,
       maxBodyBytes: r.max_body_bytes ?? null,
       hostHeaderOverride: r.host_header_override ?? null,
+      allowFraming: !!r.allow_framing,
+      frameAncestors: r.frame_ancestors ?? null,
       createdAt: r.created_at,
     }));
 
@@ -2859,8 +2875,9 @@ servicesRouter.post('/:id/routes', async (req, res) => {
          id, service_id, domain, path_prefix, target_port,
          websocket_enabled, ssl_enabled, force_https, max_upload_size,
          strip_prefix, read_timeout_seconds, write_timeout_seconds,
-         max_body_bytes, host_header_override
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         max_body_bytes, host_header_override,
+         allow_framing, frame_ancestors
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       routeId,
       req.params.id,
@@ -2875,7 +2892,9 @@ servicesRouter.post('/:id/routes', async (req, res) => {
       data.readTimeoutSeconds ?? null,
       data.writeTimeoutSeconds ?? null,
       data.maxBodyBytes ?? null,
-      data.hostHeaderOverride ?? null
+      data.hostHeaderOverride ?? null,
+      data.allowFraming ? 1 : 0,
+      data.frameAncestors ?? null
     );
 
     // Rollback helper: delete the inserted row + restore the merged file.
@@ -3062,6 +3081,14 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
         data.hostHeaderOverride !== undefined
           ? data.hostHeaderOverride
           : route.host_header_override ?? null,
+      allowFraming:
+        data.allowFraming !== undefined
+          ? !!data.allowFraming
+          : !!route.allow_framing,
+      frameAncestors:
+        data.frameAncestors !== undefined
+          ? data.frameAncestors
+          : route.frame_ancestors ?? null,
     };
 
     const oldDomain = route.domain;
@@ -3183,7 +3210,9 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
          read_timeout_seconds = ?,
          write_timeout_seconds = ?,
          max_body_bytes = ?,
-         host_header_override = ?
+         host_header_override = ?,
+         allow_framing = ?,
+         frame_ancestors = ?
        WHERE id = ?`
     ).run(
       updated.domain,
@@ -3198,6 +3227,8 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
       updated.writeTimeoutSeconds ?? null,
       updated.maxBodyBytes ?? null,
       updated.hostHeaderOverride ?? null,
+      updated.allowFraming ? 1 : 0,
+      updated.frameAncestors ?? null,
       req.params.routeId
     );
 
@@ -3216,7 +3247,9 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
              read_timeout_seconds = ?,
              write_timeout_seconds = ?,
              max_body_bytes = ?,
-             host_header_override = ?
+             host_header_override = ?,
+             allow_framing = ?,
+             frame_ancestors = ?
            WHERE id = ?`
         ).run(
           preUpdateRow.domain,
@@ -3231,6 +3264,8 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
           preUpdateRow.write_timeout_seconds ?? null,
           preUpdateRow.max_body_bytes ?? null,
           preUpdateRow.host_header_override ?? null,
+          preUpdateRow.allow_framing ?? 0,
+          preUpdateRow.frame_ancestors ?? null,
           req.params.routeId
         );
       } catch (e) {
@@ -5929,6 +5964,20 @@ function buildDomainCaddyConfig(entriesList, domain) {
         s.host_header_override !== undefined
           ? s.host_header_override
           : s.hostHeaderOverride,
+      // Phase 2c: site-level framing knobs. Read both shapes —
+      // DB rows use snake_case (`allow_framing`, `frame_ancestors`),
+      // route-CRUD payloads use camelCase. Coerce to the shape the
+      // emit step below picks up (`allowFraming`, `frameAncestors`).
+      allowFraming:
+        s.allowFraming !== undefined
+          ? !!s.allowFraming
+          : s.allow_framing != null
+          ? !!s.allow_framing
+          : false,
+      frameAncestors:
+        s.frameAncestors !== undefined
+          ? s.frameAncestors
+          : s.frame_ancestors ?? null,
     };
   });
 
@@ -6041,8 +6090,36 @@ function buildDomainCaddyConfig(entriesList, domain) {
   }
 
   // Site-level security headers (apply to 404s too).
+  //
+  // Phase 2c: when ANY route on the domain sets allow_framing=1, the
+  // whole site flips to the framing-friendly variant: X-Frame-Options
+  // is removed (Caddy `-` prefix) and a Content-Security-Policy:
+  // frame-ancestors header is set instead. Caddy's `header` directive
+  // is site-scoped, so per-route framing wouldn't actually work — the
+  // site's header block always wins. Picking "any route allows" gives
+  // operators the right escape hatch for embeddable apps (MEET, OAuth
+  // popups) without breaking the default deny-iframes posture for
+  // everything else.
+  //
+  // frame_ancestors is a comma-separated origin list. Empty / NULL
+  // collapses to '*' (allow embedding from anywhere) — the common
+  // case for self-hosted MEET. Operators who want to lock down to a
+  // specific embedder can list origins explicitly:
+  //   `https://app.example.com https://other.example.com`.
+  const allowFramingRoute = normalized.find((s) => !!s.allowFraming);
   lines.push(`    header {`);
-  lines.push(`        X-Frame-Options "SAMEORIGIN"`);
+  if (allowFramingRoute) {
+    lines.push(`        -X-Frame-Options`);
+    const raw = allowFramingRoute.frameAncestors;
+    const ancestors = (raw || '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .join(' ') || '*';
+    lines.push(`        Content-Security-Policy "frame-ancestors ${ancestors}"`);
+  } else {
+    lines.push(`        X-Frame-Options "SAMEORIGIN"`);
+  }
   lines.push(`        X-Content-Type-Options "nosniff"`);
   lines.push(`        X-XSS-Protection "1; mode=block"`);
   lines.push(`        Referrer-Policy "strict-origin-when-cross-origin"`);
@@ -6108,6 +6185,8 @@ async function regenerateDomainCaddyConfig(db, domain) {
               r.write_timeout_seconds,
               r.max_body_bytes,
               r.host_header_override,
+              r.allow_framing,
+              r.frame_ancestors,
               s.name         AS name,
               s.kind         AS kind,
               s.runtime      AS runtime,

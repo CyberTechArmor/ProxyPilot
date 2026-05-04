@@ -223,6 +223,32 @@ export const api = {
     method: 'DELETE',
   }),
 
+  // Phase 2c: L4 forwards under /services/:id/l4-forwards. Each row
+  // produces an Incus proxy device + a paired host firewall rule via
+  // the backend reconciler — the create/delete calls are the
+  // operator's single click for both.
+  getServiceL4Forwards: (serviceId) =>
+    request(`/services/${serviceId}/l4-forwards`),
+  createServiceL4Forward: (serviceId, forward) =>
+    request(`/services/${serviceId}/l4-forwards`, {
+      method: 'POST',
+      body: JSON.stringify(forward),
+    }),
+  deleteServiceL4Forward: (serviceId, forwardId) =>
+    request(`/services/${serviceId}/l4-forwards/${forwardId}`, {
+      method: 'DELETE',
+    }),
+
+  // Phase 2c: detected-ports cache + rescan trigger. The cache read
+  // is cheap; rescan walks /proc/net inside the LXC, optionally
+  // gating on `docker compose ps healthy` first.
+  getDetectedPorts: (serviceId) =>
+    request(`/services/${serviceId}/detected-ports`),
+  rescanDetectedPorts: (serviceId) =>
+    request(`/services/${serviceId}/detected-ports/rescan`, {
+      method: 'POST',
+    }),
+
   // Phase 2b G.3: refresh the cached LXC container IP for a service.
   // Re-queries Incus, updates services.target_ip if changed, and
   // regenerates the merged Caddy config for every affected domain.

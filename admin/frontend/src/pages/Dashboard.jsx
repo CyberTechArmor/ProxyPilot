@@ -3,6 +3,7 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
 import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
+import ServiceL4AndPorts from '@/components/ServiceL4AndPorts';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -2801,7 +2802,9 @@ volumes:
   };
 
   // Begin inline edit on an existing route row. Seeds the draft form
-  // with the row's current values.
+  // with the row's current values. Phase 2c per-route knobs
+  // (stripPrefix / r-w timeouts / hostHeaderOverride) round-trip
+  // through the form so existing rows keep their behavior on save.
   const beginEditSettingsRoute = (route) => {
     setEditingRouteId(route.id);
     setEditingRouteDraft({
@@ -2812,6 +2815,19 @@ volumes:
       forceHttps: route.forceHttps !== false,
       websocketEnabled: !!route.websocketEnabled,
       maxUploadSize: route.maxUploadSize || '1G',
+      stripPrefix:
+        route.stripPrefix == null
+          ? (route.pathPrefix && route.pathPrefix !== '/')
+          : !!route.stripPrefix,
+      readTimeoutSeconds:
+        route.readTimeoutSeconds != null
+          ? String(route.readTimeoutSeconds)
+          : '',
+      writeTimeoutSeconds:
+        route.writeTimeoutSeconds != null
+          ? String(route.writeTimeoutSeconds)
+          : '',
+      hostHeaderOverride: route.hostHeaderOverride || '',
     });
   };
 
@@ -2827,6 +2843,14 @@ volumes:
       forceHttps: true,
       websocketEnabled: false,
       maxUploadSize: '1G',
+      // New routes default stripPrefix to "follow path_prefix"
+      // semantics: strip when there's an explicit prefix, leave
+      // alone when matching at root. Operator can flip in the
+      // editor for fan-out workloads (MEET-style).
+      stripPrefix: false,
+      readTimeoutSeconds: '',
+      writeTimeoutSeconds: '',
+      hostHeaderOverride: '',
     });
   };
 
@@ -2851,6 +2875,19 @@ volumes:
         forceHttps: !!editingRouteDraft.forceHttps,
         websocketEnabled: !!editingRouteDraft.websocketEnabled,
         maxUploadSize: editingRouteDraft.maxUploadSize || '1G',
+        // Phase 2c knobs. stripPrefix is sent explicitly so the
+        // backend stores the operator's choice rather than re-deriving
+        // it from path_prefix on every read.
+        stripPrefix: !!editingRouteDraft.stripPrefix,
+        readTimeoutSeconds: editingRouteDraft.readTimeoutSeconds
+          ? parseInt(editingRouteDraft.readTimeoutSeconds, 10)
+          : null,
+        writeTimeoutSeconds: editingRouteDraft.writeTimeoutSeconds
+          ? parseInt(editingRouteDraft.writeTimeoutSeconds, 10)
+          : null,
+        hostHeaderOverride: editingRouteDraft.hostHeaderOverride
+          ? editingRouteDraft.hostHeaderOverride
+          : null,
       };
       if (editingRouteId === 'new') {
         await api.createRoute(settingsService.id, body);
@@ -2874,6 +2911,106 @@ volumes:
     } finally {
       setSavingRoute(false);
     }
+  };
+
+  // Phase 2c: per-route advanced knobs (strip-prefix toggle, WS r/w
+  // timeouts, host-header override). Returns a JSX fragment so both
+  // the inline-edit form and the new-row form can drop it in one
+  // place. Reads from `editingRouteDraft` and writes back via
+  // `setEditingRouteDraft({ ...editingRouteDraft, ... })`, so the
+  // existing form lifecycle (cancel/save/loading) is unchanged.
+  const renderRouteAdvancedKnobs = (idPrefix) => {
+    if (!editingRouteDraft) return null;
+    return (
+      <>
+        <div className="flex items-center justify-between">
+          <div>
+            <Label className="text-xs">Strip path prefix</Label>
+            <div className="text-xs text-muted-foreground">
+              {editingRouteDraft.stripPrefix
+                ? 'handle_path: prefix removed before forwarding'
+                : 'handle: prefix kept on forwarded request'}
+            </div>
+          </div>
+          <Switch
+            checked={!!editingRouteDraft.stripPrefix}
+            onCheckedChange={(checked) =>
+              setEditingRouteDraft({ ...editingRouteDraft, stripPrefix: checked })
+            }
+          />
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <Label className="text-xs">WebSocket / streaming</Label>
+            <div className="text-xs text-muted-foreground">
+              Disables response buffering; default timeouts bumped to 24h.
+            </div>
+          </div>
+          <Switch
+            checked={!!editingRouteDraft.websocketEnabled}
+            onCheckedChange={(checked) =>
+              setEditingRouteDraft({ ...editingRouteDraft, websocketEnabled: checked })
+            }
+          />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <Label htmlFor={`${idPrefix}-rt`} className="text-xs">
+              Read timeout (s)
+            </Label>
+            <Input
+              id={`${idPrefix}-rt`}
+              type="number"
+              min="1"
+              max="86400"
+              value={editingRouteDraft.readTimeoutSeconds || ''}
+              onChange={(e) =>
+                setEditingRouteDraft({
+                  ...editingRouteDraft,
+                  readTimeoutSeconds: e.target.value,
+                })
+              }
+              placeholder={editingRouteDraft.websocketEnabled ? '86400' : '60'}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor={`${idPrefix}-wt`} className="text-xs">
+              Write timeout (s)
+            </Label>
+            <Input
+              id={`${idPrefix}-wt`}
+              type="number"
+              min="1"
+              max="86400"
+              value={editingRouteDraft.writeTimeoutSeconds || ''}
+              onChange={(e) =>
+                setEditingRouteDraft({
+                  ...editingRouteDraft,
+                  writeTimeoutSeconds: e.target.value,
+                })
+              }
+              placeholder={editingRouteDraft.websocketEnabled ? '86400' : '60'}
+            />
+          </div>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor={`${idPrefix}-host`} className="text-xs">
+            Host header override
+          </Label>
+          <Input
+            id={`${idPrefix}-host`}
+            value={editingRouteDraft.hostHeaderOverride || ''}
+            onChange={(e) =>
+              setEditingRouteDraft({
+                ...editingRouteDraft,
+                hostHeaderOverride: e.target.value,
+              })
+            }
+            placeholder="(pass through)"
+          />
+        </div>
+      </>
+    );
   };
 
   // Delete a route inline from the card. No TOTP dialog — routes are
@@ -6266,6 +6403,7 @@ volumes:
                           }
                         />
                       </div>
+                      {renderRouteAdvancedKnobs(`sr-edit-${route.id}`)}
                       <div className="flex gap-2 justify-end">
                         <Button
                           type="button"
@@ -6391,6 +6529,7 @@ volumes:
                       }
                     />
                   </div>
+                  {renderRouteAdvancedKnobs('sr-new')}
                   <div className="flex gap-2 justify-end">
                     <Button
                       type="button"
@@ -6632,6 +6771,32 @@ volumes:
                   </div>
                 ))}
               </div>
+            )}
+            {settingsService?.lxcContainerName && (
+              <ServiceL4AndPorts
+                service={settingsService}
+                api={api}
+                toast={toast}
+                onCoverHttp={(seed) => {
+                  // Pre-fill the route-add form with the chip's port so
+                  // the operator just types the domain. Defaults match
+                  // the new-route helper above.
+                  setEditingRouteId('new');
+                  setEditingRouteDraft({
+                    domain: '',
+                    pathPrefix: '/',
+                    targetPort: String(seed.port),
+                    sslEnabled: true,
+                    forceHttps: true,
+                    websocketEnabled: false,
+                    maxUploadSize: '1G',
+                    stripPrefix: false,
+                    readTimeoutSeconds: '',
+                    writeTimeoutSeconds: '',
+                    hostHeaderOverride: '',
+                  });
+                }}
+              />
             )}
             <DialogFooter>
               <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>Close</Button>

@@ -581,6 +581,11 @@ export const api = {
   // LXC Container Services (Caddy reverse proxy mappings)
   getLxcServices: (name) => request(`/lxc/containers/${name}/services`),
 
+  // Phase 2c: TCP + UDP ports the LXC is currently listening on.
+  // Backs the container-detail panel's exposed-ports chip row and
+  // the port-input typeahead in the "add service" form.
+  getLxcListeningPorts: (name) => request(`/lxc/containers/${name}/listening-ports`),
+
   addLxcService: (name, service) => request(`/lxc/containers/${name}/services`, {
     method: 'POST',
     body: JSON.stringify(service),

@@ -596,9 +596,17 @@ export const api = {
     body: JSON.stringify(service),
   }),
 
-  deleteLxcService: (name, domain) => request(`/lxc/containers/${name}/services/${encodeURIComponent(domain)}`, {
-    method: 'DELETE',
-  }),
+  // Phase 2c: when the service entry came from the routes table
+  // (source='db'), pass the route id so the backend can target
+  // the row + regenerate the merged Caddyfile. Legacy file-only
+  // entries (source='file') leave routeId undefined and the
+  // backend falls back to the per-domain unlink.
+  deleteLxcService: (name, domain, routeId) => {
+    const qs = routeId ? `?routeId=${encodeURIComponent(routeId)}` : '';
+    return request(`/lxc/containers/${name}/services/${encodeURIComponent(domain)}${qs}`, {
+      method: 'DELETE',
+    });
+  },
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 

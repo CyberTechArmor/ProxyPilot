@@ -33,6 +33,11 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
   const wsRef = useRef(null);
   const [status, setStatus] = useState('connecting');
   const [errorText, setErrorText] = useState('');
+  // Bumping reconnectNonce re-runs the WebSocket-creation effect,
+  // which tears down the dead socket + xterm and reopens. Letting
+  // the effect own the lifecycle keeps the cleanup path
+  // single-source-of-truth — no extra reconnect helper needed.
+  const [reconnectNonce, setReconnectNonce] = useState(0);
 
   // Imperative handle: parent can call .sendInput(text) to push bytes
   // into the PTY (e.g. a "Run install script" button). Returns true
@@ -55,6 +60,11 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
 
   useEffect(() => {
     if (!containerRef.current || !wsPath) return undefined;
+    // Reset transient banner state at the top of each (re)connect so
+    // the banner doesn't briefly show stale "WebSocket closed" text
+    // when the operator clicks Reconnect.
+    setStatus('connecting');
+    setErrorText('');
 
     const term = new Terminal({
       cursorBlink: true,
@@ -165,11 +175,14 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
       fitRef.current = null;
       wsRef.current = null;
     };
-  }, [wsPath, initialCwd]);
+  }, [wsPath, initialCwd, reconnectNonce]);
+
+  const isDisconnected = status === 'closed' || status === 'idle-closed' || status === 'error';
+  const onReconnect = isDisconnected ? () => setReconnectNonce((n) => n + 1) : null;
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
-      <StatusBanner status={status} errorText={errorText} />
+      <StatusBanner status={status} errorText={errorText} onReconnect={onReconnect} />
       {/* Padding wrapper, so xterm's parent reports an unpadded
           clientHeight to FitAddon. With padding on the same element
           that holds the xterm, the fit calc rounds rows up and the
@@ -181,7 +194,7 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
   );
 });
 
-function StatusBanner({ status, errorText }) {
+function StatusBanner({ status, errorText, onReconnect }) {
   const map = {
     connecting: { label: 'Connecting…', cls: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
     connected: { label: 'Connected', cls: 'bg-green-500/15 text-green-400 border-green-500/30' },
@@ -191,9 +204,19 @@ function StatusBanner({ status, errorText }) {
   };
   const info = map[status] || map.closed;
   return (
-    <div className={`text-[11px] font-mono px-2 py-1 border rounded-t-lg ${info.cls}`}>
+    <div className={`flex items-center text-[11px] font-mono px-2 py-1 border rounded-t-lg ${info.cls}`}>
       <span>{info.label}</span>
       {errorText ? <span className="ml-2 opacity-80">— {errorText}</span> : null}
+      {onReconnect && (
+        <button
+          type="button"
+          onClick={onReconnect}
+          className="ml-auto px-2 py-0.5 text-[11px] font-mono rounded border border-current/40 hover:bg-current/10 cursor-pointer"
+          title="Re-establish the WebSocket connection"
+        >
+          Reconnect
+        </button>
+      )}
     </div>
   );
 }

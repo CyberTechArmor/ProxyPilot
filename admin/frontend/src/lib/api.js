@@ -591,10 +591,17 @@ export const api = {
     body: JSON.stringify(service),
   }),
 
-  updateLxcService: (name, oldDomain, service) => request(`/lxc/containers/${name}/services/${encodeURIComponent(oldDomain)}`, {
-    method: 'PUT',
-    body: JSON.stringify(service),
-  }),
+  // Phase 2c: pass routeId for db-source rows so the backend
+  // updates the matching service_http_routes row instead of
+  // operating on the legacy per-domain Caddyfile (which it can't
+  // disambiguate when multiple paths share a domain).
+  updateLxcService: (name, oldDomain, service, routeId) => {
+    const qs = routeId ? `?routeId=${encodeURIComponent(routeId)}` : '';
+    return request(`/lxc/containers/${name}/services/${encodeURIComponent(oldDomain)}${qs}`, {
+      method: 'PUT',
+      body: JSON.stringify(service),
+    });
+  },
 
   // Phase 2c: when the service entry came from the routes table
   // (source='db'), pass the route id so the backend can target

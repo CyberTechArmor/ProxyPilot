@@ -1313,40 +1313,14 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
     // We tag each entry with `source: 'file' | 'db'` so the
     // frontend can route edits / deletes back to the right pipeline.
     const services = [];
-    try {
-      const files = await readdir(CADDY_SITES_DIR);
-      for (const file of files) {
-        const filePath = join(CADDY_SITES_DIR, file);
-        const content = await readFile(filePath, 'utf-8');
-        if (content.includes(ip)) {
-          const domainMatch = content.match(/^(\S+)\s*\{/m);
-          const upstreamMatch = content.match(/reverse_proxy\s+([\d.]+):(\d+)/);
-          const hasTlsInternal = content.includes('tls internal');
-          const healthMatch = content.match(/^#\s*proxypilot:\s*healthpath=(\S+)/m);
-          const healthPath = healthMatch
-            ? (validateHealthPath(healthMatch[1]).ok ? healthMatch[1] : null)
-            : null;
-          if (domainMatch) {
-            services.push({
-              domain: domainMatch[1],
-              pathPrefix: '/',
-              port: upstreamMatch ? parseInt(upstreamMatch[2], 10) : null,
-              upstreamIp: upstreamMatch ? upstreamMatch[1] : null,
-              obtainCert: !hasTlsInternal,
-              healthPath,
-              source: 'file',
-            });
-          }
-        }
-      }
-    } catch {
-      // CADDY_SITES_DIR may not exist yet
-    }
 
-    // Phase 2c: pull routes from the DB. We key on lxc_container_name
-    // (the LXC quick-add owns one service per LXC) so a different
-    // dashboard-managed service that happens to point at the same IP
-    // doesn't bleed into this list.
+    // Pull routes from the DB FIRST so the file-scan can dedupe
+    // against the set of domains already managed by the routes
+    // pipeline. We key on lxc_container_name (the LXC quick-add
+    // owns one service per LXC) so a different dashboard-managed
+    // service that happens to point at the same IP doesn't bleed
+    // into this list.
+    const dbDomains = new Set();
     try {
       const db = getDb();
       const dbRoutes = db
@@ -1361,6 +1335,7 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
         )
         .all(name);
       for (const r of dbRoutes) {
+        dbDomains.add(r.domain);
         services.push({
           id: r.route_id,
           serviceId: r.service_id,
@@ -1377,6 +1352,48 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       }
     } catch (e) {
       console.warn('[LXC] DB routes fetch failed:', e?.message || e);
+    }
+
+    // Now scan the per-domain Caddy files. Skip any file whose
+    // domain is already covered by the routes table — a merged
+    // multi-route Caddyfile (written by the routes pipeline)
+    // contains multiple `reverse_proxy` lines, and the regex below
+    // grabs only the FIRST, which would surface a phantom legacy
+    // entry pointing at whichever upstream happens to sort first.
+    // The routes-table view is authoritative for any domain it
+    // owns; only legacy single-route domains belong in the file
+    // scan.
+    try {
+      const files = await readdir(CADDY_SITES_DIR);
+      for (const file of files) {
+        const filePath = join(CADDY_SITES_DIR, file);
+        const content = await readFile(filePath, 'utf-8');
+        if (!content.includes(ip)) continue;
+        const domainMatch = content.match(/^(\S+)\s*\{/m);
+        if (!domainMatch) continue;
+        // Strip optional `http://` / `https://` prefix from the site
+        // address so the dedupe set lookup matches the bare domain
+        // the routes table stores.
+        const fileDomain = domainMatch[1].replace(/^https?:\/\//, '');
+        if (dbDomains.has(fileDomain)) continue;
+        const upstreamMatch = content.match(/reverse_proxy\s+([\d.]+):(\d+)/);
+        const hasTlsInternal = content.includes('tls internal');
+        const healthMatch = content.match(/^#\s*proxypilot:\s*healthpath=(\S+)/m);
+        const healthPath = healthMatch
+          ? (validateHealthPath(healthMatch[1]).ok ? healthMatch[1] : null)
+          : null;
+        services.push({
+          domain: fileDomain,
+          pathPrefix: '/',
+          port: upstreamMatch ? parseInt(upstreamMatch[2], 10) : null,
+          upstreamIp: upstreamMatch ? upstreamMatch[1] : null,
+          obtainCert: !hasTlsInternal,
+          healthPath,
+          source: 'file',
+        });
+      }
+    } catch {
+      // CADDY_SITES_DIR may not exist yet
     }
 
     // Probe each upstream in parallel so a slow/unreachable host doesn't

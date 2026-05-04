@@ -61,7 +61,10 @@ export function getDb() {
 //   6   M  — sessions table (revocable JWT jti, sliding last_used_at, sudo_until)
 //   7   J  — user lockout columns (failed_attempts, last_failed_at, locked_until)
 //   8   N  — webauthn_credentials table + users.webauthn_user_handle
-//   100 reserved start of Phase 2c migrations (port forwards)
+//   100 Phase 2c — per-route knobs on service_http_routes (strip_prefix,
+//                  read/write timeouts, max_body_bytes, host_header_override)
+//   101 Phase 2c — service_l4_forwards (Incus proxy device emission target)
+//   102 Phase 2c — service_detected_ports (cache for the always-visible chip row)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -559,6 +562,135 @@ export function initDatabase() {
     if (!cols.includes('webauthn_user_handle')) {
       d.exec(`ALTER TABLE users ADD COLUMN webauthn_user_handle BLOB`);
     }
+  });
+
+  // Version 100: Phase 2c — per-route knobs needed for fan-out workloads
+  // (Jitsi-style stacks, LiveKit, anything with a WebSocket leg or a
+  // body-size-sensitive upload endpoint). The existing service_http_routes
+  // table only carried a coarse `websocket_enabled` flag and a string
+  // `max_upload_size`; this migration adds the per-route fields the Caddy
+  // emitter now needs to render `transport http { read_timeout 24h … }`,
+  // `flush_interval -1`, `handle` vs `handle_path`, and explicit
+  // `header_up Host` overrides without leaking any of those decisions
+  // into the per-domain merge step.
+  //
+  // Additive only. Existing rows keep behaving as before:
+  //   - strip_prefix defaults to 0; the renderer falls back to its
+  //     pre-100 behavior (treat path_prefix != '/' as strip) when the
+  //     column is 0 AND there is no path_prefix-strip override at the
+  //     write path. The new write paths (Phase 5) set strip_prefix
+  //     explicitly so future rows are unambiguous.
+  //   - read/write timeout and max_body_bytes default NULL; renderer
+  //     uses Caddy defaults when NULL, escalating to 24h timeouts only
+  //     when websocket_enabled = 1 (preserves single-domain MEET
+  //     semantics without forcing every WS route to spell out timeouts).
+  //   - host_header_override defaults NULL; renderer omits the
+  //     header_up directive entirely, matching today's pass-through.
+  runMigration(db, 100, 'phase2c_route_extra_columns', (d) => {
+    const cols = d
+      .prepare(`PRAGMA table_info(service_http_routes)`)
+      .all()
+      .map((c) => c.name);
+    if (!cols.includes('strip_prefix')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN strip_prefix INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!cols.includes('read_timeout_seconds')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN read_timeout_seconds INTEGER`);
+    }
+    if (!cols.includes('write_timeout_seconds')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN write_timeout_seconds INTEGER`);
+    }
+    if (!cols.includes('max_body_bytes')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN max_body_bytes INTEGER`);
+    }
+    if (!cols.includes('host_header_override')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN host_header_override TEXT`);
+    }
+  });
+
+  // Version 101: Phase 2c — service_l4_forwards table. Captures the
+  // raw L4 (UDP / TCP) ports that have to bypass Caddy entirely:
+  // WebRTC media (udp/50000-60000), TCP fallbacks, anything Caddy
+  // can't reverse-proxy. One row per forward; the reconciler emits
+  // one Incus proxy device per row (named `ppl4-<id>` so the cleanup
+  // pass can identify ProxyPilot-managed devices by prefix) plus a
+  // paired firewall_rules entry with source='service-l4'.
+  //
+  // The bridge IP is intentionally NOT stored here — it always comes
+  // from services.target_ip so a container-IP change updates every
+  // forward in one place. Storing connect_ip would create a drift
+  // surface where the row's IP and the service's IP can disagree.
+  //
+  // listen_port_end / connect_port_end are NULL for single-port
+  // forwards. When set, the range must be the same width on both
+  // sides; the write endpoint validates this so the schema doesn't
+  // need a CHECK that would block table rebuilds.
+  //
+  // UNIQUE(proto, listen_port, listen_port_end) prevents two services
+  // from claiming the same host edge port — the operator gets a
+  // clear conflict at create time instead of a silent reconcile race.
+  runMigration(db, 101, 'phase2c_service_l4_forwards', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS service_l4_forwards (
+        id TEXT PRIMARY KEY,
+        service_id TEXT NOT NULL,
+        proto TEXT NOT NULL CHECK (proto IN ('tcp', 'udp')),
+        listen_port INTEGER NOT NULL,
+        listen_port_end INTEGER,
+        connect_port INTEGER NOT NULL,
+        connect_port_end INTEGER,
+        description TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+        UNIQUE(proto, listen_port, listen_port_end)
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_service_l4_forwards_service
+      ON service_l4_forwards(service_id)
+    `);
+  });
+
+  // Version 102: Phase 2c — service_detected_ports cache. The
+  // detector (Phase 3) writes the last-known set of ports the
+  // service is actually listening on; the service detail panel
+  // reads from here so the always-visible chip row doesn't re-probe
+  // the LXC on every page load.
+  //
+  // `port_end` is set when the detector collapses ≥ 8 contiguous
+  // ports of the same proto into a single range chip. The Caddy
+  // can't-reverse-proxy-a-range constraint is enforced at the UI
+  // layer (range chips disable the "Add as HTTP route" action).
+  //
+  // `source` distinguishes scan origin: 'proc_net' for direct
+  // /proc/net/{tcp,udp} reads, 'docker_compose' for ports declared
+  // in a compose file inside the LXC, 'declared' for operator-
+  // entered metadata. The detector picks the most authoritative
+  // source per (proto, port) and writes one row.
+  //
+  // UNIQUE(service_id, proto, port, port_end) lets the rescan
+  // reconciler do a delete-then-insert per (service, source) batch
+  // without producing duplicate chips. detected_at is a wall-clock
+  // ISO timestamp so the UI can show "last scan: 14:02".
+  runMigration(db, 102, 'phase2c_service_detected_ports', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS service_detected_ports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT NOT NULL,
+        proto TEXT NOT NULL CHECK (proto IN ('tcp', 'udp')),
+        port INTEGER NOT NULL,
+        port_end INTEGER,
+        source TEXT NOT NULL CHECK (source IN ('proc_net', 'docker_compose', 'declared')),
+        detected_at TEXT NOT NULL,
+        FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+        UNIQUE(service_id, proto, port, port_end)
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_service_detected_ports_service
+      ON service_detected_ports(service_id)
+    `);
   });
 
   // Create file versions table for version control

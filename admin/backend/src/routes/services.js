@@ -13,6 +13,12 @@ import { decryptSecret } from '../lib/secrets.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { detectServicePorts } from '../lib/port-detector.js';
+import {
+  reconcileServiceL4Forwards,
+  removeServiceL4Plan,
+} from '../lib/l4-reconciler.js';
+import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
 
@@ -2664,6 +2670,26 @@ const createRouteSchema = z.object({
     .string()
     .regex(/^[1-9][0-9]*[MG]$/i)
     .default('1G'),
+  // Phase 2c per-route knobs (migration 100). All optional; defaults
+  // chosen to preserve pre-2c behavior:
+  //   - stripPrefix defaults to (pathPrefix !== '/') so legacy callers
+  //     keep their handle_path semantics. Modern callers should set
+  //     this explicitly per route.
+  //   - read/write timeouts default null → renderer uses Caddy default
+  //     (60s) for plain HTTP, 24h when websocketEnabled = 1.
+  //   - maxBodyBytes is an integer override over the string
+  //     maxUploadSize; either is accepted, the renderer takes the max.
+  //   - hostHeaderOverride defaults null → no `header_up Host` emitted.
+  stripPrefix: z.boolean().optional(),
+  readTimeoutSeconds: z.number().int().min(1).max(86400).nullable().optional(),
+  writeTimeoutSeconds: z.number().int().min(1).max(86400).nullable().optional(),
+  maxBodyBytes: z.number().int().min(1).nullable().optional(),
+  hostHeaderOverride: z
+    .string()
+    .max(253)
+    .regex(/^[A-Za-z0-9._-]+(:[0-9]{1,5})?$/, 'Host header must be a hostname[:port]')
+    .nullable()
+    .optional(),
 });
 
 // List routes for a service.
@@ -2684,7 +2710,9 @@ servicesRouter.get('/:id/routes', (req, res) => {
       .prepare(
         `SELECT id, service_id, domain, path_prefix, target_port,
                 websocket_enabled, ssl_enabled, force_https,
-                max_upload_size, created_at
+                max_upload_size, strip_prefix, read_timeout_seconds,
+                write_timeout_seconds, max_body_bytes, host_header_override,
+                created_at
            FROM service_http_routes
           WHERE service_id = ?
           ORDER BY length(path_prefix) DESC, created_at ASC`
@@ -2701,6 +2729,11 @@ servicesRouter.get('/:id/routes', (req, res) => {
       sslEnabled: !!r.ssl_enabled,
       forceHttps: !!r.force_https,
       maxUploadSize: r.max_upload_size,
+      stripPrefix: r.strip_prefix == null ? null : !!r.strip_prefix,
+      readTimeoutSeconds: r.read_timeout_seconds ?? null,
+      writeTimeoutSeconds: r.write_timeout_seconds ?? null,
+      maxBodyBytes: r.max_body_bytes ?? null,
+      hostHeaderOverride: r.host_header_override ?? null,
       createdAt: r.created_at,
     }));
 
@@ -2811,13 +2844,23 @@ servicesRouter.post('/:id/routes', async (req, res) => {
       // Continue without a backup; rollback will unlink on failure.
     }
 
-    // (5) INSERT the route row.
+    // (5) INSERT the route row. Phase 2c columns (strip_prefix,
+    // r/w timeouts, max_body_bytes, host_header_override) get
+    // explicit values when the caller supplied them and fall back
+    // to NULL otherwise — the renderer treats NULL as "use the
+    // pre-2c default" so omitting them keeps the existing shape.
     const routeId = uuidv4();
+    const stripPrefixValue =
+      data.stripPrefix !== undefined
+        ? (data.stripPrefix ? 1 : 0)
+        : data.pathPrefix !== '/' ? 1 : 0;
     db.prepare(
       `INSERT INTO service_http_routes (
          id, service_id, domain, path_prefix, target_port,
-         websocket_enabled, ssl_enabled, force_https, max_upload_size
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         websocket_enabled, ssl_enabled, force_https, max_upload_size,
+         strip_prefix, read_timeout_seconds, write_timeout_seconds,
+         max_body_bytes, host_header_override
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       routeId,
       req.params.id,
@@ -2827,7 +2870,12 @@ servicesRouter.post('/:id/routes', async (req, res) => {
       data.websocketEnabled ? 1 : 0,
       data.sslEnabled ? 1 : 0,
       data.forceHttps ? 1 : 0,
-      data.maxUploadSize
+      data.maxUploadSize,
+      stripPrefixValue,
+      data.readTimeoutSeconds ?? null,
+      data.writeTimeoutSeconds ?? null,
+      data.maxBodyBytes ?? null,
+      data.hostHeaderOverride ?? null
     );
 
     // Rollback helper: delete the inserted row + restore the merged file.
@@ -2912,6 +2960,11 @@ servicesRouter.post('/:id/routes', async (req, res) => {
         sslEnabled: data.sslEnabled,
         forceHttps: data.forceHttps,
         maxUploadSize: data.maxUploadSize,
+        stripPrefix: !!stripPrefixValue,
+        readTimeoutSeconds: data.readTimeoutSeconds ?? null,
+        writeTimeoutSeconds: data.writeTimeoutSeconds ?? null,
+        maxBodyBytes: data.maxBodyBytes ?? null,
+        hostHeaderOverride: data.hostHeaderOverride ?? null,
       },
     });
   } catch (error) {
@@ -2983,6 +3036,32 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
         data.maxUploadSize !== undefined
           ? data.maxUploadSize
           : route.max_upload_size,
+      // Phase 2c knobs. stripPrefix has the back-compat fallback in
+      // the renderer, so a NULL on disk means "follow path_prefix".
+      // Forward NULL through verbatim when unset so the renderer
+      // semantics stay consistent across update paths.
+      stripPrefix:
+        data.stripPrefix !== undefined
+          ? data.stripPrefix
+          : route.strip_prefix == null
+          ? null
+          : !!route.strip_prefix,
+      readTimeoutSeconds:
+        data.readTimeoutSeconds !== undefined
+          ? data.readTimeoutSeconds
+          : route.read_timeout_seconds ?? null,
+      writeTimeoutSeconds:
+        data.writeTimeoutSeconds !== undefined
+          ? data.writeTimeoutSeconds
+          : route.write_timeout_seconds ?? null,
+      maxBodyBytes:
+        data.maxBodyBytes !== undefined
+          ? data.maxBodyBytes
+          : route.max_body_bytes ?? null,
+      hostHeaderOverride:
+        data.hostHeaderOverride !== undefined
+          ? data.hostHeaderOverride
+          : route.host_header_override ?? null,
     };
 
     const oldDomain = route.domain;
@@ -3085,6 +3164,12 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
     const preUpdateRow = { ...route };
 
     // (4) UPDATE the row.
+    const stripPrefixUpdated =
+      updated.stripPrefix === null
+        ? (updated.pathPrefix !== '/' ? 1 : 0)
+        : updated.stripPrefix
+        ? 1
+        : 0;
     db.prepare(
       `UPDATE service_http_routes SET
          domain = ?,
@@ -3093,7 +3178,12 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
          websocket_enabled = ?,
          ssl_enabled = ?,
          force_https = ?,
-         max_upload_size = ?
+         max_upload_size = ?,
+         strip_prefix = ?,
+         read_timeout_seconds = ?,
+         write_timeout_seconds = ?,
+         max_body_bytes = ?,
+         host_header_override = ?
        WHERE id = ?`
     ).run(
       updated.domain,
@@ -3103,6 +3193,11 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
       updated.sslEnabled ? 1 : 0,
       updated.forceHttps ? 1 : 0,
       updated.maxUploadSize,
+      stripPrefixUpdated,
+      updated.readTimeoutSeconds ?? null,
+      updated.writeTimeoutSeconds ?? null,
+      updated.maxBodyBytes ?? null,
+      updated.hostHeaderOverride ?? null,
       req.params.routeId
     );
 
@@ -3116,7 +3211,12 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
              websocket_enabled = ?,
              ssl_enabled = ?,
              force_https = ?,
-             max_upload_size = ?
+             max_upload_size = ?,
+             strip_prefix = ?,
+             read_timeout_seconds = ?,
+             write_timeout_seconds = ?,
+             max_body_bytes = ?,
+             host_header_override = ?
            WHERE id = ?`
         ).run(
           preUpdateRow.domain,
@@ -3126,6 +3226,11 @@ servicesRouter.put('/:id/routes/:routeId', async (req, res) => {
           preUpdateRow.ssl_enabled,
           preUpdateRow.force_https,
           preUpdateRow.max_upload_size,
+          preUpdateRow.strip_prefix ?? 0,
+          preUpdateRow.read_timeout_seconds ?? null,
+          preUpdateRow.write_timeout_seconds ?? null,
+          preUpdateRow.max_body_bytes ?? null,
+          preUpdateRow.host_header_override ?? null,
           req.params.routeId
         );
       } catch (e) {
@@ -6301,6 +6406,339 @@ export function assertSiblingsMatchStance(
 // (DB reconciliation) or `buildDomainCaddyConfig` (pure in-memory builder).
 // A single domain can host multiple services on distinct path prefixes, so
 // every Caddy write now goes through the merged-config path.
+
+// ─── Phase 2c: L4 forwards + detected-ports endpoints ─────────────────
+//
+// These endpoints back the new service-detail panel: list / create /
+// delete L4 forwards, rescan listening ports inside an LXC, and a
+// single GET that joins everything (service row, HTTP routes, L4
+// forwards, cached detected ports, last compose-ps state) so the UI
+// can render in one round trip.
+//
+// All endpoints are scoped under `/services/:id/...` so authorization
+// inherits the existing per-service ACL middleware. The l4 endpoints
+// invoke the host-side reconciler directly (Incus device + paired
+// firewall rule) so the row never lives in the DB without its
+// host-side state.
+
+// Helper: load a service row + its bridge IP (resolved from Incus at
+// call time, not cached, because container restarts hand out new IPs).
+// Returns null when the service doesn't exist or has no LXC bound.
+async function loadServiceForL4(db, serviceId) {
+  const svc = db
+    .prepare(`SELECT * FROM services WHERE id = ?`)
+    .get(serviceId);
+  if (!svc) return null;
+  if (!svc.lxc_container_name) {
+    return { service: svc, bridgeIp: null, incusName: null };
+  }
+  const incusName = `pp-${svc.lxc_container_name}`;
+  let bridgeIp = svc.target_ip || null;
+  if (!bridgeIp) {
+    try {
+      const r = await execOnHostLocal(
+        `incus list ${shellSingleQuote(incusName)} --format json`,
+        { timeout: 5000 }
+      );
+      const list = JSON.parse(r.stdout || '[]');
+      if (list[0]) {
+        const v4 = (list[0].state?.network || {});
+        for (const iface of Object.values(v4)) {
+          for (const addr of (iface.addresses || [])) {
+            if (addr.family === 'inet' && addr.scope === 'global') {
+              bridgeIp = addr.address;
+              break;
+            }
+          }
+          if (bridgeIp) break;
+        }
+      }
+    } catch {
+      bridgeIp = null;
+    }
+  }
+  return { service: svc, bridgeIp, incusName };
+}
+
+// Tiny local copy of the existing execOnHost pattern from this file's
+// other endpoints. Kept inline so the L4/detect endpoints don't need
+// the cli/services Caddy code path to gate their introspection calls.
+const isInDockerL4 = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
+async function execOnHostLocal(cmd, { timeout = 15_000 } = {}) {
+  if (isInDockerL4) {
+    return execAsync(`nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(cmd)}`, { timeout });
+  }
+  return execAsync(cmd, { timeout });
+}
+
+// Schema for L4 forward create / update.
+const l4ForwardSchema = z.object({
+  proto: z.enum(['tcp', 'udp']),
+  listenPort: z.number().int().min(1).max(65535),
+  listenPortEnd: z.number().int().min(1).max(65535).nullable().optional(),
+  connectPort: z.number().int().min(1).max(65535),
+  connectPortEnd: z.number().int().min(1).max(65535).nullable().optional(),
+  description: z.string().max(255).nullable().optional(),
+  enabled: z.boolean().optional(),
+}).refine(
+  (v) => {
+    // Range width must match. listen 50000-60000 must connect to a
+    // 10001-port range — Incus enforces this too but a 400 here is a
+    // friendlier error than a generic reconciler failure.
+    const lw = (v.listenPortEnd ?? v.listenPort) - v.listenPort;
+    const cw = (v.connectPortEnd ?? v.connectPort) - v.connectPort;
+    return lw === cw && lw >= 0;
+  },
+  { message: 'listen and connect port ranges must be the same width' }
+);
+
+// GET /services/:id/l4-forwards — list rows for a service.
+servicesRouter.get('/:id/l4-forwards', (req, res) => {
+  try {
+    const db = getDb();
+    const svc = db.prepare(`SELECT id FROM services WHERE id = ?`).get(req.params.id);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const rows = db
+      .prepare(
+        `SELECT id, service_id, proto, listen_port, listen_port_end,
+                connect_port, connect_port_end, description, enabled, created_at
+           FROM service_l4_forwards
+          WHERE service_id = ?
+          ORDER BY proto, listen_port`
+      )
+      .all(req.params.id);
+    res.json({
+      forwards: rows.map((r) => ({
+        id: r.id,
+        serviceId: r.service_id,
+        proto: r.proto,
+        listenPort: r.listen_port,
+        listenPortEnd: r.listen_port_end,
+        connectPort: r.connect_port,
+        connectPortEnd: r.connect_port_end,
+        description: r.description,
+        enabled: !!r.enabled,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (e) {
+    console.error('Error listing L4 forwards:', e);
+    res.status(500).json({ error: 'Failed to list L4 forwards' });
+  }
+});
+
+// POST /services/:id/l4-forwards — create + reconcile.
+servicesRouter.post('/:id/l4-forwards', async (req, res) => {
+  let data;
+  try {
+    data = l4ForwardSchema.parse(req.body || {});
+  } catch (e) {
+    if (e instanceof z.ZodError) return res.status(400).json({ error: e.errors[0].message });
+    throw e;
+  }
+  try {
+    const db = getDb();
+    const ctx = await loadServiceForL4(db, req.params.id);
+    if (!ctx) return res.status(404).json({ error: 'Service not found' });
+    if (!ctx.service.lxc_container_name) {
+      return res.status(400).json({ error: 'L4 forwards require a service bound to an LXC' });
+    }
+    if (!ctx.bridgeIp) {
+      return res.status(400).json({
+        error: `LXC container "${ctx.service.lxc_container_name}" has no IPv4 address (is it running?)`,
+      });
+    }
+
+    const id = uuidv4();
+    try {
+      db.prepare(
+        `INSERT INTO service_l4_forwards
+           (id, service_id, proto, listen_port, listen_port_end,
+            connect_port, connect_port_end, description, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        req.params.id,
+        data.proto,
+        data.listenPort,
+        data.listenPortEnd ?? null,
+        data.connectPort,
+        data.connectPortEnd ?? null,
+        data.description ?? null,
+        data.enabled === false ? 0 : 1
+      );
+    } catch (e) {
+      if (e.message && /UNIQUE constraint/i.test(e.message)) {
+        return res.status(409).json({
+          error: `Another forward already binds ${data.proto}/${data.listenPort}${data.listenPortEnd ? '-' + data.listenPortEnd : ''}`,
+        });
+      }
+      throw e;
+    }
+
+    // Reconcile so the device + firewall row land before we respond.
+    let reconcileResult;
+    try {
+      reconcileResult = await reconcileServiceL4Forwards({
+        db,
+        serviceId: req.params.id,
+        lxcName: ctx.service.lxc_container_name,
+        bridgeIp: ctx.bridgeIp,
+        serviceTag: ctx.service.name || null,
+      });
+    } catch (e) {
+      // Roll back the DB row so an unreconcilable forward never lingers
+      // in the table — operator should see the failure now and retry,
+      // not discover orphan rows on the next list.
+      db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
+      return res.status(500).json({ error: `L4 reconcile failed: ${e.message}` });
+    }
+    const myOutcome = reconcileResult.applied.find((o) => o.id === id);
+    if (myOutcome && myOutcome.status === 'error') {
+      db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id);
+      return res.status(500).json({ error: `L4 apply failed: ${myOutcome.error}` });
+    }
+
+    logAudit(req.user.id, 'L4_FORWARD_CREATED', 'l4_forward', id, {
+      service_id: req.params.id,
+      proto: data.proto,
+      listen: data.listenPortEnd ? `${data.listenPort}-${data.listenPortEnd}` : data.listenPort,
+    }, req.ip);
+    res.status(201).json({
+      success: true,
+      forward: {
+        id,
+        serviceId: req.params.id,
+        proto: data.proto,
+        listenPort: data.listenPort,
+        listenPortEnd: data.listenPortEnd ?? null,
+        connectPort: data.connectPort,
+        connectPortEnd: data.connectPortEnd ?? null,
+        description: data.description ?? null,
+        enabled: data.enabled !== false,
+      },
+      reconcile: reconcileResult,
+    });
+  } catch (e) {
+    console.error('Error creating L4 forward:', e);
+    res.status(500).json({ error: 'Failed to create L4 forward' });
+  }
+});
+
+// DELETE /services/:id/l4-forwards/:forwardId — DB delete + reconcile
+// removes the device + firewall row.
+servicesRouter.delete('/:id/l4-forwards/:forwardId', async (req, res) => {
+  try {
+    const db = getDb();
+    const ctx = await loadServiceForL4(db, req.params.id);
+    if (!ctx) return res.status(404).json({ error: 'Service not found' });
+    const row = db
+      .prepare(`SELECT * FROM service_l4_forwards WHERE id = ? AND service_id = ?`)
+      .get(req.params.forwardId, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Forward not found' });
+
+    db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(req.params.forwardId);
+
+    // Reconcile so the orphan device + firewall row get cleaned up.
+    // If the LXC is missing/stopped we still want the DB delete to
+    // commit — the orphan walk in the reconciler is best-effort, the
+    // device cleanup itself is idempotent on next reconcile.
+    if (ctx.service.lxc_container_name && ctx.bridgeIp) {
+      try {
+        await reconcileServiceL4Forwards({
+          db,
+          serviceId: req.params.id,
+          lxcName: ctx.service.lxc_container_name,
+          bridgeIp: ctx.bridgeIp,
+          serviceTag: ctx.service.name || null,
+        });
+      } catch (e) {
+        // Don't fail the delete — log and let next reconcile sweep up.
+        console.warn('L4 reconcile after delete failed:', e.message);
+      }
+    } else if (ctx.service.lxc_container_name) {
+      // Container off — try a direct removal so nftables clears even
+      // if Incus isn't reachable to enumerate devices.
+      try {
+        await removeServiceL4Plan(
+          {
+            incusName: `pp-${ctx.service.lxc_container_name}`,
+            deviceName: `ppl4-${req.params.forwardId}`,
+            ruleId: `service-l4-${req.params.forwardId}`,
+          }
+        );
+      } catch (e) {
+        console.warn('Direct L4 removal failed:', e.message);
+      }
+    }
+
+    logAudit(req.user.id, 'L4_FORWARD_DELETED', 'l4_forward', req.params.forwardId, {
+      service_id: req.params.id,
+    }, req.ip);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Error deleting L4 forward:', e);
+    res.status(500).json({ error: 'Failed to delete L4 forward' });
+  }
+});
+
+// POST /services/:id/detected-ports/rescan — run the detector and
+// persist the result. Returns the raw detector envelope so the UI
+// can render the chip row + the docker-compose ps table without a
+// second round trip.
+servicesRouter.post('/:id/detected-ports/rescan', async (req, res) => {
+  try {
+    const db = getDb();
+    const svc = db.prepare(`SELECT * FROM services WHERE id = ?`).get(req.params.id);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!svc.lxc_container_name) {
+      return res.status(400).json({ error: 'Service is not bound to an LXC' });
+    }
+    const incusName = `pp-${svc.lxc_container_name}`;
+    const result = await detectServicePorts({
+      incusName,
+      execHost: execOnHostLocal,
+      db,
+      serviceId: req.params.id,
+    });
+    res.json({ success: true, ...result, scannedAt: new Date().toISOString() });
+  } catch (e) {
+    console.error('Error rescanning ports:', e);
+    res.status(500).json({ error: `Rescan failed: ${e.message}` });
+  }
+});
+
+// GET /services/:id/detected-ports — read the cache without rescanning.
+// The UI hits this on every panel load; rescan is opt-in via the
+// button, which keeps page load cheap.
+servicesRouter.get('/:id/detected-ports', (req, res) => {
+  try {
+    const db = getDb();
+    const svc = db.prepare(`SELECT id FROM services WHERE id = ?`).get(req.params.id);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const rows = db
+      .prepare(
+        `SELECT proto, port, port_end, source, detected_at
+           FROM service_detected_ports
+          WHERE service_id = ?
+          ORDER BY proto, port`
+      )
+      .all(req.params.id);
+    const lastScan = rows.reduce((acc, r) => (r.detected_at > acc ? r.detected_at : acc), '');
+    res.json({
+      ports: rows.map((r) => ({
+        proto: r.proto,
+        port: r.port,
+        portEnd: r.port_end,
+        source: r.source,
+      })),
+      scannedAt: lastScan || null,
+    });
+  } catch (e) {
+    console.error('Error reading detected ports:', e);
+    res.status(500).json({ error: 'Failed to read detected ports' });
+  }
+});
 
 // Named exports for the Phase 2 Caddy helpers. These are kept internal to
 // this module at the call-site level but exported so integration tests and

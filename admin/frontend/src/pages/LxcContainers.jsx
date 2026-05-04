@@ -877,13 +877,36 @@ export default function LxcContainers() {
     setMeetQuickAddSaving(true);
     try {
       const res = await api.quickAddMeet(selectedContainer.name, meetQuickAddDomain.trim());
+      // Phase 2c: response carries per-action counts so re-runs can
+      // report what was actually changed vs what was already in
+      // place. Shape after the idempotency fix:
+      //   routes:   { added, skipped, normalized }
+      //   forwards: { added, skipped }
+      const r = res?.routes;
+      const f = res?.forwards;
+      const summarize = () => {
+        // Backwards-compat: original endpoint returned plain numbers.
+        if (typeof r === 'number' && typeof f === 'number') {
+          return `${r} HTTP routes + ${f} L4 forwards on ${res.domain}.`;
+        }
+        const parts = [];
+        if (r) {
+          const bits = [`${r.added} added`];
+          if (r.skipped) bits.push(`${r.skipped} already correct`);
+          if (r.normalized) bits.push(`${r.normalized} fixed`);
+          parts.push(`routes: ${bits.join(', ')}`);
+        }
+        if (f) {
+          const bits = [`${f.added} added`];
+          if (f.skipped) bits.push(`${f.skipped} already correct`);
+          parts.push(`L4: ${bits.join(', ')}`);
+        }
+        return `${parts.join('; ')} on ${res.domain}.`;
+      };
       if (res?.warning) {
-        toast({ title: 'MEET added with warning', description: res.warning, variant: 'destructive' });
+        toast({ title: 'MEET installed with warning', description: res.warning, variant: 'destructive' });
       } else {
-        toast({
-          title: 'MEET added',
-          description: `${res.routes} HTTP routes + ${res.forwards} L4 forwards on ${res.domain}.`,
-        });
+        toast({ title: 'MEET installed', description: summarize() });
       }
       setMeetQuickAddOpen(false);
       setMeetQuickAddDomain('');

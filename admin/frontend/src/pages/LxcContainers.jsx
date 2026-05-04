@@ -354,6 +354,13 @@ export default function LxcContainers() {
   const [exposedPorts, setExposedPorts] = useState({ tcp: [], udp: [] });
   const [exposedPortsLoading, setExposedPortsLoading] = useState(false);
   const [exposedPortsScannedAt, setExposedPortsScannedAt] = useState(null);
+  // Phase 2c: MEET-preset quick-add. Modal opens with the domain
+  // input pre-empty; the operator fills it and confirms. Detection
+  // for whether to show the button at all is computed in render
+  // from `exposedPorts.tcp`.
+  const [meetQuickAddOpen, setMeetQuickAddOpen] = useState(false);
+  const [meetQuickAddDomain, setMeetQuickAddDomain] = useState('');
+  const [meetQuickAddSaving, setMeetQuickAddSaving] = useState(false);
   const [addServiceForm, setAddServiceForm] = useState({
     domain: '',
     port: '',
@@ -851,6 +858,41 @@ export default function LxcContainers() {
       toast({ title: 'Failed to add service', description: err.message, variant: 'destructive' });
     } finally {
       setAddingService(false);
+    }
+  };
+
+  // Phase 2c: detect when the LXC's listening ports match MEET's
+  // canonical layout (frontend 3000, livekit 7880, livekit-tcp-fb
+  // 7881, api 8080). UDP isn't checked — LiveKit allocates the
+  // 50000-60000 RTC range only when a call is in progress, so it's
+  // expected to be absent at install time.
+  const MEET_REQUIRED_TCP = [3000, 7880, 7881, 8080];
+  const meetPortsDetected =
+    MEET_REQUIRED_TCP.every((p) =>
+      exposedPorts.tcp.some((row) => row.port === p && (!row.portEnd || row.portEnd === p))
+    );
+
+  const submitMeetQuickAdd = async () => {
+    if (!selectedContainer || !meetQuickAddDomain.trim()) return;
+    setMeetQuickAddSaving(true);
+    try {
+      const res = await api.quickAddMeet(selectedContainer.name, meetQuickAddDomain.trim());
+      if (res?.warning) {
+        toast({ title: 'MEET added with warning', description: res.warning, variant: 'destructive' });
+      } else {
+        toast({
+          title: 'MEET added',
+          description: `${res.routes} HTTP routes + ${res.forwards} L4 forwards on ${res.domain}.`,
+        });
+      }
+      setMeetQuickAddOpen(false);
+      setMeetQuickAddDomain('');
+      fetchContainerServices(selectedContainer.name);
+      fetchExposedPorts(selectedContainer.name);
+    } catch (err) {
+      toast({ title: 'Failed to add MEET', description: err.message, variant: 'destructive' });
+    } finally {
+      setMeetQuickAddSaving(false);
     }
   };
 
@@ -2546,6 +2588,23 @@ export default function LxcContainers() {
                         >
                           rescan
                         </button>
+                        {/* Phase 2c: when the listening-port set is a
+                            superset of MEET's required TCP ports
+                            (3000/7880/7881/8080), surface a one-click
+                            "Quick add MEET" button that lays down all
+                            four HTTP routes + both L4 forwards from
+                            a single domain entry. Hidden otherwise so
+                            the panel stays generic. */}
+                        {meetPortsDetected && (
+                          <button
+                            type="button"
+                            className="ml-auto px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 cursor-pointer"
+                            onClick={() => setMeetQuickAddOpen(true)}
+                            title="Pre-fill the four MEET HTTP routes (/livekit, /api, /ws, /) and the two L4 forwards (tcp/7881, udp/50000-60000) from a single domain entry."
+                          >
+                            ⚡ Quick add MEET
+                          </button>
+                        )}
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {exposedPortsLoading && exposedPorts.tcp.length === 0 && exposedPorts.udp.length === 0 && (
@@ -3021,6 +3080,67 @@ export default function LxcContainers() {
               </TabsContent>
             </Tabs>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Phase 2c: Quick-add MEET preset dialog. Triggered from the
+          chip-row button when the LXC's listening ports look like a
+          MEET install. Single domain input → backend lays down the
+          full single-domain layout (4 HTTP routes + 2 L4 forwards)
+          in one call. */}
+      <Dialog
+        open={meetQuickAddOpen}
+        onOpenChange={(open) => { if (!meetQuickAddSaving) setMeetQuickAddOpen(open); }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Quick add MEET</DialogTitle>
+            <DialogDescription>
+              Lays down MEET's single-domain reverse-proxy layout on this LXC: four HTTP routes (/livekit/*, /api/*, /ws/*, catch-all → frontend) plus two L4 forwards (tcp/7881, udp/50000-60000). The domain you enter must already point DNS at this host.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <Label htmlFor="meet-quickadd-domain">Public domain</Label>
+              <Input
+                id="meet-quickadd-domain"
+                value={meetQuickAddDomain}
+                onChange={(e) => setMeetQuickAddDomain(e.target.value)}
+                placeholder="meet.example.com"
+                autoFocus
+                disabled={meetQuickAddSaving}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && meetQuickAddDomain.trim()) submitMeetQuickAdd();
+                }}
+              />
+            </div>
+            <div className="text-[11px] text-muted-foreground space-y-1">
+              <div>Will create:</div>
+              <ul className="list-disc list-inside space-y-0.5 pl-1">
+                <li><code className="font-mono">/livekit/* → :7880</code> (strip prefix, WebSocket, 24h timeouts)</li>
+                <li><code className="font-mono">/api/*     → :8080</code> (50 MiB body cap)</li>
+                <li><code className="font-mono">/ws/*      → :8080</code> (WebSocket)</li>
+                <li><code className="font-mono">/          → :3000</code> (frontend catch-all)</li>
+                <li><code className="font-mono">tcp/7881</code> L4 forward (LiveKit RTC TCP fallback)</li>
+                <li><code className="font-mono">udp/50000-60000</code> L4 forward (WebRTC media)</li>
+              </ul>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setMeetQuickAddOpen(false)}
+              disabled={meetQuickAddSaving}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={submitMeetQuickAdd}
+              disabled={!meetQuickAddDomain.trim() || meetQuickAddSaving}
+            >
+              {meetQuickAddSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Install'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

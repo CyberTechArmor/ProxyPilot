@@ -1451,6 +1451,32 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
   }
 });
 
+// Normalize an operator-supplied path prefix into the bare form
+// the merged-config renderer expects. The renderer appends `*`
+// itself when emitting `handle ${pathPrefix}*`, so any operator
+// who types `/api/*` (the conventional Caddy glob) needs to get
+// silently rewritten to `/api` — otherwise we end up with
+// `handle /api/**`, which is a literal-string matcher that never
+// matches a real request, and the catch-all wins.
+//
+// Returns null when the input contains characters our path scheme
+// can't represent (anything outside [A-Za-z0-9._-/]). Wildcards
+// (`*`) only valid as a trailing `/*` suffix, which we strip here.
+function normalizeLxcPathPrefix(value) {
+  if (value === undefined || value === null) return '/';
+  let p = String(value).trim();
+  if (p === '') return '/';
+  if (!p.startsWith('/')) p = '/' + p;
+  // Strip a trailing /* (the conventional Caddy glob) and any
+  // bare trailing slashes, in either order: `/api/`, `/api/*`,
+  // `/api/*/`, all collapse to `/api`.
+  p = p.replace(/\/+\*+\/*$/, '');
+  if (p.length > 1) p = p.replace(/\/+$/, '');
+  if (p === '') p = '/';
+  if (!/^\/[A-Za-z0-9._\-/]*$/.test(p)) return null;
+  return p;
+}
+
 // Find-or-create the per-LXC `services` row that owns every route
 // the LXC quick-add form inserts. One service per LXC is the right
 // granularity here: the LXC is the workload boundary, and a fan-out
@@ -1495,11 +1521,17 @@ function findOrCreateLxcService(db, name, ip) {
 // WebRTC media UDP range (50000-60000). Operators occasionally
 // invent variations; this preset only handles the canonical one.
 const MEET_PRESET = {
+  // Path prefixes are stored bare (no trailing /*). The merged-config
+  // renderer in services.js's buildDomainCaddyConfig() appends `*`
+  // when it emits `handle ${pathPrefix}*`, so storing `/api/*` here
+  // would produce `handle /api/**` — a literal match for a URL that
+  // never occurs, which makes /api requests fall through to the
+  // catch-all root route.
   routes: [
-    { pathPrefix: '/livekit/*', port: 7880, stripPrefix: true,  websocketEnabled: true  },
-    { pathPrefix: '/api/*',     port: 8080, stripPrefix: false, websocketEnabled: false },
-    { pathPrefix: '/ws/*',      port: 8080, stripPrefix: false, websocketEnabled: true  },
-    { pathPrefix: '/',          port: 3000, stripPrefix: false, websocketEnabled: false },
+    { pathPrefix: '/livekit', port: 7880, stripPrefix: true,  websocketEnabled: true  },
+    { pathPrefix: '/api',     port: 8080, stripPrefix: false, websocketEnabled: false },
+    { pathPrefix: '/ws',      port: 8080, stripPrefix: false, websocketEnabled: true  },
+    { pathPrefix: '/',        port: 3000, stripPrefix: false, websocketEnabled: false },
   ],
   l4Forwards: [
     { proto: 'tcp', listenPort: 7881, listenPortEnd: null,  connectPort: 7881, connectPortEnd: null,  description: 'LiveKit RTC TCP fallback' },
@@ -1771,9 +1803,8 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
   const cleanDomain = domain.trim();
   const svcPort = parseInt(port, 10) || 80;
   const cert = obtainCert !== false;
-  const cleanPath =
-    typeof pathPrefix === 'string' && pathPrefix.trim() ? pathPrefix.trim() : '/';
-  if (!/^\/[A-Za-z0-9._\-/]*$/.test(cleanPath)) {
+  const cleanPath = normalizeLxcPathPrefix(pathPrefix);
+  if (cleanPath === null) {
     return res.status(400).json({ success: false, error: 'Invalid path prefix.' });
   }
   const wsEnabled = !!websocketEnabled;
@@ -2064,9 +2095,9 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
       const cleanDomain = (newDomain || row.domain).trim();
       const cleanPath =
         typeof pathPrefix === 'string' && pathPrefix.trim()
-          ? pathPrefix.trim()
+          ? normalizeLxcPathPrefix(pathPrefix)
           : row.path_prefix;
-      if (!/^\/[A-Za-z0-9._\-/]*$/.test(cleanPath)) {
+      if (cleanPath === null) {
         return res.status(400).json({ success: false, error: 'Invalid path prefix.' });
       }
       const svcPort = parseInt(port, 10) || 80;

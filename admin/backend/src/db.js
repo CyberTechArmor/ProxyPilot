@@ -65,6 +65,7 @@ export function getDb() {
 //                  read/write timeouts, max_body_bytes, host_header_override)
 //   101 Phase 2c — service_l4_forwards (Incus proxy device emission target)
 //   102 Phase 2c — service_detected_ports (cache for the always-visible chip row)
+//   103 Phase 2c hotfix — strip trailing `/*` from service_http_routes.path_prefix
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -704,6 +705,28 @@ export function initDatabase() {
     d.exec(`
       CREATE INDEX IF NOT EXISTS idx_service_detected_ports_service
       ON service_detected_ports(service_id)
+    `);
+  });
+
+  // Version 103: Phase 2c hotfix — strip trailing /* from path_prefix.
+  // The first cut of the LXC Quick Add MEET preset stored paths as
+  // `/api/*`, `/livekit/*`, etc. with the conventional Caddy-glob
+  // suffix baked in. The merged-config renderer in services.js
+  // appends `*` itself when emitting `handle ${pathPrefix}*`, so
+  // those rows produced `handle /api/**` — a literal-string
+  // matcher that never matches a real request, falling all traffic
+  // through to the catch-all and breaking /api / /livekit routing.
+  //
+  // This migration normalizes any stored row that ends in /* to the
+  // bare-prefix form the renderer expects. Idempotent — only flips
+  // rows that match the bad pattern. The root path '/' is left
+  // alone (it matches /\/$/ but not /\/\*$/).
+  runMigration(db, 103, 'phase2c_strip_trailing_glob_from_paths', (d) => {
+    d.exec(`
+      UPDATE service_http_routes
+         SET path_prefix = SUBSTR(path_prefix, 1, LENGTH(path_prefix) - 2)
+       WHERE path_prefix LIKE '%/*'
+         AND path_prefix != '/*'
     `);
   });
 

@@ -951,6 +951,19 @@ else
         # the buggy block. Idempotent: skips if `privileged: true` is
         # already present.
         COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
+
+        # Strip the obsolete `version: '3.x'` key — it's been
+        # ignored since Compose v2 and recent compose CLIs warn on
+        # every invocation ("the attribute `version` is obsolete,
+        # it will be ignored, please remove it to avoid potential
+        # confusion"). Idempotent: only fires when the line is
+        # actually present.
+        if [ -f "$COMPOSE_FILE" ] && grep -qE "^version:[[:space:]]*['\"]?[0-9.]+['\"]?[[:space:]]*$" "$COMPOSE_FILE"; then
+            log "${YELLOW}Patching docker-compose.yml: removing obsolete \`version:\` key${NC}"
+            sed -i -E "/^version:[[:space:]]*['\"]?[0-9.]+['\"]?[[:space:]]*$/d" "$COMPOSE_FILE"
+            log "${GREEN}docker-compose.yml: \`version\` key removed${NC}"
+        fi
+
         if [ -f "$COMPOSE_FILE" ] && ! grep -q "^[[:space:]]*privileged: true" "$COMPOSE_FILE"; then
             if grep -qE "cap_drop:|cap_add:|security_opt:" "$COMPOSE_FILE"; then
                 log "${YELLOW}Patching docker-compose.yml: replacing cap-drop block with privileged: true${NC}"

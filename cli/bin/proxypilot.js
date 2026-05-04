@@ -297,6 +297,8 @@ import {
   setScopeCommand as firewallSetScopeCommand,
   addManualCommand as firewallAddManualCommand,
   removeManualCommand as firewallRemoveManualCommand,
+  addServiceL4Command as firewallAddServiceL4Command,
+  removeServiceL4Command as firewallRemoveServiceL4Command,
   panicCloseCommand as firewallPanicCloseCommand,
   panicOpenCommand as firewallPanicOpenCommand,
   egressAllowCommand as firewallEgressAllowCommand,
@@ -407,6 +409,36 @@ firewall
   .action(async (id, opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await firewallRemoveManualCommand(id, opts, globalOpts);
+  });
+
+// Machine-managed L4 forward rules. Driven by the admin backend's
+// reconciler when an operator adds an L4 forward to a service in
+// the dashboard; not intended for direct operator use, but kept
+// as first-class CLI commands so the audit log entry shows the
+// right action name and so a `--json` consumer (the admin) gets
+// the same envelope shape as add-manual / remove-manual.
+firewall
+  .command('add-service-l4')
+  .description('(machine) Add an L4-forward firewall rule for a service')
+  .requiredOption('--id <id>', 'Rule id (must start with service-l4-)')
+  .requiredOption('--port <p>', 'Port number (or range start when --port-end is set)', parseInt)
+  .option('--port-end <p>', 'End of port range (inclusive)', parseInt)
+  .requiredOption('--proto <tcp|udp>', 'Protocol')
+  .option('--scope <scope>', 'Scope: public | lan-only | vpn-only | localhost-only (default public)')
+  .requiredOption('--reason <text>', 'Why this port is open')
+  .option('--source-cidr <cidr>', 'Restrict to source CIDR (repeatable)', (v, prev) => [...(prev ?? []), v])
+  .option('--service <name>', 'Service tag for vpn-only rules')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallAddServiceL4Command(opts, globalOpts);
+  });
+
+firewall
+  .command('remove-service-l4 <id>')
+  .description('(machine) Remove an L4-forward firewall rule')
+  .action(async (id, opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await firewallRemoveServiceL4Command(id, opts, globalOpts);
   });
 
 firewall

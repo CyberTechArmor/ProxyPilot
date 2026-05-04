@@ -154,6 +154,55 @@ export function initSchema(db) {
     db.exec(`ALTER TABLE firewall_rules ADD COLUMN service TEXT`);
   }
 
+  // ── Firewall rules: extend `source` enum to include 'service-l4' ────────
+  // Phase 2c adds machine-managed L4 forwards driven by the admin
+  // backend's reconciler. Their firewall rows live alongside `manual`
+  // rules but carry source='service-l4' so cleanup can target them
+  // by source instead of guessing from the id. SQLite enforces CHECK
+  // constraints at insert time using the value baked into the table
+  // definition, so we have to rebuild the table to widen the enum
+  // without losing existing rows.
+  //
+  // Idempotent: only fires when the live CHECK is missing the new
+  // value. Defers FKs around the rebuild because firewall_rules has
+  // no incoming FKs today but the rebuild pattern is the safe one if
+  // any get added later.
+  const fwSql = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='firewall_rules'`)
+    .get();
+  if (fwSql && fwSql.sql && !/['"]?service-l4['"]?/.test(fwSql.sql)) {
+    db.pragma('defer_foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE firewall_rules_new (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL CHECK (source IN ('base','manual','lxc','docker','caddy-l4','host','service-l4')),
+        container TEXT,
+        process TEXT,
+        port_start INTEGER NOT NULL,
+        port_end INTEGER,
+        proto TEXT NOT NULL CHECK (proto IN ('tcp','udp')),
+        scope TEXT NOT NULL CHECK (scope IN ('public','lan-only','vpn-only','localhost-only')),
+        source_cidrs_json TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        reason TEXT,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        enabled_at TEXT,
+        enabled_by TEXT,
+        disabled_at TEXT,
+        disabled_by TEXT,
+        service TEXT
+      );
+      INSERT INTO firewall_rules_new
+        SELECT id, source, container, process, port_start, port_end, proto, scope,
+               source_cidrs_json, enabled, reason, first_seen, last_seen,
+               enabled_at, enabled_by, disabled_at, disabled_by, service
+          FROM firewall_rules;
+      DROP TABLE firewall_rules;
+      ALTER TABLE firewall_rules_new RENAME TO firewall_rules;
+    `);
+  }
+
   // ── Firewall reconciles (apply history) ─────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS firewall_reconciles (

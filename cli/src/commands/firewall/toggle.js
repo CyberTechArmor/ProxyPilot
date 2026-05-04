@@ -1,4 +1,4 @@
-import { enable, disable, setScope, addManual, removeManual, list } from '../../core/firewall/index.js';
+import { enable, disable, setScope, addManual, removeManual, addServiceL4, removeServiceL4, list } from '../../core/firewall/index.js';
 import { reconcile } from '../../core/firewall/index.js';
 import * as output from '../../output.js';
 
@@ -149,4 +149,54 @@ export async function removeManualCommand(id, opts, globalOpts) {
     return;
   }
   await applyAndReconcile({ result, action: 'remove-manual', globalOpts });
+}
+
+/**
+ * Machine-managed L4 forward rule add/remove. Called only by the
+ * admin backend's L4 reconciler — operators never touch these
+ * commands directly. The operator-supplied id namespace
+ * (`service-l4-<forward_id>`) is enforced in the core function so
+ * the admin can compute add/remove pairs without first looking up
+ * the row.
+ */
+export async function addServiceL4Command(opts, globalOpts) {
+  const port = parseInt(opts.port, 10);
+  const portEnd = opts.portEnd != null ? parseInt(opts.portEnd, 10) : null;
+  let result;
+  try {
+    result = addServiceL4({
+      id: opts.id,
+      port,
+      portEnd,
+      proto: opts.proto,
+      scope: opts.scope,
+      reason: opts.reason,
+      sourceCidrs: opts.sourceCidr ?? [],
+      service: opts.service,
+    });
+  } catch (err) {
+    output.error(err.message);
+    process.exitCode = 1;
+    return;
+  }
+  await applyAndReconcile({ result, action: 'add-service-l4', globalOpts });
+}
+
+export async function removeServiceL4Command(id, opts, globalOpts) {
+  let result;
+  try {
+    result = removeServiceL4({ id });
+  } catch (err) {
+    // NOT_FOUND is recoverable — the reconciler treats "already gone"
+    // as success so partial cleanup paths converge. Surface as ok:true
+    // in JSON mode so the admin doesn't error out on idempotent retries.
+    if (err.code === 'NOT_FOUND' && globalOpts.json) {
+      output.json({ ok: true, action: 'remove-service-l4', rule: { id }, already_absent: true });
+      return;
+    }
+    output.error(err.message);
+    process.exitCode = 1;
+    return;
+  }
+  await applyAndReconcile({ result, action: 'remove-service-l4', globalOpts });
 }

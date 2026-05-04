@@ -1581,40 +1581,71 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
 
     const db = getDb();
 
-    // Pre-flight: every desired (domain, path) tuple must be free.
-    // The HTTP-route INSERT below would surface a UNIQUE-constraint
-    // error on conflict, but checking up front lets us fail
-    // with one clean message instead of mid-batch.
-    for (const r of MEET_PRESET.routes) {
-      const collide = db
-        .prepare(`SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ? LIMIT 1`)
+    // Pre-flight: build a per-route / per-forward plan so re-running
+    // Quick Add MEET against a partially-installed LXC is idempotent.
+    //
+    //   action: 'insert' — row absent, will be created
+    //   action: 'skip'   — row exists and matches the preset exactly
+    //   action: 'reject' — row exists but disagrees with the preset
+    //
+    // The reject branch surfaces the specific mismatch so the operator
+    // knows which manual edit will let the re-install through.
+    //
+    // The route check tolerates an existing row whose path_prefix has
+    // a trailing /* — that's the broken shape the v1 Quick Add wrote
+    // and migration 103 normalizes on next boot. Treat both forms as
+    // matching the canonical bare prefix so an operator on an
+    // un-migrated DB can still re-install.
+    const stripGlob = (s) => String(s || '').replace(/\/+\*+\/*$/, '') || '/';
+    const routePlan = MEET_PRESET.routes.map((r) => {
+      const exact = db
+        .prepare(`SELECT * FROM service_http_routes WHERE domain = ? AND path_prefix = ? LIMIT 1`)
         .get(cleanDomain, r.pathPrefix);
-      if (collide) {
-        return res.status(409).json({
-          success: false,
-          error: `${cleanDomain}${r.pathPrefix} already exists. Delete the existing routes for this domain first.`,
-        });
-      }
+      const globbed = exact || db
+        .prepare(`SELECT * FROM service_http_routes WHERE domain = ? AND path_prefix = ? LIMIT 1`)
+        .get(cleanDomain, `${r.pathPrefix}/*`);
+      const existing = exact || globbed;
+      if (!existing) return { route: r, action: 'insert' };
+      const matches =
+        existing.target_port === r.port &&
+        !!existing.strip_prefix === r.stripPrefix &&
+        !!existing.websocket_enabled === r.websocketEnabled;
+      if (matches) return { route: r, action: 'skip', existingId: existing.id, normalize: !exact };
+      return {
+        route: r,
+        action: 'reject',
+        reason: `${cleanDomain}${r.pathPrefix} already exists with port=${existing.target_port} strip=${!!existing.strip_prefix} ws=${!!existing.websocket_enabled}; expected port=${r.port} strip=${r.stripPrefix} ws=${r.websocketEnabled}`,
+      };
+    });
+    const routeReject = routePlan.find((p) => p.action === 'reject');
+    if (routeReject) {
+      return res.status(409).json({ success: false, error: routeReject.reason });
     }
 
-    // Pre-flight: L4 forward listen ports must be free. Same shape
-    // of guard against the UNIQUE(proto, listen_port, listen_port_end)
-    // constraint on service_l4_forwards.
-    for (const f of MEET_PRESET.l4Forwards) {
-      const collide = db
+    const forwardPlan = MEET_PRESET.l4Forwards.map((f) => {
+      const existing = db
         .prepare(
-          `SELECT id FROM service_l4_forwards
+          `SELECT * FROM service_l4_forwards
             WHERE proto = ? AND listen_port = ?
-              AND (listen_port_end IS ? OR listen_port_end = ?)`
+              AND (listen_port_end IS ? OR listen_port_end = ?)
+            LIMIT 1`
         )
         .get(f.proto, f.listenPort, f.listenPortEnd, f.listenPortEnd);
-      if (collide) {
-        const range = f.listenPortEnd ? `${f.listenPort}-${f.listenPortEnd}` : `${f.listenPort}`;
-        return res.status(409).json({
-          success: false,
-          error: `${f.proto}/${range} is already taken by another L4 forward.`,
-        });
-      }
+      if (!existing) return { forward: f, action: 'insert' };
+      const matches =
+        existing.connect_port === f.connectPort &&
+        (existing.connect_port_end ?? null) === (f.connectPortEnd ?? null);
+      if (matches) return { forward: f, action: 'skip', existingId: existing.id };
+      const range = f.listenPortEnd ? `${f.listenPort}-${f.listenPortEnd}` : `${f.listenPort}`;
+      return {
+        forward: f,
+        action: 'reject',
+        reason: `${f.proto}/${range} is taken by another forward (connect=${existing.connect_port}${existing.connect_port_end ? '-' + existing.connect_port_end : ''}); expected connect=${f.connectPort}${f.connectPortEnd ? '-' + f.connectPortEnd : ''}`,
+      };
+    });
+    const forwardReject = forwardPlan.find((p) => p.action === 'reject');
+    if (forwardReject) {
+      return res.status(409).json({ success: false, error: forwardReject.reason });
     }
 
     // If a legacy single-domain Caddyfile exists for this domain,
@@ -1650,8 +1681,23 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
     };
 
     try {
-      // 1. HTTP routes.
-      for (const r of MEET_PRESET.routes) {
+      // 1. HTTP routes — only insert/normalize what the plan says.
+      let routesAdded = 0;
+      let routesNormalized = 0;
+      for (const p of routePlan) {
+        const r = p.route;
+        if (p.action === 'skip') {
+          // Existing row matches the preset; if its path_prefix is
+          // the broken /* form, normalize it in place so the merged
+          // Caddyfile renders correctly without waiting for the next
+          // admin-backend restart to run migration 103.
+          if (p.normalize) {
+            db.prepare(`UPDATE service_http_routes SET path_prefix = ? WHERE id = ?`)
+              .run(r.pathPrefix, p.existingId);
+            routesNormalized++;
+          }
+          continue;
+        }
         const id = uuidv4();
         db.prepare(
           `INSERT INTO service_http_routes
@@ -1670,10 +1716,11 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
           // /api route; bake that in here so the operator doesn't have
           // to remember it post-install. Other routes inherit the
           // standard 1G default.
-          r.pathPrefix === '/api/*' ? '50M' : '1G',
+          r.pathPrefix === '/api' ? '50M' : '1G',
           r.stripPrefix ? 1 : 0
         );
         insertedRouteIds.push(id);
+        routesAdded++;
       }
 
       // 2. Regenerate the merged Caddyfile + reload BEFORE touching L4
@@ -1699,8 +1746,11 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
         reloadWarning = `Routes saved but Caddy reload failed: ${detail || 'unknown error'}`;
       }
 
-      // 3. L4 forward rows.
-      for (const f of MEET_PRESET.l4Forwards) {
+      // 3. L4 forward rows — only insert what the plan says.
+      let forwardsAdded = 0;
+      for (const p of forwardPlan) {
+        if (p.action === 'skip') continue;
+        const f = p.forward;
         const id = uuidv4();
         db.prepare(
           `INSERT INTO service_l4_forwards
@@ -1718,6 +1768,7 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
           f.description
         );
         insertedForwardIds.push(id);
+        forwardsAdded++;
       }
 
       // 4. Reconcile L4 forwards: emits Incus proxy devices and
@@ -1748,12 +1799,16 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
         });
       }
 
-      console.log(`[LXC] Quick-add MEET on ${name}: ${insertedRouteIds.length} routes, ${insertedForwardIds.length} forwards`);
+      const routesSkipped = MEET_PRESET.routes.length - routesAdded;
+      const forwardsSkipped = MEET_PRESET.l4Forwards.length - forwardsAdded;
+      console.log(
+        `[LXC] Quick-add MEET on ${name}: routes added=${routesAdded} skipped=${routesSkipped} normalized=${routesNormalized}; forwards added=${forwardsAdded} skipped=${forwardsSkipped}`
+      );
       res.json({
         success: true,
         domain: cleanDomain,
-        routes: insertedRouteIds.length,
-        forwards: insertedForwardIds.length,
+        routes: { added: routesAdded, skipped: routesSkipped, normalized: routesNormalized },
+        forwards: { added: forwardsAdded, skipped: forwardsSkipped },
         l4: l4Result,
         ...(reloadWarning && { warning: reloadWarning }),
       });

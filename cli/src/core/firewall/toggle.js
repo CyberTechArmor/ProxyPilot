@@ -201,6 +201,113 @@ export function addManual({ port, portEnd, proto, scope, reason, sourceCidrs, se
   return rule;
 }
 
+/**
+ * Add a machine-managed L4 forward firewall rule. Functionally
+ * identical to addManual() except:
+ *   - source = 'service-l4' (so cleanup can target by source rather
+ *     than by guessing from the id pattern)
+ *   - id is operator-supplied (the admin reconciler computes
+ *     `service-l4-<forward_id>` so add and remove are both
+ *     deterministic without an extra round trip)
+ *   - id is required to start with `service-l4-` so this entry point
+ *     can't be used to overwrite arbitrary rule rows
+ *   - default scope when none is given is 'public' — L4 forwards on
+ *     the host edge are by definition publicly reachable; the
+ *     reconciler can still set 'vpn-only' / 'lan-only' explicitly
+ *     to restrict reach
+ *
+ * The reason field stays required for audit-trail symmetry with
+ * addManual.
+ */
+export function addServiceL4({ id, port, portEnd, proto, scope, reason, sourceCidrs, service, actor }) {
+  if (typeof id !== 'string' || !id.startsWith('service-l4-')) {
+    throw new Error(`addServiceL4: id must start with 'service-l4-' (got ${id})`);
+  }
+  const effScope = scope ?? 'public';
+  if (!VALID_SCOPES.includes(effScope)) throw new Error(`invalid scope: ${effScope}`);
+  if (proto !== 'tcp' && proto !== 'udp') throw new Error(`invalid proto: ${proto}`);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`invalid port: ${port}`);
+  }
+  if (portEnd != null) {
+    if (!Number.isInteger(portEnd) || portEnd < port || portEnd > 65535) {
+      throw new Error(`invalid port range: ${port}-${portEnd}`);
+    }
+  }
+  if (!reason) throw new Error('--reason is required for service-l4 rules');
+
+  const state = readState();
+  panicGuard(state, 'add-service-l4');
+  if (findRule(state, id)) {
+    throw new Error(`a rule with id ${id} already exists`);
+  }
+  const ts = nowIso();
+  const rule = {
+    id,
+    source: 'service-l4',
+    container: null,
+    process: null,
+    port_start: port,
+    port_end: portEnd ?? null,
+    proto,
+    scope: effScope,
+    enabled: true,
+    reason,
+    first_seen: ts,
+    last_seen: ts,
+    enabled_at: ts,
+    enabled_by: actor ?? null,
+  };
+  if (sourceCidrs && sourceCidrs.length > 0) rule.source_cidrs = sourceCidrs;
+  const warnings = applyServiceTag(rule, service);
+  state.discovered.push(rule);
+  state.discovered.sort((a, b) => a.id.localeCompare(b.id));
+  writeState(state);
+  audit({
+    subsystem: 'firewall',
+    action: 'add-service-l4',
+    resource: id,
+    actor,
+    after: rule,
+  });
+  Object.defineProperty(rule, '_warnings', { value: warnings, enumerable: false });
+  return rule;
+}
+
+/**
+ * Remove an L4-forward firewall rule. Symmetric with removeManual
+ * but only accepts rows with source='service-l4', so an operator
+ * can't accidentally drop a hand-curated `manual` rule through this
+ * entry point.
+ *
+ * Idempotent at the API surface: missing rows raise a NOT_FOUND
+ * error so the admin reconciler can treat it as "already gone" and
+ * keep going.
+ */
+export function removeServiceL4({ id, actor }) {
+  const state = readState();
+  const idx = state.discovered.findIndex(r => r.id === id);
+  if (idx === -1) {
+    const err = new Error(`no rule with id ${id}`);
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const rule = state.discovered[idx];
+  if (rule.source !== 'service-l4') {
+    throw new Error(`refusing to remove non-service-l4 rule ${id} (source=${rule.source}); use disable instead`);
+  }
+  state.discovered.splice(idx, 1);
+  writeState(state);
+  audit({
+    subsystem: 'firewall',
+    action: 'remove-service-l4',
+    resource: id,
+    actor,
+    before: rule,
+  });
+  return rule;
+}
+
 export function removeManual({ id, actor }) {
   const state = readState();
   const idx = state.discovered.findIndex(r => r.id === id);

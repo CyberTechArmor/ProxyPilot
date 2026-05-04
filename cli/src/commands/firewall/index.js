@@ -8,6 +8,8 @@ export {
   setScopeCommand,
   addManualCommand,
   removeManualCommand,
+  addServiceL4Command,
+  removeServiceL4Command,
 } from './toggle.js';
 export { panicCloseCommand, panicOpenCommand } from './panic.js';
 export { egressAllowCommand, egressDenyCommand, egressListCommand } from './egress.js';

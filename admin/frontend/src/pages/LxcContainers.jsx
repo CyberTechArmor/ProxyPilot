@@ -344,6 +344,16 @@ export default function LxcContainers() {
   const [containerServices, setContainerServices] = useState([]);
   const [containerListening, setContainerListening] = useState(null);
   const [servicesLoading, setServicesLoading] = useState(false);
+  // Phase 2c: full TCP + UDP listening-port set from the new
+  // /containers/:name/listening-ports endpoint. Loaded when the
+  // container detail dialog opens so the "add service" port input
+  // can autocomplete from real data instead of the operator
+  // guessing. Distinct from `containerListening` above (which is
+  // probe-failure scoped, only TCP, only set on the legacy services
+  // endpoint when at least one route is unreachable).
+  const [exposedPorts, setExposedPorts] = useState({ tcp: [], udp: [] });
+  const [exposedPortsLoading, setExposedPortsLoading] = useState(false);
+  const [exposedPortsScannedAt, setExposedPortsScannedAt] = useState(null);
   const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
   const [addingService, setAddingService] = useState(false);
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
@@ -690,12 +700,34 @@ export default function LxcContainers() {
     }
   }, []);
 
+  // Fetch the container's currently-listening TCP+UDP ports. Used
+  // by the detail panel's exposed-ports chip row + the port-input
+  // datalist so an operator picking a service port sees real data
+  // instead of guessing. Independent from fetchContainerServices —
+  // that endpoint only returns listening data on probe failure;
+  // this one always probes when the panel opens.
+  const fetchExposedPorts = useCallback(async (containerName) => {
+    setExposedPortsLoading(true);
+    try {
+      const res = await api.getLxcListeningPorts(containerName);
+      setExposedPorts({ tcp: res.tcp || [], udp: res.udp || [] });
+      setExposedPortsScannedAt(res.scannedAt || null);
+    } catch {
+      setExposedPorts({ tcp: [], udp: [] });
+      setExposedPortsScannedAt(null);
+    } finally {
+      setExposedPortsLoading(false);
+    }
+  }, []);
+
   const openInfo = async (container, tab = 'details') => {
     setSelectedContainer(container);
     setContainerState(null);
     setSnapshots([]);
     setContainerServices([]);
     setContainerListening(null);
+    setExposedPorts({ tcp: [], udp: [] });
+    setExposedPortsScannedAt(null);
     setAddServiceForm({ domain: '', port: '', obtainCert: true });
     setEditingService(null);
     setInfoDefaultTab(tab);
@@ -711,8 +743,11 @@ export default function LxcContainers() {
     } catch {
       // Silently fail for detail fetch
     }
-    // Fetch services separately (container may not have an IP yet)
+    // Fetch services + exposed ports in parallel — services lookup
+    // can be slow when probing routes, exposed-ports is a cheap
+    // /proc read, no need to serialize.
     fetchContainerServices(container.name);
+    fetchExposedPorts(container.name);
   };
 
   // Delete container
@@ -2359,6 +2394,76 @@ export default function LxcContainers() {
                     </p>
                   )}
 
+                  {/* Phase 2c: exposed-port chip row. Always visible
+                      when the container reports any listeners; clicking
+                      a chip seeds the port input below. Single-port
+                      chips are clickable; range chips render as
+                      info-only since Caddy can't reverse-proxy a port
+                      range — those are L4-forward territory and surface
+                      in the service-detail panel instead. */}
+                  {(exposedPorts.tcp.length > 0 || exposedPorts.udp.length > 0 || exposedPortsLoading) && (
+                    <div className="mb-2">
+                      <div className="text-[11px] text-muted-foreground mb-1 flex items-center gap-2">
+                        Detected listeners inside the container
+                        {exposedPortsScannedAt && (
+                          <span className="opacity-60">· last {new Date(exposedPortsScannedAt).toLocaleTimeString()}</span>
+                        )}
+                        <button
+                          type="button"
+                          className="underline opacity-70 hover:opacity-100"
+                          onClick={() => fetchExposedPorts(selectedContainer.name)}
+                        >
+                          rescan
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {exposedPortsLoading && exposedPorts.tcp.length === 0 && exposedPorts.udp.length === 0 && (
+                          <span className="text-[11px] text-muted-foreground italic">Probing…</span>
+                        )}
+                        {exposedPorts.tcp.map((p, i) => {
+                          const isRange = p.portEnd && p.portEnd !== p.port;
+                          const label = isRange ? `${p.port}-${p.portEnd}` : String(p.port);
+                          return (
+                            <button
+                              key={`tcp-${p.port}-${p.portEnd ?? ''}-${i}`}
+                              type="button"
+                              disabled={isRange}
+                              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-mono transition-colors ${
+                                isRange
+                                  ? 'opacity-60 cursor-not-allowed border-border/40'
+                                  : 'border-blue-500/40 bg-blue-500/5 hover:bg-blue-500/15 cursor-pointer'
+                              }`}
+                              title={
+                                isRange
+                                  ? "Caddy can't reverse-proxy a port range — use an L4 forward in the service detail panel"
+                                  : 'Click to fill the port field'
+                              }
+                              onClick={() => {
+                                if (isRange) return;
+                                setAddServiceForm((f) => ({ ...f, port: String(p.port) }));
+                              }}
+                            >
+                              tcp/{label}
+                            </button>
+                          );
+                        })}
+                        {exposedPorts.udp.map((p, i) => {
+                          const isRange = p.portEnd && p.portEnd !== p.port;
+                          const label = isRange ? `${p.port}-${p.portEnd}` : String(p.port);
+                          return (
+                            <span
+                              key={`udp-${p.port}-${p.portEnd ?? ''}-${i}`}
+                              className="inline-flex items-center gap-1 rounded-full border border-border/40 bg-muted/30 px-2 py-0.5 text-[11px] font-mono opacity-70"
+                              title="Caddy can't reverse-proxy UDP — use an L4 forward in the service detail panel"
+                            >
+                              udp/{label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Add new service form */}
                   <div className="flex items-center gap-2 p-2 rounded-lg border border-dashed border-border/50 bg-muted/20">
                     <div className="flex-1 grid grid-cols-3 gap-1.5">
@@ -2375,8 +2480,21 @@ export default function LxcContainers() {
                         value={addServiceForm.port}
                         onChange={(e) => setAddServiceForm((f) => ({ ...f, port: e.target.value }))}
                         className="h-7 text-xs"
+                        list={`lxc-ports-${selectedContainer?.name || 'x'}`}
                         onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
                       />
+                      {/* Datalist hooks the port input up to the
+                          chip-row data: typing 8 narrows to 8080,
+                          dropdown shows every detected single-port
+                          listener. Range entries are skipped — Caddy
+                          can't route ranges. */}
+                      <datalist id={`lxc-ports-${selectedContainer?.name || 'x'}`}>
+                        {exposedPorts.tcp
+                          .filter((p) => !p.portEnd || p.portEnd === p.port)
+                          .map((p, i) => (
+                            <option key={`opt-${p.port}-${i}`} value={String(p.port)} />
+                          ))}
+                      </datalist>
                       <Input
                         placeholder="/healthz"
                         value={addServiceForm.healthPath}

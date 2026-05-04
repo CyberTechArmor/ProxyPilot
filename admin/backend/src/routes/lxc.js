@@ -1232,6 +1232,56 @@ async function listListeningPorts(incusName) {
   };
 }
 
+// GET /containers/:name/listening-ports — TCP + UDP listeners
+// inside the LXC. Backs the LXC detail panel's "exposed ports"
+// chip row + the port-input datalist so an operator picking a
+// service port can see what's actually listening rather than
+// guessing.
+//
+// Reuses the Phase 2c port-detector library (range collapse +
+// proc/net parser) so the data shape matches the service-detail
+// panel's chip row. Always-call: cheap enough to run on every
+// dialog open since /proc/net is a few KB and there's no
+// docker-compose health gate at this layer (this endpoint is
+// container-scoped, not service-scoped).
+lxcRouter.get('/containers/:name/listening-ports', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const { detectServicePorts } = await import('../lib/port-detector.js');
+    // No db / serviceId — we don't want to write into
+    // service_detected_ports from a container-scoped probe; the
+    // service-detail panel owns that cache. composeOpts is empty
+    // so the compose health gate stays opt-in.
+    const result = await detectServicePorts({
+      incusName,
+      execHost: execOnHost,
+    });
+    const tcp = result.ports
+      .filter((p) => p.proto === 'tcp')
+      .map((p) => ({ port: p.port, portEnd: p.port_end ?? null }));
+    const udp = result.ports
+      .filter((p) => p.proto === 'udp')
+      .map((p) => ({ port: p.port, portEnd: p.port_end ?? null }));
+    res.json({
+      success: true,
+      tcp,
+      udp,
+      loopbackOnly: result.loopbackOnly,
+      scanError: result.scanError,
+      scannedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: `Failed to read listening ports: ${(e.stderr || e.message || '').trim()}`,
+    });
+  }
+});
+
 // GET /containers/:name/services - List Caddy services for this container (by IP)
 lxcRouter.get('/containers/:name/services', async (req, res) => {
   const { name } = req.params;

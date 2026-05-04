@@ -354,7 +354,19 @@ export default function LxcContainers() {
   const [exposedPorts, setExposedPorts] = useState({ tcp: [], udp: [] });
   const [exposedPortsLoading, setExposedPortsLoading] = useState(false);
   const [exposedPortsScannedAt, setExposedPortsScannedAt] = useState(null);
-  const [addServiceForm, setAddServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
+  const [addServiceForm, setAddServiceForm] = useState({
+    domain: '',
+    port: '',
+    obtainCert: true,
+    healthPath: '',
+    // Phase 2c: a non-root pathPrefix routes the new entry through
+    // service_http_routes so multiple paths can share a domain
+    // (MEET-style fan-out). stripPrefix and websocketEnabled are
+    // only meaningful when pathPrefix != '/'.
+    pathPrefix: '/',
+    stripPrefix: false,
+    websocketEnabled: false,
+  });
   const [addingService, setAddingService] = useState(false);
   const [editingService, setEditingService] = useState(null); // { domain, port, obtainCert, healthPath } or null
   const [editServiceForm, setEditServiceForm] = useState({ domain: '', port: '', obtainCert: true, healthPath: '' });
@@ -728,7 +740,15 @@ export default function LxcContainers() {
     setContainerListening(null);
     setExposedPorts({ tcp: [], udp: [] });
     setExposedPortsScannedAt(null);
-    setAddServiceForm({ domain: '', port: '', obtainCert: true });
+    setAddServiceForm({
+      domain: '',
+      port: '',
+      obtainCert: true,
+      healthPath: '',
+      pathPrefix: '/',
+      stripPrefix: false,
+      websocketEnabled: false,
+    });
     setEditingService(null);
     setInfoDefaultTab(tab);
     setTerminalCwd('');
@@ -796,18 +816,36 @@ export default function LxcContainers() {
     try {
       const domain = addServiceForm.domain.trim();
       const trimmedHealthPath = (addServiceForm.healthPath || '').trim();
+      const pathPrefix = (addServiceForm.pathPrefix || '/').trim() || '/';
       const res = await api.addLxcService(selectedContainer.name, {
         domain,
         port: parseInt(addServiceForm.port, 10) || 80,
         obtainCert: addServiceForm.obtainCert,
         healthPath: trimmedHealthPath || null,
+        pathPrefix,
+        // strip is meaningful only on non-root paths; the backend
+        // defaults to true when path != '/' if the field is omitted,
+        // but we send it explicitly so the operator's choice
+        // round-trips on edit.
+        ...(pathPrefix !== '/' && {
+          stripPrefix: !!addServiceForm.stripPrefix,
+          websocketEnabled: !!addServiceForm.websocketEnabled,
+        }),
       });
       if (res?.warning) {
         toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
       } else {
-        toast({ title: 'Service added', description: `${domain} configured.` });
+        toast({ title: 'Service added', description: `${domain}${pathPrefix === '/' ? '' : pathPrefix} configured.` });
       }
-      setAddServiceForm({ domain: '', port: '', obtainCert: true, healthPath: '' });
+      setAddServiceForm({
+        domain: '',
+        port: '',
+        obtainCert: true,
+        healthPath: '',
+        pathPrefix: '/',
+        stripPrefix: false,
+        websocketEnabled: false,
+      });
       fetchContainerServices(selectedContainer.name);
     } catch (err) {
       toast({ title: 'Failed to add service', description: err.message, variant: 'destructive' });
@@ -839,10 +877,16 @@ export default function LxcContainers() {
     }
   };
 
-  const handleDeleteService = async (domain) => {
+  // Phase 2c: when the service entry is a routes-table row
+  // (source='db'), the caller passes its route id so the backend
+  // can target the right pipeline. Legacy file-only entries
+  // (source='file' or absent) still delete by domain.
+  const handleDeleteService = async (svc) => {
     if (!selectedContainer) return;
+    const domain = typeof svc === 'string' ? svc : svc.domain;
+    const routeId = typeof svc === 'string' ? undefined : (svc.source === 'db' ? svc.id : undefined);
     try {
-      const res = await api.deleteLxcService(selectedContainer.name, domain);
+      const res = await api.deleteLxcService(selectedContainer.name, domain, routeId);
       if (res?.warning) {
         toast({ title: 'Service removed with warning', description: res.warning, variant: 'destructive' });
       } else {
@@ -2189,7 +2233,10 @@ export default function LxcContainers() {
                   {containerServices.length > 0 ? (
                     <div className="space-y-1.5 mb-3">
                       {containerServices.map((svc) => (
-                        <div key={svc.domain} className="rounded-lg border border-border/50 bg-muted/30 text-xs overflow-hidden">
+                        <div
+                          key={svc.id || `${svc.source || 'file'}-${svc.domain}-${svc.pathPrefix || '/'}`}
+                          className="rounded-lg border border-border/50 bg-muted/30 text-xs overflow-hidden"
+                        >
                           <div className="flex items-center gap-2 p-2">
                           {editingService === svc.domain ? (
                             <>
@@ -2243,7 +2290,28 @@ export default function LxcContainers() {
                           ) : (
                             <>
                               <Globe className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
-                              <span className="font-mono flex-1 truncate">{svc.domain}</span>
+                              <span className="font-mono flex-1 truncate">
+                                {svc.domain}
+                                {svc.pathPrefix && svc.pathPrefix !== '/' && (
+                                  <span className="text-muted-foreground">{svc.pathPrefix}</span>
+                                )}
+                              </span>
+                              {svc.stripPrefix && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border/50"
+                                  title="handle_path: prefix removed before forwarding"
+                                >
+                                  strip
+                                </span>
+                              )}
+                              {svc.websocketEnabled && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30"
+                                  title="WebSocket / streaming: flush_interval -1 + 24h timeouts"
+                                >
+                                  ws
+                                </span>
+                              )}
                               <span className="text-muted-foreground">:{svc.port}</span>
                               {svc.reachable === false && (
                                 <span
@@ -2327,7 +2395,7 @@ export default function LxcContainers() {
                                 variant="ghost"
                                 size="sm"
                                 className="h-6 px-1.5 text-muted-foreground hover:text-red-500"
-                                onClick={() => handleDeleteService(svc.domain)}
+                                onClick={() => handleDeleteService(svc)}
                               >
                                 <Trash2 className="h-3 w-3" />
                               </Button>
@@ -2464,14 +2532,50 @@ export default function LxcContainers() {
                     </div>
                   )}
 
-                  {/* Add new service form */}
+                  {/* Phase 2c: when the operator sets a non-root
+                      path, expose strip-prefix + WS toggles. Hidden
+                      otherwise so the simple "domain → one port"
+                      flow stays a single row. */}
+                  {addServiceForm.pathPrefix && addServiceForm.pathPrefix !== '/' && (
+                    <div className="flex items-center gap-4 px-1 mb-1.5 text-[11px] text-muted-foreground">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <Switch
+                          checked={!!addServiceForm.stripPrefix}
+                          onCheckedChange={(checked) => setAddServiceForm((f) => ({ ...f, stripPrefix: checked }))}
+                          className="scale-[0.65]"
+                        />
+                        <span>strip prefix</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <Switch
+                          checked={!!addServiceForm.websocketEnabled}
+                          onCheckedChange={(checked) => setAddServiceForm((f) => ({ ...f, websocketEnabled: checked }))}
+                          className="scale-[0.65]"
+                        />
+                        <span>websocket / streaming</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* Add new service form. Path defaults to / for the
+                      common single-port case; setting it to /api,
+                      /livekit, etc. routes that path to a different
+                      port on the same domain (MEET-style fan-out). */}
                   <div className="flex items-center gap-2 p-2 rounded-lg border border-dashed border-border/50 bg-muted/20">
-                    <div className="flex-1 grid grid-cols-3 gap-1.5">
+                    <div className="flex-1 grid grid-cols-4 gap-1.5">
                       <Input
                         placeholder="domain.example.com"
                         value={addServiceForm.domain}
                         onChange={(e) => setAddServiceForm((f) => ({ ...f, domain: e.target.value }))}
                         className="h-7 text-xs"
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
+                      />
+                      <Input
+                        placeholder="/ (or /api)"
+                        value={addServiceForm.pathPrefix}
+                        onChange={(e) => setAddServiceForm((f) => ({ ...f, pathPrefix: e.target.value }))}
+                        className="h-7 text-xs font-mono"
+                        title="Route only this path on the domain. Use / for the catch-all, /api for path-routed sub-services."
                         onKeyDown={(e) => e.key === 'Enter' && handleAddService()}
                       />
                       <Input

@@ -66,6 +66,7 @@ export function getDb() {
 //   101 Phase 2c — service_l4_forwards (Incus proxy device emission target)
 //   102 Phase 2c — service_detected_ports (cache for the always-visible chip row)
 //   103 Phase 2c hotfix — strip trailing `/*` from service_http_routes.path_prefix
+//   104 Phase 2c — allow_framing + frame_ancestors columns
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -728,6 +729,39 @@ export function initDatabase() {
        WHERE path_prefix LIKE '%/*'
          AND path_prefix != '/*'
     `);
+  });
+
+  // Version 104: Phase 2c — allow-framing knob on service_http_routes.
+  // The renderer hard-codes `X-Frame-Options: SAMEORIGIN` in the site
+  // header block, which is correct for vanilla apps but wrong for
+  // anything that NEEDS to be embeddable (MEET's meeting page, any
+  // OAuth/iframe-driven flow). Two columns:
+  //
+  //   allow_framing    INTEGER 0|1     when 1, the site emits
+  //                                    `-X-Frame-Options` (Caddy's
+  //                                    delete-header syntax) instead
+  //                                    of setting it, and adds a
+  //                                    `Content-Security-Policy:
+  //                                    frame-ancestors <list>` header.
+  //   frame_ancestors  TEXT            comma-separated origin list
+  //                                    that becomes the CSP value.
+  //                                    NULL/empty → wildcard '*'.
+  //
+  // Site-level effect: any single route on the domain having
+  // allow_framing=1 flips the whole site's header block to the
+  // framing-friendly variant. Site headers are global to all paths
+  // by Caddy's design, so per-route would just paper over that.
+  runMigration(db, 104, 'phase2c_allow_framing', (d) => {
+    const cols = d
+      .prepare(`PRAGMA table_info(service_http_routes)`)
+      .all()
+      .map((c) => c.name);
+    if (!cols.includes('allow_framing')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN allow_framing INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!cols.includes('frame_ancestors')) {
+      d.exec(`ALTER TABLE service_http_routes ADD COLUMN frame_ancestors TEXT`);
+    }
   });
 
   // Create file versions table for version control

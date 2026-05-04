@@ -1328,6 +1328,7 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
         .prepare(
           `SELECT r.id AS route_id, r.domain, r.path_prefix, r.target_port,
                   r.ssl_enabled, r.websocket_enabled, r.strip_prefix,
+                  r.allow_framing, r.frame_ancestors,
                   s.id AS service_id, s.target_ip
              FROM service_http_routes r
              JOIN services s ON r.service_id = s.id
@@ -1347,6 +1348,8 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
           obtainCert: !!r.ssl_enabled,
           websocketEnabled: !!r.websocket_enabled,
           stripPrefix: !!r.strip_prefix,
+          allowFraming: !!r.allow_framing,
+          frameAncestors: r.frame_ancestors ?? null,
           healthPath: null,
           source: 'db',
         });
@@ -1527,11 +1530,18 @@ const MEET_PRESET = {
   // would produce `handle /api/**` — a literal match for a URL that
   // never occurs, which makes /api requests fall through to the
   // catch-all root route.
+  // allowFraming on the root catch-all flips the whole site's
+  // header block to emit `-X-Frame-Options` + a frame-ancestors CSP
+  // (default '*'). The renderer reads "any route on the domain has
+  // allow_framing=1" and applies it site-wide, so flagging just the
+  // root is enough — putting the flag on every row would be
+  // redundant. MEET's meeting page is iframe-embeddable by design,
+  // and the default X-Frame-Options: SAMEORIGIN breaks any embed.
   routes: [
-    { pathPrefix: '/livekit', port: 7880, stripPrefix: true,  websocketEnabled: true  },
-    { pathPrefix: '/api',     port: 8080, stripPrefix: false, websocketEnabled: false },
-    { pathPrefix: '/ws',      port: 8080, stripPrefix: false, websocketEnabled: true  },
-    { pathPrefix: '/',        port: 3000, stripPrefix: false, websocketEnabled: false },
+    { pathPrefix: '/livekit', port: 7880, stripPrefix: true,  websocketEnabled: true,  allowFraming: false },
+    { pathPrefix: '/api',     port: 8080, stripPrefix: false, websocketEnabled: false, allowFraming: false },
+    { pathPrefix: '/ws',      port: 8080, stripPrefix: false, websocketEnabled: true,  allowFraming: false },
+    { pathPrefix: '/',        port: 3000, stripPrefix: false, websocketEnabled: false, allowFraming: true  },
   ],
   l4Forwards: [
     { proto: 'tcp', listenPort: 7881, listenPortEnd: null,  connectPort: 7881, connectPortEnd: null,  description: 'LiveKit RTC TCP fallback' },
@@ -1606,15 +1616,18 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
         .get(cleanDomain, `${r.pathPrefix}/*`);
       const existing = exact || globbed;
       if (!existing) return { route: r, action: 'insert' };
+      const expectFraming = !!r.allowFraming;
+      const haveFraming = !!existing.allow_framing;
       const matches =
         existing.target_port === r.port &&
         !!existing.strip_prefix === r.stripPrefix &&
-        !!existing.websocket_enabled === r.websocketEnabled;
+        !!existing.websocket_enabled === r.websocketEnabled &&
+        haveFraming === expectFraming;
       if (matches) return { route: r, action: 'skip', existingId: existing.id, normalize: !exact };
       return {
         route: r,
         action: 'reject',
-        reason: `${cleanDomain}${r.pathPrefix} already exists with port=${existing.target_port} strip=${!!existing.strip_prefix} ws=${!!existing.websocket_enabled}; expected port=${r.port} strip=${r.stripPrefix} ws=${r.websocketEnabled}`,
+        reason: `${cleanDomain}${r.pathPrefix} already exists with port=${existing.target_port} strip=${!!existing.strip_prefix} ws=${!!existing.websocket_enabled} framing=${haveFraming}; expected port=${r.port} strip=${r.stripPrefix} ws=${r.websocketEnabled} framing=${expectFraming}`,
       };
     });
     const routeReject = routePlan.find((p) => p.action === 'reject');
@@ -1703,8 +1716,8 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
           `INSERT INTO service_http_routes
              (id, service_id, domain, path_prefix, target_port,
               websocket_enabled, ssl_enabled, force_https, max_upload_size,
-              strip_prefix)
-           VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`
+              strip_prefix, allow_framing, frame_ancestors)
+           VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)`
         ).run(
           id,
           svc.id,
@@ -1717,7 +1730,10 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
           // to remember it post-install. Other routes inherit the
           // standard 1G default.
           r.pathPrefix === '/api' ? '50M' : '1G',
-          r.stripPrefix ? 1 : 0
+          r.stripPrefix ? 1 : 0,
+          r.allowFraming ? 1 : 0,
+          // null frameAncestors → renderer falls back to '*'
+          null
         );
         insertedRouteIds.push(id);
         routesAdded++;
@@ -2155,6 +2171,8 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
     pathPrefix,
     stripPrefix,
     websocketEnabled,
+    allowFraming,
+    frameAncestors,
   } = req.body;
 
   if (!validateName(name)) {
@@ -2227,11 +2245,20 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
         });
       }
 
+      // allow_framing / frame_ancestors are only forwarded when the
+      // PUT body sets them — undefined leaves the existing DB value
+      // alone so toggling other knobs doesn't silently reset framing.
+      const setFraming = allowFraming !== undefined;
+      const framingValue = allowFraming ? 1 : 0;
+      const setAncestors = frameAncestors !== undefined;
+      const ancestorsValue = frameAncestors ?? null;
       db.prepare(
         `UPDATE service_http_routes SET
            domain = ?, path_prefix = ?, target_port = ?,
            websocket_enabled = ?, ssl_enabled = ?, force_https = ?,
-           strip_prefix = ?
+           strip_prefix = ?,
+           allow_framing = COALESCE(?, allow_framing),
+           frame_ancestors = CASE WHEN ? THEN ? ELSE frame_ancestors END
          WHERE id = ?`
       ).run(
         cleanDomain,
@@ -2241,6 +2268,9 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
         cert ? 1 : 0,
         cert ? 1 : 0,
         wantStrip ? 1 : 0,
+        setFraming ? framingValue : null,
+        setAncestors ? 1 : 0,
+        ancestorsValue,
         routeId
       );
 

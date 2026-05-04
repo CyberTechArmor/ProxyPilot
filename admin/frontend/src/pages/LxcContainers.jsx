@@ -2430,6 +2430,14 @@ export default function LxcContainers() {
                                   ws
                                 </span>
                               )}
+                              {svc.allowFraming && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30"
+                                  title="Allow framing: site emits -X-Frame-Options + Content-Security-Policy frame-ancestors"
+                                >
+                                  iframe
+                                </span>
+                              )}
                               <span className="text-muted-foreground">:{svc.port}</span>
                               {svc.reachable === false && (
                                 <span
@@ -3174,7 +3182,7 @@ export default function LxcContainers() {
                 <li><code className="font-mono">/livekit/* → :7880</code> (strip prefix, WebSocket, 24h timeouts)</li>
                 <li><code className="font-mono">/api/*     → :8080</code> (50 MiB body cap)</li>
                 <li><code className="font-mono">/ws/*      → :8080</code> (WebSocket)</li>
-                <li><code className="font-mono">/          → :3000</code> (frontend catch-all)</li>
+                <li><code className="font-mono">/          → :3000</code> (frontend catch-all, allow iframe embedding)</li>
                 <li><code className="font-mono">tcp/7881</code> L4 forward (LiveKit RTC TCP fallback)</li>
                 <li><code className="font-mono">udp/50000-60000</code> L4 forward (WebRTC media)</li>
               </ul>

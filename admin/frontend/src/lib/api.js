@@ -586,6 +586,16 @@ export const api = {
   // the port-input typeahead in the "add service" form.
   getLxcListeningPorts: (name) => request(`/lxc/containers/${name}/listening-ports`),
 
+  // Phase 2c: one-shot MEET single-domain installer. Inserts the
+  // four canonical HTTP routes (/livekit, /api, /ws, /) and the
+  // two L4 forwards (tcp/7881, udp/50000-60000) in one call so
+  // the operator doesn't have to enter them by hand.
+  quickAddMeet: (name, domain) =>
+    request(`/lxc/containers/${name}/quick-add/meet`, {
+      method: 'POST',
+      body: JSON.stringify({ domain }),
+    }),
+
   addLxcService: (name, service) => request(`/lxc/containers/${name}/services`, {
     method: 'POST',
     body: JSON.stringify(service),

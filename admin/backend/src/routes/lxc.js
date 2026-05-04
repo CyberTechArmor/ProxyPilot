@@ -12,6 +12,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
+import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
@@ -1486,6 +1487,255 @@ function findOrCreateLxcService(db, name, ip) {
   ).run(id, name, ip, name);
   return db.prepare(`SELECT * FROM services WHERE id = ?`).get(id);
 }
+
+// MEET reference layout. Source: deploy/external-proxy/caddy/single-domain.Caddyfile
+// in the MEET repo. The fan-out is canonical — frontend on 3000,
+// API on 8080 (also serves /ws), LiveKit signaling on 7880, plus
+// L4 forwards for the LiveKit RTC TCP fallback (7881) and the
+// WebRTC media UDP range (50000-60000). Operators occasionally
+// invent variations; this preset only handles the canonical one.
+const MEET_PRESET = {
+  routes: [
+    { pathPrefix: '/livekit/*', port: 7880, stripPrefix: true,  websocketEnabled: true  },
+    { pathPrefix: '/api/*',     port: 8080, stripPrefix: false, websocketEnabled: false },
+    { pathPrefix: '/ws/*',      port: 8080, stripPrefix: false, websocketEnabled: true  },
+    { pathPrefix: '/',          port: 3000, stripPrefix: false, websocketEnabled: false },
+  ],
+  l4Forwards: [
+    { proto: 'tcp', listenPort: 7881, listenPortEnd: null,  connectPort: 7881, connectPortEnd: null,  description: 'LiveKit RTC TCP fallback' },
+    { proto: 'udp', listenPort: 50000, listenPortEnd: 60000, connectPort: 50000, connectPortEnd: 60000, description: 'WebRTC media' },
+  ],
+  // The TCP ports we expect to see listening before we'll accept
+  // the preset. UDP isn't checked — LiveKit allocates the WebRTC
+  // range on-demand when a call starts, so it's normal for the
+  // 50000-60000 sockets to be absent at install time.
+  requiredTcpPorts: [3000, 7880, 7881, 8080],
+};
+
+// POST /containers/:name/quick-add/meet - One-shot MEET single-domain
+// install. Operator supplies a domain; we add 4 HTTP routes and 2 L4
+// forwards in one transaction with one Caddy reload at the end.
+//
+// Refuses to overwrite — if any of the (domain, path) tuples already
+// exist or any L4 listen port is taken, the whole call rolls back so
+// the operator doesn't end up half-configured.
+lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
+  const { name } = req.params;
+  const { domain } = req.body || {};
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  if (!domain || typeof domain !== 'string' || !domain.trim()) {
+    return res.status(400).json({ success: false, error: 'Domain is required.' });
+  }
+  const cleanDomain = domain.trim();
+
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    const result = await execOnHost(`incus list ${incusName} --format json 2>/dev/null`, { timeout: 5000 });
+    const containers = JSON.parse(result.stdout || '[]');
+    if (containers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Container not found.' });
+    }
+    const ip = extractIPv4(containers[0]);
+    if (!ip) {
+      return res.status(400).json({ success: false, error: 'Container has no IP address. Is it running?' });
+    }
+
+    try { await ensureCaddyStructure(); } catch (e) {
+      console.error('[LXC] ensureCaddyStructure failed:', e?.message || e);
+    }
+
+    const db = getDb();
+
+    // Pre-flight: every desired (domain, path) tuple must be free.
+    // The HTTP-route INSERT below would surface a UNIQUE-constraint
+    // error on conflict, but checking up front lets us fail
+    // with one clean message instead of mid-batch.
+    for (const r of MEET_PRESET.routes) {
+      const collide = db
+        .prepare(`SELECT id FROM service_http_routes WHERE domain = ? AND path_prefix = ? LIMIT 1`)
+        .get(cleanDomain, r.pathPrefix);
+      if (collide) {
+        return res.status(409).json({
+          success: false,
+          error: `${cleanDomain}${r.pathPrefix} already exists. Delete the existing routes for this domain first.`,
+        });
+      }
+    }
+
+    // Pre-flight: L4 forward listen ports must be free. Same shape
+    // of guard against the UNIQUE(proto, listen_port, listen_port_end)
+    // constraint on service_l4_forwards.
+    for (const f of MEET_PRESET.l4Forwards) {
+      const collide = db
+        .prepare(
+          `SELECT id FROM service_l4_forwards
+            WHERE proto = ? AND listen_port = ?
+              AND (listen_port_end IS ? OR listen_port_end = ?)`
+        )
+        .get(f.proto, f.listenPort, f.listenPortEnd, f.listenPortEnd);
+      if (collide) {
+        const range = f.listenPortEnd ? `${f.listenPort}-${f.listenPortEnd}` : `${f.listenPort}`;
+        return res.status(409).json({
+          success: false,
+          error: `${f.proto}/${range} is already taken by another L4 forward.`,
+        });
+      }
+    }
+
+    // If a legacy single-domain Caddyfile exists for this domain,
+    // remove it before we lay down the merged version. The migration
+    // logic in POST /services would otherwise insert a phantom root
+    // route that conflicts with our preset's `/`.
+    const legacyConfigPath = join(CADDY_SITES_DIR, cleanDomain);
+    if (existsSync(legacyConfigPath)) {
+      await unlink(legacyConfigPath).catch(() => {});
+    }
+
+    const svc = findOrCreateLxcService(db, name, ip);
+    const insertedRouteIds = [];
+    const insertedForwardIds = [];
+
+    // Atomic-ish at the row level: any single insert failure rolls
+    // back the rows already inserted in this batch + reverts to a
+    // clean state. We intentionally do NOT wrap in a SQLite
+    // transaction because the L4 reconciler does host-side work
+    // (Incus device + firewall row) that can't participate in a
+    // DB transaction; the rollback path matches that asymmetry.
+    const rollback = async () => {
+      for (const id of insertedRouteIds) {
+        try { db.prepare(`DELETE FROM service_http_routes WHERE id = ?`).run(id); } catch {}
+      }
+      for (const id of insertedForwardIds) {
+        try { db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id); } catch {}
+      }
+      try { await regenerateDomainCaddyConfig(db, cleanDomain); } catch {}
+      // Reconciler will sweep up any orphan ppl4-* devices on the
+      // next service-detail panel open, so we don't fan out a
+      // second Incus call here.
+    };
+
+    try {
+      // 1. HTTP routes.
+      for (const r of MEET_PRESET.routes) {
+        const id = uuidv4();
+        db.prepare(
+          `INSERT INTO service_http_routes
+             (id, service_id, domain, path_prefix, target_port,
+              websocket_enabled, ssl_enabled, force_https, max_upload_size,
+              strip_prefix)
+           VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`
+        ).run(
+          id,
+          svc.id,
+          cleanDomain,
+          r.pathPrefix,
+          r.port,
+          r.websocketEnabled ? 1 : 0,
+          // MEET's reference Caddyfile sets a 50 MiB body cap on the
+          // /api route; bake that in here so the operator doesn't have
+          // to remember it post-install. Other routes inherit the
+          // standard 1G default.
+          r.pathPrefix === '/api/*' ? '50M' : '1G',
+          r.stripPrefix ? 1 : 0
+        );
+        insertedRouteIds.push(id);
+      }
+
+      // 2. Regenerate the merged Caddyfile + reload BEFORE touching L4
+      // forwards. If the Caddy half fails, we can roll back without
+      // having created any host-side Incus devices.
+      try {
+        await regenerateDomainCaddyConfig(db, cleanDomain);
+      } catch (genErr) {
+        await rollback();
+        return res.status(400).json({
+          success: false,
+          error: `Caddy render failed: ${genErr.message}`,
+        });
+      }
+      let reloadWarning = null;
+      try {
+        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+      } catch (reloadError) {
+        const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
+        // Reload failure isn't fatal to the preset (the rules are
+        // saved, and a manual reload will pick them up); surface it
+        // as a warning so the operator knows.
+        reloadWarning = `Routes saved but Caddy reload failed: ${detail || 'unknown error'}`;
+      }
+
+      // 3. L4 forward rows.
+      for (const f of MEET_PRESET.l4Forwards) {
+        const id = uuidv4();
+        db.prepare(
+          `INSERT INTO service_l4_forwards
+             (id, service_id, proto, listen_port, listen_port_end,
+              connect_port, connect_port_end, description, enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        ).run(
+          id,
+          svc.id,
+          f.proto,
+          f.listenPort,
+          f.listenPortEnd,
+          f.connectPort,
+          f.connectPortEnd,
+          f.description
+        );
+        insertedForwardIds.push(id);
+      }
+
+      // 4. Reconcile L4 forwards: emits Incus proxy devices and
+      // pairs each with a service-l4 firewall row. Per-row outcomes
+      // come back so the response can call out which side of which
+      // forward failed without aborting the whole batch.
+      let l4Result = null;
+      try {
+        l4Result = await reconcileServiceL4Forwards({
+          db,
+          serviceId: svc.id,
+          lxcName: name,
+          bridgeIp: ip,
+          serviceTag: name,
+        });
+      } catch (e) {
+        // Roll back the L4 inserts only — HTTP routes stay since
+        // they reloaded successfully; the operator can retry the
+        // L4 reconcile from the service-detail panel.
+        for (const id of insertedForwardIds) {
+          try { db.prepare(`DELETE FROM service_l4_forwards WHERE id = ?`).run(id); } catch {}
+        }
+        return res.status(500).json({
+          success: false,
+          error: `HTTP routes installed but L4 reconcile failed: ${e.message}. Open the service-detail panel and re-add the L4 forwards.`,
+          partial: { routes: insertedRouteIds.length, forwards: 0 },
+          ...(reloadWarning && { warning: reloadWarning }),
+        });
+      }
+
+      console.log(`[LXC] Quick-add MEET on ${name}: ${insertedRouteIds.length} routes, ${insertedForwardIds.length} forwards`);
+      res.json({
+        success: true,
+        domain: cleanDomain,
+        routes: insertedRouteIds.length,
+        forwards: insertedForwardIds.length,
+        l4: l4Result,
+        ...(reloadWarning && { warning: reloadWarning }),
+      });
+    } catch (e) {
+      await rollback();
+      throw e;
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `Quick-add MEET failed: ${(error.stderr || error.message || '').trim()}`,
+    });
+  }
+});
 
 // POST /containers/:name/services - Add a route to the LXC's service.
 //

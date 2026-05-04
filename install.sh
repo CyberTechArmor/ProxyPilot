@@ -963,8 +963,8 @@ create_docker_compose() {
     fi
 
     cat > "${install_dir}/docker-compose.yml" <<EOF
-version: '3.8'
-
+# Compose Spec — no `version:` key (it's been obsolete since
+# Compose v2 and recent compose CLIs warn on every invocation).
 services:
   proxypilot:
     build:

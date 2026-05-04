@@ -606,6 +606,20 @@ export function initDatabase() {
     if (!cols.includes('host_header_override')) {
       d.exec(`ALTER TABLE service_http_routes ADD COLUMN host_header_override TEXT`);
     }
+    // Backfill: pre-100 renderer treated path_prefix != '/' as "strip
+    // the prefix" (handle_path semantics in Caddy). New rows default
+    // strip_prefix=0, so without this backfill an upgrade would silently
+    // change every prefixed route's matching from `handle_path /foo*`
+    // to `handle /foo*` and break upstream apps that assumed the
+    // prefix would be gone. Run once, idempotent: only flips rows
+    // that are still at the column default.
+    d.exec(
+      `UPDATE service_http_routes
+         SET strip_prefix = 1
+       WHERE path_prefix IS NOT NULL
+         AND path_prefix != '/'
+         AND strip_prefix = 0`
+    );
   });
 
   // Version 101: Phase 2c — service_l4_forwards table. Captures the

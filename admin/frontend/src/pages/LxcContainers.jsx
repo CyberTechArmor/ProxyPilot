@@ -854,21 +854,36 @@ export default function LxcContainers() {
     }
   };
 
-  const handleUpdateService = async (oldDomain) => {
+  // Phase 2c: takes the full service row (or just the legacy
+  // domain string) so we can preserve routeId / source / pathPrefix
+  // through the update call. Editing a routes-table row updates
+  // through the Phase 2c pipeline; editing a legacy file row stays
+  // on the file-write path.
+  const handleUpdateService = async (svc) => {
     if (!selectedContainer || !editServiceForm.domain.trim()) return;
+    const oldDomain = typeof svc === 'string' ? svc : svc.domain;
+    const routeId = typeof svc === 'string' ? undefined : (svc.source === 'db' ? svc.id : undefined);
     try {
       const domain = editServiceForm.domain.trim();
       const trimmedHealthPath = (editServiceForm.healthPath || '').trim();
-      const res = await api.updateLxcService(selectedContainer.name, oldDomain, {
+      const body = {
         domain,
         port: parseInt(editServiceForm.port, 10) || 80,
         obtainCert: editServiceForm.obtainCert,
         healthPath: trimmedHealthPath || null,
-      });
+      };
+      // Routes-table rows carry the full set of per-route knobs;
+      // forward them through so toggling strip / WS works inline.
+      if (routeId) {
+        body.pathPrefix = (editServiceForm.pathPrefix || '/').trim() || '/';
+        body.stripPrefix = !!editServiceForm.stripPrefix;
+        body.websocketEnabled = !!editServiceForm.websocketEnabled;
+      }
+      const res = await api.updateLxcService(selectedContainer.name, oldDomain, body, routeId);
       if (res?.warning) {
         toast({ title: 'Service saved with warning', description: res.warning, variant: 'destructive' });
       } else {
-        toast({ title: 'Service updated', description: `${domain} updated.` });
+        toast({ title: 'Service updated', description: `${domain}${body.pathPrefix && body.pathPrefix !== '/' ? body.pathPrefix : ''} updated.` });
       }
       setEditingService(null);
       fetchContainerServices(selectedContainer.name);
@@ -2238,55 +2253,93 @@ export default function LxcContainers() {
                           className="rounded-lg border border-border/50 bg-muted/30 text-xs overflow-hidden"
                         >
                           <div className="flex items-center gap-2 p-2">
-                          {editingService === svc.domain ? (
-                            <>
-                              <div className="flex-1 grid grid-cols-3 gap-1.5">
-                                <Input
-                                  value={editServiceForm.domain}
-                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, domain: e.target.value }))}
-                                  className="h-7 text-xs"
-                                  placeholder="domain"
-                                />
-                                <Input
-                                  type="number"
-                                  value={editServiceForm.port}
-                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, port: e.target.value }))}
-                                  className="h-7 text-xs"
-                                  placeholder="port"
-                                />
-                                <Input
-                                  value={editServiceForm.healthPath || ''}
-                                  onChange={(e) => setEditServiceForm((f) => ({ ...f, healthPath: e.target.value }))}
-                                  className="h-7 text-xs font-mono"
-                                  placeholder="/healthz"
-                                  title="Optional HTTP HEAD probe path. Leave blank to keep TCP-only health checks."
-                                />
+                          {editingService === (svc.id || `${svc.domain}|${svc.pathPrefix || '/'}`) ? (
+                            <div className="flex-1 flex flex-col gap-2">
+                              {/* Phase 2c: routes-table rows get a 4-col grid
+                                  with a path field; legacy file rows stay
+                                  3-col (no path concept). */}
+                              <div className="flex items-center gap-2">
+                                <div className={`flex-1 grid ${svc.source === 'db' ? 'grid-cols-4' : 'grid-cols-3'} gap-1.5`}>
+                                  <Input
+                                    value={editServiceForm.domain}
+                                    onChange={(e) => setEditServiceForm((f) => ({ ...f, domain: e.target.value }))}
+                                    className="h-7 text-xs"
+                                    placeholder="domain"
+                                  />
+                                  {svc.source === 'db' && (
+                                    <Input
+                                      value={editServiceForm.pathPrefix || '/'}
+                                      onChange={(e) => setEditServiceForm((f) => ({ ...f, pathPrefix: e.target.value }))}
+                                      className="h-7 text-xs font-mono"
+                                      placeholder="/ (or /api)"
+                                      title="Route only this path on the domain."
+                                    />
+                                  )}
+                                  <Input
+                                    type="number"
+                                    value={editServiceForm.port}
+                                    onChange={(e) => setEditServiceForm((f) => ({ ...f, port: e.target.value }))}
+                                    className="h-7 text-xs"
+                                    placeholder="port"
+                                  />
+                                  <Input
+                                    value={editServiceForm.healthPath || ''}
+                                    onChange={(e) => setEditServiceForm((f) => ({ ...f, healthPath: e.target.value }))}
+                                    className="h-7 text-xs font-mono"
+                                    placeholder="/healthz"
+                                    title="Optional HTTP HEAD probe path. Leave blank to keep TCP-only health checks."
+                                  />
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <Switch
+                                    checked={editServiceForm.obtainCert}
+                                    onCheckedChange={(checked) => setEditServiceForm((f) => ({ ...f, obtainCert: checked }))}
+                                    className="scale-[0.65]"
+                                  />
+                                  <Shield className={`h-3 w-3 ${editServiceForm.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
+                                </div>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-1.5 text-green-500 hover:text-green-400"
+                                  onClick={() => handleUpdateService(svc)}
+                                >
+                                  <Check className="h-3 w-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-1.5 text-muted-foreground"
+                                  onClick={() => setEditingService(null)}
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
                               </div>
-                              <div className="flex items-center gap-1">
-                                <Switch
-                                  checked={editServiceForm.obtainCert}
-                                  onCheckedChange={(checked) => setEditServiceForm((f) => ({ ...f, obtainCert: checked }))}
-                                  className="scale-[0.65]"
-                                />
-                                <Shield className={`h-3 w-3 ${editServiceForm.obtainCert ? 'text-green-500' : 'text-muted-foreground/40'}`} />
-                              </div>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-1.5 text-green-500 hover:text-green-400"
-                                onClick={() => handleUpdateService(svc.domain)}
-                              >
-                                <Check className="h-3 w-3" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-1.5 text-muted-foreground"
-                                onClick={() => setEditingService(null)}
-                              >
-                                <X className="h-3 w-3" />
-                              </Button>
-                            </>
+                              {/* Phase 2c: strip/WS toggles. Hidden for
+                                  legacy file rows (those flags don't round-
+                                  trip through the file pipeline) and for
+                                  root paths (where strip is a no-op). */}
+                              {svc.source === 'db' && editServiceForm.pathPrefix && editServiceForm.pathPrefix !== '/' && (
+                                <div className="flex items-center gap-4 px-1 text-[11px] text-muted-foreground">
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <Switch
+                                      checked={!!editServiceForm.stripPrefix}
+                                      onCheckedChange={(checked) => setEditServiceForm((f) => ({ ...f, stripPrefix: checked }))}
+                                      className="scale-[0.65]"
+                                    />
+                                    <span>strip prefix</span>
+                                  </label>
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <Switch
+                                      checked={!!editServiceForm.websocketEnabled}
+                                      onCheckedChange={(checked) => setEditServiceForm((f) => ({ ...f, websocketEnabled: checked }))}
+                                      className="scale-[0.65]"
+                                    />
+                                    <span>websocket / streaming</span>
+                                  </label>
+                                </div>
+                              )}
+                            </div>
                           ) : (
                             <>
                               <Globe className="h-3.5 w-3.5 text-cyan-500 shrink-0" />
@@ -2380,12 +2433,22 @@ export default function LxcContainers() {
                                 size="sm"
                                 className="h-6 px-1.5 text-muted-foreground hover:text-cyan-500"
                                 onClick={() => {
-                                  setEditingService(svc.domain);
+                                  // Phase 2c: editing key is the row's
+                                  // unique id (db rows) or a (domain, path)
+                                  // tuple (legacy file rows). Avoids the
+                                  // earlier bug where multiple rows on the
+                                  // same domain all flipped into edit mode
+                                  // because the key was just `svc.domain`.
+                                  const key = svc.id || `${svc.domain}|${svc.pathPrefix || '/'}`;
+                                  setEditingService(key);
                                   setEditServiceForm({
                                     domain: svc.domain,
                                     port: String(svc.port || ''),
                                     obtainCert: svc.obtainCert,
                                     healthPath: svc.healthPath || '',
+                                    pathPrefix: svc.pathPrefix || '/',
+                                    stripPrefix: !!svc.stripPrefix,
+                                    websocketEnabled: !!svc.websocketEnabled,
                                   });
                                 }}
                               >

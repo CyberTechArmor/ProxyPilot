@@ -1598,6 +1598,7 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
     // and the new path-prefixed route. Without this step the merged
     // file would be missing the legacy entry's port and the original
     // service would 404.
+    let migrationWarning = null;
     if (fileExists) {
       try {
         const existing = await readFile(configPath, 'utf-8');
@@ -1628,6 +1629,13 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
               tlsInternal ? 0 : 1,
               tlsInternal ? 0 : 1
             );
+            // Surface the migration so the operator can spot the
+            // auto-created root row in the list and decide whether
+            // it still matches their intent (common case: the old
+            // single-port setup pointed at the API; for a fan-out
+            // app the root usually wants to point at the frontend
+            // instead, so the user has to edit the migrated row).
+            migrationWarning = `${cleanDomain} previously had a single-route config pointing at :${legacyPort}; migrated to / → :${legacyPort}. Edit or delete that row if it should now point at a different port.`;
           }
         }
         // Drop the file — the merged regenerator will rewrite it.
@@ -1707,7 +1715,15 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
         healthPath: cleanHealthPath,
         source: 'db',
       },
-      ...(reloadWarning && { warning: reloadWarning }),
+      // Two warning channels: a Caddy reload failure is more
+      // urgent (the live ruleset may be stale) so it wins; the
+      // migration warning is informational so it ships only when
+      // there's no reload error to crowd it out.
+      ...(reloadWarning
+        ? { warning: reloadWarning }
+        : migrationWarning
+        ? { warning: migrationWarning }
+        : {}),
     });
   } catch (error) {
     res.status(500).json({
@@ -1718,9 +1734,24 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
 });
 
 // PUT /containers/:name/services/:domain - Update an existing service
+//
+// Phase 2c: takes an optional ?routeId= to target a routes-table row.
+// Without routeId we fall back to the legacy domain-keyed file path.
+// Request body now also carries pathPrefix / stripPrefix / websocketEnabled
+// so the inline edit form can change the new per-route knobs without
+// having to delete and re-add the row.
 lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
   const { name, domain: oldDomain } = req.params;
-  const { domain: newDomain, port, obtainCert, healthPath } = req.body;
+  const { routeId } = req.query;
+  const {
+    domain: newDomain,
+    port,
+    obtainCert,
+    healthPath,
+    pathPrefix,
+    stripPrefix,
+    websocketEnabled,
+  } = req.body;
 
   if (!validateName(name)) {
     return res.status(400).json({ success: false, error: 'Invalid container name.' });
@@ -1747,10 +1778,108 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
       console.error('[LXC] ensureCaddyStructure failed:', e?.message || e);
     }
 
-    // Same-domain conflict guard: if the rename-target is already a
-    // route in the Service Settings surface, refuse rather than letting
-    // the two surfaces silently overwrite each other's site files.
-    // Skip when the operator is keeping the same domain (no rename).
+    // Routes-table update path. Targeted via ?routeId so we never
+    // accidentally hit a different (domain, path) row when multiple
+    // routes share a domain.
+    if (routeId) {
+      const db = getDb();
+      const row = db
+        .prepare(
+          `SELECT r.id, r.domain, r.path_prefix, s.id AS service_id
+             FROM service_http_routes r
+             JOIN services s ON s.id = r.service_id
+            WHERE r.id = ? AND s.lxc_container_name = ?`
+        )
+        .get(routeId, name);
+      if (!row) {
+        return res.status(404).json({ success: false, error: 'Route not found.' });
+      }
+      const cleanDomain = (newDomain || row.domain).trim();
+      const cleanPath =
+        typeof pathPrefix === 'string' && pathPrefix.trim()
+          ? pathPrefix.trim()
+          : row.path_prefix;
+      if (!/^\/[A-Za-z0-9._\-/]*$/.test(cleanPath)) {
+        return res.status(400).json({ success: false, error: 'Invalid path prefix.' });
+      }
+      const svcPort = parseInt(port, 10) || 80;
+      const cert = obtainCert !== false;
+      const wsEnabled = !!websocketEnabled;
+      const wantStrip =
+        stripPrefix !== undefined ? !!stripPrefix : cleanPath !== '/';
+
+      // (domain, path_prefix) UNIQUE → check for collisions before
+      // updating, excluding the row we're updating.
+      const existing = db
+        .prepare(
+          `SELECT id FROM service_http_routes
+            WHERE domain = ? AND path_prefix = ? AND id != ?`
+        )
+        .get(cleanDomain, cleanPath, routeId);
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          error: `${cleanDomain}${cleanPath} already has another route.`,
+        });
+      }
+
+      db.prepare(
+        `UPDATE service_http_routes SET
+           domain = ?, path_prefix = ?, target_port = ?,
+           websocket_enabled = ?, ssl_enabled = ?, force_https = ?,
+           strip_prefix = ?
+         WHERE id = ?`
+      ).run(
+        cleanDomain,
+        cleanPath,
+        svcPort,
+        wsEnabled ? 1 : 0,
+        cert ? 1 : 0,
+        cert ? 1 : 0,
+        wantStrip ? 1 : 0,
+        routeId
+      );
+
+      // Regenerate both the new domain (always) and the old domain
+      // when the rename actually changed it — the old merged file
+      // either shrinks or unlinks depending on remaining siblings.
+      try {
+        await regenerateDomainCaddyConfig(db, cleanDomain);
+        if (cleanDomain !== row.domain) {
+          await regenerateDomainCaddyConfig(db, row.domain);
+        }
+      } catch (genErr) {
+        console.warn('[LXC] regenerate after route update failed:', genErr.message);
+      }
+
+      let reloadWarning = null;
+      try {
+        await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+      } catch (reloadError) {
+        const detail = (reloadError.stderr || reloadError.stdout || reloadError.message || '').trim();
+        reloadWarning = `Saved but Caddy reload failed: ${detail || 'unknown error'}`;
+      }
+      return res.json({
+        success: true,
+        service: {
+          id: routeId,
+          serviceId: row.service_id,
+          domain: cleanDomain,
+          pathPrefix: cleanPath,
+          port: svcPort,
+          stripPrefix: wantStrip,
+          websocketEnabled: wsEnabled,
+          obtainCert: cert,
+          healthPath: cleanHealthPath,
+          source: 'db',
+        },
+        ...(reloadWarning && { warning: reloadWarning }),
+      });
+    }
+
+    // Legacy file path (no routeId). Same conflict guard as before so
+    // a rename target that's owned by the routes pipeline doesn't
+    // get clobbered.
     const targetDomain = (newDomain || oldDomain).trim();
     if (targetDomain !== oldDomain) {
       try {
@@ -1799,7 +1928,7 @@ lxcRouter.put('/containers/:name/services/:domain', async (req, res) => {
     console.log(`[LXC] Updated service ${oldDomain} -> ${cleanDomain}:${svcPort} for container ${name}`);
     res.json({
       success: true,
-      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath },
+      service: { domain: cleanDomain, port: svcPort, obtainCert: cert, healthPath: cleanHealthPath, source: 'file' },
       ...(reloadWarning && { warning: reloadWarning }),
     });
   } catch (error) {

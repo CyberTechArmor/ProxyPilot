@@ -1836,6 +1836,57 @@ lxcRouter.post('/containers/:name/quick-add/meet', async (req, res) => {
 // flags — for everything else we take the routes pipeline because
 // the merged-Caddyfile builder already handles strip_prefix /
 // websocket / per-route timeouts cleanly.
+// POST /containers/:name/services/regenerate - Force-rebuild every
+// merged Caddyfile owned by this LXC and reload Caddy. Used when
+// the on-disk Caddyfile drifts from the routes table (the most
+// common trigger: a previous edit didn't trip a regen, or the
+// regen happened but the reload was racing). Operator action of
+// last resort that doesn't require a host shell — equivalent to
+// the host-side `caddy reload --config /etc/caddy/Caddyfile`
+// pattern but driven from the routes-table state we already own.
+lxcRouter.post('/containers/:name/services/regenerate', async (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  try {
+    const db = getDb();
+    const domains = db
+      .prepare(
+        `SELECT DISTINCT r.domain
+           FROM service_http_routes r
+           JOIN services s ON s.id = r.service_id
+          WHERE s.lxc_container_name = ?
+          ORDER BY r.domain`
+      )
+      .all(name)
+      .map((r) => r.domain);
+    const errors = [];
+    for (const d of domains) {
+      try { await regenerateDomainCaddyConfig(db, d); }
+      catch (e) { errors.push({ domain: d, error: e.message }); }
+    }
+    let reloadWarning = null;
+    try {
+      await execOnHost('caddy reload --config /etc/caddy/Caddyfile 2>&1');
+    } catch (e) {
+      const detail = (e.stderr || e.stdout || e.message || '').trim();
+      reloadWarning = `Files regenerated but Caddy reload failed: ${detail || 'unknown error'}`;
+    }
+    res.json({
+      success: errors.length === 0,
+      domains,
+      errors,
+      ...(reloadWarning && { warning: reloadWarning }),
+    });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: `Regenerate failed: ${(e.stderr || e.message || '').trim()}`,
+    });
+  }
+});
+
 lxcRouter.post('/containers/:name/services', async (req, res) => {
   const { name } = req.params;
   const {

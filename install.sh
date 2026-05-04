@@ -439,7 +439,13 @@ check_docker_compose() {
 # Install additional dependencies
 install_dependencies() {
     log_info "Installing additional dependencies..."
-    apt-get install -y qrencode jq
+    # sqlite3 CLI is used for operator-side diagnostics against
+    # /opt/proxypilot/data/db/proxypilot.db when troubleshooting
+    # route state. The admin runtime uses better-sqlite3 (Node
+    # native) so we don't strictly need the binary at runtime,
+    # but having it installed keeps the host-shell debug path
+    # one command short of a fix.
+    apt-get install -y qrencode jq sqlite3
     log_success "Dependencies installed"
 }
 

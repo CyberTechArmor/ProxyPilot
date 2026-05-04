@@ -596,6 +596,16 @@ export const api = {
       body: JSON.stringify({ domain }),
     }),
 
+  // Phase 2c: force-rebuild every merged Caddyfile this LXC owns
+  // and reload Caddy. Used when on-disk state has drifted from the
+  // routes table (a missed reload, a manual edit gone stale).
+  // Operator action of last resort that doesn't require host
+  // shell access.
+  regenerateLxcCaddy: (name) =>
+    request(`/lxc/containers/${name}/services/regenerate`, {
+      method: 'POST',
+    }),
+
   addLxcService: (name, service) => request(`/lxc/containers/${name}/services`, {
     method: 'POST',
     body: JSON.stringify(service),

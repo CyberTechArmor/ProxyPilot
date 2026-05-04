@@ -2611,6 +2611,37 @@ export default function LxcContainers() {
                         >
                           rescan
                         </button>
+                        <button
+                          type="button"
+                          className="underline opacity-70 hover:opacity-100"
+                          title="Force-rebuild every merged Caddyfile this LXC owns and reload Caddy. Use when on-disk state has drifted from what the UI shows (a missed reload, a stale edit)."
+                          onClick={async () => {
+                            try {
+                              const r = await api.regenerateLxcCaddy(selectedContainer.name);
+                              if (r?.warning) {
+                                toast({ title: 'Regenerated with warning', description: r.warning, variant: 'destructive' });
+                              } else if (r?.errors?.length) {
+                                toast({
+                                  title: 'Regenerated with errors',
+                                  description: r.errors.map((e) => `${e.domain}: ${e.error}`).join('; '),
+                                  variant: 'destructive',
+                                });
+                              } else {
+                                toast({
+                                  title: 'Caddy reloaded',
+                                  description: r?.domains?.length
+                                    ? `Rebuilt ${r.domains.length} site file(s).`
+                                    : 'No domains owned by this LXC.',
+                                });
+                              }
+                              fetchContainerServices(selectedContainer.name);
+                            } catch (err) {
+                              toast({ title: 'Regenerate failed', description: err.message, variant: 'destructive' });
+                            }
+                          }}
+                        >
+                          regenerate Caddy
+                        </button>
                         {/* Phase 2c: when the listening-port set is a
                             superset of MEET's required TCP ports
                             (3000/7880/7881/8080), surface a one-click

@@ -6766,6 +6766,42 @@ servicesRouter.delete('/:id/l4-forwards/:forwardId', async (req, res) => {
   }
 });
 
+// POST /services/:id/l4-forwards/reconcile — operator-driven re-apply.
+// Use case: a host reboot left the live device set out of sync with the
+// DB (most commonly when an ephemeral UDP socket grabbed a port inside
+// a large range before incus brought the proxy device up). The
+// reconciler is otherwise only invoked off create/delete; this endpoint
+// makes the heal action a one-click affordance instead of asking the
+// operator to delete + re-add.
+servicesRouter.post('/:id/l4-forwards/reconcile', async (req, res) => {
+  try {
+    const db = getDb();
+    const ctx = await loadServiceForL4(db, req.params.id);
+    if (!ctx) return res.status(404).json({ error: 'Service not found' });
+    if (!ctx.service.lxc_container_name) {
+      return res.status(400).json({ error: 'Service has no LXC container' });
+    }
+    if (!ctx.bridgeIp) {
+      return res.status(400).json({ error: 'Service has no cached bridge IP — refresh IP first' });
+    }
+    const result = await reconcileServiceL4Forwards({
+      db,
+      serviceId: req.params.id,
+      lxcName: ctx.service.lxc_container_name,
+      bridgeIp: ctx.bridgeIp,
+      serviceTag: ctx.service.name || null,
+    });
+    logAudit(req.user.id, 'L4_FORWARDS_RECONCILED', 'service', req.params.id, {
+      outcomes: (result && result.applied) || [],
+      reservedPorts: result && result.reservedPorts ? result.reservedPorts.value : null,
+    }, req.ip);
+    res.json({ success: true, reconcile: result });
+  } catch (e) {
+    console.error('Error reconciling L4 forwards:', e);
+    res.status(500).json({ error: `L4 reconcile failed: ${e.message}` });
+  }
+});
+
 // POST /services/:id/detected-ports/rescan — run the detector and
 // persist the result. Returns the raw detector envelope so the UI
 // can render the chip row + the docker-compose ps table without a

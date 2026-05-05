@@ -238,6 +238,14 @@ export const api = {
     request(`/services/${serviceId}/l4-forwards/${forwardId}`, {
       method: 'DELETE',
     }),
+  // Re-run the L4 reconciler against the live host state. Recreates
+  // proxy devices and firewall rules that the DB still claims but
+  // that have disappeared from the host (typically after a reboot
+  // where an ephemeral UDP socket conflicted with a forward range).
+  reconcileServiceL4Forwards: (serviceId) =>
+    request(`/services/${serviceId}/l4-forwards/reconcile`, {
+      method: 'POST',
+    }),
 
   // Phase 2c: detected-ports cache + rescan trigger. The cache read
   // is cheap; rescan walks /proc/net inside the LXC, optionally

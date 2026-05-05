@@ -27,6 +27,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
 import { shellSingleQuote } from './shell-quote.js';
+import { reconcileReservedPorts } from './l4-reserved-ports.js';
 
 const execAsync = promisify(exec);
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
@@ -269,7 +270,20 @@ export async function reconcileServiceL4Forwards({
     }
   }
 
-  return { applied: outcomes };
+  // After every reconcile, refresh the kernel's
+  // ip_local_reserved_ports drop-in to match the current set of UDP
+  // ranges. This stops the early-boot ephemeral allocation from
+  // silently breaking large UDP forwards (the WebRTC media class) on
+  // the next host reboot. Failures here don't fail the reconcile —
+  // the host-side state just stays as it was.
+  let reservedPorts = null;
+  try {
+    reservedPorts = await reconcileReservedPorts({ db, execHost });
+  } catch (e) {
+    reservedPorts = { error: e.message };
+  }
+
+  return { applied: outcomes, reservedPorts };
 }
 
 /**

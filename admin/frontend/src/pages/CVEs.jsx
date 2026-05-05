@@ -23,7 +23,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, BugPlay, Copy, Loader2, RefreshCw, X,
+  ArrowLeft, BugPlay, Copy, Loader2, Pencil, Plus, RefreshCw, Save, Trash2, X, Zap,
 } from 'lucide-react';
 
 const STATUS_TONE = {
@@ -168,7 +168,7 @@ function CveListRow({ entry, onOpen }) {
   );
 }
 
-function CveDetail({ cveId, onBack, onChanged }) {
+function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -176,6 +176,10 @@ function CveDetail({ cveId, onBack, onChanged }) {
   const [running, setRunning] = useState(false);
   const [dismissOpen, setDismissOpen] = useState(false);
   const [reason, setReason] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
@@ -253,6 +257,45 @@ function CveDetail({ cveId, onBack, onChanged }) {
     }
   };
 
+  const onStartEdit = () => {
+    setDraft(yamlBody);
+    setEditing(true);
+  };
+
+  const onSaveEdit = async () => {
+    setSaving(true);
+    try {
+      await api.saveCveEdit(cveId, draft);
+      toast({ title: 'Saved', description: 'Spec updated; engine picks it up on next poll.' });
+      setEditing(false);
+      await refresh();
+      onChanged?.();
+    } catch (err) {
+      toast({
+        title: 'Save failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDelete = async () => {
+    try {
+      await api.deleteCve(cveId);
+      toast({ title: 'Deleted', description: `${cveId} removed from inbox.` });
+      setDeleteOpen(false);
+      onDeleted?.();
+    } catch (err) {
+      toast({
+        title: 'Delete failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    }
+  };
+
   const action = data?.action_class || 'ALERT';
   const status = data?.status || 'NEW';
   const isOneClick = action === 'ONE_CLICK';
@@ -320,6 +363,13 @@ function CveDetail({ cveId, onBack, onChanged }) {
               >
                 <X className="h-4 w-4 mr-1.5" /> Mark dismissed
               </Button>
+              <Button
+                variant="ghost" size="sm"
+                onClick={() => setDeleteOpen(true)}
+                className="text-red-500/80 hover:text-red-500"
+              >
+                <Trash2 className="h-4 w-4 mr-1.5" /> Delete
+              </Button>
             </CardContent>
           </Card>
 
@@ -341,11 +391,43 @@ function CveDetail({ cveId, onBack, onChanged }) {
           )}
 
           <Card>
-            <CardHeader><CardTitle className="text-base">Spec (YAML)</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-base">Spec (YAML)</CardTitle>
+              {!editing ? (
+                <Button variant="outline" size="sm" onClick={onStartEdit}>
+                  <Pencil className="h-4 w-4 mr-1.5" /> Edit
+                </Button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={onSaveEdit} disabled={saving || !draft.trim()}>
+                    {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
+                    Save
+                  </Button>
+                </div>
+              )}
+            </CardHeader>
             <CardContent>
-              <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded p-3 overflow-x-auto">
-                {yamlBody}
-              </pre>
+              {editing ? (
+                <textarea
+                  className="w-full text-xs font-mono bg-muted/30 rounded p-3 border min-h-[24rem]"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  spellCheck={false}
+                />
+              ) : (
+                <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded p-3 overflow-x-auto">
+                  {yamlBody}
+                </pre>
+              )}
+              {editing && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  Embedded <code className="font-mono">cve:</code> field must remain{' '}
+                  <code className="font-mono">{cveId}</code>. Server validates before writing.
+                </p>
+              )}
             </CardContent>
           </Card>
         </>
@@ -372,17 +454,37 @@ function CveDetail({ cveId, onBack, onChanged }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Delete {cveId}?</DialogTitle></DialogHeader>
+          <div className="text-sm text-muted-foreground">
+            Removes the YAML file from the inbox entirely. Use{' '}
+            <strong className="text-foreground">Mark dismissed</strong> instead if you want to
+            keep the record. This cannot be undone.
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDeleteOpen(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={onDelete}>Delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 function CveList({ onOpen, refreshKey }) {
+  const { toast } = useToast();
   const [data, setData] = useState({ entries: [], host: '', unread: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [filterAction, setFilterAction] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [sortBy, setSortBy] = useState('tier');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteContent, setPasteContent] = useState('');
+  const [pasting, setPasting] = useState(false);
+  const [polling, setPolling] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
@@ -397,6 +499,49 @@ function CveList({ onOpen, refreshKey }) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
+
+  const onPaste = async () => {
+    if (!pasteContent.trim()) return;
+    setPasting(true);
+    try {
+      const out = await api.pasteCve(pasteContent);
+      toast({ title: 'Saved', description: `${out.cve} added to inbox.` });
+      setPasteOpen(false);
+      setPasteContent('');
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Save failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setPasting(false);
+    }
+  };
+
+  const onPollNow = async () => {
+    setPolling(true);
+    try {
+      const out = await api.pollCves();
+      const ran = (out?.entries || []).filter(e => e.executed).length;
+      toast({
+        title: 'Poll done',
+        description: ran > 0
+          ? `Engine executed ${ran} AUTO_PATCH ${ran === 1 ? 'entry' : 'entries'}.`
+          : 'Nothing to do — no AUTO_PATCH entries affected this host.',
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Poll failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setPolling(false);
+    }
+  };
 
   const visible = useMemo(() => {
     let rows = data.entries.slice();
@@ -430,17 +575,24 @@ function CveList({ onOpen, refreshKey }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <BugPlay className="h-5 w-5 text-orange-500" />
         <h1 className="text-lg font-semibold">CVEs</h1>
         <span className="text-xs text-muted-foreground ml-2">
           {data.host ? `host: ${data.host}` : null}
         </span>
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">
+          <span className="text-xs text-muted-foreground hidden sm:inline">
             {data.entries.length} total · {data.unread} unread
           </span>
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => setPasteOpen(true)}>
+            <Plus className="h-4 w-4 mr-1.5" /> Paste YAML
+          </Button>
+          <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
+            {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
+            Poll now
+          </Button>
+          <Button variant="ghost" size="icon" onClick={refresh} disabled={loading} title="Refresh list">
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </Button>
         </div>
@@ -496,6 +648,34 @@ function CveList({ onOpen, refreshKey }) {
           ))
         )}
       </div>
+
+      <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader><DialogTitle>Paste CVE YAML</DialogTitle></DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">
+              Filename is derived from the embedded <code className="font-mono">cve:</code>{' '}
+              field. An entry with the same id is overwritten. The server validates the YAML
+              before writing; nothing lands on disk if validation fails.
+            </p>
+            <textarea
+              className="w-full text-xs font-mono bg-muted/30 rounded p-3 border min-h-[20rem]"
+              value={pasteContent}
+              onChange={(e) => setPasteContent(e.target.value)}
+              placeholder={`cve: CVE-2026-12345\nname: "Short title"\nhosts:\n  ${data.host || '<hostname>'}: {action_class: ALERT, tier: 3}\nplaybook:\n  detect: {probe: "exit 0"}\n  patch: {steps: ["true"]}\nstate: {status: NEW, operator_seen: false}\n`}
+              spellCheck={false}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPasteOpen(false)}>Cancel</Button>
+            <Button onClick={onPaste} disabled={pasting || !pasteContent.trim()}>
+              {pasting ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
+              Save to inbox
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -515,6 +695,7 @@ export default function CVEs() {
         cveId={openCve}
         onBack={() => setOpenCve(null)}
         onChanged={() => setRefreshKey(k => k + 1)}
+        onDeleted={() => { setOpenCve(null); setRefreshKey(k => k + 1); }}
       />
     );
   }

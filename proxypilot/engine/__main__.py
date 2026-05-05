@@ -10,6 +10,12 @@ Subcommands:
   run-one <CVE-ID>   Manual trigger for a single entry. Used by the
                      ONE_CLICK "Run on this host" button via the backend.
   show <CVE-ID>      Print the parsed entry summary as JSON. Read-only.
+  mark-seen <CVE-ID> Set state.operator_seen=true. Used when the
+                     dashboard opens an entry's detail view.
+  dismiss <CVE-ID>   Set state.status=DISMISSED with a required reason.
+  validate           Read YAML from stdin, return {ok, cve, error}. Used
+                     by the dashboard to validate a paste before saving
+                     it to the inbox.
 
 Each subcommand writes a one-line JSON result to stdout so a parent
 shell or the Node backend can capture the run summary without having
@@ -19,7 +25,9 @@ to scrape free-text logs.
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -136,6 +144,50 @@ def cmd_dismiss(args: argparse.Namespace) -> int:
     return 0
 
 
+# Filename / cve-id format. The same shape the backend enforces on
+# the URL — kept in lock-step so a paste that round-trips through
+# /api/cves can never produce a name the listing endpoint then
+# refuses to read.
+_CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
+
+
+def cmd_validate(_args: argparse.Namespace) -> int:
+    """Validate a YAML body from stdin without touching the inbox.
+    Returns {ok: true, cve: "<id>"} on success, {ok: false, error: "..."}
+    otherwise. The dashboard's "Save" path calls this before writing.
+    """
+    body = sys.stdin.read()
+    if not body.strip():
+        print(json.dumps({"ok": False, "error": "empty body"}))
+        return 2
+    try:
+        from .inbox import _yaml
+        from ruamel.yaml.comments import CommentedMap
+        raw = _yaml().load(io.StringIO(body))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"YAML parse error: {e}"}))
+        return 2
+    if not isinstance(raw, (dict, CommentedMap)):
+        print(json.dumps({"ok": False, "error": "top-level YAML must be a mapping"}))
+        return 2
+    cve = raw.get("cve")
+    if not isinstance(cve, str) or not cve.strip():
+        print(json.dumps({"ok": False, "error": "missing required `cve:` field"}))
+        return 2
+    cve = cve.strip()
+    if not _CVE_RE.match(cve):
+        print(json.dumps({"ok": False, "error": f"invalid CVE id: {cve!r}; expected CVE-YYYY-NNNN[N..]"}))
+        return 2
+    if not isinstance(raw.get("hosts"), (dict, list)) and raw.get("hosts") is not None:
+        print(json.dumps({"ok": False, "error": "`hosts` must be a mapping or list"}))
+        return 2
+    if "playbook" in raw and not isinstance(raw.get("playbook"), (dict, CommentedMap)):
+        print(json.dumps({"ok": False, "error": "`playbook` must be a mapping"}))
+        return 2
+    print(json.dumps({"ok": True, "cve": cve}))
+    return 0
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     inbox = Path(args.inbox or INBOX_DIR)
     path = inbox / f"{args.cve}.yaml"
@@ -186,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     pd.add_argument("--reason", required=True)
     pd.add_argument("--actor", help="history actor (defaults to 'operator')")
 
+    sub.add_parser("validate", help="validate YAML on stdin; print JSON result")
+
     args = p.parse_args(argv)
     if args.cmd == "inventory":
         return cmd_inventory(args)
@@ -199,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_mark_seen(args)
     if args.cmd == "dismiss":
         return cmd_dismiss(args)
+    if args.cmd == "validate":
+        return cmd_validate(args)
     p.error(f"unknown command {args.cmd!r}")
     return 2
 

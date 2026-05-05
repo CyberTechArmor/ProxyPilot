@@ -943,6 +943,21 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Operator-managed inbox writes. The backend extracts the cve id
+  // from the YAML body, so the paste flow never needs to think about
+  // filenames; saveCveEdit pins the URL id to catch typos. Both go
+  // through the engine's `validate` subcommand server-side.
+  pasteCve: (content) =>
+    request('/cves', { method: 'POST', body: JSON.stringify({ content }) }),
+  saveCveEdit: (cveId, content) =>
+    request(`/cves/${encodeURIComponent(cveId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  deleteCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}`, { method: 'DELETE' }),
+  pollCves: () => request('/cves/poll', { method: 'POST' }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

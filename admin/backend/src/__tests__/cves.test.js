@@ -10,8 +10,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// The DELETE / PUT / POST handlers call logAudit, which expects the
+// audit_log table to exist. Point DATABASE_PATH at a fresh tmp dir
+// BEFORE importing db.js so the schema is created against a throwaway
+// SQLite file, not the operator's real one.
+process.env.DATABASE_PATH = join(
+  mkdtempSync(join(tmpdir(), 'pp-cve-test-')), 'test.db');
+process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret';
+process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY
+  || 'test-key-must-be-32-bytes-long-x';
+// The route's runEngine() spawns `python -m proxypilot.engine` and
+// inherits this process's cwd (admin/backend) which does NOT have
+// the proxypilot package on sys.path. Point PYTHONPATH at the
+// project root so the validate subprocess can find the module.
+const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
+process.env.PYTHONPATH = REPO_ROOT
+  + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : '');
+const { initDatabase, getDb } = await import('../db.js');
+initDatabase();
+
+// Insert a test user so logAudit's FK on users(id) holds. The
+// handlers don't read this row back; only the FK check needs it.
+const TEST_USER_ID = 'test-user';
+getDb().prepare(
+  `INSERT OR IGNORE INTO users (id, username, password_hash, totp_secret, role, totp_enabled)
+   VALUES (?, 'cve-test-user', 'unused', 'unused', 'admin', 0)`
+).run(TEST_USER_ID);
 
 // The extractors are not exported. We exercise them via the route's
 // listing endpoint by spinning up a minimal Express app pointed at a
@@ -29,30 +57,51 @@ async function loadRouter(inboxDir, hostname) {
   return mod.cvesRouter;
 }
 
-// We bypass requireAdmin by stubbing req.user before the router runs.
-// requireSudo isn't on GET / so the listing path is reachable.
-async function callList(router) {
+// We bypass requireAdmin / requireSudo by stubbing req.user before
+// the router runs. The auth middleware is exercised by other suites;
+// here we focus on the route handlers themselves.
+async function callRouter(router, path, { method = 'GET', body = null } = {}) {
   const express = (await import('express')).default;
   const app = express();
-  app.use((req, _res, next) => { req.user = { id: 1, role: 'admin', username: 'test' }; next(); });
+  app.use(express.json({ limit: '1mb' }));
+  app.use((req, _res, next) => {
+    req.user = { id: TEST_USER_ID, role: 'admin', username: 'cve-test-user' };
+    // requireSudo reads sudo_until off req.session; satisfy it for
+    // the duration of the test without going through real auth. The
+    // sliding-window DB write is wrapped in try/catch so an absent
+    // sessions table is harmless.
+    req.session = {
+      id: 'test-session',
+      sudo_until: new Date(Date.now() + 60_000).toISOString(),
+    };
+    next();
+  });
   app.use('/', router);
   const { default: http } = await import('node:http');
-  return new Promise((resolve, reject) => {
-    const server = http.createServer(app);
-    server.listen(0, async () => {
-      const port = server.address().port;
-      try {
-        const r = await fetch(`http://127.0.0.1:${port}/`);
-        const json = await r.json();
-        resolve({ status: r.status, body: json });
-      } catch (err) {
-        reject(err);
-      } finally {
-        server.close();
-      }
+  const server = http.createServer(app);
+  // Wait for server to be ready, fire the request, await close so the
+  // socket / keep-alive timer / express-rate-limit memory store don't
+  // leave stray handles open between tests.
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+  let result;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
     });
-  });
+    const json = r.headers.get('content-type')?.includes('json')
+      ? await r.json() : await r.text();
+    result = { status: r.status, body: json };
+  } finally {
+    await new Promise((resolve) => server.closeAllConnections?.() || resolve());
+    await new Promise((resolve) => server.close(() => resolve()));
+  }
+  return result;
 }
+
+const callList = (router) => callRouter(router, '/');
 
 test('list extracts dict-keyed hosts and counts unread', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
@@ -140,6 +189,116 @@ test('missing host in spec defaults action_class to ALERT', async () => {
     const router = await loadRouter(dir, 'vm');
     const { body } = await callList(router);
     assert.equal(body.entries[0].action_class, 'ALERT');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── paste / save / delete ─────────────────────────────────────────────────
+//
+// These routes shell out to the Python engine for `validate`. Skip when
+// the engine isn't on PYTHONPATH (CI without the repo root mounted).
+
+import { spawnSync } from 'node:child_process';
+
+function engineAvailable() {
+  // PYTHONPATH was set above; just check that the entrypoint resolves.
+  const r = spawnSync('python3', ['-m', 'proxypilot.engine', '--help'],
+    { encoding: 'utf8', timeout: 10_000 });
+  return r.status === 0;
+}
+
+test('paste creates a new entry, validate rejects bad cve id', { skip: !engineAvailable() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    process.env.PROXYPILOT_ENGINE_BIN = 'python3';
+    process.env.PROXYPILOT_ENGINE_MODULE = 'proxypilot.engine';
+    const router = await loadRouter(dir, 'vm');
+
+    // Bad: missing cve field.
+    const bad = await callRouter(router, '/', {
+      method: 'POST',
+      body: { content: 'name: just a thing\n' },
+    });
+    assert.equal(bad.status, 400);
+
+    // Good: minimal valid spec gets written.
+    const ok = await callRouter(router, '/', {
+      method: 'POST',
+      body: {
+        content: [
+          'cve: CVE-2026-7777',
+          'name: paste test',
+          'hosts:',
+          '  vm: {action_class: ALERT, tier: 4}',
+          'state: {status: NEW, operator_seen: false}',
+          '',
+        ].join('\n'),
+      },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.cve, 'CVE-2026-7777');
+
+    // List now sees the new entry.
+    const { body: list } = await callList(router);
+    const hit = list.entries.find(e => e.cve === 'CVE-2026-7777');
+    assert.ok(hit, 'pasted entry appears in list');
+    assert.equal(hit.action_class, 'ALERT');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PUT rejects when embedded cve disagrees with URL', { skip: !engineAvailable() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/CVE-2026-1111', {
+      method: 'PUT',
+      body: {
+        content: 'cve: CVE-2026-2222\nstate: {status: NEW}\n',
+      },
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /does not match/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('DELETE removes the file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-3333.yaml'),
+      'cve: CVE-2026-3333\nstate: {status: NEW}\n');
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/CVE-2026-3333', { method: 'DELETE' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    const { body: list } = await callList(router);
+    assert.equal(list.entries.find(e => e.cve === 'CVE-2026-3333'), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('DELETE 404s on missing entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/CVE-2026-4444', { method: 'DELETE' });
+    assert.equal(r.status, 404);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('DELETE rejects path traversal in id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/..%2F..%2Fetc%2Fshadow', { method: 'DELETE' });
+    assert.equal(r.status, 400);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

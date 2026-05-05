@@ -18,9 +18,10 @@
 // are also rate-limited at the global /api limiter).
 
 import { Router } from 'express';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { readdir, readFile, stat, unlink, mkdir, rename, writeFile, chmod } from 'node:fs/promises';
+import { join, basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
@@ -116,8 +117,9 @@ function extractHostAction(body, hostname) {
 
 // Spawn the Python engine and capture its single-line JSON result.
 // All write actions go through here so the YAML mutation lives in
-// the engine module, not duplicated in Node.
-function runEngine(args, { timeoutMs = 30 * 60 * 1000 } = {}) {
+// the engine module, not duplicated in Node. Optionally feeds bytes
+// on stdin (used for `validate`, which reads YAML from there).
+function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(ENGINE_BIN, ['-m', ENGINE_MODULE, ...args], {
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
@@ -144,7 +146,29 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000 } = {}) {
         reject(new Error(`engine exited ${code}; stderr: ${stderr.trim().slice(0, 500)}`));
       }
     });
+    if (stdinText !== null) {
+      child.stdin.end(stdinText);
+    } else {
+      child.stdin.end();
+    }
   });
+}
+
+// Atomic write: tmp-in-same-dir + rename so a crash mid-write can't
+// leave half a YAML for the next poll to choke on. Mirrors the Python
+// engine's writeFileAtomic.
+async function writeYamlAtomic(targetPath, body) {
+  const dir = dirname(targetPath);
+  await mkdir(dir, { recursive: true });
+  const tmp = join(dir, `.cve-tmp-${randomBytes(6).toString('hex')}`);
+  try {
+    await writeFile(tmp, body, { encoding: 'utf8', mode: 0o644 });
+    await chmod(tmp, 0o644);
+    await rename(tmp, targetPath);
+  } catch (err) {
+    try { await unlink(tmp); } catch {}
+    throw err;
+  }
 }
 
 // ── routes ──────────────────────────────────────────────────────────────────
@@ -284,6 +308,109 @@ cvesRouter.post('/:cveId/run', requireAdmin, requireSudo, async (req, res) => {
       final_status: out?.result?.final_status ?? null,
       operator_action_required: out?.result?.operator_action_required ?? null,
     }, req.ip);
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── operator-managed inbox writes ──────────────────────────────────────────
+//
+// Paste / Save / Delete / Poll-now. These let the operator manage the
+// inbox entirely from the dashboard without shelling onto the host.
+//
+// Paste + Save go through the engine's `validate` subcommand first
+// so a malformed YAML (or one whose `cve:` field doesn't match the
+// filename) is rejected before the file lands on disk. Delete and
+// Poll-now are simple shell-outs.
+
+// Cap upload size at something that fits even a chatty CVE spec but
+// rules out a YAML bomb. Inbox entries on this branch top out at ~6KB.
+const MAX_YAML_BYTES = 256 * 1024;
+
+const writeBodySchema = z.object({
+  // Raw YAML body. Filename is derived from the embedded `cve:` field
+  // so the operator can't paste a body that disagrees with the URL.
+  content: z.string().min(1).max(MAX_YAML_BYTES),
+}).strict();
+
+// POST /api/cves — paste a new entry (or overwrite an existing one).
+// PUT /api/cves/:id — save an edit; the embedded cve must equal :id.
+async function handleWrite(req, res, { expectedCveId = null }) {
+  let body;
+  try {
+    body = writeBodySchema.parse(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  let validation;
+  try {
+    validation = await runEngine(['validate'],
+      { timeoutMs: 10_000, stdinText: body.content });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!validation.ok) {
+    return res.status(400).json({ error: validation.error || 'validation failed' });
+  }
+
+  const cveId = validation.cve;
+  if (expectedCveId && cveId !== expectedCveId) {
+    return res.status(400).json({
+      error: `URL CVE id (${expectedCveId}) does not match embedded cve: ${cveId}`,
+    });
+  }
+  const path = safePath(cveId);
+  if (!path) return res.status(400).json({ error: 'invalid CVE id' });
+
+  // Ensure body ends with a newline so the file is POSIX-clean. ruamel
+  // writes one on dump; preserve the same convention here for
+  // operator-pasted content.
+  const text = body.content.endsWith('\n') ? body.content : body.content + '\n';
+  try {
+    await writeYamlAtomic(path, text);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  logAudit(req.user.id, expectedCveId ? 'CVE_EDIT' : 'CVE_PASTE', 'cve', cveId,
+           { bytes: text.length }, req.ip);
+  res.json({ ok: true, cve: cveId, path });
+}
+
+cvesRouter.post('/', requireAdmin, requireSudo, (req, res) =>
+  handleWrite(req, res, { expectedCveId: null }));
+
+cvesRouter.put('/:cveId', requireAdmin, requireSudo, (req, res) => {
+  if (!CVE_ID_RE.test(req.params.cveId)) {
+    return res.status(400).json({ error: 'invalid CVE id' });
+  }
+  return handleWrite(req, res, { expectedCveId: req.params.cveId });
+});
+
+cvesRouter.delete('/:cveId', requireAdmin, requireSudo, async (req, res) => {
+  const path = safePath(req.params.cveId);
+  if (!path) return res.status(400).json({ error: 'invalid CVE id' });
+  try {
+    await unlink(path);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  logAudit(req.user.id, 'CVE_DELETE', 'cve', req.params.cveId, {}, req.ip);
+  res.json({ ok: true });
+});
+
+// POST /api/cves/poll — trigger an immediate engine poll. Useful right
+// after pasting a new entry so the operator doesn't have to wait for
+// the 5-minute timer. AUTO_PATCH entries that probe positive will run
+// during this call; the response includes the per-entry summary.
+cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
+  try {
+    const out = await runEngine(['poll'], { timeoutMs: 35 * 60 * 1000 });
+    logAudit(req.user.id, 'CVE_POLL', 'cve', null,
+             { entries: out?.entries?.length ?? null }, req.ip);
     res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });

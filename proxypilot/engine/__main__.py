@@ -151,41 +151,101 @@ def cmd_dismiss(args: argparse.Namespace) -> int:
 _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
 
 
+def _parse_yaml_body(body: str):
+    """Shared parser for validate / paste. Returns (raw, error). On
+    success raw is a CommentedMap and error is None; on failure raw
+    is None and error is the user-facing message."""
+    if not body.strip():
+        return None, "empty body"
+    try:
+        from .inbox import _yaml
+        raw = _yaml().load(io.StringIO(body))
+    except Exception as e:
+        return None, f"YAML parse error: {e}"
+    from ruamel.yaml.comments import CommentedMap
+    if not isinstance(raw, (dict, CommentedMap)):
+        return None, "top-level YAML must be a mapping"
+    cve = raw.get("cve")
+    if not isinstance(cve, str) or not cve.strip():
+        return None, "missing required `cve:` field"
+    cve = cve.strip()
+    if not _CVE_RE.match(cve):
+        return None, f"invalid CVE id: {cve!r}; expected CVE-YYYY-NNNN[N..]"
+    raw["cve"] = cve  # normalise
+    if "hosts" in raw and not isinstance(raw.get("hosts"), (dict, list)):
+        return None, "`hosts` must be a mapping or list"
+    if "playbook" in raw and not isinstance(raw.get("playbook"),
+                                            (dict, CommentedMap)):
+        return None, "`playbook` must be a mapping"
+    return raw, None
+
+
 def cmd_validate(_args: argparse.Namespace) -> int:
     """Validate a YAML body from stdin without touching the inbox.
     Returns {ok: true, cve: "<id>"} on success, {ok: false, error: "..."}
     otherwise. The dashboard's "Save" path calls this before writing.
     """
     body = sys.stdin.read()
-    if not body.strip():
-        print(json.dumps({"ok": False, "error": "empty body"}))
+    raw, err = _parse_yaml_body(body)
+    if err:
+        print(json.dumps({"ok": False, "error": err}))
         return 2
+    print(json.dumps({"ok": True, "cve": raw["cve"]}))
+    return 0
+
+
+def cmd_paste(args: argparse.Namespace) -> int:
+    """Validate stdin YAML, stamp `_proxypilot.origin: paste`, and
+    write to <inbox>/<cve>.yaml atomically. Replaces the dashboard's
+    Node-side write path so origin tracking lives in one place."""
+    body = sys.stdin.read()
+    raw, err = _parse_yaml_body(body)
+    if err:
+        print(json.dumps({"ok": False, "error": err}))
+        return 2
+    from . import INBOX_DIR
+    from .source_git import stamp_paste_origin
+    inbox = Path(args.inbox or INBOX_DIR)
+    inbox.mkdir(parents=True, exist_ok=True)
+    target = inbox / f"{raw['cve']}.yaml"
+    stamp_paste_origin(raw)
     try:
         from .inbox import _yaml
-        from ruamel.yaml.comments import CommentedMap
-        raw = _yaml().load(io.StringIO(body))
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            _yaml().dump(raw, f)
+        import os as _os
+        _os.replace(tmp, target)
     except Exception as e:
-        print(json.dumps({"ok": False, "error": f"YAML parse error: {e}"}))
+        print(json.dumps({"ok": False, "error": f"write failed: {e}"}))
         return 2
-    if not isinstance(raw, (dict, CommentedMap)):
-        print(json.dumps({"ok": False, "error": "top-level YAML must be a mapping"}))
-        return 2
-    cve = raw.get("cve")
-    if not isinstance(cve, str) or not cve.strip():
-        print(json.dumps({"ok": False, "error": "missing required `cve:` field"}))
-        return 2
-    cve = cve.strip()
-    if not _CVE_RE.match(cve):
-        print(json.dumps({"ok": False, "error": f"invalid CVE id: {cve!r}; expected CVE-YYYY-NNNN[N..]"}))
-        return 2
-    if not isinstance(raw.get("hosts"), (dict, list)) and raw.get("hosts") is not None:
-        print(json.dumps({"ok": False, "error": "`hosts` must be a mapping or list"}))
-        return 2
-    if "playbook" in raw and not isinstance(raw.get("playbook"), (dict, CommentedMap)):
-        print(json.dumps({"ok": False, "error": "`playbook` must be a mapping"}))
-        return 2
-    print(json.dumps({"ok": True, "cve": cve}))
+    print(json.dumps({"ok": True, "cve": raw["cve"], "path": str(target)}))
     return 0
+
+
+def cmd_sync_git(args: argparse.Namespace) -> int:
+    """Read-only pull from a git source. Imports any new <CVE>.yaml
+    files into the inbox; never overwrites or deletes existing
+    entries. Stamps each import with origin=git + commit SHA."""
+    from . import INBOX_DIR
+    from .source_git import DEFAULT_SOURCE_DIR, sync
+    if not args.git_url:
+        print(json.dumps({"ok": False, "error": "git_url is required"}))
+        return 2
+    inbox = Path(args.inbox or INBOX_DIR)
+    src = Path(args.source_dir or DEFAULT_SOURCE_DIR)
+    result = sync(args.git_url, inbox_dir=inbox, source_dir=src)
+    out = {
+        "ok": not result.errors,
+        "git_url": result.git_url,
+        "git_commit": result.git_commit,
+        "imported": result.imported,
+        "skipped_existing_count": len(result.skipped_existing),
+        "skipped_invalid": result.skipped_invalid,
+        "errors": result.errors,
+    }
+    print(json.dumps(out))
+    return 0 if out["ok"] else 2
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -240,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("validate", help="validate YAML on stdin; print JSON result")
 
+    sub.add_parser("paste", help="validate + write a pasted YAML to <inbox>/<cve>.yaml")
+
+    psg = sub.add_parser("sync-git", help="read-only pull of inbox specs from a git URL")
+    psg.add_argument("--git-url", required=True)
+    psg.add_argument("--source-dir", help="staging dir (default /var/lib/proxypilot/cve-inbox-source)")
+
     args = p.parse_args(argv)
     if args.cmd == "inventory":
         return cmd_inventory(args)
@@ -255,6 +321,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_dismiss(args)
     if args.cmd == "validate":
         return cmd_validate(args)
+    if args.cmd == "paste":
+        return cmd_paste(args)
+    if args.cmd == "sync-git":
+        return cmd_sync_git(args)
     p.error(f"unknown command {args.cmd!r}")
     return 2
 

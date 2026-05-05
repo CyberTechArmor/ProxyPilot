@@ -958,6 +958,18 @@ export const api = {
     request(`/cves/${encodeURIComponent(cveId)}`, { method: 'DELETE' }),
   pollCves: () => request('/cves/poll', { method: 'POST' }),
 
+  // Read-only git source. Operators set a repo URL via PUT; the
+  // engine pulls + imports new specs on POST /git-sync. Sync is
+  // additive — existing entries (paste OR git from a different URL)
+  // are never overwritten.
+  getCveGitConfig: () => request('/cves/git-config'),
+  setCveGitConfig: (url) =>
+    request('/cves/git-config', {
+      method: 'PUT',
+      body: JSON.stringify({ url: (url || '').trim() }),
+    }),
+  syncCveGit: () => request('/cves/git-sync', { method: 'POST' }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

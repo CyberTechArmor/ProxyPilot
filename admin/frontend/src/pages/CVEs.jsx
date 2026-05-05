@@ -23,7 +23,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, BugPlay, Copy, Loader2, Pencil, Plus, RefreshCw, Save, Trash2, X, Zap,
+  ArrowLeft, BugPlay, Copy, GitBranch, Loader2, Pencil, Plus,
+  RefreshCw, Save, Settings, Trash2, X, Zap,
 } from 'lucide-react';
 
 const STATUS_TONE = {
@@ -141,6 +142,25 @@ function extractHistory(body) {
   return items;
 }
 
+function OriginPill({ origin, gitUrl }) {
+  if (origin === 'git') {
+    return (
+      <span title={gitUrl || ''}
+            className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
+        <GitBranch className="h-3 w-3" /> git
+      </span>
+    );
+  }
+  if (origin === 'paste') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
+        paste
+      </span>
+    );
+  }
+  return null;
+}
+
 function CveListRow({ entry, onOpen }) {
   return (
     <button
@@ -153,6 +173,7 @@ function CveListRow({ entry, onOpen }) {
           <span className="h-2 w-2 rounded-full bg-orange-500" aria-label="unread" />
         )}
         {entry.cve}
+        <OriginPill origin={entry.origin} gitUrl={entry.origin_git_url} />
       </div>
       <div className="col-span-7 sm:col-span-4 text-sm text-muted-foreground truncate">
         {entry.name || '—'}
@@ -485,6 +506,11 @@ function CveList({ onOpen, refreshKey }) {
   const [pasteContent, setPasteContent] = useState('');
   const [pasting, setPasting] = useState(false);
   const [polling, setPolling] = useState(false);
+  const [gitConfigOpen, setGitConfigOpen] = useState(false);
+  const [gitUrl, setGitUrl] = useState('');
+  const [gitDraft, setGitDraft] = useState('');
+  const [gitSaving, setGitSaving] = useState(false);
+  const [gitSyncing, setGitSyncing] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
@@ -499,6 +525,62 @@ function CveList({ onOpen, refreshKey }) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
+
+  // Pull the saved git source URL once on mount; cheap settings read.
+  useEffect(() => {
+    api.getCveGitConfig()
+      .then(c => setGitUrl(c.url || ''))
+      .catch(() => {});
+  }, []);
+
+  const onSaveGitConfig = async () => {
+    setGitSaving(true);
+    try {
+      await api.setCveGitConfig(gitDraft);
+      setGitUrl(gitDraft);
+      toast({ title: 'Git source saved',
+              description: gitDraft ? 'Click Sync now to pull.' : 'Cleared.' });
+      setGitConfigOpen(false);
+    } catch (err) {
+      toast({
+        title: 'Save failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setGitSaving(false);
+    }
+  };
+
+  const onSyncGit = async () => {
+    if (!gitUrl) {
+      setGitDraft('');
+      setGitConfigOpen(true);
+      return;
+    }
+    setGitSyncing(true);
+    try {
+      const out = await api.syncCveGit();
+      const imported = (out?.imported || []).length;
+      const skipped = out?.skipped_existing_count || 0;
+      const errors = (out?.errors || []).length;
+      toast({
+        title: errors ? `Synced with ${errors} error(s)` : 'Synced',
+        description: `Imported ${imported}, kept ${skipped} existing` +
+          (out?.git_commit ? ` (commit ${out.git_commit.slice(0, 7)})` : ''),
+        variant: errors ? 'destructive' : undefined,
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Sync failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setGitSyncing(false);
+    }
+  };
 
   const onPaste = async () => {
     if (!pasteContent.trim()) return;
@@ -588,6 +670,17 @@ function CveList({ onOpen, refreshKey }) {
           <Button variant="outline" size="sm" onClick={() => setPasteOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" /> Paste YAML
           </Button>
+          <Button variant="outline" size="sm"
+                  onClick={onSyncGit} disabled={gitSyncing}
+                  title={gitUrl ? `Pull from ${gitUrl}` : 'Configure a git source first'}>
+            {gitSyncing ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <GitBranch className="h-4 w-4 mr-1.5" />}
+            Sync git
+          </Button>
+          <Button variant="ghost" size="icon"
+                  onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
+                  title="Configure git source URL">
+            <Settings className="h-4 w-4" />
+          </Button>
           <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
             {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
             Poll now
@@ -602,6 +695,17 @@ function CveList({ onOpen, refreshKey }) {
         Claude writes specs into the inbox; the engine acts on AUTO_PATCH entries automatically and
         surfaces ONE_CLICK + ALERT here for operator review.
       </p>
+
+      {gitUrl && (
+        <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
+          <GitBranch className="h-3.5 w-3.5" />
+          <span>Source:</span>
+          <code className="font-mono break-all">{gitUrl}</code>
+          <span className="text-[10px] opacity-70">
+            (read-only · sync is additive · changing URL never deletes existing entries)
+          </span>
+        </div>
+      )}
 
       {error && (
         <div className="text-sm text-red-500 border border-red-500/30 bg-red-500/10 rounded px-3 py-2">
@@ -672,6 +776,38 @@ function CveList({ onOpen, refreshKey }) {
             <Button onClick={onPaste} disabled={pasting || !pasteContent.trim()}>
               {pasting ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
               Save to inbox
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={gitConfigOpen} onOpenChange={setGitConfigOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Git source for CVE specs</DialogTitle></DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">
+              Read-only pull. The engine clones / pulls into a staging dir on the host and
+              copies any new <code className="font-mono">CVE-*.yaml</code> files into the
+              inbox. Existing entries — including those from a previous URL or from paste —
+              are never overwritten or deleted. Each git-imported entry is stamped with its
+              source URL and commit SHA.
+            </p>
+            <Input
+              value={gitDraft}
+              onChange={(e) => setGitDraft(e.target.value)}
+              placeholder="https://github.com/your-org/cve-specs.git"
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground">
+              Leave empty to disable. Changes apply on next "Sync git". Both paste and git
+              sources can coexist.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setGitConfigOpen(false)}>Cancel</Button>
+            <Button onClick={onSaveGitConfig} disabled={gitSaving}>
+              {gitSaving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
+              Save URL
             </Button>
           </DialogFooter>
         </DialogContent>

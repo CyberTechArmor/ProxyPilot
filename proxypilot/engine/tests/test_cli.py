@@ -123,3 +123,130 @@ def test_dismiss_writes_status_and_history(tmp_path, monkeypatch):
     assert "DISMISSED" in text
     assert "not applicable" in text
     assert "operator:test" in text
+
+
+# ── paste + origin stamp ──────────────────────────────────────────────────────
+
+def test_paste_writes_file_and_stamps_origin(tmp_path, monkeypatch):
+    body = (
+        "cve: CVE-2026-1100\n"
+        "name: paste origin test\n"
+        "hosts:\n  vm: {action_class: ALERT, tier: 4}\n"
+        "state: {status: NEW, operator_seen: false}\n"
+    )
+    out = _capture(monkeypatch, body)
+    rc = cli.main(["--inbox", str(tmp_path), "paste"])
+    assert rc == 0
+    j = _last_line_json(out)
+    assert j["ok"] is True
+    assert j["cve"] == "CVE-2026-1100"
+    text = (tmp_path / "CVE-2026-1100.yaml").read_text()
+    assert "_proxypilot:" in text
+    assert "origin: paste" in text
+
+
+def test_paste_does_not_overwrite_existing_origin(tmp_path, monkeypatch):
+    # If the body already carries a _proxypilot block (e.g. operator
+    # is editing a git-imported entry), we must NOT clobber it back
+    # to "paste" — the original origin should be preserved.
+    body = (
+        "cve: CVE-2026-1101\n"
+        "_proxypilot:\n  origin: git\n  git_url: https://example.com/cves.git\n"
+        "state: {status: NEW}\n"
+    )
+    out = _capture(monkeypatch, body)
+    rc = cli.main(["--inbox", str(tmp_path), "paste"])
+    assert rc == 0
+    text = (tmp_path / "CVE-2026-1101.yaml").read_text()
+    assert "origin: git" in text
+    assert "origin: paste" not in text
+
+
+def test_paste_rejects_invalid_yaml(tmp_path, monkeypatch):
+    out = _capture(monkeypatch, "not: valid: yaml: at all")
+    rc = cli.main(["--inbox", str(tmp_path), "paste"])
+    assert rc == 2
+    j = _last_line_json(out)
+    assert j["ok"] is False
+    # No file should have been written.
+    assert not list(tmp_path.iterdir())
+
+
+# ── sync-git ──────────────────────────────────────────────────────────────────
+
+def _init_fake_repo(tmp_path):
+    """Build a tiny git repo containing a few CVE YAMLs + noise."""
+    import subprocess
+    repo = tmp_path / "fake-cves.git-src"
+    repo.mkdir()
+    (repo / "CVE-2026-2001.yaml").write_text(
+        "cve: CVE-2026-2001\nname: from-git-1\nstate: {status: NEW}\n")
+    (repo / "CVE-2026-2002.yaml").write_text(
+        "cve: CVE-2026-2002\nname: from-git-2\nstate: {status: NEW}\n")
+    (repo / "README.md").write_text("# noise\n")
+    # A YAML whose filename doesn't match its cve field — must be skipped.
+    (repo / "CVE-2026-9999.yaml").write_text(
+        "cve: CVE-2026-2003\nstate: {status: NEW}\n")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    # Test environment may have global commit-signing turned on; the
+    # fake repo doesn't need (and can't reach) a signing server.
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "tag.gpgsign", "false"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "commit",
+                    "-q", "-m", "init", "--no-gpg-sign"], cwd=repo, check=True)
+    return repo
+
+
+def test_sync_git_imports_new_specs(tmp_path, monkeypatch):
+    import subprocess
+    if subprocess.run(["git", "--version"],
+                      capture_output=True).returncode != 0:
+        import pytest as _pt
+        _pt.skip("git not available")
+    repo = _init_fake_repo(tmp_path)
+    inbox = tmp_path / "inbox"
+    src = tmp_path / "src"
+    out = _capture(monkeypatch)
+    rc = cli.main(["--inbox", str(inbox), "sync-git",
+                   "--git-url", str(repo), "--source-dir", str(src)])
+    assert rc == 0
+    j = _last_line_json(out)
+    assert j["ok"] is True
+    assert sorted(j["imported"]) == ["CVE-2026-2001.yaml", "CVE-2026-2002.yaml"]
+    # CVE-2026-9999.yaml had a cve field of CVE-2026-2003 — name/cve
+    # mismatch is rejected.
+    assert any("9999" in s for s in j["skipped_invalid"])
+    # Each import got the origin stamp.
+    for name in j["imported"]:
+        text = (inbox / name).read_text()
+        assert "_proxypilot:" in text
+        assert "origin: git" in text
+
+
+def test_sync_git_skips_existing_entries(tmp_path, monkeypatch):
+    import subprocess
+    if subprocess.run(["git", "--version"],
+                      capture_output=True).returncode != 0:
+        import pytest as _pt
+        _pt.skip("git not available")
+    repo = _init_fake_repo(tmp_path)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    # Pre-existing entry with an operator-edited state. Sync must
+    # leave it alone — additive only.
+    (inbox / "CVE-2026-2001.yaml").write_text(
+        "cve: CVE-2026-2001\nname: operator-edited\n"
+        "_proxypilot: {origin: paste}\nstate: {status: RESOLVED}\n")
+    out = _capture(monkeypatch)
+    rc = cli.main(["--inbox", str(inbox), "sync-git",
+                   "--git-url", str(repo), "--source-dir", str(tmp_path / "src")])
+    assert rc == 0
+    j = _last_line_json(out)
+    assert "CVE-2026-2001.yaml" not in j["imported"]
+    assert "CVE-2026-2002.yaml" in j["imported"]
+    # The pre-existing file's content was not overwritten.
+    assert "operator-edited" in (inbox / "CVE-2026-2001.yaml").read_text()
+    assert "RESOLVED" in (inbox / "CVE-2026-2001.yaml").read_text()

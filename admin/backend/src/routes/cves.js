@@ -19,11 +19,12 @@
 
 import { Router } from 'express';
 import { readdir, readFile, stat, unlink, mkdir, rename, writeFile, chmod } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { logAudit } from '../db.js';
+import { logAudit, getSetting, setSetting } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 
 export const cvesRouter = Router();
@@ -32,6 +33,16 @@ const INBOX_DIR = process.env.PROXYPILOT_INBOX_DIR || '/var/lib/proxypilot/cve-i
 const ENGINE_BIN = process.env.PROXYPILOT_ENGINE_BIN || 'python3';
 const ENGINE_MODULE = process.env.PROXYPILOT_ENGINE_MODULE || 'proxypilot.engine';
 const HOSTNAME = process.env.PROXYPILOT_HOSTNAME || '';
+
+// The dashboard runs in a Docker container; the engine + python3 +
+// ruamel.yaml live on the host (Phase A architecture — the agent
+// socket isn't wired for engine RPCs yet). Pivot through `nsenter
+// -t 1` so the spawn lands in the host's mount + uts + net + ipc
+// namespaces, where python3 -m proxypilot.engine resolves. Same
+// pattern as caddy-driver.js / l4-diagnose.js / pty.js.
+//
+// Outside Docker (tests, dev), we run the engine directly.
+const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
 // CVE filenames are constrained to the canonical CVE-YYYY-NNNN[N..]
 // shape so a malicious id can't traverse out of the inbox dir.
@@ -56,8 +67,20 @@ function extractScalar(body, key) {
 
 // extractNested("state", "status", body) finds the `status:` key
 // inside the `state:` block. Indent-based: matches any line indented
-// further than the block header. Good enough for our flat schema.
+// further than the block header. Also recognises flow-form blocks
+// like `state: {status: NEW}` on a single line — common in compact
+// hand-pasted YAML. Good enough for our flat schema.
 function extractNested(parent, child, body) {
+  // Flow form: `parent: { ..., child: VALUE, ... }` on one line.
+  const flowMatch = body.match(
+    new RegExp(`(?:^|\\n)${parent}:\\s*\\{([^}]*)\\}`));
+  if (flowMatch) {
+    const inner = flowMatch[1];
+    const kv = inner.match(new RegExp(`(?:^|,)\\s*${child}:\\s*([^,}]+)`));
+    if (kv) {
+      return kv[1].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+    }
+  }
   const lines = body.split('\n');
   let inBlock = false;
   let baseIndent = -1;
@@ -120,10 +143,39 @@ function extractHostAction(body, hostname) {
 // the engine module, not duplicated in Node. Optionally feeds bytes
 // on stdin (used for `validate`, which reads YAML from there).
 function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) {
+  // Build the argv. In Docker we wrap with nsenter so the spawn
+  // pivots into the host namespace where the engine + python3 are
+  // installed. Outside Docker we run the engine directly.
+  //
+  // The engine CLI's --inbox / --host flags come BEFORE the
+  // subcommand, so prepend them here. Tests + alternate deployments
+  // override INBOX_DIR / HOSTNAME via env, and we want those values
+  // to actually reach the subprocess.
+  const globalArgs = ['--inbox', INBOX_DIR];
+  if (HOSTNAME) globalArgs.push('--host', HOSTNAME);
+  let bin, fullArgs;
+  if (isInDocker) {
+    bin = 'nsenter';
+    // -m mount, -u uts, -n net, -i ipc, -p pid (so signals reach
+    // the right pid tree). We don't need -U because the host runs
+    // as the same root.
+    fullArgs = ['-t', '1', '-m', '-u', '-n', '-i', '-p', '--',
+                ENGINE_BIN, '-m', ENGINE_MODULE, ...globalArgs, ...args];
+  } else {
+    bin = ENGINE_BIN;
+    fullArgs = ['-m', ENGINE_MODULE, ...globalArgs, ...args];
+  }
+  // Set PYTHONPATH so `-m proxypilot.engine` resolves on the host.
+  // install.sh copies the repo to /opt/proxypilot; operators with a
+  // different layout override via PROXYPILOT_INSTALL_DIR.
+  const installDir = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
+  const childEnv = {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',
+    PYTHONPATH: installDir + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : ''),
+  };
   return new Promise((resolve, reject) => {
-    const child = spawn(ENGINE_BIN, ['-m', ENGINE_MODULE, ...args], {
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    });
+    const child = spawn(bin, fullArgs, { env: childEnv });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
@@ -132,7 +184,19 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) 
     }, timeoutMs);
     child.stdout.on('data', d => { stdout += d; });
     child.stderr.on('data', d => { stderr += d; });
-    child.on('error', err => { clearTimeout(timer); reject(err); });
+    child.on('error', err => {
+      clearTimeout(timer);
+      // Surface a clearer error on the typical missing-binary cases
+      // so the operator sees a remediation hint, not a raw ENOENT.
+      if (err.code === 'ENOENT') {
+        const what = isInDocker ? 'nsenter (util-linux not in container)' : 'python3';
+        err = new Error(`engine spawn failed: ${what} not found. ` +
+          (isInDocker
+            ? 'Container needs util-linux installed and pid:host enabled.'
+            : `Install python3 + ruamel.yaml on the host and ensure ${installDir} contains the proxypilot package.`));
+      }
+      reject(err);
+    });
     child.on('close', code => {
       clearTimeout(timer);
       // The engine writes one JSON line per command. Even on non-zero
@@ -143,7 +207,25 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) 
         if (code !== 0 && parsed.ok !== false) parsed.exit_code = code;
         resolve(parsed);
       } catch {
-        reject(new Error(`engine exited ${code}; stderr: ${stderr.trim().slice(0, 500)}`));
+        // Common case: `No module named proxypilot` — the host has
+        // python3 but the engine package isn't on PYTHONPATH. Surface
+        // a remediation hint instead of a raw stderr dump.
+        const errText = stderr.trim();
+        if (/No module named ['\"]?proxypilot/.test(errText)) {
+          reject(new Error(
+            `engine package not found on host PYTHONPATH (${installDir}). ` +
+            `Run install.sh / update.sh, or set PROXYPILOT_INSTALL_DIR to ` +
+            `the directory containing the proxypilot/ package.`));
+          return;
+        }
+        if (/No module named ['\"]?ruamel/.test(errText)) {
+          reject(new Error(
+            'ruamel.yaml not installed on the host. ' +
+            'Install with: apt install python3-ruamel.yaml  (Debian/Ubuntu) ' +
+            'or: pip3 install ruamel.yaml'));
+          return;
+        }
+        reject(new Error(`engine exited ${code}; stderr: ${errText.slice(0, 500)}`));
       }
     });
     if (stdinText !== null) {
@@ -216,6 +298,11 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
       tier: tier ? parseInt(tier, 10) || tier : null,
       last_updated: lastUpdated,
       mtime: st ? st.mtime.toISOString() : null,
+      // _proxypilot block is metadata: origin (paste|git), git_url,
+      // git_commit, imported_at. Lives at top level alongside `cve:`,
+      // so extractNested with parent="_proxypilot" works.
+      origin: extractNested('_proxypilot', 'origin', body) || 'unknown',
+      origin_git_url: extractNested('_proxypilot', 'git_url', body),
     });
   }
   res.json({ host: HOSTNAME, entries, unread });
@@ -336,6 +423,11 @@ const writeBodySchema = z.object({
 
 // POST /api/cves — paste a new entry (or overwrite an existing one).
 // PUT /api/cves/:id — save an edit; the embedded cve must equal :id.
+//
+// Both call the engine's `paste` subcommand which validates the YAML,
+// stamps `_proxypilot.origin: paste` on first import, and writes the
+// file atomically. This keeps origin tracking in one place — the
+// backend never serializes YAML itself.
 async function handleWrite(req, res, { expectedCveId = null }) {
   let body;
   try {
@@ -344,6 +436,9 @@ async function handleWrite(req, res, { expectedCveId = null }) {
     return res.status(400).json({ error: e.message });
   }
 
+  // For PUT we still need to know the cve id so we can refuse
+  // mismatched ids. Run validate first (cheap), then paste. validate
+  // returns the parsed cve id without touching disk.
   let validation;
   try {
     validation = await runEngine(['validate'],
@@ -354,29 +449,27 @@ async function handleWrite(req, res, { expectedCveId = null }) {
   if (!validation.ok) {
     return res.status(400).json({ error: validation.error || 'validation failed' });
   }
-
   const cveId = validation.cve;
   if (expectedCveId && cveId !== expectedCveId) {
     return res.status(400).json({
       error: `URL CVE id (${expectedCveId}) does not match embedded cve: ${cveId}`,
     });
   }
-  const path = safePath(cveId);
-  if (!path) return res.status(400).json({ error: 'invalid CVE id' });
 
-  // Ensure body ends with a newline so the file is POSIX-clean. ruamel
-  // writes one on dump; preserve the same convention here for
-  // operator-pasted content.
-  const text = body.content.endsWith('\n') ? body.content : body.content + '\n';
+  let writeOut;
   try {
-    await writeYamlAtomic(path, text);
+    writeOut = await runEngine(['paste'],
+      { timeoutMs: 15_000, stdinText: body.content });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
+  if (!writeOut.ok) {
+    return res.status(400).json({ error: writeOut.error || 'write failed' });
+  }
 
   logAudit(req.user.id, expectedCveId ? 'CVE_EDIT' : 'CVE_PASTE', 'cve', cveId,
-           { bytes: text.length }, req.ip);
-  res.json({ ok: true, cve: cveId, path });
+           { bytes: body.content.length }, req.ip);
+  res.json({ ok: true, cve: cveId, path: writeOut.path });
 }
 
 cvesRouter.post('/', requireAdmin, requireSudo, (req, res) =>
@@ -411,6 +504,71 @@ cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
     const out = await runEngine(['poll'], { timeoutMs: 35 * 60 * 1000 });
     logAudit(req.user.id, 'CVE_POLL', 'cve', null,
              { entries: out?.entries?.length ?? null }, req.ip);
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── read-only git source config + sync ────────────────────────────────────
+//
+// Operators point ProxyPilot at a git repo (typically a Claude-curated
+// catalog of CVE specs) and the engine pulls new entries on demand.
+// The sync is strictly additive: existing entries — including their
+// origin (paste / a previous git URL) — never get overwritten or
+// removed when the URL changes.
+//
+// State flow:
+//   1. PUT /api/cves/git-config { url } — operator sets / changes URL.
+//   2. POST /api/cves/git-sync — pulls + imports new specs.
+//   3. Each import lands in the inbox with `_proxypilot.origin: git`,
+//      `git_url`, `git_commit`. Engine + dashboard treat these as
+//      opaque metadata.
+
+const GIT_URL_KEY = 'cve_git_url';
+
+// Permissive enough to allow https / git@ / file:// for tests, strict
+// enough to block obvious shell-meta. The engine wraps the URL in argv
+// for subprocess.run so injection isn't possible, but we still want a
+// readable error in the dashboard rather than a cryptic git failure.
+const gitUrlSchema = z.object({
+  url: z.string().trim().min(0).max(1024)
+    .refine(v => v === '' || /^(https?:\/\/|git@|ssh:\/\/|file:\/\/|\/)/.test(v),
+            { message: 'must be empty or start with https://, ssh://, git@, file://, or /' }),
+}).strict();
+
+cvesRouter.get('/git-config', requireAdmin, async (_req, res) => {
+  res.json({ url: getSetting(GIT_URL_KEY) || '' });
+});
+
+cvesRouter.put('/git-config', requireAdmin, requireSudo, async (req, res) => {
+  let body;
+  try {
+    body = gitUrlSchema.parse(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  setSetting(GIT_URL_KEY, body.url);
+  logAudit(req.user.id, 'CVE_GIT_CONFIG', 'cve', null,
+           { url_set: !!body.url }, req.ip);
+  res.json({ ok: true, url: body.url });
+});
+
+cvesRouter.post('/git-sync', requireAdmin, requireSudo, async (req, res) => {
+  const url = (getSetting(GIT_URL_KEY) || '').trim();
+  if (!url) {
+    return res.status(400).json({
+      error: 'no git source configured; set one via PUT /api/cves/git-config',
+    });
+  }
+  try {
+    const out = await runEngine(['sync-git', '--git-url', url],
+      { timeoutMs: 5 * 60 * 1000 });
+    logAudit(req.user.id, 'CVE_GIT_SYNC', 'cve', null, {
+      git_commit: out?.git_commit ?? null,
+      imported: (out?.imported || []).length,
+      errors: (out?.errors || []).length,
+    }, req.ip);
     res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });

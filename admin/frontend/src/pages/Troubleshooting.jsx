@@ -10,30 +10,66 @@
 //     anything from this page; some of these are destructive and the
 //     pause-to-paste step is the safety bar.
 //
+// Layout: each entry is a <details> element so operators can collapse
+// the dense content and scan symptoms quickly. The first entry in
+// each section is open by default. "Run on" tags are colour-coded by
+// machine class so eye-tracking lands on the right host immediately.
+//
 // Static content. No API calls. Admin-only because the recipes lean
 // on root-level state (known_hosts, /etc/wireguard, /opt/proxypilot,
 // systemd, docker-compose).
 
 import { Navigate } from 'react-router-dom';
-import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Cable, Copy, GitBranch, KeyRound, LifeBuoy, Server, ShieldAlert, Trash2,
+  Cable, ChevronRight, Copy, KeyRound, LifeBuoy, Server, ShieldAlert, Trash2,
 } from 'lucide-react';
 
-// One troubleshooting entry. `commands` is an array of {label, code,
-// runOn} so we can group "run this on your laptop" vs "run this on
-// the host" without forcing the operator to re-read context.
-function Entry({ title, symptom, why, commands, warning }) {
+// "run on:" colour codes. Picked so each machine class gets its own
+// eye-trackable hue without leaning on traffic-light semantics
+// (these are scopes, not severities).
+//
+//   your laptop          → blue   (the operator's own machine)
+//   ProxyPilot host      → orange (the box running the dashboard)
+//   managed server       → purple (a downstream box ProxyPilot manages)
+//   different machine    → grey   (any third party — usually for
+//                                  external reachability checks)
+//   server console       → red    (out-of-band — serial / hypervisor
+//                                  / `incus exec`, when SSH is the
+//                                  thing being debugged)
+function runOnTone(runOn) {
+  if (!runOn) return 'bg-muted text-muted-foreground border-border';
+  const r = runOn.toLowerCase();
+  if (r.includes('laptop') || r.includes('your machine') || r.includes('client'))
+    return 'bg-blue-500/15 text-blue-300 border-blue-500/30';
+  if (r.includes('proxypilot host') || r.includes('the host') || r.includes('dashboard host'))
+    return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
+  if (r.includes('the server') || r.includes('managed') || r.includes('target'))
+    return 'bg-purple-500/15 text-purple-300 border-purple-500/30';
+  if (r.includes('console') || r.includes('serial') || r.includes('incus exec'))
+    return 'bg-red-500/15 text-red-300 border-red-500/30';
+  return 'bg-muted text-muted-foreground border-border';
+}
+
+function RunOnPill({ runOn }) {
+  if (!runOn) return null;
+  return (
+    <span className={`inline-flex items-center text-[11px] font-mono border rounded px-2 py-0.5 ${runOnTone(runOn)}`}>
+      {runOn}
+    </span>
+  );
+}
+
+function CommandBlock({ label, runOn, code }) {
   const { toast } = useToast();
-  const copy = async (text, label) => {
+  const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
-      toast({ title: `${label} copied`, description: 'Pasted to clipboard.' });
+      await navigator.clipboard.writeText(code);
+      toast({ title: 'Copied', description: label || 'Command pasted to clipboard.' });
     } catch (err) {
       toast({
         title: 'Copy failed',
@@ -43,60 +79,74 @@ function Entry({ title, symptom, why, commands, warning }) {
     }
   };
   return (
-    <div className="border border-border rounded p-3 space-y-2">
-      <div>
-        <h3 className="text-sm font-medium">{title}</h3>
-        {symptom && (
-          <p className="text-xs text-muted-foreground mt-0.5">
-            <span className="font-medium">Symptom: </span>
-            <span className="font-mono">{symptom}</span>
-          </p>
-        )}
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        {label && <span className="text-muted-foreground">{label}</span>}
+        <RunOnPill runOn={runOn} />
       </div>
-      {why && <p className="text-xs text-muted-foreground">{why}</p>}
-      {warning && (
-        <div className="text-xs border border-amber-500/30 bg-amber-500/10 text-amber-500 rounded px-2 py-1.5">
-          <span className="font-medium">Warning: </span>{warning}
-        </div>
-      )}
-      {commands.map((c, i) => (
-        <div key={i} className="space-y-1">
-          {c.label && (
-            <div className="text-[11px] text-muted-foreground flex items-center gap-2">
-              <span>{c.label}</span>
-              {c.runOn && (
-                <span className="font-mono text-[10px] border border-border rounded px-1.5 py-0.5">
-                  run on: {c.runOn}
-                </span>
-              )}
+      <div className="flex gap-2">
+        <pre className="flex-1 text-xs font-mono bg-background border border-border/60 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
+          {code}
+        </pre>
+        <Button
+          variant="outline" size="sm"
+          onClick={copy}
+          title="Copy command"
+          className="self-start shrink-0"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// One troubleshooting entry rendered as a collapsible <details>. The
+// summary row stays compact (title + symptom badge) so operators can
+// scan by symptom; details unfold on click for the why + commands.
+function Entry({ title, symptom, why, commands, warning, defaultOpen = false }) {
+  return (
+    <details
+      open={defaultOpen}
+      className="group border border-border rounded-lg bg-card open:bg-card/95 open:shadow-sm transition-shadow"
+    >
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden px-4 py-3 flex items-start gap-3 hover:bg-accent/30 rounded-lg">
+        <ChevronRight className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+        <div className="flex-1 min-w-0">
+          <h3 className="text-sm font-semibold leading-snug">{title}</h3>
+          {symptom && (
+            <div className="mt-1 text-xs">
+              <span className="font-mono text-amber-400/90 break-words">{symptom}</span>
             </div>
           )}
-          <div className="flex gap-2">
-            <pre className="flex-1 text-xs font-mono bg-muted/30 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-              {c.code}
-            </pre>
-            <Button
-              variant="outline" size="sm"
-              onClick={() => copy(c.code, c.label || 'Command')}
-              title="Copy command"
-              className="self-start shrink-0"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
-          </div>
         </div>
-      ))}
-    </div>
+      </summary>
+      <div className="px-4 pb-4 pt-1 pl-11 space-y-3">
+        {why && (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {why}
+          </p>
+        )}
+        {warning && (
+          <div className="text-xs border-l-2 border-amber-500 bg-amber-500/5 text-amber-300/90 rounded-r px-3 py-2 leading-relaxed">
+            <span className="font-medium">Warning. </span>{warning}
+          </div>
+        )}
+        <div className="space-y-3">
+          {commands.map((c, i) => <CommandBlock key={i} {...c} />)}
+        </div>
+      </div>
+    </details>
   );
 }
 
 function Section({ title, children }) {
   return (
     <div className="space-y-3">
-      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+      <h2 className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
         {title}
       </h2>
-      <div className="space-y-3">{children}</div>
+      <div className="space-y-2">{children}</div>
     </div>
   );
 }
@@ -117,8 +167,37 @@ const SSH_ENTRIES = [
         runOn: 'your laptop',
         code: 'ssh-keyscan -t ed25519 10.100.0.1 >> ~/.ssh/known_hosts' },
       { label: 'Verify the server\'s actual fingerprint (compare with the SSH warning)',
-        runOn: 'the server (console / incus exec)',
+        runOn: 'server console',
         code: 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' },
+    ],
+  },
+  {
+    title: 'List + clean up SSH keys on your client (Windows / PowerShell)',
+    symptom: 'Two keys with the same name conflicting / leftover keys from old servers / "too many authentication failures".',
+    why: 'Each SSH connection offers every key in your `~/.ssh/` directory (or every key loaded into ssh-agent) until the server accepts one — or until it hits MaxAuthTries (usually 6) and disconnects with "too many authentication failures". A pile of stale keys is also a hygiene problem: it\'s easier to leak a key you\'ve forgotten about. Below is the audit-and-prune workflow on Windows; the macOS / Linux equivalents are the same minus the PowerShell wrapping.',
+    warning: 'Deleting a private key cannot be undone — make sure you don\'t need the matching server access before removing the file. The `.pub` companion is the public half and is harmless to keep, but pair them when deleting so you don\'t leave orphans.',
+    commands: [
+      { label: 'List every key file in ~/.ssh (private + public, plus their fingerprints)',
+        runOn: 'your laptop',
+        code: 'Get-ChildItem $HOME\\.ssh\\ -File | Where-Object { $_.Name -notmatch \'^(known_hosts|config|authorized_keys)\' } |\n  ForEach-Object {\n    if ($_.Name -like \'*.pub\') {\n      $fp = (ssh-keygen -lf $_.FullName) 2>$null\n      [PSCustomObject]@{ Name=$_.Name; Size=$_.Length; Fingerprint=$fp }\n    } else {\n      [PSCustomObject]@{ Name=$_.Name; Size=$_.Length; Fingerprint=\'(private key)\' }\n    }\n  } | Format-Table -AutoSize' },
+      { label: 'Show the fingerprint of one specific key',
+        runOn: 'your laptop',
+        code: 'ssh-keygen -lf $HOME\\.ssh\\proxypilot_lxc-duo2_ed25519.pub' },
+      { label: 'List keys currently loaded into ssh-agent',
+        runOn: 'your laptop',
+        code: 'ssh-add -l' },
+      { label: 'Remove a key from ssh-agent (does NOT delete the file)',
+        runOn: 'your laptop',
+        code: 'ssh-add -d $HOME\\.ssh\\proxypilot_old_ed25519' },
+      { label: 'Delete a key + its public companion from disk (NAME = the part before _ed25519/_rsa)',
+        runOn: 'your laptop',
+        code: '$NAME = \'proxypilot_old_ed25519\'\nRemove-Item $HOME\\.ssh\\$NAME, "$HOME\\.ssh\\$NAME.pub" -ErrorAction Continue' },
+      { label: 'Audit known_hosts: list every host you\'ve ever connected to',
+        runOn: 'your laptop',
+        code: 'Get-Content $HOME\\.ssh\\known_hosts | ForEach-Object { ($_ -split \' \')[0] } | Sort-Object -Unique' },
+      { label: 'Remove all known_hosts entries for one host',
+        runOn: 'your laptop',
+        code: 'ssh-keygen -R 10.100.0.1' },
     ],
   },
   {
@@ -130,7 +209,7 @@ const SSH_ENTRIES = [
         runOn: 'your laptop',
         code: 'ssh -v -i ~/.ssh/proxypilot_ed25519 root@10.100.0.1 2>&1 | grep -E "Offering|Authentications|publickey|denied"' },
       { label: 'Verify the key is authorised on the server',
-        runOn: 'the server',
+        runOn: 'managed server',
         code: 'grep -F "$(ssh-keygen -lf ~/.ssh/proxypilot_ed25519.pub | awk \'{print $2}\')" ~/.ssh/authorized_keys || echo "key not present in authorized_keys"' },
       { label: 'Re-add the key (run from your laptop)',
         runOn: 'your laptop',
@@ -140,16 +219,16 @@ const SSH_ENTRIES = [
   {
     title: 'Connection refused / timeout',
     symptom: 'ssh: connect to host ... port 22: Connection refused  /  Connection timed out',
-    why: 'sshd isn\'t listening on the port you tried, the host is unreachable on the network you\'re using, or a firewall (host-side or upstream) is dropping the SYN. "Refused" = host is up and rejecting; "timed out" = no host or no route.',
+    why: '"Refused" means the host is up and rejecting the connection — sshd isn\'t listening, or a firewall is sending RST. "Timed out" means no host or no route — packets aren\'t getting there at all. They look similar but point to different layers.',
     commands: [
       { label: 'Check the route to the server',
         runOn: 'your laptop',
         code: 'ping -c 3 10.100.0.1' },
-      { label: 'Check sshd status',
-        runOn: 'the server',
+      { label: 'Check sshd is running + listening',
+        runOn: 'managed server',
         code: 'systemctl status ssh; ss -tlnp | grep -w 22' },
-      { label: 'Check the host firewall',
-        runOn: 'the server',
+      { label: 'Check the host firewall isn\'t dropping :22',
+        runOn: 'managed server',
         code: 'nft list ruleset 2>/dev/null | grep -A2 "tcp dport 22"; iptables -nL INPUT 2>/dev/null | grep -E "22|ssh"' },
     ],
   },
@@ -162,10 +241,13 @@ const HOST_CLEANUP_ENTRIES = [
     why: 'The dashboard refuses to remove a peer that handshake\'d in the last few minutes — accidental clicks would lock you out of a working tunnel. ProxyPilot routes that override through the CLI on purpose, so the action requires shell access (= you\'re actually on the host, not a stolen browser session).',
     commands: [
       { label: 'List peers + their last handshake',
-        runOn: 'the ProxyPilot host',
-        code: 'proxypilot vpn peers' },
+        runOn: 'ProxyPilot host',
+        code: 'proxypilot vpn peer list' },
+      { label: 'Show one peer in detail',
+        runOn: 'ProxyPilot host',
+        code: 'proxypilot vpn peer show <name>' },
       { label: 'Force-remove the peer (replace <name>)',
-        runOn: 'the ProxyPilot host',
+        runOn: 'ProxyPilot host',
         code: 'proxypilot vpn peer remove <name> --force' },
     ],
   },
@@ -173,7 +255,7 @@ const HOST_CLEANUP_ENTRIES = [
     title: 'Remove an old WireGuard interface entirely',
     symptom: 'Stale wg0 / lxc-duo / vpn-* interface lingers after operator deleted the peer.',
     why: 'wg-quick keeps interface state in /etc/wireguard/<iface>.conf and the kernel keeps the device up until you take it down. Deleting the conf file alone doesn\'t stop the live interface.',
-    warning: 'Confirms by IP address — if you\'re SSH\'d in over the WG you\'re about to take down, you will get disconnected. Run from console or another route.',
+    warning: 'If you\'re SSH\'d in over the WG tunnel you\'re about to take down, you will get disconnected. Run from console or another route.',
     commands: [
       { label: 'Take the interface down',
         runOn: 'the host',
@@ -201,7 +283,7 @@ const HOST_CLEANUP_ENTRIES = [
     ],
   },
   {
-    title: 'Reset the dashboard database (lose users + audit, keep services)',
+    title: 'Reset the dashboard database (lose users + audit, keep nothing)',
     symptom: 'Forgot the admin password / TOTP / locked out and recovery codes are gone.',
     why: 'The auth state lives entirely in proxypilot.db. Deleting it triggers the first-time-setup wizard on the next dashboard load. Your service / route / firewall configs live in the SQLite DB too — this is a heavy hammer, prefer the CLI password-reset path if it\'s available.',
     warning: 'Deletes ALL configured services, firewall rules, VPN peers, audit log. Operators with sudo on the host can also reset just the admin password via CLI without losing the rest — try that first.',
@@ -345,13 +427,13 @@ const VPN_ENTRIES = [
     why: 'The peer\'s endpoint, port, public key, or the firewall hop from client to server is wrong. A failing handshake is silent — the client sees an active tunnel, the server never receives a packet that decrypts.',
     commands: [
       { label: 'On the server: live wg state',
-        runOn: 'the ProxyPilot host',
+        runOn: 'ProxyPilot host',
         code: 'wg show all latest-handshakes\nwg show all transfer' },
       { label: 'On the server: confirm the listen port is actually open',
-        runOn: 'the ProxyPilot host',
+        runOn: 'ProxyPilot host',
         code: 'ss -ulnp | grep wg\nnft list ruleset 2>/dev/null | grep -A2 "udp dport"' },
       { label: 'From outside (any other host on the internet)',
-        runOn: 'a different machine',
+        runOn: 'different machine',
         code: 'nc -zvu YOUR.PUBLIC.IP 51820' },
     ],
   },
@@ -364,11 +446,18 @@ const VPN_ENTRIES = [
         runOn: 'the host',
         code: 'docker compose -f /opt/proxypilot/docker-compose.yml logs proxypilot 2>&1 | grep -E "VPN-startup|wg0 listen port"' },
       { label: 'Update each peer\'s `Endpoint = host:NEW_PORT` to match',
-        runOn: 'each client',
+        runOn: 'your laptop',
         code: '# Edit the WG config on each client and replace the port:\n# Endpoint = your.host:NEW_PORT' },
     ],
   },
 ];
+
+// Mark only the first entry of each section as defaultOpen so the
+// page opens with a sensible "what's a typical item look like"
+// without rendering five hundred lines of expanded content.
+function withFirstOpen(entries) {
+  return entries.map((e, i) => ({ ...e, defaultOpen: i === 0 }));
+}
 
 export default function Troubleshooting() {
   const { user } = useAuth();
@@ -382,10 +471,12 @@ export default function Troubleshooting() {
         <LifeBuoy className="h-5 w-5 text-orange-500" />
         <h1 className="text-lg font-semibold">Troubleshooting</h1>
       </div>
-      <p className="text-xs text-muted-foreground max-w-2xl">
-        Operator runbook for common issues. Every entry has a copy-to-clipboard command —
-        nothing on this page auto-executes. Each command is annotated with where to run it
-        (your laptop vs. the ProxyPilot host vs. a managed server).
+      <p className="text-xs text-muted-foreground max-w-2xl leading-relaxed">
+        Operator runbook for common issues. Click any entry to expand it. Every command has
+        a copy-to-clipboard button — nothing on this page auto-executes. The colour-coded
+        pill on each command tells you where to run it: <RunOnPill runOn="your laptop" />,{' '}
+        <RunOnPill runOn="ProxyPilot host" />, <RunOnPill runOn="managed server" />, or{' '}
+        <RunOnPill runOn="server console" />.
       </p>
 
       <Tabs defaultValue="ssh" className="w-full">
@@ -401,8 +492,8 @@ export default function Troubleshooting() {
           <Card>
             <CardHeader><CardTitle className="text-base">SSH access</CardTitle></CardHeader>
             <CardContent>
-              <Section title="Connection problems">
-                {SSH_ENTRIES.map((e, i) => <Entry key={i} {...e} />)}
+              <Section title="Connection problems + client cleanup">
+                {withFirstOpen(SSH_ENTRIES).map((e, i) => <Entry key={i} {...e} />)}
               </Section>
             </CardContent>
           </Card>
@@ -413,7 +504,7 @@ export default function Troubleshooting() {
             <CardHeader><CardTitle className="text-base">Host cleanup</CardTitle></CardHeader>
             <CardContent>
               <Section title="Removing leftover state">
-                {HOST_CLEANUP_ENTRIES.map((e, i) => <Entry key={i} {...e} />)}
+                {withFirstOpen(HOST_CLEANUP_ENTRIES).map((e, i) => <Entry key={i} {...e} />)}
               </Section>
             </CardContent>
           </Card>
@@ -424,7 +515,7 @@ export default function Troubleshooting() {
             <CardHeader><CardTitle className="text-base">Dashboard service</CardTitle></CardHeader>
             <CardContent>
               <Section title="Common operational issues">
-                {SERVICE_ENTRIES.map((e, i) => <Entry key={i} {...e} />)}
+                {withFirstOpen(SERVICE_ENTRIES).map((e, i) => <Entry key={i} {...e} />)}
               </Section>
             </CardContent>
           </Card>
@@ -435,7 +526,7 @@ export default function Troubleshooting() {
             <CardHeader><CardTitle className="text-base">CVE engine</CardTitle></CardHeader>
             <CardContent>
               <Section title="Engine + inbox">
-                {ENGINE_ENTRIES.map((e, i) => <Entry key={i} {...e} />)}
+                {withFirstOpen(ENGINE_ENTRIES).map((e, i) => <Entry key={i} {...e} />)}
               </Section>
             </CardContent>
           </Card>
@@ -446,7 +537,7 @@ export default function Troubleshooting() {
             <CardHeader><CardTitle className="text-base">WireGuard VPN</CardTitle></CardHeader>
             <CardContent>
               <Section title="Tunnel + peer issues">
-                {VPN_ENTRIES.map((e, i) => <Entry key={i} {...e} />)}
+                {withFirstOpen(VPN_ENTRIES).map((e, i) => <Entry key={i} {...e} />)}
               </Section>
             </CardContent>
           </Card>

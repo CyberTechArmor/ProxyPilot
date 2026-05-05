@@ -129,7 +129,6 @@ export default function Layout() {
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
     { name: 'Firewall', href: '/firewall', icon: Shield, adminOnly: true },
     { name: 'VPN', href: '/vpn', icon: Cable, adminOnly: true },
-    { name: 'Security', href: '/security', icon: ShieldAlert, adminOnly: true },
     { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },

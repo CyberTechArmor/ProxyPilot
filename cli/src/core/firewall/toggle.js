@@ -122,6 +122,39 @@ export function disable({ id, actor }) {
   });
 }
 
+/**
+ * Move a rule's port (and optional port_end) without touching its
+ * scope, enabled state, or source_cidrs. Used by `vpn setListenPort`
+ * to migrate the `base-wireguard` rule when the WG listen port is
+ * changed via the dashboard — the rule's port_start must follow or
+ * inbound packets get dropped on the new port.
+ *
+ * Validates port range to keep an invalid number out of the state
+ * file. The reconciler will then re-emit the nft accept on next pass.
+ */
+export function setPort({ id, port, portEnd = null, actor }) {
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) {
+    throw new Error(`invalid port ${port}: expected 1-65535`);
+  }
+  let pe = null;
+  if (portEnd !== null && portEnd !== undefined) {
+    pe = Number(portEnd);
+    if (!Number.isInteger(pe) || pe < p || pe > 65535) {
+      throw new Error(`invalid port_end ${portEnd}: expected ${p}-65535`);
+    }
+  }
+  return mutate({
+    id,
+    action: 'set-port',
+    actor,
+    fn: (rule) => {
+      rule.port_start = p;
+      rule.port_end = pe;
+    },
+  });
+}
+
 export function setScope({ id, scope, sourceCidrs, service, actor }) {
   if (!VALID_SCOPES.includes(scope)) {
     throw new Error(`invalid scope: ${scope}`);

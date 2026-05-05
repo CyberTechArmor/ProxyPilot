@@ -2,6 +2,6 @@ export { readState, writeState, defaultState, STATE_FILE, STATE_BAK } from './st
 export { render, checksum } from './render.js';
 export { reconcile, lockoutCheck, resolveVpnSources } from './reconcile.js';
 export { scan, scanHost, reconcileDiscovery } from './discover.js';
-export { enable, disable, setScope, addManual, removeManual, addServiceL4, removeServiceL4, list } from './toggle.js';
+export { enable, disable, setScope, setPort, addManual, removeManual, addServiceL4, removeServiceL4, list } from './toggle.js';
 export { panicClose, panicOpen } from './panic.js';
 export { allowEgress, denyEgress, listEgress } from './egress.js';

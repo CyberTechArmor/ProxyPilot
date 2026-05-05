@@ -58,7 +58,19 @@ export async function statusCommand(_opts, globalOpts) {
       default_iface: cfg?.default_iface ?? null,
       server_public_key: cfg?.server_public_key ?? null,
       base_wireguard_rule: baseWgRule
-        ? { enabled: !!baseWgRule.enabled, scope: baseWgRule.scope, source_cidrs: baseWgRule.source_cidrs ?? null }
+        ? {
+            enabled: !!baseWgRule.enabled,
+            scope: baseWgRule.scope,
+            source_cidrs: baseWgRule.source_cidrs ?? null,
+            // Port_start surfaced so the dashboard backend's auto-heal
+            // can detect drift between vpn_config.listen_port and the
+            // actual nft accept rule. Without this, a previous
+            // setListenPort that updated wg0 but failed to move the
+            // rule would silently keep dropping handshakes on the new
+            // port — a class of bug we burned a session on.
+            port_start: baseWgRule.port_start ?? null,
+            port_end: baseWgRule.port_end ?? null,
+          }
         : null,
     };
 

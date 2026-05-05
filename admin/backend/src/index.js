@@ -261,7 +261,7 @@ server.listen(PORT, '0.0.0.0', () => {
   // can reconcile cleanly afterwards.
   setImmediate(async () => {
     try {
-      const vpn = await autoHealVpnListenPort({ db: getDb() });
+      const vpn = await autoHealVpnListenPort();
       // Log every outcome so silent runs are debuggable. Previously
       // we only logged on `migrated:true`, which made it impossible
       // to tell whether the helper ran-and-skipped or threw before

@@ -12,17 +12,17 @@
 // The fix is to keep the WG listen port outside that range. The CLI
 // pins safe-range to 49000-49999 (WG_SAFE_PORT_MIN..MAX); this
 // startup pass detects existing deployments that booted with 51820
-// (or any other unsafe port) and migrates them to the safe-range
-// default (49000) the same way the dashboard would — invoking the
-// CLI's setListenPort, which atomically rewrites wg0.conf, restarts
-// wg-quick@wg0, and reconciles the firewall.
+// (or any other unsafe port) AND deployments where the listen port
+// is in the safe range but the base-wireguard firewall rule's
+// port_start drifted (a previous-version setListenPort updated wg0
+// without updating nft — handshakes then get silently dropped).
 //
-// Skipped when:
-//   - vpn_config row doesn't exist (VPN never enabled, nothing to heal).
-//   - Listen port is already in the safe range (no-op).
-//   - The CLI's setListenPort returns an error — logged, not retried,
-//     because operator intervention will be needed (e.g. wg0 is in a
-//     weird state). Never blocks /api/health.
+// All state is read via `proxypilot --json vpn status` — the CLI's
+// SQLite DB is the authoritative source for vpn_config and the
+// firewall.json state. The backend has its own DB at
+// /data/db/proxypilot.db that does NOT contain vpn_config; reading
+// from the wrong DB was the bug that produced
+// `[VPN-startup] skipped: read vpn_config: no such table`.
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -36,9 +36,7 @@ const PROXYPILOT_BIN = process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot'
 // Safe range — must match cli/src/core/vpn/server.js. Duplicated
 // here rather than imported because the backend container doesn't
 // have the CLI source on its module path; the CLI binary is on PATH
-// inside the host namespace via nsenter. The constant is small and
-// stable enough that the duplication is the cheaper of the two
-// options.
+// inside the host namespace via nsenter.
 const WG_SAFE_PORT_MIN = 49000;
 const WG_SAFE_PORT_MAX = 49999;
 const WG_SAFE_PORT_DEFAULT = WG_SAFE_PORT_MIN;
@@ -53,57 +51,69 @@ async function defaultExecHost(command, { timeout = 30_000 } = {}) {
   return execAsync(command, { timeout, maxBuffer: 4 * 1024 * 1024 });
 }
 
+// Run a `proxypilot --json` subcommand on the host and parse the
+// JSON envelope. The CLI writes `{ok:false, error}` to stdout on
+// recoverable failures (and exits non-zero); execHost throws in that
+// case but still leaves the JSON in err.stdout. Returns the parsed
+// payload either way; callers check `.ok`.
+async function callProxypilot(args, { execHost = defaultExecHost, timeout = 60_000 } = {}) {
+  const cmd = [
+    shellSingleQuote(PROXYPILOT_BIN),
+    '--json',
+    ...args.map(shellSingleQuote),
+  ].join(' ');
+  try {
+    const r = await execHost(cmd, { timeout });
+    const out = (r && r.stdout) || '';
+    if (!out.trim()) return { ok: false, error: 'empty CLI output' };
+    return JSON.parse(out);
+  } catch (e) {
+    if (e?.stdout) {
+      try { return JSON.parse(e.stdout); } catch { /* fall through */ }
+    }
+    const msg = (e && (e.stderr || e.message)) || String(e);
+    return { ok: false, error: String(msg).trim() };
+  }
+}
+
 /**
- * Detect-and-migrate the WG listen port if it's outside the safe range.
+ * Detect-and-migrate the WG listen port if it's outside the safe range,
+ * or if the base-wireguard firewall rule drifted from the listen port.
  * Returns a small summary the caller can log; never throws.
+ *
+ * Resolution paths, in order:
+ *   - vpn not enabled (no cfg)                → skipped
+ *   - listen_port in safe range AND rule aligned → skipped
+ *   - listen_port in safe range, rule drifted    → realign rule
+ *   - listen_port outside safe range             → migrate to default
  */
 export async function autoHealVpnListenPort({
-  db,
   execHost = defaultExecHost,
   log = console.log,
   errLog = console.error,
 } = {}) {
-  if (!db) return { skipped: 'no db' };
-
-  let row;
-  try {
-    row = db.prepare(`SELECT id, endpoint, listen_port FROM vpn_config WHERE id = 1`).get();
-  } catch (e) {
-    // vpn_config table may not exist in very old schemas — treat
-    // as "no VPN" rather than failing boot.
-    return { skipped: `read vpn_config: ${e.message}` };
+  const status = await callProxypilot(['vpn', 'status'], { execHost });
+  if (status.ok === false) {
+    return { skipped: `vpn status failed: ${status.error}` };
   }
-  if (!row) return { skipped: 'vpn not enabled' };
-
-  const currentPort = row.listen_port;
-  // Also check the firewall state for a drifted base-wireguard rule.
-  // The exact failure mode this catches: a previous setListenPort
-  // moved listen_port to a safe value but did NOT move the firewall
-  // rule's port_start (the bug we fixed). The rule then keeps emitting
-  // `udp dport <old-port>` and every WG handshake on the new port is
-  // silently dropped at the host edge — VPN never establishes, vpn-only
-  // services like SSH-on-22 become unreachable.
-  let firewallPort = null;
-  try {
-    const stateRaw = await execHost('cat /var/lib/proxypilot/firewall.json 2>/dev/null || true', { timeout: 5_000 });
-    const stateBody = (stateRaw && stateRaw.stdout) || '';
-    if (stateBody.trim()) {
-      const state = JSON.parse(stateBody);
-      const wgRule = (state.base ?? []).find((r) => r.id === 'base-wireguard');
-      if (wgRule && Number.isInteger(wgRule.port_start)) {
-        firewallPort = wgRule.port_start;
-      }
-    }
-  } catch {
-    // Firewall state unreadable — treat as "no drift detected".
-    firewallPort = null;
+  if (!status.enabled) {
+    return { skipped: 'vpn not enabled' };
   }
+
+  const currentPort = Number(status.listen_port);
+  if (!Number.isInteger(currentPort)) {
+    return { skipped: `vpn status returned non-integer listen_port: ${status.listen_port}` };
+  }
+
+  const rulePort = status.base_wireguard_rule && Number.isInteger(status.base_wireguard_rule.port_start)
+    ? status.base_wireguard_rule.port_start
+    : null;
 
   const portInSafeRange = currentPort >= WG_SAFE_PORT_MIN && currentPort <= WG_SAFE_PORT_MAX;
-  const ruleDrift = firewallPort !== null && firewallPort !== currentPort;
+  const ruleDrift = rulePort !== null && rulePort !== currentPort;
 
   if (portInSafeRange && !ruleDrift) {
-    return { skipped: `already in safe range (${currentPort})`, currentPort };
+    return { skipped: `already in safe range (${currentPort}) and rule aligned`, currentPort };
   }
 
   // Pick the target. If listen_port is already in the safe range but
@@ -113,7 +123,7 @@ export async function autoHealVpnListenPort({
 
   if (ruleDrift && portInSafeRange) {
     log(
-      `[VPN-startup] base-wireguard firewall rule on ${firewallPort} but WG listen port is ` +
+      `[VPN-startup] base-wireguard firewall rule on ${rulePort} but WG listen port is ` +
       `${currentPort}; realigning rule to ${targetPort}`
     );
   } else {
@@ -123,38 +133,10 @@ export async function autoHealVpnListenPort({
     );
   }
 
-  const cmd = [
-    shellSingleQuote(PROXYPILOT_BIN),
-    '--json', 'vpn', 'server', 'set-listen-port',
-    '--port', String(targetPort),
-  ].join(' ');
-
-  let result;
-  try {
-    const r = await execHost(cmd, { timeout: 60_000 });
-    try {
-      result = JSON.parse((r && r.stdout) || '{}');
-    } catch {
-      // CLI returned non-JSON; surface the raw output.
-      errLog(`[VPN-startup] non-JSON CLI output: ${r && r.stdout}`);
-      return { migrated: false, error: 'non-JSON CLI output', from: currentPort };
-    }
-  } catch (e) {
-    // Some CLIs return non-zero on error AND write JSON to stdout.
-    if (e?.stdout) {
-      try {
-        const j = JSON.parse(e.stdout);
-        if (j && j.ok === false) {
-          errLog(`[VPN-startup] migrate failed: ${j.error || 'unknown'}`);
-          return { migrated: false, error: j.error || 'unknown', from: currentPort };
-        }
-      } catch { /* fall through */ }
-    }
-    const msg = (e && (e.stderr || e.message)) || String(e);
-    errLog(`[VPN-startup] migrate threw: ${String(msg).trim()}`);
-    return { migrated: false, error: String(msg).trim(), from: currentPort };
-  }
-
+  const result = await callProxypilot(
+    ['vpn', 'server', 'set-listen-port', '--port', String(targetPort)],
+    { execHost }
+  );
   if (result.ok === false) {
     errLog(`[VPN-startup] migrate refused: ${result.error || 'unknown'}`);
     return { migrated: false, error: result.error || 'unknown', from: currentPort };
@@ -169,5 +151,6 @@ export async function autoHealVpnListenPort({
     from: currentPort,
     to: result.listen_port,
     endpoint: result.endpoint,
+    realigned: !!result.realigned,
   };
 }

@@ -23,9 +23,69 @@ import {
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, BugPlay, Copy, GitBranch, Loader2, Pencil, Plus,
-  RefreshCw, Save, Settings, Trash2, X, Zap,
+  ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Plus,
+  RefreshCw, Save, Trash2, X, Zap,
 } from 'lucide-react';
+
+// A real, working CVE inbox spec — round-trips through the engine's
+// validate subcommand. Loaded into the Paste dialog when the operator
+// clicks "Load example" so they have a known-good shape to start from.
+// Mirrors docs/cve-engine/example-cve.yaml verbatim; if you edit one,
+// edit the other.
+const EXAMPLE_YAML = `cve: CVE-2024-3094
+name: "xz-utils backdoor in liblzma (5.6.0 / 5.6.1)"
+disclosed: "2024-03-29"
+cvss: 10.0
+impact: REMOTE_RCE_ROOT
+blast_radius: HOST_FULL
+sources:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-3094
+  - https://www.openwall.com/lists/oss-security/2024/03/29/4
+  - https://security-tracker.debian.org/tracker/CVE-2024-3094
+hosts:
+  __HOSTNAME__:
+    action_class: AUTO_PATCH
+    tier: 1
+playbook:
+  detect:
+    probe: |
+      #!/bin/sh
+      ver=$(dpkg-query -W -f='\${Version}' liblzma5 2>/dev/null || true)
+      case "$ver" in
+        5.6.0*|5.6.1-1|5.6.1-2)
+          echo "AFFECTED: liblzma5 $ver"
+          exit 0
+          ;;
+        "")
+          echo "liblzma5 not installed; not affected"
+          exit 1
+          ;;
+        *)
+          echo "liblzma5 $ver — not in vulnerable range"
+          exit 1
+          ;;
+      esac
+  patch:
+    steps:
+      - "apt-get update"
+      - "apt-get install -y --reinstall xz-utils liblzma5 liblzma-dev"
+      - "systemctl try-restart sshd 2>/dev/null || true"
+      - "systemctl try-restart systemd-logind 2>/dev/null || true"
+    rollback:
+      snapshot_supported: true
+      restore: |
+        #!/bin/sh
+        prev=$(ls -1 /var/cache/apt/archives/liblzma5_*.deb 2>/dev/null | tail -n1)
+        [ -n "$prev" ] && dpkg -i "$prev"
+  mitigate:
+    steps:
+      - "# Restrict sshd to public-key auth only; xz exploit triggers"
+      - "# during early sshd auth path."
+      - "systemctl reload sshd"
+state:
+  status: NEW
+  operator_seen: false
+`;
 
 const STATUS_TONE = {
   NEW: 'bg-orange-500/15 text-orange-500 border-orange-500/30',
@@ -672,14 +732,9 @@ function CveList({ onOpen, refreshKey }) {
           </Button>
           <Button variant="outline" size="sm"
                   onClick={onSyncGit} disabled={gitSyncing}
-                  title={gitUrl ? `Pull from ${gitUrl}` : 'Configure a git source first'}>
+                  title={gitUrl ? `Pull from ${gitUrl}` : 'Click to configure a git source'}>
             {gitSyncing ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <GitBranch className="h-4 w-4 mr-1.5" />}
-            Sync git
-          </Button>
-          <Button variant="ghost" size="icon"
-                  onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
-                  title="Configure git source URL">
-            <Settings className="h-4 w-4" />
+            {gitUrl ? 'Sync git' : 'Add git source'}
           </Button>
           <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
             {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
@@ -700,7 +755,14 @@ function CveList({ onOpen, refreshKey }) {
         <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
           <GitBranch className="h-3.5 w-3.5" />
           <span>Source:</span>
-          <code className="font-mono break-all">{gitUrl}</code>
+          <button
+            type="button"
+            onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
+            className="font-mono break-all underline-offset-2 hover:underline hover:text-foreground"
+            title="Click to change or clear"
+          >
+            {gitUrl}
+          </button>
           <span className="text-[10px] opacity-70">
             (read-only · sync is additive · changing URL never deletes existing entries)
           </span>
@@ -762,6 +824,24 @@ function CveList({ onOpen, refreshKey }) {
               field. An entry with the same id is overwritten. The server validates the YAML
               before writing; nothing lands on disk if validation fails.
             </p>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setPasteContent(
+                  EXAMPLE_YAML.replace(/__HOSTNAME__/g, data.host || 'vm'))}
+                className="inline-flex items-center gap-1 underline-offset-2 hover:underline text-muted-foreground hover:text-foreground"
+              >
+                <FileCode className="h-3.5 w-3.5" /> Load example (CVE-2024-3094 — xz-utils backdoor)
+              </button>
+              <span className="text-muted-foreground/60">·</span>
+              <a
+                href="https://github.com/cybertecharmor/proxypilot/blob/main/docs/cve-engine/claude-prompt.md"
+                target="_blank" rel="noreferrer"
+                className="underline-offset-2 hover:underline text-muted-foreground hover:text-foreground"
+              >
+                Claude prompt
+              </a>
+            </div>
             <textarea
               className="w-full text-xs font-mono bg-muted/30 rounded p-3 border min-h-[20rem]"
               value={pasteContent}

@@ -985,8 +985,12 @@ create_docker_compose() {
 services:
   proxypilot:
     build:
-      context: ./admin
-      dockerfile: Dockerfile
+      # Context is the install root so the Dockerfile can COPY both
+      # admin/ (Node backend + built frontend) and proxypilot/ (the
+      # CVE engine Python package — used for paste/sync/validate
+      # in-container; AUTO_PATCH execution still pivots to the host).
+      context: .
+      dockerfile: admin/Dockerfile
     container_name: proxypilot-admin
     restart: always
     # ProxyPilot drives caddy / incus / docker / git / npm on the host

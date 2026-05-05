@@ -34,14 +34,22 @@ const ENGINE_BIN = process.env.PROXYPILOT_ENGINE_BIN || 'python3';
 const ENGINE_MODULE = process.env.PROXYPILOT_ENGINE_MODULE || 'proxypilot.engine';
 const HOSTNAME = process.env.PROXYPILOT_HOSTNAME || '';
 
-// The dashboard runs in a Docker container; the engine + python3 +
-// ruamel.yaml live on the host (Phase A architecture — the agent
-// socket isn't wired for engine RPCs yet). Pivot through `nsenter
-// -t 1` so the spawn lands in the host's mount + uts + net + ipc
-// namespaces, where python3 -m proxypilot.engine resolves. Same
-// pattern as caddy-driver.js / l4-diagnose.js / pty.js.
+// Engine commands split into two lanes:
 //
-// Outside Docker (tests, dev), we run the engine directly.
+//   In-container — pure YAML manipulation: validate, paste,
+//   mark-seen, dismiss, sync-git, show, list. These read/write the
+//   inbox dir (bind-mounted from the host) but don't shell out to
+//   apt-get / systemctl / etc. The container ships python3 +
+//   ruamel.yaml + the proxypilot package, so they run without any
+//   host setup.
+//
+//   Host-pivot — actually mutates the host: poll, run-one, inventory.
+//   These need apt-get, snapshot tools, the running kernel etc.,
+//   so they pivot through `nsenter -t 1` into the host namespace
+//   (Phase A architecture — same pattern as caddy-driver.js).
+//
+// Outside Docker (tests, dev), every command runs directly.
+const HOST_PIVOT_COMMANDS = new Set(['poll', 'run-one', 'inventory']);
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
 // CVE filenames are constrained to the canonical CVE-YYYY-NNNN[N..]
@@ -153,8 +161,12 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) 
   // to actually reach the subprocess.
   const globalArgs = ['--inbox', INBOX_DIR];
   if (HOSTNAME) globalArgs.push('--host', HOSTNAME);
+  // First positional after globalArgs is the subcommand — that's
+  // what we route on for the in-container vs. host-pivot decision.
+  const subcommand = args[0] || '';
+  const needsHostPivot = isInDocker && HOST_PIVOT_COMMANDS.has(subcommand);
   let bin, fullArgs;
-  if (isInDocker) {
+  if (needsHostPivot) {
     bin = 'nsenter';
     // -m mount, -u uts, -n net, -i ipc, -p pid (so signals reach
     // the right pid tree). We don't need -U because the host runs
@@ -165,14 +177,21 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) 
     bin = ENGINE_BIN;
     fullArgs = ['-m', ENGINE_MODULE, ...globalArgs, ...args];
   }
-  // Set PYTHONPATH so `-m proxypilot.engine` resolves on the host.
-  // install.sh copies the repo to /opt/proxypilot; operators with a
-  // different layout override via PROXYPILOT_INSTALL_DIR.
+  // PYTHONPATH for the engine module. Two cases:
+  //   - In-container path: the Dockerfile copies proxypilot/ to
+  //     /app/proxypilot and sets PYTHONPATH=/app. process.env.PYTHONPATH
+  //     already carries that, so we keep it untouched.
+  //   - Host pivot: the host has the package at PROXYPILOT_INSTALL_DIR
+  //     (default /opt/proxypilot) — install.sh copies it there.
+  //     Prepend that so the host's python3 finds the module.
   const installDir = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
+  const pythonPath = needsHostPivot
+    ? installDir + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : '')
+    : (process.env.PYTHONPATH || '/app');
   const childEnv = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
-    PYTHONPATH: installDir + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : ''),
+    PYTHONPATH: pythonPath,
   };
   return new Promise((resolve, reject) => {
     const child = spawn(bin, fullArgs, { env: childEnv });
@@ -186,14 +205,18 @@ function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) 
     child.stderr.on('data', d => { stderr += d; });
     child.on('error', err => {
       clearTimeout(timer);
-      // Surface a clearer error on the typical missing-binary cases
-      // so the operator sees a remediation hint, not a raw ENOENT.
       if (err.code === 'ENOENT') {
-        const what = isInDocker ? 'nsenter (util-linux not in container)' : 'python3';
-        err = new Error(`engine spawn failed: ${what} not found. ` +
-          (isInDocker
-            ? 'Container needs util-linux installed and pid:host enabled.'
-            : `Install python3 + ruamel.yaml on the host and ensure ${installDir} contains the proxypilot package.`));
+        if (needsHostPivot) {
+          err = new Error(
+            'engine spawn failed: nsenter not found in container. ' +
+            'Rebuild the dashboard image (apk add util-linux) or set ' +
+            'pid:host in docker-compose.');
+        } else {
+          err = new Error(
+            `engine spawn failed: ${ENGINE_BIN} not found. ` +
+            'In-container engine should be installed via the admin Dockerfile ' +
+            '(python3 + py3-ruamel.yaml). Rebuild the image.');
+        }
       }
       reject(err);
     });

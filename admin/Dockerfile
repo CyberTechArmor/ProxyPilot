@@ -1,5 +1,6 @@
 # ProxyPilot Admin Dashboard Dockerfile
-# Expects frontend to be pre-built (frontend/dist directory)
+# Build context is the install root (admin/ + proxypilot/ both reachable).
+# Frontend is pre-built before docker build (admin/frontend/dist).
 
 # Stage 1: Build backend dependencies
 FROM node:20-alpine AS backend-builder
@@ -23,37 +24,53 @@ RUN for i in 1 2 3 4 5; do \
     done && command -v g++ >/dev/null
 
 # Copy backend package files
-COPY backend/package*.json ./
+COPY admin/backend/package*.json ./
 RUN npm install --omit=dev
 
 # Stage 2: Production image
 FROM node:20-alpine
 WORKDIR /app
 
-# Install runtime dependencies (same retry logic as the builder
-# stage — curl is a single small package but the CDN doesn't care
-# what you're asking for, only whether it can resolve).
+# Runtime dependencies. Same retry pattern as the builder. Now also
+# carries the CVE engine's Python deps so paste / sync / validate /
+# mark-seen / dismiss work without depending on the host. Engine
+# commands that actually mutate the host (poll, run-one) still pivot
+# through nsenter -t 1 — see runEngine() in routes/cves.js.
+#
+#   - python3 + py3-ruamel.yaml: engine runtime
+#   - util-linux: provides nsenter for the host pivot
+#   - git: source-git sync clones into /var/lib/proxypilot/cve-inbox-source
+#   - curl: healthcheck
 RUN for i in 1 2 3 4 5; do \
-        apk add --no-cache curl && break || { \
+        apk add --no-cache curl python3 py3-ruamel.yaml util-linux git \
+            && break || { \
             echo "apk add attempt $i/5 failed, sleeping $((i*i*2))s"; \
             sleep $((i*i*2)); \
         }; \
-    done && command -v curl >/dev/null
+    done && command -v curl >/dev/null \
+         && command -v python3 >/dev/null \
+         && command -v nsenter >/dev/null \
+         && command -v git >/dev/null
 
 # Create non-root user
 RUN addgroup -S proxypilot && adduser -S proxypilot -G proxypilot
 
 # Copy pre-built frontend (built on host before docker build)
-COPY frontend/dist ./frontend/dist
+COPY admin/frontend/dist ./frontend/dist
 
 # Verify frontend was copied correctly
-RUN test -f ./frontend/dist/index.html || (echo "ERROR: frontend/dist/index.html not found in Docker build context" && exit 1)
+RUN test -f ./frontend/dist/index.html || (echo "ERROR: admin/frontend/dist/index.html not found in Docker build context" && exit 1)
 RUN ls -la ./frontend/dist/
 
 # Copy backend with dependencies
 COPY --from=backend-builder /app/backend/node_modules ./backend/node_modules
-COPY backend/src ./backend/src
-COPY backend/package.json ./backend/
+COPY admin/backend/src ./backend/src
+COPY admin/backend/package.json ./backend/
+
+# Copy the CVE engine Python package. Lives at /app/proxypilot so
+# `python3 -m proxypilot.engine ...` resolves with PYTHONPATH=/app.
+# Tests live alongside; they're harmless at runtime.
+COPY proxypilot ./proxypilot
 
 # Create data directory
 RUN mkdir -p /data && chown -R proxypilot:proxypilot /data
@@ -61,6 +78,10 @@ RUN mkdir -p /data && chown -R proxypilot:proxypilot /data
 # Set environment
 ENV NODE_ENV=production
 ENV DATABASE_PATH=/data/db/proxypilot.db
+# In-container PYTHONPATH so the engine resolves without a system
+# pip install. The host pivot uses PROXYPILOT_INSTALL_DIR (set by
+# install.sh) for the same purpose on the host side.
+ENV PYTHONPATH=/app
 
 # Expose port
 EXPOSE 3001

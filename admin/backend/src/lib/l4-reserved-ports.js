@@ -126,10 +126,20 @@ export async function reconcileReservedPorts({ db, execHost = defaultExecHost } 
     ? `${RESERVED_PORTS_HEADER}net.ipv4.ip_local_reserved_ports = ${value}\n`
     : '';
 
+  // Read the current contents from the *host* filesystem. The backend
+  // runs in a container; node's fs APIs see only the container's local
+  // /etc, so any direct fs.* call against /etc/sysctl.d/* would touch
+  // the wrong tree and `sysctl -p` (which runs on the host via nsenter)
+  // would fail with ENOENT — exactly the symptom that surfaced in
+  // production. Everything below goes through execHost so the path is
+  // always evaluated in the host namespace.
   let current = '';
   try {
-    const { readFileSync } = await import('node:fs');
-    current = readFileSync(RESERVED_PORTS_PATH, 'utf-8');
+    const r = await execHost(
+      `cat ${shellSingleQuote(RESERVED_PORTS_PATH)} 2>/dev/null || true`,
+      { timeout: 5_000 }
+    );
+    current = (r && r.stdout) || '';
   } catch {
     current = '';
   }
@@ -138,14 +148,32 @@ export async function reconcileReservedPorts({ db, execHost = defaultExecHost } 
     return { value, changed: false, applied: true };
   }
 
-  const { writeFileSync, unlinkSync } = await import('node:fs');
   if (desired === '') {
-    try { unlinkSync(RESERVED_PORTS_PATH); } catch { /* not present */ }
-  } else {
     try {
-      writeFileSync(RESERVED_PORTS_PATH, desired, { mode: 0o644 });
+      await execHost(`rm -f ${shellSingleQuote(RESERVED_PORTS_PATH)}`, { timeout: 5_000 });
     } catch (err) {
-      return { value, changed: false, applied: false, error: `write ${RESERVED_PORTS_PATH}: ${err.message}` };
+      const detail = ((err && (err.stderr || err.message)) || '').toString().trim();
+      return { value, changed: false, applied: false, error: `rm ${RESERVED_PORTS_PATH}: ${detail}` };
+    }
+  } else {
+    // Write atomically via base64 + tee to avoid heredoc / quoting
+    // hazards. base64 has no shell metacharacters so single-quoting is
+    // safe; install -m 0644 -T sets the final mode AND replaces the
+    // file in one syscall (rename on the same filesystem), so a
+    // mid-write crash can't leave a half-written sysctl drop-in.
+    const b64 = Buffer.from(desired, 'utf-8').toString('base64');
+    const dir = RESERVED_PORTS_PATH.slice(0, RESERVED_PORTS_PATH.lastIndexOf('/')) || '/';
+    const cmd =
+      `mkdir -p ${shellSingleQuote(dir)} && ` +
+      `t=$(mktemp ${shellSingleQuote(dir)}/.proxypilot-reserved-XXXXXX) && ` +
+      `printf '%s' '${b64}' | base64 -d > "$t" && ` +
+      `chmod 0644 "$t" && ` +
+      `mv -f "$t" ${shellSingleQuote(RESERVED_PORTS_PATH)}`;
+    try {
+      await execHost(cmd, { timeout: 5_000 });
+    } catch (err) {
+      const detail = ((err && (err.stderr || err.message)) || '').toString().trim();
+      return { value, changed: false, applied: false, error: `write ${RESERVED_PORTS_PATH}: ${detail}` };
     }
   }
 

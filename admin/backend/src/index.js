@@ -262,13 +262,24 @@ server.listen(PORT, '0.0.0.0', () => {
   setImmediate(async () => {
     try {
       const vpn = await autoHealVpnListenPort({ db: getDb() });
+      // Log every outcome so silent runs are debuggable. Previously
+      // we only logged on `migrated:true`, which made it impossible
+      // to tell whether the helper ran-and-skipped or threw before
+      // even getting to the log line.
       if (vpn.migrated) {
         console.log(
-          `[VPN-startup] migrated wg0 listen port ${vpn.from} -> ${vpn.to}`
+          `[VPN-startup] migrated wg0 listen port ${vpn.from} -> ${vpn.to}` +
+          (vpn.endpoint ? ` (endpoint ${vpn.endpoint})` : '')
         );
+      } else if (vpn.error) {
+        console.error(`[VPN-startup] migrate failed: ${vpn.error}`);
+      } else if (vpn.skipped) {
+        console.log(`[VPN-startup] skipped: ${vpn.skipped}`);
+      } else {
+        console.log(`[VPN-startup] no action taken (state: ${JSON.stringify(vpn)})`);
       }
     } catch (err) {
-      console.error('[VPN-startup] failed:', err.message || err);
+      console.error('[VPN-startup] threw:', err.message || err);
     }
     try {
       const summary = await reconcileAllServiceL4Forwards({ db: getDb() });

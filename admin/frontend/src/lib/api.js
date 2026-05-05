@@ -881,6 +881,15 @@ export const api = {
   getVpnPeer: (name) => request(`/vpn/${encodeURIComponent(name)}`),
   enableVpn: (body) => request('/vpn/enable', { method: 'POST', body: JSON.stringify(body || {}) }),
   disableVpn: () => request('/vpn/disable', { method: 'POST', body: '{}' }),
+  // Change WG server listen port. Backend pins to the safe range
+  // 49000-49999 — outside the kernel ephemeral pool and the typical
+  // WebRTC media range — and rewrites wg0.conf, restarts wg-quick,
+  // re-reconciles the firewall, all in one transaction.
+  setVpnListenPort: (port) =>
+    request('/vpn/server/listen-port', {
+      method: 'POST',
+      body: JSON.stringify({ port }),
+    }),
   addVpnPeer: (body) => request('/vpn/peers', { method: 'POST', body: JSON.stringify(body || {}) }),
   rotateVpnPeer: (name) =>
     request(`/vpn/peers/${encodeURIComponent(name)}/rotate`, { method: 'POST', body: '{}' }),

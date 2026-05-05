@@ -125,6 +125,14 @@ export default function Vpn() {
   const [rotateConfirmPeer, setRotateConfirmPeer] = useState(null);
   const [rotateBusy, setRotateBusy] = useState(false);
 
+  // Listen-port edit. setLPortOpen flips the inline form on/off; the
+  // backend pins the value to the safe range 49000-49999 (outside the
+  // WebRTC media range that MEET-style stacks claim), so we validate
+  // here too to avoid a roundtrip on a known-bad input.
+  const [lportOpen, setLportOpen] = useState(false);
+  const [lportValue, setLportValue] = useState('');
+  const [lportBusy, setLportBusy] = useState(false);
+
   useEffect(() => {
     if (isAdmin) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -356,6 +364,36 @@ export default function Vpn() {
     }
   }
 
+  async function submitLPort() {
+    const p = Number(String(lportValue).trim());
+    if (!Number.isInteger(p) || p < 49000 || p > 49999) {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid port',
+        description: 'Listen port must be 49000-49999 (the safe range outside the WebRTC media range).',
+      });
+      return;
+    }
+    setLportBusy(true);
+    try {
+      const r = await api.setVpnListenPort(p);
+      if (r?.unchanged) {
+        toast({ title: `Already on ${r.listen_port}/udp; no change` });
+      } else {
+        toast({
+          title: `Listen port → ${r.listen_port}/udp`,
+          description: 'Re-distribute peer configs so existing peers reconnect.',
+        });
+      }
+      setLportOpen(false);
+      loadAll();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Change listen port failed', description: e.message });
+    } finally {
+      setLportBusy(false);
+    }
+  }
+
   async function submitEnable() {
     const endpoint = enableForm.endpoint.trim();
     if (!endpoint) {
@@ -440,7 +478,56 @@ export default function Vpn() {
           {status && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
               <StatusCell label="Endpoint" value={status.endpoint ?? '—'} />
-              <StatusCell label="Listen port" value={`${status.listen_port ?? '—'}/udp`} />
+              <div className="rounded-md border p-2.5 bg-card flex flex-col gap-1">
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Listen port</div>
+                {lportOpen ? (
+                  <div className="flex items-center gap-1">
+                    <Input
+                      type="number"
+                      min={49000}
+                      max={49999}
+                      value={lportValue}
+                      onChange={(e) => setLportValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitLPort();
+                        if (e.key === 'Escape') { setLportOpen(false); setLportValue(''); }
+                      }}
+                      className="h-7 text-sm w-24"
+                      autoFocus
+                      disabled={lportBusy}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={submitLPort}
+                      disabled={lportBusy}
+                      className="h-7 px-2"
+                    >
+                      {lportBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => { setLportOpen(false); setLportValue(''); }}
+                      disabled={lportBusy}
+                      className="h-7 px-2"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLportValue(String(status.listen_port ?? 49000));
+                      setLportOpen(true);
+                    }}
+                    className="text-sm text-left hover:underline cursor-pointer"
+                    title="Click to change WireGuard listen port (must be 49000-49999)"
+                  >
+                    {status.listen_port ?? '—'}/udp
+                  </button>
+                )}
+              </div>
               <StatusCell
                 label="Interface"
                 value={status.interface_up ? `up (${status.live_peer_count ?? 0} live)` : 'down'}

@@ -15,10 +15,29 @@ export const WG_CONFIG_DIR = '/etc/wireguard';
 export const WG_CONFIG_FILE = path.join(WG_CONFIG_DIR, 'wg0.conf');
 export const WG_SERVER_PRIVATE = path.join(WG_CONFIG_DIR, 'server_private.key');
 export const WG_INTERFACE = 'wg0';
-export const WG_DEFAULT_PORT = 51820;
+
+// Safe port range for the WireGuard listen port. The default Linux
+// ephemeral pool is 32768-60999 and Incus L4 forwards on the host
+// commonly carve 50000-60000 for WebRTC media (LiveKit / MEET / etc.).
+// 49000-49999 sits below both — gives 1000 ports of headroom which
+// is plenty (you only need one WG endpoint per host) and keeps the
+// listen port reliably outside any media-range proxy device's bind.
+//
+// Older deployments default to 51820 (WireGuard's IANA-assigned
+// port), which lives inside the typical WebRTC range. The startup
+// auto-heal in the backend migrates those to 49000 on first boot
+// after upgrade so MEET-style stacks stop racing the WG port.
+export const WG_SAFE_PORT_MIN = 49000;
+export const WG_SAFE_PORT_MAX = 49999;
+export const WG_DEFAULT_PORT = WG_SAFE_PORT_MIN;
 export const WG_DEFAULT_CIDR = '10.100.0.0/24';
 export const WG_DEFAULT_DNS = '10.100.0.1';
 export const WG_SERVER_IP = '10.100.0.1/24';
+
+export function isPortInSafeRange(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n >= WG_SAFE_PORT_MIN && n <= WG_SAFE_PORT_MAX;
+}
 
 function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { encoding: 'utf-8', ...opts });
@@ -310,6 +329,102 @@ export async function enable({ endpoint, listenPort = WG_DEFAULT_PORT, dns = WG_
   });
 
   return { endpoint, listenPort, defaultIface: iface, publicKey };
+}
+
+/**
+ * Change the WireGuard listen port in place.
+ *
+ * Re-uses everything else (server keypair, peers, CIDR, default
+ * iface) and just rewrites wg0.conf with the new ListenPort, restarts
+ * wg-quick@wg0 to bind it, then re-reconciles the firewall so the
+ * `base-wireguard` allow rule moves to the new port too. The endpoint
+ * string is also rewritten — the host part is preserved, only the
+ * `:port` suffix changes. Existing peer client configs use the
+ * endpoint string verbatim, so re-rendering each peer (downloading
+ * a fresh config / regenerating QR) picks up the new port without a
+ * key rotation.
+ *
+ * Refuses to act when:
+ *   - The new port is outside WG_SAFE_PORT_MIN..MAX. Operators who
+ *     really need WG outside the safe range should call enable()
+ *     directly with --port; this function is the dashboard-driven
+ *     happy path and pins to the safe range to keep the UI from
+ *     reintroducing the WebRTC-conflict footgun.
+ *   - vpn_config is missing. Without an existing config there's no
+ *     keypair, no endpoint, no peers — the operator wants `enable`,
+ *     not a port change.
+ *   - The on-disk private key is missing. Same reasoning as enable():
+ *     refuse to silently rotate the server key.
+ *
+ * No-op when the new port equals the current port.
+ */
+export async function setListenPort({ port, actor } = {}) {
+  const n = validateListenPort(port);
+  if (!isPortInSafeRange(n)) {
+    throw new Error(
+      `port ${n} is outside the safe range ${WG_SAFE_PORT_MIN}-${WG_SAFE_PORT_MAX}. ` +
+      `Reserved to stay clear of the kernel ephemeral pool and the typical WebRTC media range. ` +
+      `Use \`vpn enable --port <p>\` directly if you need an unsafe port.`
+    );
+  }
+  const cfg = readVpnConfig();
+  if (!cfg) {
+    throw new Error('vpn_config is missing — run `vpn enable` first');
+  }
+  if (n === cfg.listen_port) {
+    return { ok: true, listen_port: n, endpoint: cfg.endpoint, unchanged: true };
+  }
+  if (!fs.existsSync(WG_SERVER_PRIVATE)) {
+    throw new Error(
+      `${WG_SERVER_PRIVATE} is missing — refusing to silently rotate the server key. ` +
+      `Restore it from backup or run \`vpn disable && vpn enable\` to start fresh.`
+    );
+  }
+
+  // Rewrite the endpoint's port suffix. The validator already
+  // enforced the host:port shape on enable — splitting on the LAST
+  // ":" handles bracketed IPv6 literals correctly without re-parsing.
+  const lastColon = cfg.endpoint.lastIndexOf(':');
+  const newEndpoint = lastColon >= 0
+    ? `${cfg.endpoint.slice(0, lastColon)}:${n}`
+    : `${cfg.endpoint}:${n}`;
+
+  const before = { listen_port: cfg.listen_port, endpoint: cfg.endpoint };
+  const privateKey = fs.readFileSync(WG_SERVER_PRIVATE, 'utf-8').trim();
+  const peers = readEnabledPeers();
+
+  writeVpnConfig({
+    serverPublicKey: cfg.server_public_key,
+    endpoint: newEndpoint,
+    listenPort: n,
+    cidr: cfg.cidr,
+    defaultIface: cfg.default_iface,
+    dns: cfg.dns,
+  });
+  writeWg0Conf({ privateKey, listenPort: n, serverIp: WG_SERVER_IP, peers });
+
+  // Full restart — wg syncconf would re-bind peer state but won't
+  // change the listen port on a running interface. Only an actual
+  // socket re-bind moves it.
+  const up = run('systemctl', ['restart', `wg-quick@${WG_INTERFACE}`]);
+  if (up.status !== 0) {
+    throw new Error(`failed to restart wg-quick@${WG_INTERFACE} on new port: ${spawnError(up)}`);
+  }
+
+  const r = await fwReconcile({ actor });
+  if (!r.ok) {
+    throw new Error(`firewall reconcile failed after port change: ${JSON.stringify(r.rejection)}`);
+  }
+
+  audit({
+    subsystem: 'vpn',
+    action: 'set-listen-port',
+    resource: WG_INTERFACE,
+    actor,
+    before,
+    after: { listen_port: n, endpoint: newEndpoint },
+  });
+  return { ok: true, listen_port: n, endpoint: newEndpoint, unchanged: false };
 }
 
 /**

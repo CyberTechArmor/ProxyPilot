@@ -329,3 +329,39 @@ vpnRouter.post('/peers/:name/set-scope', requireSudo, async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// POST /vpn/server/listen-port — change the WG listen port via the
+// CLI's setListenPort code path (which pins to the safe range
+// 49000-49999, rewrites wg0.conf, restarts wg-quick@wg0, and
+// re-reconciles the firewall in one transaction). Sudo-gated because
+// it kicks the live VPN — every connected peer drops and reconnects
+// on the new port.
+const setListenPortBodySchema = z.object({
+  port: z.union([z.number().int(), z.string().regex(/^\d{1,5}$/)]),
+}).strict();
+
+vpnRouter.post('/server/listen-port', requireSudo, async (req, res) => {
+  let body;
+  try { body = setListenPortBodySchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+  const port = Number(body.port);
+  if (!Number.isInteger(port) || port < 49000 || port > 49999) {
+    return res.status(400).json({
+      ok: false,
+      error: `port ${port} outside safe range 49000-49999`,
+    });
+  }
+  try {
+    const args = ['server', 'set-listen-port', '--port', String(port)];
+    const result = await callProxypilot(args);
+    if (result?.ok === false) return res.status(400).json(result);
+    logAudit(req.user.id, 'VPN_SET_LISTEN_PORT', 'vpn', 'wg0', {
+      port,
+      endpoint: result?.endpoint ?? null,
+      unchanged: !!result?.unchanged,
+    }, req.ip);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});

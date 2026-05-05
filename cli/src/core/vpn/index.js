@@ -1,12 +1,14 @@
 export {
   enable,
   disable,
+  setListenPort,
   detectDefaultIface,
   generateServerKeypair,
   readVpnConfig,
   renderWg0Conf,
   writeWg0Conf,
   validateEndpoint,
+  isPortInSafeRange,
   WG_INTERFACE,
   WG_CONFIG_FILE,
   WG_SERVER_PRIVATE,
@@ -14,6 +16,8 @@ export {
   WG_DEFAULT_CIDR,
   WG_DEFAULT_DNS,
   WG_SERVER_IP,
+  WG_SAFE_PORT_MIN,
+  WG_SAFE_PORT_MAX,
 } from './server.js';
 export { renderQrPng, renderQrAnsi } from './qr.js';
 export { dumpPeers, isOnline, ONLINE_HANDSHAKE_WINDOW_SECONDS } from './status.js';

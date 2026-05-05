@@ -58,7 +58,26 @@ async function defaultExecHost(command, { timeout = 10_000 } = {}) {
 /**
  * Look up the LXC's current IPv4 from `incus list --format json`.
  * Returns null when the container is missing or stopped.
+ *
+ * Mirrors the iface-picking logic in routes/lxc.js's pickIp(): try
+ * `eth0` first (the LXC's conventional primary interface), then any
+ * other interface that isn't loopback or a docker/veth/cni bridge
+ * *inside* the LXC. Without this filter, an LXC running Docker can
+ * report `172.17.0.1` (docker0) as its first IP — that's an address
+ * inside the LXC's namespace that the host can't route to, so the
+ * proxy device's connect= must use the incusbr0-side IP instead.
  */
+const RUNTIME_IFACE_PATTERNS = [
+  /^docker\d+$/,
+  /^docker_gwbridge$/,
+  /^br-[0-9a-f]+$/,
+  /^veth/,
+  /^cni\d*$/,
+];
+function isRuntimeIface(name) {
+  return RUNTIME_IFACE_PATTERNS.some((re) => re.test(name));
+}
+
 async function fetchCurrentBridgeIp(lxcName, { execHost = defaultExecHost } = {}) {
   const incusName = lxcName.startsWith(INSTANCE_PREFIX) ? lxcName : `${INSTANCE_PREFIX}${lxcName}`;
   try {
@@ -68,12 +87,20 @@ async function fetchCurrentBridgeIp(lxcName, { execHost = defaultExecHost } = {}
     );
     const arr = JSON.parse((r && r.stdout) || '[]');
     if (!Array.isArray(arr) || arr.length === 0) return null;
-    const addrs = (arr[0].state && arr[0].state.network) || {};
-    for (const ifaceName of Object.keys(addrs)) {
-      if (ifaceName === 'lo') continue;
-      const list = (addrs[ifaceName] && addrs[ifaceName].addresses) || [];
-      for (const a of list) {
-        if (a.family === 'inet' && a.scope === 'global') return a.address;
+    const ifaces = Object.entries((arr[0].state && arr[0].state.network) || {});
+    const isRoutable = (a) => a.family === 'inet' && (!a.scope || a.scope === 'global') && !a.address.startsWith('127.');
+    // Prefer eth0 (LXC's conventional primary).
+    for (const [name, iface] of ifaces) {
+      if (name !== 'eth0') continue;
+      for (const a of iface.addresses || []) {
+        if (isRoutable(a)) return a.address;
+      }
+    }
+    // Otherwise any interface that isn't lo or a runtime bridge.
+    for (const [name, iface] of ifaces) {
+      if (name === 'lo' || isRuntimeIface(name)) continue;
+      for (const a of iface.addresses || []) {
+        if (isRoutable(a)) return a.address;
       }
     }
     return null;
@@ -137,9 +164,59 @@ async function probeFirewallRule(ruleId, { execHost = defaultExecHost }) {
   }
 }
 
+/**
+ * Find host-side processes that are already bound to a port inside
+ * the L4 forward's listen range. The Incus proxy device needs a
+ * contiguous bind on the whole range — a single fixed-port listener
+ * inside the range (a common one is WireGuard on udp/51820) is
+ * enough to fail the device add with "address already in use".
+ *
+ * Runs `ss -<u/t>lnp` on the host and returns the offending lines.
+ * Single-port forwards almost never collide; we only do this probe
+ * for ranges to keep the diagnose latency low for the common case.
+ */
+async function probeHostPortConflicts({ proto, listenPort, listenPortEnd, execHost = defaultExecHost }) {
+  const isRange = listenPortEnd && listenPortEnd > listenPort;
+  if (!isRange) return { conflicts: [] };
+  const flag = proto === 'udp' ? '-ulnp' : '-tlnp';
+  try {
+    const r = await execHost(`ss ${flag} 2>/dev/null`, { timeout: 5_000 });
+    const out = (r && r.stdout) || '';
+    const conflicts = [];
+    for (const line of out.split('\n')) {
+      // ss output: rows with a Local Address:Port column. Pluck the
+      // listen port from the "*:N" / "0.0.0.0:N" / "[::]:N" forms.
+      const m = line.match(/(?:^|\s)(?:\*|\d+\.\d+\.\d+\.\d+|\[[^\]]*\]):([0-9]{1,5})\s/);
+      if (!m) continue;
+      const p = parseInt(m[1], 10);
+      if (p < listenPort || p > listenPortEnd) continue;
+      // Pull the users:(("name",pid=…)) clause if present.
+      const userMatch = line.match(/users:\(\(([^\)]+)\)/);
+      conflicts.push({ port: p, owner: userMatch ? userMatch[1] : null });
+    }
+    return { conflicts };
+  } catch (err) {
+    return { conflicts: [], error: err.message || String(err) };
+  }
+}
+
 function summarize(forward, checks) {
   // Walk the checks in dependency order and pick the first one that's
   // failing. The next_step is the operator-facing instruction for it.
+  //
+  // Host-side port conflicts come BEFORE bridge-IP / device / firewall
+  // checks because no amount of reconciling fixes a port that another
+  // service already owns. The operator needs to move that service first.
+  if (checks.hostConflicts && checks.hostConflicts.length > 0) {
+    const list = checks.hostConflicts
+      .map((c) => `${forward.proto}/${c.port}${c.owner ? ` (${c.owner})` : ''}`)
+      .join(', ');
+    return {
+      ok: false,
+      severity: 'error',
+      next_step: `Another process on the host is already bound inside this range: ${list}. Incus proxy needs a contiguous bind on the whole range, so this collision blocks the device add. Move the conflicting service to a port outside ${forward.listen_port}-${forward.listen_port_end} and reconcile again.`,
+    };
+  }
   if (!checks.bridgeIp.matches) {
     return {
       ok: false,
@@ -263,12 +340,19 @@ export async function diagnoseServiceL4Forwards({
     });
     const firewallCheck = await probeFirewallRule(plan.ruleId, { execHost });
     firewallCheck.ruleId = plan.ruleId;
+    const hostConflictCheck = await probeHostPortConflicts({
+      proto: fw.proto,
+      listenPort: fw.listen_port,
+      listenPortEnd: fw.listen_port_end || fw.listen_port,
+      execHost,
+    });
 
     const checks = {
       bridgeIp: bridgeIpCheck,
       incusDevice: incusDeviceCheck,
       lxcListener: lxcListenerCheck,
       firewall: firewallCheck,
+      hostConflicts: hostConflictCheck.conflicts,
     };
     const summary = summarize(fw, checks);
 

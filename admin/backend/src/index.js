@@ -8,7 +8,7 @@ import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync } from 'fs';
-import { initDatabase } from './db.js';
+import { initDatabase, getDb } from './db.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
@@ -18,6 +18,7 @@ import { firewallRouter } from './routes/firewall.js';
 import { vpnRouter } from './routes/vpn.js';
 import { securityRouter } from './routes/security.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
+import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -252,4 +253,23 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
+
+  // Heal L4 forwards in the background once the listener is open. A
+  // host reboot can drop UDP-range proxy devices when an ephemeral
+  // socket grabs a port inside the range before incus binds; without
+  // this pass the device stays gone until an operator clicks something
+  // in the dashboard. Running async keeps boot fast — a slow incus
+  // call won't delay /api/health responses.
+  setImmediate(async () => {
+    try {
+      const summary = await reconcileAllServiceL4Forwards({ db: getDb() });
+      if (summary.services > 0) {
+        console.log(
+          `[L4-startup] done: ${summary.services} service(s), ${summary.applied} applied, ${summary.removed} removed, ${summary.errors.length} errored`
+        );
+      }
+    } catch (err) {
+      console.error('[L4-startup] failed:', err.message || err);
+    }
+  });
 });

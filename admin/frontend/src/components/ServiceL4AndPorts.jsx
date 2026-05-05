@@ -155,6 +155,39 @@ export default function ServiceL4AndPorts({
     }
   };
 
+  // Operator-driven re-apply. Walks every forward through the
+  // reconciler, recreating any Incus proxy device or firewall row that
+  // disappeared (the most common cause being a host reboot where an
+  // ephemeral UDP socket grabbed a port inside a forward's range
+  // before incus could bind it).
+  const reconcileForwards = async () => {
+    setSavingForward(true);
+    try {
+      const r = await api.reconcileServiceL4Forwards(service.id);
+      const outcomes = r?.reconcile?.applied || [];
+      const errors = outcomes.filter((o) => o.status === 'error');
+      if (errors.length > 0) {
+        toast({
+          variant: 'destructive',
+          title: `${errors.length} forward(s) failed to reconcile`,
+          description: errors.map((e) => `${e.id}: ${e.error || 'unknown'}`).join('; '),
+        });
+      } else {
+        const applied = outcomes.filter((o) => o.status === 'applied' || o.status === 'present').length;
+        const removed = outcomes.filter((o) => o.status === 'removed').length;
+        toast({
+          title: 'L4 forwards reconciled',
+          description: `${applied} present, ${removed} cleaned up`,
+        });
+      }
+      await refreshForwards();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Reconcile failed', description: e.message });
+    } finally {
+      setSavingForward(false);
+    }
+  };
+
   const deleteForward = async (fw) => {
     setSavingForward(true);
     try {
@@ -318,15 +351,29 @@ export default function ServiceL4AndPorts({
             </span>
           </h4>
           {!draft && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => beginAddForward(null)}
-            >
-              <Plus className="h-4 w-4 mr-1" />
-              Add forward
-            </Button>
+            <div className="flex items-center gap-2">
+              {forwards.length > 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={reconcileForwards}
+                  disabled={savingForward || forwardsLoading}
+                  title="Re-apply all L4 forwards. Use this if a forward stopped working after a host reboot."
+                >
+                  Reconcile
+                </Button>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => beginAddForward(null)}
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Add forward
+              </Button>
+            </div>
           )}
         </div>
 

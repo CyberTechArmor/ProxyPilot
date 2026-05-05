@@ -30,3 +30,7 @@ data/
 # CLI data
 cli/node_modules/
 
+# Python bytecode (proxypilot/engine package)
+__pycache__/
+*.pyc
+

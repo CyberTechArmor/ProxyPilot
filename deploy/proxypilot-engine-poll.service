@@ -1,0 +1,19 @@
+[Unit]
+Description=ProxyPilot CVE engine — inbox poll + AUTO_PATCH dispatch
+After=network-online.target proxypilot-engine-inventory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m proxypilot.engine poll
+# AUTO_PATCH steps run shell commands as root (apt-get etc.) so the
+# unit needs full host write access. The hardening below removes
+# everything we don't need; the rollback path uses /var/lib/proxypilot
+# for snapshots and the inbox.
+ProtectKernelTunables=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

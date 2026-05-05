@@ -924,6 +924,25 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // CVE inbox — Claude writes spec YAMLs into the inbox dir; the
+  // Python engine reads + executes them per-host. These endpoints
+  // back the dashboard's CVEs section: list view, detail view, and
+  // the operator-driven actions (mark seen, dismiss, run-on-this-host).
+  listCves: () => request('/cves'),
+  getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
+  markCveSeen: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/seen`, { method: 'POST' }),
+  dismissCve: (cveId, reason) =>
+    request(`/cves/${encodeURIComponent(cveId)}/dismiss`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  runCve: (cveId, body = {}) =>
+    request(`/cves/${encodeURIComponent(cveId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

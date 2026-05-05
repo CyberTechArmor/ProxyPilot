@@ -11,7 +11,7 @@
 // dismiss, run-one) so the YAML opaque-field preservation contract
 // stays in one place.
 
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -21,6 +21,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Plus,
@@ -132,6 +133,58 @@ function yamlScalar(body, key) {
 
 // Pull the patch.steps array as a flat list of strings. Best-effort
 // shallow scan; multi-line block scalars are returned verbatim.
+// Pull a YAML list under a top-level key. Handles block form
+//   sources:
+//     - https://example.com/a
+//     - https://example.com/b
+// and flow form
+//   sources: ["https://example.com/a", "https://example.com/b"]
+function extractListItems(body, key) {
+  if (!body) return [];
+  // Flow form first.
+  const flow = body.match(new RegExp(`(?:^|\\n)${key}:\\s*\\[([^\\]]*)\\]`));
+  if (flow) {
+    return flow[1]
+      .split(',')
+      .map(s => s.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean);
+  }
+  const lines = body.split('\n');
+  const out = [];
+  let inBlock = false;
+  for (const line of lines) {
+    if (!inBlock) {
+      if (new RegExp(`^${key}:\\s*$`).test(line)) inBlock = true;
+      continue;
+    }
+    if (/^\S/.test(line)) break;
+    const dash = line.match(/^\s*-\s*(.+)$/);
+    if (dash) {
+      const v = dash[1].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+      if (v) out.push(v);
+    }
+  }
+  return out;
+}
+
+// Pull a single key from a nested top-level block (e.g. _proxypilot.origin).
+// Block form only — engine writes block form, that's what we'll see here.
+function extractNestedScalar(body, parent, child) {
+  if (!body) return null;
+  const lines = body.split('\n');
+  let inBlock = false;
+  for (const line of lines) {
+    if (!inBlock) {
+      if (new RegExp(`^${parent}:\\s*$`).test(line)) inBlock = true;
+      continue;
+    }
+    if (/^\S/.test(line)) break;
+    const m = line.match(new RegExp(`^\\s+${child}:\\s*([^\\n#]+)`));
+    if (m) return m[1].replace(/^["']|["']$/g, '').trim();
+  }
+  return null;
+}
+
 function extractPatchSteps(body) {
   if (!body) return [];
   const lines = body.split('\n');
@@ -246,6 +299,64 @@ function CveListRow({ entry, onOpen }) {
         <StatusPill status={entry.status} />
       </div>
     </button>
+  );
+}
+
+// Two-column key/value grid used by the About tab. Rows with falsy
+// values are hidden so we don't render "Disclosed: —" noise.
+function FactGrid({ items }) {
+  const rows = items.filter(([, v]) => v !== null && v !== undefined && v !== '' && v !== false);
+  if (rows.length === 0) return null;
+  return (
+    <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
+      {rows.map(([k, v], i) => (
+        <Fragment key={i}>
+          <dt className="text-muted-foreground">{k}</dt>
+          <dd className="break-words">{v}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+// "What does this CVE entry actually do" — context-aware blurb under
+// the metadata. The text changes by action_class so the operator
+// reads the right mental model: AUTO_PATCH runs without you,
+// ONE_CLICK waits for your click, ALERT is read-only.
+function ExplainerBlock({ action, patchSteps, rollbackBody, hasMitigate }) {
+  const lane = action === 'AUTO_PATCH' ? (
+    <p>
+      The engine runs this on the next 5-minute poll without operator
+      input. It probes the host, snapshots first if a backend is
+      available, runs the patch steps, re-runs the probe to verify,
+      and rolls back if verify still says affected.
+    </p>
+  ) : action === 'ONE_CLICK' ? (
+    <p>
+      The engine waits for your <strong>Run on this host</strong>{' '}
+      click. Same state machine as AUTO_PATCH (probe → snapshot →
+      patch → verify → rollback), just operator-triggered. Use this
+      lane for image swaps, service restarts, anything you want a
+      human gate on.
+    </p>
+  ) : (
+    <p>
+      The engine never executes this entry. It surfaces the playbook
+      so you can run the steps by hand. Use{' '}
+      <strong>Copy patch</strong> to grab the commands and{' '}
+      <strong>Mark dismissed</strong> with a reason once you've acted.
+    </p>
+  );
+  return (
+    <div className="rounded border border-border bg-muted/20 p-3 text-xs text-muted-foreground space-y-2">
+      <div className="text-foreground/80 font-medium text-sm">What this entry does</div>
+      {lane}
+      <ul className="list-disc list-inside space-y-0.5">
+        <li>{patchSteps.length} patch step{patchSteps.length === 1 ? '' : 's'} authored.</li>
+        <li>Rollback step {rollbackBody ? 'present' : 'NOT present — the engine has no automatic recovery if a step fails'}.</li>
+        {hasMitigate && <li>Mitigation block present (operator-only — engine never runs it).</li>}
+      </ul>
+    </div>
   );
 }
 
@@ -391,6 +502,23 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   const isOneClick = action === 'ONE_CLICK';
   const isAutoPatch = action === 'AUTO_PATCH';
 
+  // About-tab metadata pulled out of the YAML. Cheap; runs only when
+  // the tab renders (memoized off yamlBody which only changes on
+  // refresh / edit-save). Block-form extraction matches what the
+  // engine writes via ruamel; flow form is supported for paste users.
+  const meta = useMemo(() => ({
+    name: yamlScalar(yamlBody, 'name'),
+    disclosed: yamlScalar(yamlBody, 'disclosed'),
+    cvss: yamlScalar(yamlBody, 'cvss'),
+    impact: yamlScalar(yamlBody, 'impact'),
+    blast_radius: yamlScalar(yamlBody, 'blast_radius'),
+    sources: extractListItems(yamlBody, 'sources'),
+    origin: extractNestedScalar(yamlBody, '_proxypilot', 'origin'),
+    git_url: extractNestedScalar(yamlBody, '_proxypilot', 'git_url'),
+    git_commit: extractNestedScalar(yamlBody, '_proxypilot', 'git_commit'),
+    imported_at: extractNestedScalar(yamlBody, '_proxypilot', 'imported_at'),
+  }), [yamlBody]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -419,6 +547,8 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
         </div>
       ) : (
         <>
+          {/* Actions card stays above the tabs — they're always
+              relevant regardless of which tab the operator is on. */}
           <Card>
             <CardHeader><CardTitle className="text-base">Actions</CardTitle></CardHeader>
             <CardContent className="flex flex-wrap gap-2">
@@ -463,63 +593,139 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
             </CardContent>
           </Card>
 
-          {history.length > 0 && (
-            <Card>
-              <CardHeader><CardTitle className="text-base">History</CardTitle></CardHeader>
-              <CardContent>
-                <ol className="space-y-2 text-xs">
-                  {history.map((h, i) => (
-                    <li key={i} className="flex flex-col sm:flex-row sm:gap-3 border-l-2 border-border pl-3">
-                      <span className="font-mono text-muted-foreground sm:w-44 shrink-0">{h.ts || '—'}</span>
-                      <span className="font-mono text-muted-foreground sm:w-44 shrink-0">{h.actor || '—'}</span>
-                      <span className="break-words">{h.change || ''}</span>
-                    </li>
-                  ))}
-                </ol>
-              </CardContent>
-            </Card>
-          )}
+          <Tabs defaultValue="about" className="w-full">
+            <TabsList>
+              <TabsTrigger value="about">About</TabsTrigger>
+              <TabsTrigger value="history">
+                History {history.length > 0 ? <span className="ml-1.5 text-[10px] opacity-70">({history.length})</span> : null}
+              </TabsTrigger>
+              <TabsTrigger value="spec">Spec (YAML)</TabsTrigger>
+            </TabsList>
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0">
-              <CardTitle className="text-base">Spec (YAML)</CardTitle>
-              {!editing ? (
-                <Button variant="outline" size="sm" onClick={onStartEdit}>
-                  <Pencil className="h-4 w-4 mr-1.5" /> Edit
-                </Button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={onSaveEdit} disabled={saving || !draft.trim()}>
-                    {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
-                    Save
-                  </Button>
-                </div>
-              )}
-            </CardHeader>
-            <CardContent>
-              {editing ? (
-                <textarea
-                  className="w-full text-xs font-mono bg-muted/30 rounded p-3 border min-h-[24rem]"
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  spellCheck={false}
-                />
-              ) : (
-                <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded p-3 overflow-x-auto">
-                  {yamlBody}
-                </pre>
-              )}
-              {editing && (
-                <p className="text-xs text-muted-foreground mt-2">
-                  Embedded <code className="font-mono">cve:</code> field must remain{' '}
-                  <code className="font-mono">{cveId}</code>. Server validates before writing.
-                </p>
-              )}
-            </CardContent>
-          </Card>
+            <TabsContent value="about">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{meta.name || cveId}</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4 text-sm">
+                  <FactGrid items={[
+                    ['CVE id',       <span className="font-mono">{cveId}</span>],
+                    ['Disclosed',    meta.disclosed],
+                    ['CVSS',         meta.cvss],
+                    ['Impact',       meta.impact && <span className="font-mono">{meta.impact}</span>],
+                    ['Blast radius', meta.blast_radius && <span className="font-mono">{meta.blast_radius}</span>],
+                    ['Action class', <ActionPill action={action} />],
+                    ['Status',       <StatusPill status={status} />],
+                  ]} />
+
+                  <ExplainerBlock
+                    action={action}
+                    patchSteps={patchSteps}
+                    rollbackBody={rollbackBody}
+                    hasMitigate={/\n\s*mitigate:/.test(yamlBody)}
+                  />
+
+                  {meta.sources.length > 0 && (
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Sources</div>
+                      <ul className="space-y-1 text-xs">
+                        {meta.sources.map((s, i) => (
+                          <li key={i}>
+                            {/^https?:\/\//.test(s)
+                              ? <a href={s} target="_blank" rel="noreferrer"
+                                   className="font-mono text-blue-400 underline-offset-2 hover:underline break-all">{s}</a>
+                              : <span className="font-mono break-all">{s}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {(meta.origin || meta.git_url) && (
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Provenance</div>
+                      <FactGrid items={[
+                        ['Origin',       meta.origin && <OriginPill origin={meta.origin} gitUrl={meta.git_url} />],
+                        ['Git URL',      meta.git_url && <span className="font-mono text-xs break-all">{meta.git_url}</span>],
+                        ['Git commit',   meta.git_commit && <span className="font-mono text-xs">{String(meta.git_commit).slice(0, 12)}</span>],
+                        ['Imported',     meta.imported_at && <span className="font-mono text-xs">{meta.imported_at}</span>],
+                      ]} />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="history">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">History &amp; audit log</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {history.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No history yet. The engine appends an entry every time it runs the
+                      probe, takes a snapshot, fires a patch step, or rolls back; the
+                      operator's mark-dismissed / save-edit / delete actions show up here too.
+                    </p>
+                  ) : (
+                    <ol className="space-y-2 text-xs">
+                      {history.map((h, i) => (
+                        <li key={i} className="flex flex-col sm:flex-row sm:gap-3 border-l-2 border-border pl-3">
+                          <span className="font-mono text-muted-foreground sm:w-44 shrink-0">{h.ts || '—'}</span>
+                          <span className="font-mono text-muted-foreground sm:w-44 shrink-0">{h.actor || '—'}</span>
+                          <span className="break-words">{h.change || ''}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="spec">
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0">
+                  <CardTitle className="text-base">Spec (YAML)</CardTitle>
+                  {!editing ? (
+                    <Button variant="outline" size="sm" onClick={onStartEdit}>
+                      <Pencil className="h-4 w-4 mr-1.5" /> Edit
+                    </Button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={onSaveEdit} disabled={saving || !draft.trim()}>
+                        {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
+                        Save
+                      </Button>
+                    </div>
+                  )}
+                </CardHeader>
+                <CardContent>
+                  {editing ? (
+                    <textarea
+                      className="w-full text-xs font-mono bg-muted/30 rounded p-3 border min-h-[24rem]"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      spellCheck={false}
+                    />
+                  ) : (
+                    <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded p-3 overflow-x-auto">
+                      {yamlBody}
+                    </pre>
+                  )}
+                  {editing && (
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Embedded <code className="font-mono">cve:</code> field must remain{' '}
+                      <code className="font-mono">{cveId}</code>. Server validates before writing.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
         </>
       )}
 

@@ -9,3 +9,4 @@ export { peerSetScopeCommand } from './peer-set-scope.js';
 export { peerListCommand } from './peer-list.js';
 export { peerShowCommand } from './peer-show.js';
 export { statusCommand } from './status.js';
+export { serverSetListenPortCommand } from './server-set-listen-port.js';

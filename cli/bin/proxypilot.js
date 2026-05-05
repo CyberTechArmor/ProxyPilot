@@ -530,6 +530,7 @@ import {
   peerListCommand as vpnPeerListCommand,
   peerShowCommand as vpnPeerShowCommand,
   statusCommand as vpnStatusCommand,
+  serverSetListenPortCommand as vpnServerSetListenPortCommand,
 } from '../src/commands/vpn/index.js';
 
 const vpn = program
@@ -561,6 +562,19 @@ vpn
   .action(async (opts, cmd) => {
     const globalOpts = cmd.optsWithGlobals();
     await vpnDisableCommand(opts, globalOpts);
+  });
+
+const vpnServer = vpn
+  .command('server')
+  .description('Server-side knobs (listen port, etc.)');
+
+vpnServer
+  .command('set-listen-port')
+  .description('Change the WireGuard listen port (must be 49000-49999, the safe range outside the typical WebRTC media range)')
+  .requiredOption('--port <p>', 'New listen port (49000-49999)')
+  .action(async (opts, cmd) => {
+    const globalOpts = cmd.optsWithGlobals();
+    await vpnServerSetListenPortCommand(opts, globalOpts);
   });
 
 const vpnPeer = vpn

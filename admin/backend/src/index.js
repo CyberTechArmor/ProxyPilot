@@ -19,6 +19,7 @@ import { vpnRouter } from './routes/vpn.js';
 import { securityRouter } from './routes/security.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
+import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -254,13 +255,21 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
 
-  // Heal L4 forwards in the background once the listener is open. A
-  // host reboot can drop UDP-range proxy devices when an ephemeral
-  // socket grabs a port inside the range before incus binds; without
-  // this pass the device stays gone until an operator clicks something
-  // in the dashboard. Running async keeps boot fast — a slow incus
-  // call won't delay /api/health responses.
+  // Async background work post-listen. Order matters: migrate the WG
+  // listen port FIRST so any L4 forwards that conflict with the old
+  // port (most commonly the WebRTC range vs. WG's IANA 51820 default)
+  // can reconcile cleanly afterwards.
   setImmediate(async () => {
+    try {
+      const vpn = await autoHealVpnListenPort({ db: getDb() });
+      if (vpn.migrated) {
+        console.log(
+          `[VPN-startup] migrated wg0 listen port ${vpn.from} -> ${vpn.to}`
+        );
+      }
+    } catch (err) {
+      console.error('[VPN-startup] failed:', err.message || err);
+    }
     try {
       const summary = await reconcileAllServiceL4Forwards({ db: getDb() });
       if (summary.services > 0) {

@@ -6,6 +6,7 @@ import { audit } from '../../db/audit.js';
 import {
   enable as fwEnable,
   disable as fwDisable,
+  setPort as fwSetPort,
   readState as fwReadState,
   writeState as fwWriteState,
   reconcile as fwReconcile,
@@ -371,9 +372,45 @@ export async function setListenPort({ port, actor } = {}) {
   if (!cfg) {
     throw new Error('vpn_config is missing — run `vpn enable` first');
   }
-  if (n === cfg.listen_port) {
+
+  // If the port matches AND the base-wireguard firewall rule is
+  // already aligned, this is a true no-op. But if the rule's
+  // port_start drifted (e.g. earlier setListenPort ran before the
+  // setPort fix landed, leaving the rule at the old port and silently
+  // dropping every handshake), we need to re-align even though the
+  // listen_port column hasn't moved.
+  const fwState = fwReadState();
+  const wgRule = (fwState.base ?? []).find((r) => r.id === 'base-wireguard');
+  const ruleAligned = wgRule && wgRule.port_start === n;
+  if (n === cfg.listen_port && ruleAligned) {
     return { ok: true, listen_port: n, endpoint: cfg.endpoint, unchanged: true };
   }
+
+  // Listen port already correct but the firewall rule drifted. Don't
+  // restart wg-quick — just realign the rule + reconcile. This is the
+  // recovery path for hosts where a previous setListenPort moved the
+  // listen port without moving the rule (the bug we just fixed).
+  if (n === cfg.listen_port && !ruleAligned) {
+    try {
+      fwSetPort({ id: 'base-wireguard', port: n, actor });
+    } catch (e) {
+      if (e.code !== 'NOT_FOUND') throw e;
+    }
+    const r = await fwReconcile({ actor });
+    if (!r.ok) {
+      throw new Error(`firewall reconcile failed during rule realign: ${JSON.stringify(r.rejection)}`);
+    }
+    audit({
+      subsystem: 'vpn',
+      action: 'realign-firewall-rule',
+      resource: WG_INTERFACE,
+      actor,
+      before: { base_wireguard_port: wgRule ? wgRule.port_start : null },
+      after: { base_wireguard_port: n },
+    });
+    return { ok: true, listen_port: n, endpoint: cfg.endpoint, realigned: true };
+  }
+
   if (!fs.existsSync(WG_SERVER_PRIVATE)) {
     throw new Error(
       `${WG_SERVER_PRIVATE} is missing — refusing to silently rotate the server key. ` +
@@ -409,6 +446,18 @@ export async function setListenPort({ port, actor } = {}) {
   const up = run('systemctl', ['restart', `wg-quick@${WG_INTERFACE}`]);
   if (up.status !== 0) {
     throw new Error(`failed to restart wg-quick@${WG_INTERFACE} on new port: ${spawnError(up)}`);
+  }
+
+  // Move the base-wireguard firewall rule's port to match. Without
+  // this, the reconcile below would re-emit `udp dport <old>` and
+  // every WG handshake on the new port would be silently dropped at
+  // the host edge — exactly the symptom that bit prod (vpn-only SSH
+  // also stuck because WG never came up). setPort tolerates the rule
+  // not being present yet (NOT_FOUND); enable() below ensures it.
+  try {
+    fwSetPort({ id: 'base-wireguard', port: n, actor });
+  } catch (e) {
+    if (e.code !== 'NOT_FOUND') throw e;
   }
 
   const r = await fwReconcile({ actor });

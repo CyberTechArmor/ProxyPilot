@@ -76,19 +76,57 @@ export async function autoHealVpnListenPort({
   if (!row) return { skipped: 'vpn not enabled' };
 
   const currentPort = row.listen_port;
-  if (currentPort >= WG_SAFE_PORT_MIN && currentPort <= WG_SAFE_PORT_MAX) {
+  // Also check the firewall state for a drifted base-wireguard rule.
+  // The exact failure mode this catches: a previous setListenPort
+  // moved listen_port to a safe value but did NOT move the firewall
+  // rule's port_start (the bug we fixed). The rule then keeps emitting
+  // `udp dport <old-port>` and every WG handshake on the new port is
+  // silently dropped at the host edge — VPN never establishes, vpn-only
+  // services like SSH-on-22 become unreachable.
+  let firewallPort = null;
+  try {
+    const stateRaw = await execHost('cat /var/lib/proxypilot/firewall.json 2>/dev/null || true', { timeout: 5_000 });
+    const stateBody = (stateRaw && stateRaw.stdout) || '';
+    if (stateBody.trim()) {
+      const state = JSON.parse(stateBody);
+      const wgRule = (state.base ?? []).find((r) => r.id === 'base-wireguard');
+      if (wgRule && Number.isInteger(wgRule.port_start)) {
+        firewallPort = wgRule.port_start;
+      }
+    }
+  } catch {
+    // Firewall state unreadable — treat as "no drift detected".
+    firewallPort = null;
+  }
+
+  const portInSafeRange = currentPort >= WG_SAFE_PORT_MIN && currentPort <= WG_SAFE_PORT_MAX;
+  const ruleDrift = firewallPort !== null && firewallPort !== currentPort;
+
+  if (portInSafeRange && !ruleDrift) {
     return { skipped: `already in safe range (${currentPort})`, currentPort };
   }
 
-  log(
-    `[VPN-startup] listen port ${currentPort} is outside safe range ` +
-    `${WG_SAFE_PORT_MIN}-${WG_SAFE_PORT_MAX}; migrating to ${WG_SAFE_PORT_DEFAULT}`
-  );
+  // Pick the target. If listen_port is already in the safe range but
+  // the firewall rule drifted, realign to the existing port (no need
+  // to restart wg-quick); otherwise migrate to the safe-range default.
+  const targetPort = portInSafeRange ? currentPort : WG_SAFE_PORT_DEFAULT;
+
+  if (ruleDrift && portInSafeRange) {
+    log(
+      `[VPN-startup] base-wireguard firewall rule on ${firewallPort} but WG listen port is ` +
+      `${currentPort}; realigning rule to ${targetPort}`
+    );
+  } else {
+    log(
+      `[VPN-startup] listen port ${currentPort} is outside safe range ` +
+      `${WG_SAFE_PORT_MIN}-${WG_SAFE_PORT_MAX}; migrating to ${WG_SAFE_PORT_DEFAULT}`
+    );
+  }
 
   const cmd = [
     shellSingleQuote(PROXYPILOT_BIN),
     '--json', 'vpn', 'server', 'set-listen-port',
-    '--port', String(WG_SAFE_PORT_DEFAULT),
+    '--port', String(targetPort),
   ].join(' ');
 
   let result;

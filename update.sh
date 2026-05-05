@@ -939,6 +939,15 @@ else
         if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
             log "Copying updated files from ${SCRIPT_DIR} to ${INSTALL_DIR}..."
             cp -r "${SCRIPT_DIR}/admin" "${INSTALL_DIR}/"
+            # CVE engine package — the new admin/Dockerfile COPYs
+            # proxypilot/ from the build context, so it must live
+            # alongside admin/ in the install dir. install.sh already
+            # copies it on fresh installs; this catches existing
+            # installs being upgraded.
+            if [[ -d "${SCRIPT_DIR}/proxypilot" ]]; then
+                rm -rf "${INSTALL_DIR}/proxypilot"
+                cp -r "${SCRIPT_DIR}/proxypilot" "${INSTALL_DIR}/"
+            fi
         fi
 
         # In-place migration of the deployed docker-compose.yml: the
@@ -962,6 +971,61 @@ else
             log "${YELLOW}Patching docker-compose.yml: removing obsolete \`version:\` key${NC}"
             sed -i -E "/^version:[[:space:]]*['\"]?[0-9.]+['\"]?[[:space:]]*$/d" "$COMPOSE_FILE"
             log "${GREEN}docker-compose.yml: \`version\` key removed${NC}"
+        fi
+
+        # CVE engine migration. The Dockerfile now expects the install
+        # root as its build context (so it can COPY both admin/ and
+        # proxypilot/), and the production stage carries the engine's
+        # Python deps + nsenter for the host pivot. Existing compose
+        # files have:
+        #     context: ./admin
+        #     dockerfile: Dockerfile
+        # Rewrite to:
+        #     context: .
+        #     dockerfile: admin/Dockerfile
+        # Idempotent — only fires when the old shape is present.
+        if [ -f "$COMPOSE_FILE" ] && grep -qE "^[[:space:]]+context:[[:space:]]+\./admin[[:space:]]*$" "$COMPOSE_FILE"; then
+            log "${YELLOW}Patching docker-compose.yml: build context for new admin/Dockerfile${NC}"
+            sed -i -E \
+                -e "s#^([[:space:]]+)context:[[:space:]]+\./admin[[:space:]]*\$#\\1context: .#" \
+                -e "s#^([[:space:]]+)dockerfile:[[:space:]]+Dockerfile[[:space:]]*\$#\\1dockerfile: admin/Dockerfile#" \
+                "$COMPOSE_FILE"
+            log "${GREEN}docker-compose.yml: build context migrated to install root${NC}"
+        fi
+
+        # Inbox bind-mount — required so the dashboard listing endpoint
+        # can read /var/lib/proxypilot/cve-inbox/ entries authored on
+        # the host. Idempotent: only adds if missing.
+        if [ -f "$COMPOSE_FILE" ] && ! grep -qE "/var/lib/proxypilot:/var/lib/proxypilot" "$COMPOSE_FILE"; then
+            if grep -qE "/var/run/docker.sock:/var/run/docker.sock" "$COMPOSE_FILE"; then
+                log "${YELLOW}Patching docker-compose.yml: adding /var/lib/proxypilot bind mount${NC}"
+                # Insert the inbox mount right after the docker.sock
+                # mount so it ends up grouped with the other host-shared
+                # volumes. sed -i with literal newline via $'\n' on
+                # GNU sed.
+                sed -i -E \
+                    "/^[[:space:]]+- \/var\/run\/docker\.sock:\/var\/run\/docker\.sock[[:space:]]*\$/a\\
+      - /var/lib/proxypilot:/var/lib/proxypilot" \
+                    "$COMPOSE_FILE"
+                # Also ensure the inbox dir exists on the host so the
+                # bind-mount doesn't auto-create it as an empty dir
+                # owned by docker's daemon UID.
+                install -d -m 0755 /var/lib/proxypilot/cve-inbox 2>/dev/null || true
+                log "${GREEN}docker-compose.yml: inbox bind-mount wired${NC}"
+            fi
+        fi
+
+        # Engine env vars: install dir + hostname so the engine can
+        # locate itself on host pivots and look up hosts.<name>.action_class.
+        if [ -f "$COMPOSE_FILE" ] && ! grep -qE "PROXYPILOT_INSTALL_DIR=" "$COMPOSE_FILE"; then
+            HOST_HN=$(hostname)
+            log "${YELLOW}Patching docker-compose.yml: adding engine env vars${NC}"
+            sed -i -E \
+                "/^[[:space:]]+- DOCKER_CONTAINER=true[[:space:]]*\$/a\\
+      - PROXYPILOT_INSTALL_DIR=${INSTALL_DIR}\\
+      - PROXYPILOT_HOSTNAME=${HOST_HN}" \
+                "$COMPOSE_FILE"
+            log "${GREEN}docker-compose.yml: engine env vars added${NC}"
         fi
 
         if [ -f "$COMPOSE_FILE" ] && ! grep -q "^[[:space:]]*privileged: true" "$COMPOSE_FILE"; then
@@ -999,6 +1063,69 @@ PYEOF
                 log "${GREEN}docker-compose.yml patched. Container will pick up on rebuild.${NC}"
             fi
         fi
+
+        # CVE engine — host-side requirements for the AUTO_PATCH /
+        # ONE_CLICK execution lanes. The dashboard's read-only paths
+        # (paste, validate, sync-git) run inside the container and
+        # don't need any of this. poll / run-one / inventory pivot
+        # to the host via nsenter and need:
+        #
+        #   - python3 + python3-ruamel.yaml: engine runtime.
+        #   - git: source-git sync clones into a staging dir.
+        #   - The proxypilot/ Python package on disk at $INSTALL_DIR
+        #     (already copied above by `cp -r ${SCRIPT_DIR}/proxypilot`).
+        #   - systemd timers (inventory hourly, poll every 5 min) so
+        #     AUTO_PATCH actually runs without a dashboard click.
+        #
+        # All idempotent — re-running update.sh on a fully-installed
+        # host is a no-op.
+        if command -v apt-get >/dev/null 2>&1; then
+            need_deps=()
+            command -v python3 >/dev/null 2>&1 || need_deps+=("python3")
+            python3 -c "import ruamel.yaml" 2>/dev/null || need_deps+=("python3-ruamel.yaml")
+            command -v git >/dev/null 2>&1 || need_deps+=("git")
+            if [ ${#need_deps[@]} -gt 0 ]; then
+                log "${YELLOW}Installing host-side CVE engine deps: ${need_deps[*]}${NC}"
+                DEBIAN_FRONTEND=noninteractive apt-get install -y "${need_deps[@]}" \
+                    >/dev/null 2>&1 || \
+                    log "${YELLOW}Some engine deps failed to install; AUTO_PATCH may not work until you run apt-get install ${need_deps[*]}${NC}"
+            fi
+        fi
+
+        if [[ -d "${SCRIPT_DIR}/deploy" ]]; then
+            engine_units_changed=0
+            for unit in proxypilot-engine-inventory.service \
+                        proxypilot-engine-inventory.timer \
+                        proxypilot-engine-poll.service \
+                        proxypilot-engine-poll.timer; do
+                src="${SCRIPT_DIR}/deploy/${unit}"
+                dst="/etc/systemd/system/${unit}"
+                [ -f "$src" ] || continue
+                # Patch ExecStart= to set PYTHONPATH=$INSTALL_DIR so
+                # the engine module resolves without a system pip
+                # install.
+                tmp=$(mktemp)
+                sed "s#ExecStart=/usr/bin/python3#ExecStart=/usr/bin/env PYTHONPATH=${INSTALL_DIR} /usr/bin/python3#" \
+                    "$src" > "$tmp"
+                if [ ! -f "$dst" ] || ! cmp -s "$tmp" "$dst"; then
+                    install -m 0644 "$tmp" "$dst"
+                    engine_units_changed=1
+                fi
+                rm -f "$tmp"
+            done
+            if [ "$engine_units_changed" = "1" ]; then
+                log "${YELLOW}CVE engine systemd units changed; reloading${NC}"
+                systemctl daemon-reload
+                systemctl enable --now proxypilot-engine-inventory.timer 2>/dev/null || true
+                systemctl enable --now proxypilot-engine-poll.timer 2>/dev/null || true
+                log "${GREEN}CVE engine timers active${NC}"
+            fi
+        fi
+
+        # Inbox dir — bind-mounted into the container above. Must
+        # exist on the host before docker-compose up or Docker auto-
+        # creates it as an empty dir owned by root.
+        install -d -m 0755 /var/lib/proxypilot/cve-inbox 2>/dev/null || true
 
         # Phase A — patch the deployed docker-compose.yml so the
         # container can reach the host-side agent. Two idempotent

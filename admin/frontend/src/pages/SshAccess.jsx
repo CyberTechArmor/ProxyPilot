@@ -73,6 +73,14 @@ export default function SshAccess() {
   const [connectRow, setConnectRow] = useState(null);
   const [connectServer, setConnectServer] = useState('');
   const [connectCopied, setConnectCopied] = useState(null); // 'bash' | 'powershell' | null
+  // VPN snapshot used to pick the right default SSH host. If base-ssh
+  // is scope=vpn-only the public hostname times out from outside the
+  // tunnel, so we default to the WG-internal server IP (10.100.0.1
+  // unless the operator changed the CIDR) — that's the unambiguously-
+  // tunnel-routed address and matches what `proxypilot vpn status`
+  // shows as the server bind. Falls back to window.location.hostname
+  // if the VPN isn't enabled or the lookup fails.
+  const [vpnHint, setVpnHint] = useState(null); // { sshIsVpnOnly, wgServerIp } | null
 
   // Password-auth toggle state. The /password-auth/status endpoint
   // returns { password_auth, effective_default, match_overrides,
@@ -86,9 +94,38 @@ export default function SshAccess() {
     if (isAdmin) {
       loadEntries();
       loadPwAuth();
+      loadVpnHint();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, filter]);
+
+  // Pull just enough VPN state to pick the right SSH default host.
+  // If listVpn isn't available or the call fails, leave hint null and
+  // the connect modal falls back to window.location.hostname.
+  async function loadVpnHint() {
+    try {
+      const r = await api.listVpn();
+      const status = r?.status;
+      if (!status?.enabled) {
+        setVpnHint({ sshIsVpnOnly: false, wgServerIp: null });
+        return;
+      }
+      // Server's wg0 address is the first /32 in the configured CIDR
+      // (ProxyPilot's standard layout: server at .1). We don't have
+      // the explicit server-ip back from /vpn, but cidr lets us derive
+      // it the same way wg0.conf is rendered.
+      const cidr = status.cidr || '10.100.0.0/24';
+      const wgServerIp = cidr.split('/')[0].replace(/\.0$/, '.1');
+      // base-ssh scope is on the firewall page, not the VPN status —
+      // a separate call would be needed to read it cleanly. As a
+      // proxy: if the VPN is enabled at all, prefer the WG IP. The
+      // public hostname still works when scope=public; the WG IP
+      // works for both scope=public and scope=vpn-only.
+      setVpnHint({ sshIsVpnOnly: true, wgServerIp });
+    } catch {
+      setVpnHint(null);
+    }
+  }
 
   if (!isAdmin) return <Navigate to="/" replace />;
 
@@ -282,7 +319,13 @@ export default function SshAccess() {
 
   function openConnect(row) {
     setConnectRow(row);
-    setConnectServer(window.location.hostname);
+    // Prefer the WG-internal server IP when the VPN is enabled — it
+    // works whether base-ssh is scope=public or scope=vpn-only and
+    // doesn't depend on DNS or NAT hairpinning. window.location.hostname
+    // is the right fallback when the VPN isn't up (the operator must
+    // be reaching the dashboard via that hostname already).
+    const fallback = window.location.hostname;
+    setConnectServer(vpnHint?.wgServerIp || fallback);
     setConnectCopied(null);
   }
 

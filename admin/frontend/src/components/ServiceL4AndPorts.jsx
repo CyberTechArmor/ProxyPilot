@@ -15,7 +15,7 @@
 // chip.
 
 import { useEffect, useState } from 'react';
-import { Loader2, Plus, RefreshCcw, Trash2 } from 'lucide-react';
+import { Loader2, Plus, RefreshCcw, Stethoscope, Trash2 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -52,6 +52,10 @@ export default function ServiceL4AndPorts({
   const [scanning, setScanning] = useState(false);
   const [savingForward, setSavingForward] = useState(false);
   const [draft, setDraft] = useState(null);
+  // Per-forward diagnostic results, keyed by forward id. null until
+  // the operator runs the check; clears when forwards are reloaded.
+  const [diagnoseResults, setDiagnoseResults] = useState(null);
+  const [diagnosing, setDiagnosing] = useState(false);
 
   // Initial load on dialog open / service change.
   useEffect(() => {
@@ -188,8 +192,43 @@ export default function ServiceL4AndPorts({
     }
   };
 
+  // Read-only diagnostic across the four host-side layers we can see
+  // (bridge IP drift, incus device, host firewall, LXC listener).
+  // For each forward we surface a one-line `next_step` describing
+  // what the operator should fix or — when host-side is verified
+  // clean — naming the cloud-provider security group as the next
+  // candidate.
+  const diagnoseForwards = async () => {
+    setDiagnosing(true);
+    setDiagnoseResults(null);
+    try {
+      const r = await api.diagnoseServiceL4Forwards(service.id);
+      const map = {};
+      for (const fw of (r?.diagnose?.forwards) || []) map[fw.id] = fw;
+      setDiagnoseResults(map);
+      const broken = Object.values(map).filter((f) => !f.ok);
+      if (broken.length === 0) {
+        toast({
+          title: 'L4 forwards look healthy',
+          description: 'Host-side path verified. If calls still fail, check your cloud-provider security group.',
+        });
+      } else {
+        toast({
+          variant: 'destructive',
+          title: `${broken.length} forward(s) need attention`,
+          description: 'See the per-forward notes below.',
+        });
+      }
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Diagnose failed', description: e.message });
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const deleteForward = async (fw) => {
     setSavingForward(true);
+    setDiagnoseResults(null); // stale once forwards mutate
     try {
       await api.deleteServiceL4Forward(service.id, fw.id);
       toast({ title: 'L4 forward removed' });
@@ -353,16 +392,31 @@ export default function ServiceL4AndPorts({
           {!draft && (
             <div className="flex items-center gap-2">
               {forwards.length > 0 && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={reconcileForwards}
-                  disabled={savingForward || forwardsLoading}
-                  title="Re-apply all L4 forwards. Use this if a forward stopped working after a host reboot."
-                >
-                  Reconcile
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={diagnoseForwards}
+                    disabled={savingForward || forwardsLoading || diagnosing}
+                    title="Test each forward against the host-side path: bridge IP drift, incus proxy device, host firewall rule, LXC listener. Use this when calls fail and you don't know which layer to look at."
+                  >
+                    {diagnosing
+                      ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                      : <Stethoscope className="h-4 w-4 mr-1" />}
+                    Diagnose
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={reconcileForwards}
+                    disabled={savingForward || forwardsLoading || diagnosing}
+                    title="Re-apply all L4 forwards. Use this if a forward stopped working after a host reboot."
+                  >
+                    Reconcile
+                  </Button>
+                </>
               )}
               <Button
                 type="button"
@@ -377,35 +431,60 @@ export default function ServiceL4AndPorts({
           )}
         </div>
 
-        {forwards.map((fw) => (
-          <div
-            key={fw.id}
-            className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-md border p-2"
-          >
-            <div className="min-w-0">
-              <code className="font-mono text-sm">
-                {fw.proto}/{fmtForwardRange(fw)} → :
-                {fw.connectPortEnd && fw.connectPortEnd !== fw.connectPort
-                  ? `${fw.connectPort}-${fw.connectPortEnd}`
-                  : fw.connectPort}
-              </code>
-              {fw.description && (
-                <div className="text-xs text-muted-foreground">{fw.description}</div>
+        {forwards.map((fw) => {
+          const dx = diagnoseResults && diagnoseResults[fw.id];
+          // Tone the diagnostic note by severity. ok+info = neutral
+          // (host-side verified), warn = amber, error = red.
+          const dxTone =
+            !dx ? '' :
+            dx.severity === 'error' ? 'border-red-500/40 bg-red-500/5 text-red-500' :
+            dx.severity === 'warn'  ? 'border-amber-500/40 bg-amber-500/5 text-amber-500' :
+                                      'border-emerald-500/30 bg-emerald-500/5 text-emerald-500';
+          return (
+            <div
+              key={fw.id}
+              className="flex flex-col gap-1 rounded-md border p-2"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="min-w-0">
+                  <code className="font-mono text-sm">
+                    {fw.proto}/{fmtForwardRange(fw)} → :
+                    {fw.connectPortEnd && fw.connectPortEnd !== fw.connectPort
+                      ? `${fw.connectPort}-${fw.connectPortEnd}`
+                      : fw.connectPort}
+                  </code>
+                  {fw.description && (
+                    <div className="text-xs text-muted-foreground">{fw.description}</div>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-red-500 hover:text-red-600"
+                  onClick={() => deleteForward(fw)}
+                  disabled={savingForward}
+                  title="Delete forward"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+              {dx && (
+                <div className={`text-xs border rounded px-2 py-1.5 ${dxTone}`}>
+                  <div className="font-medium">
+                    {dx.ok ? '✓' : '✗'} {dx.next_step}
+                  </div>
+                  <div className="mt-1 grid grid-cols-2 sm:grid-cols-4 gap-x-3 gap-y-0.5 text-muted-foreground font-mono">
+                    <span>{dx.checks.bridgeIp.matches ? '✓' : '✗'} bridge IP</span>
+                    <span>{dx.checks.incusDevice.present ? '✓' : '✗'} proxy device</span>
+                    <span>{dx.checks.firewall.present ? '✓' : '✗'} firewall rule</span>
+                    <span>{dx.checks.lxcListener.listening ? '✓' : '·'} LXC listener</span>
+                  </div>
+                </div>
               )}
             </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 text-red-500 hover:text-red-600"
-              onClick={() => deleteForward(fw)}
-              disabled={savingForward}
-              title="Delete forward"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ))}
+          );
+        })}
 
         {draft && (
           <div className="rounded-md border bg-muted/30 p-3 space-y-3">

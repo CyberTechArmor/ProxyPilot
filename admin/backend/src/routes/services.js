@@ -18,6 +18,7 @@ import {
   reconcileServiceL4Forwards,
   removeServiceL4Plan,
 } from '../lib/l4-reconciler.js';
+import { diagnoseServiceL4Forwards } from '../lib/l4-diagnose.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 
 const execAsync = promisify(exec);
@@ -6799,6 +6800,35 @@ servicesRouter.post('/:id/l4-forwards/reconcile', async (req, res) => {
   } catch (e) {
     console.error('Error reconciling L4 forwards:', e);
     res.status(500).json({ error: `L4 reconcile failed: ${e.message}` });
+  }
+});
+
+// POST /services/:id/l4-forwards/diagnose — read-only health check.
+//
+// For each forward, probes the four host-side layers ProxyPilot can
+// see (bridge IP drift, incus proxy device, host firewall rule, LXC
+// listener). Reports a per-forward `next_step` so the operator knows
+// exactly what to fix next — and, when host-side is verified clean,
+// names the cloud-provider security group as the only remaining
+// candidate (which is outside ProxyPilot's reach).
+servicesRouter.post('/:id/l4-forwards/diagnose', async (req, res) => {
+  try {
+    const db = getDb();
+    const ctx = await loadServiceForL4(db, req.params.id);
+    if (!ctx) return res.status(404).json({ error: 'Service not found' });
+    if (!ctx.service.lxc_container_name) {
+      return res.status(400).json({ error: 'Service has no LXC container' });
+    }
+    const result = await diagnoseServiceL4Forwards({
+      db,
+      serviceId: req.params.id,
+      lxcName: ctx.service.lxc_container_name,
+      bridgeIp: ctx.bridgeIp,
+    });
+    res.json({ success: true, diagnose: result });
+  } catch (e) {
+    console.error('Error diagnosing L4 forwards:', e);
+    res.status(500).json({ error: `L4 diagnose failed: ${e.message}` });
   }
 });
 

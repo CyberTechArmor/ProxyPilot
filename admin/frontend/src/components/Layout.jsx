@@ -20,6 +20,7 @@ import {
   Cable,
   BugPlay,
   LifeBuoy,
+  HardDrive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -131,6 +132,7 @@ export default function Layout() {
     { name: 'VPN', href: '/vpn', icon: Cable, adminOnly: true },
     { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
+    { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];

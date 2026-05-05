@@ -970,6 +970,13 @@ export const api = {
     }),
   syncCveGit: () => request('/cves/git-sync', { method: 'POST' }),
 
+  // Housekeeping — disk-usage view (docker df + backup dir) plus
+  // opt-in prune actions for stale artifacts. Pruning is sudo-gated
+  // and per-category — empty body = no-op.
+  housekeepingUsage: () => request('/housekeeping/usage'),
+  housekeepingPrune: (body) =>
+    request('/housekeeping/prune', { method: 'POST', body: JSON.stringify(body) }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

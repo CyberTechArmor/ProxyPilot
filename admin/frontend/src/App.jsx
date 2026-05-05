@@ -11,6 +11,7 @@ import Firewall from '@/pages/Firewall';
 import Vpn from '@/pages/Vpn';
 import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
+import Housekeeping from '@/pages/Housekeeping';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -70,6 +71,7 @@ function App() {
         <Route path="security" element={<Navigate to="/cves" replace />} />
         <Route path="cves" element={<CVEs />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
+        <Route path="housekeeping" element={<Housekeeping />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

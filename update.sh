@@ -1299,6 +1299,57 @@ PYEOF
         docker logs proxypilot-admin --tail 20 2>&1 || true
 
         log "${GREEN}Docker container rebuilt and restarted (healthy)${NC}"
+
+        # Post-update cleanup. Only runs after the new build is
+        # confirmed healthy — a failed update goes through the ERR
+        # trap which restores the DB and tries to bring the OLD
+        # container back, so we must NOT prune anything that might
+        # be needed for that recovery path. By the time we reach
+        # this line:
+        #
+        #   - The new image is tagged + active, so the old build
+        #     of proxypilot-proxypilot is now dangling (untagged).
+        #     `docker image prune -f` removes ONLY dangling images
+        #     — it never touches anything with a tag, so other
+        #     applications on this host's docker daemon are safe.
+        #   - The build cache from the just-finished --no-cache
+        #     rebuild is at peak size; `--keep-storage 1g` caps it.
+        #   - The pre-update DB backup that on_error would have
+        #     used is older than today's run; we keep the most
+        #     recent N (default 30 days) and prune the rest so
+        #     long-lived hosts don't accumulate dozens of GB.
+        #
+        # All three are best-effort — failures are logged but don't
+        # fail the update.
+        log "${BLUE}Post-update cleanup${NC}"
+
+        if reclaimed_dangling=$(docker image prune -f 2>/dev/null | grep -E "Total reclaimed space:" | awk '{print $NF" "$(NF-1)}' | tr -d ',' ); then
+            [ -n "$reclaimed_dangling" ] \
+                && log "  Dangling images pruned: ${reclaimed_dangling}" \
+                || log "  No dangling images to prune."
+        else
+            log "${YELLOW}  Image prune skipped (docker error).${NC}"
+        fi
+
+        if reclaimed_cache=$(docker builder prune -f --keep-storage 1g 2>/dev/null | grep -E "Total:" | awk '{print $2,$3}'); then
+            [ -n "$reclaimed_cache" ] \
+                && log "  Build cache trimmed to 1 GiB (freed ${reclaimed_cache})." \
+                || log "  Build cache already within budget."
+        else
+            log "${YELLOW}  Build cache prune skipped (docker error).${NC}"
+        fi
+
+        BACKUP_DIR="${INSTALL_DIR}/data/db/backups"
+        BACKUP_KEEP_DAYS="${PROXYPILOT_BACKUP_KEEP_DAYS:-30}"
+        if [ -d "$BACKUP_DIR" ]; then
+            removed=$(find "$BACKUP_DIR" -type f -name "*.bak*" -mtime "+${BACKUP_KEEP_DAYS}" -print -delete 2>/dev/null | wc -l)
+            if [ "$removed" -gt 0 ]; then
+                log "  DB backups: removed ${removed} file(s) older than ${BACKUP_KEEP_DAYS} day(s)."
+            else
+                log "  DB backups: nothing older than ${BACKUP_KEEP_DAYS} day(s) to remove."
+            fi
+        fi
+
         log ""
         log "${GREEN}========================================${NC}"
         log "${GREEN}       Restart completed!               ${NC}"

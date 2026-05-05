@@ -11,7 +11,7 @@
 // dismiss, run-one) so the YAML opaque-field preservation contract
 // stays in one place.
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -274,12 +274,21 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
     }
   }, [cveId]);
 
+  // Capture the latest onChanged in a ref so the open-mark-as-seen
+  // effect below can reach it without depending on its identity.
+  // Without this, the parent re-renders on every refreshKey bump,
+  // hands a fresh onChanged closure down, the effect re-runs because
+  // its deps changed, calls onChanged again, and we're in a render
+  // loop that pegs the page at "fresh load every half second".
+  const onChangedRef = useRef(onChanged);
+  useEffect(() => { onChangedRef.current = onChanged; }, [onChanged]);
+
   useEffect(() => {
     refresh();
     // Mark as seen on open — fire-and-forget; failure doesn't block
     // the read view, the badge will retry on next poll.
-    api.markCveSeen(cveId).then(() => onChanged?.()).catch(() => {});
-  }, [cveId, refresh, onChanged]);
+    api.markCveSeen(cveId).then(() => onChangedRef.current?.()).catch(() => {});
+  }, [cveId, refresh]);
 
   const yamlBody = data?.yaml || '';
   const patchSteps = useMemo(() => extractPatchSteps(yamlBody), [yamlBody]);

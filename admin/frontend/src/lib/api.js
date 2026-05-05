@@ -246,6 +246,13 @@ export const api = {
     request(`/services/${serviceId}/l4-forwards/reconcile`, {
       method: 'POST',
     }),
+  // Read-only diagnostic across the four host-side layers ProxyPilot
+  // can verify (bridge IP drift, incus device, host firewall, LXC
+  // listener). Returns per-forward `next_step` text the UI can show.
+  diagnoseServiceL4Forwards: (serviceId) =>
+    request(`/services/${serviceId}/l4-forwards/diagnose`, {
+      method: 'POST',
+    }),
 
   // Phase 2c: detected-ports cache + rescan trigger. The cache read
   // is cheap; rescan walks /proc/net inside the LXC, optionally

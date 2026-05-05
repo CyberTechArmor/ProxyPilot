@@ -9,6 +9,7 @@ import HostShell from '@/pages/HostShell';
 import SshAccess from '@/pages/SshAccess';
 import Firewall from '@/pages/Firewall';
 import Vpn from '@/pages/Vpn';
+import Security from '@/pages/Security';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -62,6 +63,7 @@ function App() {
         <Route path="ssh-access" element={<SshAccess />} />
         <Route path="firewall" element={<Firewall />} />
         <Route path="vpn" element={<Vpn />} />
+        <Route path="security" element={<Security />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

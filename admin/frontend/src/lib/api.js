@@ -887,6 +887,19 @@ export const api = {
       body: JSON.stringify(body || {}),
     }),
 
+  // Security / CVE inbox — wraps the agent-side
+  // security.cve_<id>.check / .patch RPCs through the backend
+  // /api/security/cve/<id> surface. The patch call is sudo-gated,
+  // so the existing useSudo hook will prompt and replay on
+  // sudo_required envelopes.
+  cveCheck: (cveId) =>
+    request(`/security/cve/${encodeURIComponent(cveId)}`),
+  cvePatch: (cveId, body = {}) =>
+    request(`/security/cve/${encodeURIComponent(cveId)}/patch`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

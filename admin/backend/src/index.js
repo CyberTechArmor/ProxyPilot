@@ -16,6 +16,7 @@ import { lxcRouter } from './routes/lxc.js';
 import { sshAccessRouter } from './routes/ssh-access.js';
 import { firewallRouter } from './routes/firewall.js';
 import { vpnRouter } from './routes/vpn.js';
+import { securityRouter } from './routes/security.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
@@ -205,6 +206,7 @@ app.use('/api/lxc', authenticateToken, lxcRouter);
 app.use('/api/ssh-access', authenticateToken, sshAccessRouter);
 app.use('/api/firewall', authenticateToken, firewallRouter);
 app.use('/api/vpn', authenticateToken, vpnRouter);
+app.use('/api/security', authenticateToken, securityRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

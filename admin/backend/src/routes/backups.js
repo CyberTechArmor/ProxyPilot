@@ -1,16 +1,38 @@
-// Backups feature — PR 1 foundation.
+// Backups feature — full route surface (PR 1 + PR 2).
 //
-// Phase 1 mounts the Storage tab's API surface only:
-//   GET    /api/backups/storage          list destinations
-//   POST   /api/backups/storage          create a destination
-//   PUT    /api/backups/storage/:id      update a destination
-//   DELETE /api/backups/storage/:id      remove a destination
-//   POST   /api/backups/storage/:id/test connect + HEAD bucket
-//   POST   /api/backups/storage/:id/default mark this row default
+//   Storage destinations:
+//     GET    /api/backups/storage
+//     POST   /api/backups/storage           (sudo)
+//     PUT    /api/backups/storage/:id       (sudo)
+//     DELETE /api/backups/storage/:id       (sudo)
+//     POST   /api/backups/storage/:id/test  (sudo)  HEAD bucket
+//     POST   /api/backups/storage/:id/default (sudo)
 //
-// The on-demand backup creation routes (POST /api/backups,
-// GET /api/backups, ...) land in a follow-up commit on this same
-// branch so each piece is reviewable in isolation.
+//   Backup artifacts (on-demand):
+//     POST   /api/backups                   (sudo)  create at any tier
+//     GET    /api/backups
+//     GET    /api/backups/:id               manifest + metadata
+//     GET    /api/backups/:id/download      stream from S3
+//     DELETE /api/backups/:id               (sudo)
+//
+//   Schedules (PR 2):
+//     GET    /api/backups/schedules
+//     POST   /api/backups/schedules         (sudo)
+//     PUT    /api/backups/schedules/:id     (sudo)
+//     DELETE /api/backups/schedules/:id     (sudo)
+//     POST   /api/backups/schedules/:id/run-now (sudo)
+//
+//   Restore (PR 2):
+//     POST   /api/backups/:id/restore       (sudo)  → run_id
+//     GET    /api/backups/restores
+//     GET    /api/backups/restores/:id      live state machine
+//
+//   Usage + helpers:
+//     GET    /api/backups/usage             per-destination + tier
+//                                           breakdown
+//     GET    /api/backups/health-classes    declarative table for
+//                                           Mode A's per-service
+//                                           checks
 //
 // Conventions inherited from the existing route modules:
 //   * requireAdmin gates reads; requireAdmin + requireSudo gates
@@ -31,7 +53,18 @@ import { encryptSecret } from '../lib/secrets.js';
 import {
   testConnection, putObject, getObjectStream, deleteObject, buildKey,
 } from '../lib/s3.js';
-import { packConfigTier } from '../lib/backup-pack.js';
+import {
+  packConfigTier, packConfigPlusDataTier, packFullTier,
+} from '../lib/backup-pack.js';
+import {
+  register as schedulerRegister,
+  unregister as schedulerUnregister,
+  enqueue as schedulerEnqueue,
+  isValidCronExpr,
+  computeNextRunMs,
+} from '../lib/backup-scheduler.js';
+import { runModeA, runModeC } from '../lib/restore.js';
+import { listHealthClasses } from '../lib/health-checks.js';
 
 const INSTALL_DIR = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
 const ENV_PATH = process.env.PROXYPILOT_ENV_PATH || path.join(INSTALL_DIR, '.env');
@@ -419,15 +452,9 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     return res.status(400).json({ error: e.message });
   }
 
-  // PR 1 — only the config tier ships.  Reject the others with a
-  // helpful message rather than a generic 400 so a forward-pinned
-  // client gets a clear signal about why their request 4xx'd.
-  if (body.tier !== 'config') {
-    return res.status(400).json({
-      error: `tier "${body.tier}" not supported in this release. ` +
-             `PR 1 ships the config tier only; PR 2 adds config_plus_data + full.`,
-    });
-  }
+  // PR 2 supports all three tiers: config, config_plus_data, full.
+  // The packer chosen below is keyed off body.tier; an unknown tier
+  // surfaces as a 400 from the zod enum, not silently as a default.
 
   const db = getDb();
   const destination = pickDestination(db, body.destination_id);
@@ -462,17 +489,39 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
 
   let packed;
   try {
-    packed = await packConfigTier({
-      db,
-      passphrase: body.passphrase,
-      envPath: ENV_PATH,
-      cveInboxDir: CVE_INBOX_DIR,
-      meta: {
-        scope: body.scope || 'all',
-        backup_id: id,
-        destination_name: destination.name,
-      },
-    });
+    const sharedMeta = {
+      scope: body.scope || 'all',
+      backup_id: id,
+      destination_name: destination.name,
+    };
+    if (body.tier === 'config') {
+      packed = await packConfigTier({
+        db,
+        passphrase: body.passphrase,
+        envPath: ENV_PATH,
+        cveInboxDir: CVE_INBOX_DIR,
+        meta: sharedMeta,
+      });
+    } else if (body.tier === 'config_plus_data') {
+      packed = await packConfigPlusDataTier({
+        db,
+        passphrase: body.passphrase,
+        envPath: ENV_PATH,
+        cveInboxDir: CVE_INBOX_DIR,
+        installDir: INSTALL_DIR,
+        meta: sharedMeta,
+      });
+    } else {
+      // 'full'
+      packed = await packFullTier({
+        db,
+        passphrase: body.passphrase,
+        envPath: ENV_PATH,
+        cveInboxDir: CVE_INBOX_DIR,
+        installDir: INSTALL_DIR,
+        meta: sharedMeta,
+      });
+    }
   } catch (err) {
     db.prepare(`UPDATE backups SET status = 'failed', error = ? WHERE id = ?`)
       .run(`pack failed: ${err?.message || err}`, id);
@@ -588,4 +637,371 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
   }, req.ip);
 
   res.json({ ok: true, s3_error: s3Error });
+});
+
+// ── Schedules ───────────────────────────────────────────────────────
+//
+// CRUD on backup_schedules.  Mutating routes register / unregister
+// the cron task synchronously in the request handler so an operator
+// who creates a schedule sees it pick up the next tick — they don't
+// have to wait for the next dashboard reboot.
+
+function publicScheduleShape(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    destination_id: row.destination_id,
+    cron_expr: row.cron_expr,
+    tier: row.tier,
+    scope: row.scope || null,
+    retention_keep: row.retention_keep,
+    retention_days: row.retention_days,
+    passphrase_hint: row.passphrase_hint || null,
+    enabled: !!row.enabled,
+    last_run_at: row.last_run_at || null,
+    last_run_status: row.last_run_status || null,
+    last_run_error: row.last_run_error || null,
+    next_run_at: row.next_run_at || null,
+    created_by: row.created_by || null,
+    created_at: row.created_at,
+  };
+}
+
+const scheduleSchema = z.object({
+  name: z.string().min(1).max(128),
+  destination_id: z.string().min(1).max(64),
+  cron_expr: z.string().min(1).max(128),
+  tier: z.enum(['config', 'config_plus_data', 'full']),
+  scope: z.string().min(1).max(256).optional().nullable(),
+  retention_keep: z.number().int().min(0).max(10_000).optional(),
+  retention_days: z.number().int().min(1).max(36500).optional().nullable(),
+  passphrase: z.string().min(8).max(1024),
+  passphrase_hint: z.string().max(256).optional().nullable(),
+  enabled: z.boolean().optional(),
+}).strict();
+
+const scheduleUpdateSchema = scheduleSchema.partial().strict().refine(
+  (obj) => Object.keys(obj).length > 0,
+  { message: 'PUT body must not be empty' },
+);
+
+function readSchedule(id) {
+  return getDb().prepare(`SELECT * FROM backup_schedules WHERE id = ?`).get(id);
+}
+
+backupsRouter.get('/schedules', requireAdmin, (_req, res) => {
+  const rows = getDb().prepare(
+    `SELECT * FROM backup_schedules ORDER BY created_at DESC`
+  ).all();
+  res.json({ schedules: rows.map(publicScheduleShape) });
+});
+
+backupsRouter.post('/schedules', requireAdmin, requireSudo, (req, res) => {
+  let body;
+  try { body = scheduleSchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+
+  if (!isValidCronExpr(body.cron_expr)) {
+    return res.status(400).json({ error: `invalid cron_expr: ${body.cron_expr}` });
+  }
+  const dest = getDb().prepare(`SELECT id FROM backup_destinations WHERE id = ?`)
+    .get(body.destination_id);
+  if (!dest) return res.status(409).json({ error: 'destination not found' });
+
+  const id = uuid();
+  const enabled = body.enabled === false ? 0 : 1;
+  const nextMs = computeNextRunMs(body.cron_expr);
+
+  getDb().prepare(`
+    INSERT INTO backup_schedules (id, name, destination_id, cron_expr, tier, scope,
+                                  retention_keep, retention_days,
+                                  passphrase_hint, passphrase_enc,
+                                  enabled, next_run_at, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, body.name, body.destination_id, body.cron_expr, body.tier, body.scope || null,
+    body.retention_keep ?? 30,
+    body.retention_days ?? null,
+    body.passphrase_hint || null,
+    encryptSecret(body.passphrase),
+    enabled,
+    nextMs ? new Date(nextMs).toISOString() : null,
+    req.user?.id || null,
+  );
+
+  const row = readSchedule(id);
+  if (enabled) schedulerRegister(row);
+
+  logAudit(req.user.id, 'BACKUP_SCHEDULE_CREATE', 'backup_schedule', id, {
+    name: body.name, cron_expr: body.cron_expr, tier: body.tier,
+    destination_id: body.destination_id, enabled: !!enabled,
+  }, req.ip);
+
+  res.status(201).json({ schedule: publicScheduleShape(row) });
+});
+
+backupsRouter.put('/schedules/:id', requireAdmin, requireSudo, (req, res) => {
+  const existing = readSchedule(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'schedule not found' });
+
+  let body;
+  try { body = scheduleUpdateSchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+
+  if (body.cron_expr !== undefined && !isValidCronExpr(body.cron_expr)) {
+    return res.status(400).json({ error: `invalid cron_expr: ${body.cron_expr}` });
+  }
+  if (body.destination_id !== undefined) {
+    const ok = getDb().prepare(`SELECT id FROM backup_destinations WHERE id = ?`)
+      .get(body.destination_id);
+    if (!ok) return res.status(409).json({ error: 'destination not found' });
+  }
+
+  const updates = [];
+  const args = [];
+  function set(col, val) { updates.push(`${col} = ?`); args.push(val); }
+  if (body.name !== undefined) set('name', body.name);
+  if (body.destination_id !== undefined) set('destination_id', body.destination_id);
+  if (body.cron_expr !== undefined) set('cron_expr', body.cron_expr);
+  if (body.tier !== undefined) set('tier', body.tier);
+  if (body.scope !== undefined) set('scope', body.scope || null);
+  if (body.retention_keep !== undefined) set('retention_keep', body.retention_keep);
+  if (body.retention_days !== undefined) set('retention_days', body.retention_days || null);
+  if (body.passphrase !== undefined) set('passphrase_enc', encryptSecret(body.passphrase));
+  if (body.passphrase_hint !== undefined) set('passphrase_hint', body.passphrase_hint || null);
+  if (body.enabled !== undefined) set('enabled', body.enabled ? 1 : 0);
+
+  if (body.cron_expr !== undefined) {
+    const nextMs = computeNextRunMs(body.cron_expr);
+    set('next_run_at', nextMs ? new Date(nextMs).toISOString() : null);
+  }
+
+  if (updates.length > 0) {
+    args.push(existing.id);
+    getDb().prepare(
+      `UPDATE backup_schedules SET ${updates.join(', ')} WHERE id = ?`
+    ).run(...args);
+  }
+
+  const after = readSchedule(existing.id);
+  // Re-register so the worker picks up the new cron / enabled state.
+  schedulerUnregister(existing.id);
+  if (after.enabled) schedulerRegister(after);
+
+  logAudit(req.user.id, 'BACKUP_SCHEDULE_UPDATE', 'backup_schedule', existing.id, {
+    fields_changed: Object.keys(body).filter((k) => k !== 'passphrase'),
+    passphrase_rotated: body.passphrase !== undefined,
+  }, req.ip);
+
+  res.json({ schedule: publicScheduleShape(after) });
+});
+
+backupsRouter.delete('/schedules/:id', requireAdmin, requireSudo, (req, res) => {
+  const existing = readSchedule(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'schedule not found' });
+
+  schedulerUnregister(existing.id);
+  getDb().prepare(`DELETE FROM backup_schedules WHERE id = ?`).run(existing.id);
+
+  logAudit(req.user.id, 'BACKUP_SCHEDULE_DELETE', 'backup_schedule', existing.id, {
+    name: existing.name,
+  }, req.ip);
+
+  res.json({ ok: true });
+});
+
+// POST /api/backups/schedules/:id/run-now — fire a job immediately
+// without waiting for the cron tick.  Subject to the same serial-
+// queue rule, so a run-now during a long-running backup queues
+// instead of overlapping.
+backupsRouter.post('/schedules/:id/run-now', requireAdmin, requireSudo, (req, res) => {
+  const existing = readSchedule(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'schedule not found' });
+
+  const queued = schedulerEnqueue(existing.id, { runOnce: true });
+  logAudit(req.user.id, 'BACKUP_SCHEDULE_RUN_NOW', 'backup_schedule', existing.id, {
+    name: existing.name, queued,
+  }, req.ip);
+  res.json({ ok: true, queued });
+});
+
+// ── Usage ──────────────────────────────────────────────────────────
+//
+// Per-destination + per-tier size + count breakdown.  Cheap — pure
+// SQL aggregation against the local backups table.  PR 2 follow-up
+// could augment with a live S3 ListObjects to surface drift between
+// the dashboard's view and the bucket's, but that's a network
+// round-trip per destination so we keep it out of the hot path.
+
+backupsRouter.get('/usage', requireAdmin, (_req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT b.destination_id, d.name AS destination_name, b.tier,
+           COUNT(*) AS count, COALESCE(SUM(b.size_bytes), 0) AS bytes
+    FROM backups b
+    LEFT JOIN backup_destinations d ON d.id = b.destination_id
+    WHERE b.status = 'ok'
+    GROUP BY b.destination_id, b.tier
+    ORDER BY destination_name, b.tier
+  `).all();
+
+  // Total + per-destination summaries for the dashboard card.
+  const perDestination = {};
+  let totalBytes = 0;
+  let totalCount = 0;
+  for (const r of rows) {
+    totalBytes += r.bytes;
+    totalCount += r.count;
+    const key = r.destination_id || 'unknown';
+    if (!perDestination[key]) {
+      perDestination[key] = {
+        destination_id: r.destination_id,
+        destination_name: r.destination_name,
+        bytes: 0,
+        count: 0,
+        tiers: [],
+      };
+    }
+    perDestination[key].bytes += r.bytes;
+    perDestination[key].count += r.count;
+    perDestination[key].tiers.push({ tier: r.tier, bytes: r.bytes, count: r.count });
+  }
+
+  res.json({
+    total: { bytes: totalBytes, count: totalCount },
+    per_destination: Object.values(perDestination),
+    rows, // raw aggregate rows for clients that want to render their own breakdown
+  });
+});
+
+// ── Restore ────────────────────────────────────────────────────────
+
+const restoreSchema = z.object({
+  mode: z.enum(['dry_run', 'apply']).optional().default('dry_run'),
+  target: z.enum(['manifest_only', 'in_place', 'sandbox']).optional().default('sandbox'),
+  passphrase: z.string().min(8).max(1024),
+  import_incus: z.boolean().optional(),
+}).strict();
+
+backupsRouter.post('/:id/restore', requireAdmin, requireSudo, async (req, res) => {
+  const backup = readBackup(req.params.id);
+  if (!backup) return res.status(404).json({ error: 'backup not found' });
+  if (backup.status !== 'ok') {
+    return res.status(409).json({ error: `backup is ${backup.status}, not 'ok'` });
+  }
+
+  let body;
+  try { body = restoreSchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+
+  // PR 2 explicitly does NOT ship in_place restore — that's the
+  // operator-overhead-heavy Mode B from the spec.  Reject it with
+  // a clear hint pointing at sandbox / manifest_only.
+  if (body.target === 'in_place') {
+    return res.status(400).json({
+      error: 'in_place restore is out of scope for PR 2; pick target=sandbox or manifest_only',
+    });
+  }
+
+  const destination = getDb().prepare(
+    `SELECT * FROM backup_destinations WHERE id = ?`
+  ).get(backup.destination_id);
+  if (!destination) {
+    return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
+  }
+
+  const runId = uuid();
+  getDb().prepare(`
+    INSERT INTO restore_runs (id, backup_id, mode, target, status, initiated_by)
+    VALUES (?, ?, ?, ?, 'running', ?)
+  `).run(runId, backup.id, body.mode, body.target, req.user.id);
+
+  logAudit(req.user.id, 'BACKUP_RESTORE_START', 'restore_run', runId, {
+    backup_id: backup.id, mode: body.mode, target: body.target,
+  }, req.ip);
+
+  // Respond with the runId before the engine work starts so the UI
+  // can switch into 'tail logs' mode immediately.  The engine runs
+  // in the background; clients poll GET /restores/:id for state.
+  res.status(202).json({ run_id: runId, status: 'running' });
+
+  // Fire-and-forget — the engine writes back into restore_runs
+  // incrementally and finalize() flips status when it's done.
+  // We deliberately don't await: the response is already out.
+  setImmediate(async () => {
+    try {
+      if (body.target === 'manifest_only') {
+        await runModeC({ runId, backup, destination, passphrase: body.passphrase });
+      } else {
+        await runModeA({
+          runId,
+          backup,
+          destination,
+          passphrase: body.passphrase,
+          importIncus: !!body.import_incus,
+        });
+      }
+    } catch (err) {
+      // Last-ditch failure path — runModeA/C should normally
+      // finalize() the row themselves.  Ensure something lands so
+      // a restore_run never sits in 'running' forever.
+      try {
+        getDb().prepare(`
+          UPDATE restore_runs SET status = 'failed', finished_at = CURRENT_TIMESTAMP,
+                                  notes = ? WHERE id = ? AND status = 'running'
+        `).run(`engine threw: ${err?.message || err}`, runId);
+      } catch { /* ignore — best effort */ }
+    }
+  });
+});
+
+backupsRouter.get('/restores', requireAdmin, (_req, res) => {
+  const rows = getDb().prepare(
+    `SELECT * FROM restore_runs ORDER BY started_at DESC, id DESC LIMIT 200`
+  ).all();
+  res.json({
+    restores: rows.map((r) => ({
+      id: r.id,
+      backup_id: r.backup_id,
+      mode: r.mode,
+      target: r.target,
+      sandbox_dir: r.sandbox_dir || null,
+      started_at: r.started_at,
+      finished_at: r.finished_at || null,
+      status: r.status,
+      step_count: r.steps_json ? JSON.parse(r.steps_json).length : 0,
+      initiated_by: r.initiated_by,
+      notes: r.notes || null,
+    })),
+  });
+});
+
+backupsRouter.get('/restores/:id', requireAdmin, (req, res) => {
+  const row = getDb().prepare(`SELECT * FROM restore_runs WHERE id = ?`)
+    .get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'restore run not found' });
+  let steps = [];
+  try { steps = JSON.parse(row.steps_json || '[]'); } catch { steps = []; }
+  res.json({
+    restore: {
+      id: row.id,
+      backup_id: row.backup_id,
+      mode: row.mode,
+      target: row.target,
+      sandbox_dir: row.sandbox_dir || null,
+      started_at: row.started_at,
+      finished_at: row.finished_at || null,
+      status: row.status,
+      steps,
+      initiated_by: row.initiated_by,
+      notes: row.notes || null,
+    },
+  });
+});
+
+// GET /api/backups/health-classes — declarative table of supported
+// health-check classes for the restore Mode A UI.
+backupsRouter.get('/health-classes', requireAdmin, (_req, res) => {
+  res.json({ classes: listHealthClasses() });
 });

@@ -125,6 +125,10 @@ test('list extracts dict-keyed hosts and counts unread', async () => {
     assert.equal(body.entries[0].action_class, 'AUTO_PATCH');
     assert.equal(body.entries[0].status, 'NEW');
     assert.equal(body.entries[0].operator_seen, false);
+    // `added` falls back to file ctime when there's no _proxypilot
+    // block. Just check it's an ISO timestamp string.
+    assert.match(body.entries[0].added, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(body.entries[0].latest_note, null);
     assert.equal(body.unread, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -362,6 +366,91 @@ test('PUT /git-config rejects bare strings (no scheme)', async () => {
       body: { url: 'just a string' },
     });
     assert.equal(r.status, 400);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// New "Added" + "latest_note" listing fields. These let the table
+// render Date Added / Date Updated columns and inline applicability
+// hints without an extra detail fetch.
+
+test('list surfaces _proxypilot.imported_at as `added`', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0010.yaml'), [
+      'cve: CVE-2026-0010',
+      'name: imported',
+      '_proxypilot:',
+      '  origin: git',
+      '  git_url: https://example.com/x.git',
+      '  imported_at: "2026-04-15T10:00:00Z"',
+      'hosts: {vm: {action_class: ALERT, tier: 4}}',
+      'state: {status: NEW, operator_seen: false}',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { body } = await callList(router);
+    assert.equal(body.entries[0].added, '2026-04-15T10:00:00Z');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('list surfaces latest history entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0011.yaml'), [
+      'cve: CVE-2026-0011',
+      'name: with-history',
+      'hosts: {vm: {action_class: AUTO_PATCH, tier: 1}}',
+      'state:',
+      '  status: RESOLVED',
+      '  operator_seen: true',
+      '  history:',
+      '    - ts: "2026-05-01T12:00:00Z"',
+      '      actor: claude-routine',
+      '      change: "initial entry"',
+      '    - ts: "2026-05-05T18:42:11Z"',
+      '      actor: proxypilot-engine',
+      '      change: "probe exit=1; host not affected"',
+      '      host: vm',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { body } = await callList(router);
+    const note = body.entries[0].latest_note;
+    assert.ok(note, 'latest_note should be present');
+    assert.equal(note.ts, '2026-05-05T18:42:11Z');
+    assert.equal(note.actor, 'proxypilot-engine');
+    assert.match(note.change, /probe exit=1/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('detail returns added + latest_note + last_updated', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0012.yaml'), [
+      'cve: CVE-2026-0012',
+      'name: detail-fields',
+      '_proxypilot: {origin: paste, imported_at: "2026-04-20T00:00:00Z"}',
+      'hosts: {vm: {action_class: ALERT, tier: 4}}',
+      'state:',
+      '  status: NEW',
+      '  last_updated: "2026-05-06T09:00:00Z"',
+      '  history:',
+      '    - {ts: "2026-04-20T00:00:00Z", actor: claude, change: created}',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { status, body } = await callRouter(router, '/CVE-2026-0012');
+    assert.equal(status, 200);
+    assert.equal(body.added, '2026-04-20T00:00:00Z');
+    assert.equal(body.last_updated, '2026-05-06T09:00:00Z');
+    assert.ok(body.latest_note);
+    assert.equal(body.latest_note.actor, 'claude');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

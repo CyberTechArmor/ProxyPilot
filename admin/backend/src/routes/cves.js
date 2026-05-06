@@ -73,6 +73,98 @@ function extractScalar(body, key) {
   return m[1].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
 }
 
+// Pull the latest entry from state.history. Returns
+// {ts, actor, change} or null if there's no history yet.
+//
+// History grows append-only so the last item is the most recent run.
+// We accept BOTH forms ruamel.yaml + hand-pasted YAMLs produce:
+//
+//   block:
+//     history:
+//       - ts: "2026-05-05T18:42:11Z"
+//         actor: proxypilot-engine
+//         change: "probe exit=1; host not affected"
+//
+//   flow:
+//     history:
+//       - {ts: "2026-05-05T18:42:11Z", actor: claude, change: created}
+//
+// Mixed within the same `history:` list is allowed and handled.
+function extractLatestHistory(body) {
+  if (!body) return null;
+  const histStart = body.search(/\n\s+history:\s*\n/);
+  if (histStart < 0) return null;
+  const tail = body.slice(histStart);
+
+  // Split history into items by walking line-by-line. An item starts
+  // at any `(indent)- ` line; everything indented further (block form)
+  // OR the rest of the same line (flow form) belongs to that item.
+  const lines = tail.split('\n');
+  // Skip the `history:` header line itself.
+  const items = [];
+  let cur = null;
+  let itemIndent = -1;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (/^\S/.test(line)) {
+      // Top-level key — left the history block.
+      if (cur) { items.push(cur); cur = null; }
+      break;
+    }
+    const dash = line.match(/^(\s+)-\s+(.*)$/);
+    if (dash) {
+      if (cur) items.push(cur);
+      itemIndent = dash[1].length;
+      cur = { lines: [dash[2]], indent: itemIndent };
+      continue;
+    }
+    // Continuation line. Belongs to current item only if indented
+    // strictly more than the dash.
+    const ind = line.match(/^(\s*)/)[1].length;
+    if (cur && ind > itemIndent) {
+      cur.lines.push(line.slice(itemIndent + 2));
+    }
+  }
+  if (cur) items.push(cur);
+  if (items.length === 0) return null;
+
+  // Parse the LAST item.
+  const last = items[items.length - 1];
+  const out = { ts: null, actor: null, change: null };
+
+  // Flow form on first line: `{ts: ..., actor: ..., change: ...}`
+  const head = last.lines[0] || '';
+  const flowMatch = head.match(/^\s*\{(.+)\}\s*$/);
+  if (flowMatch) {
+    // Naive split — change values can't contain commas / braces in
+    // our schema, which is true for engine writes; operators editing
+    // by hand and inserting commas in flow form are an edge case.
+    for (const part of flowMatch[1].split(/,(?![^{]*\})/)) {
+      const kv = part.match(/^\s*(\w+):\s*(.*?)\s*$/);
+      if (!kv) continue;
+      const key = kv[1];
+      const val = kv[2].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+      if (key === 'ts' || key === 'actor' || key === 'change' || key === 'host') {
+        out[key] = val;
+      }
+    }
+    return out.ts || out.actor || out.change ? out : null;
+  }
+
+  // Block form: each line is `key: value`.
+  // First line might be `ts: ...` (the dash already consumed).
+  for (const ln of last.lines) {
+    const m = ln.match(/^\s*(\w+):\s*(.*)$/);
+    if (!m) continue;
+    const key = m[1];
+    const val = m[2].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+    if (key === 'ts' || key === 'actor' || key === 'change' || key === 'host') {
+      if (!out[key]) out[key] = val;
+    }
+  }
+  return out.ts || out.actor || out.change ? out : null;
+}
+
 // extractNested("state", "status", body) finds the `status:` key
 // inside the `state:` block. Indent-based: matches any line indented
 // further than the block header. Also recognises flow-form blocks
@@ -309,6 +401,14 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
     let st;
     try { st = await stat(join(INBOX_DIR, name)); } catch { st = null; }
     if (!seen) unread += 1;
+    // "Added": when this entry first started being actionable on
+    // THIS host. Prefer the engine's own _proxypilot.imported_at
+    // stamp (set by paste/git-sync), fall back to the file's ctime
+    // (covers entries that landed before we added origin tracking).
+    const importedAt = extractNested('_proxypilot', 'imported_at', body);
+    const added = importedAt
+      || (st ? st.ctime.toISOString() : null);
+    const latestHistory = extractLatestHistory(body);
     entries.push({
       cve,
       name: extractScalar(body, 'name'),
@@ -320,12 +420,21 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
       operator_action_required: opAction,
       tier: tier ? parseInt(tier, 10) || tier : null,
       last_updated: lastUpdated,
+      added,
       mtime: st ? st.mtime.toISOString() : null,
       // _proxypilot block is metadata: origin (paste|git), git_url,
       // git_commit, imported_at. Lives at top level alongside `cve:`,
       // so extractNested with parent="_proxypilot" works.
       origin: extractNested('_proxypilot', 'origin', body) || 'unknown',
       origin_git_url: extractNested('_proxypilot', 'git_url', body),
+      // Most recent timeline event so the list view can show
+      // applicability ("probe exit=1; host not affected") without
+      // an extra detail fetch.
+      latest_note: latestHistory ? {
+        ts: latestHistory.ts,
+        actor: latestHistory.actor,
+        change: latestHistory.change,
+      } : null,
     });
   }
   res.json({ host: HOSTNAME, entries, unread });
@@ -407,19 +516,29 @@ cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
   const path = safePath(req.params.cveId);
   if (!path) return res.status(400).json({ error: 'invalid CVE id' });
   let body;
+  let st;
   try {
     body = await readFile(path, 'utf8');
+    st = await stat(path);
   } catch (err) {
     if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
     return res.status(500).json({ error: err.message });
   }
   const action = extractHostAction(body, HOSTNAME) || 'ALERT';
   const status = (extractNested('state', 'status', body) || 'NEW').toUpperCase().replace('_', '-');
+  const importedAt = extractNested('_proxypilot', 'imported_at', body);
   res.json({
     cve: req.params.cveId,
     action_class: action,
     status,
     yaml: body,
+    // Convenience fields the About tab uses without re-parsing the
+    // YAML on the client. The yaml itself stays in the response so
+    // the Spec tab keeps working unchanged.
+    last_updated: extractNested('state', 'last_updated', body),
+    added: importedAt || (st ? st.ctime.toISOString() : null),
+    operator_action_required: extractNested('state', 'operator_action_required', body),
+    latest_note: extractLatestHistory(body),
   });
 });
 

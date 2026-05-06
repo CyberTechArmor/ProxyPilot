@@ -95,11 +95,24 @@ test('tarPack: header checksum is the unsigned sum of all 512 header bytes', () 
   assert.equal(claimed, sum, 'tar checksum must equal byte sum with field as spaces');
 });
 
-test('tarPack: filenames longer than 100 bytes are rejected', () => {
-  const longName = 'a'.repeat(101);
+test('tarPack: paths > 100 bytes are split into prefix + name (ustar)', () => {
+  // 200-char path with deep slashes — prefix[155] + name[100]
+  // can express it.  The writer must succeed and emit a header
+  // whose prefix field at offset 345 carries the dirname.
+  const deep = 'a/'.repeat(50) + 'b/' + 'c'.repeat(50); // ~152 chars
+  const out = tarPack({ [deep]: Buffer.from('x') });
+  // Header bytes 345..500 hold prefix[155]; verify our split's
+  // dirname landed in there.
+  const prefixField = out.slice(345, 500).toString('utf-8').replace(/\0+$/, '');
+  assert.ok(prefixField.length > 0, 'long paths must use the ustar prefix field');
+  assert.ok(deep.startsWith(prefixField), 'prefix must match the path head');
+});
+
+test('tarPack: paths > 256 bytes are rejected', () => {
+  const tooDeep = 'd/'.repeat(150);
   assert.throws(
-    () => tarPack({ [longName]: Buffer.from('x') }),
-    /name too long/,
+    () => tarPack({ [tooDeep]: Buffer.from('x') }),
+    /too long/,
   );
 });
 

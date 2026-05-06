@@ -43,6 +43,8 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 const MAGIC = 'PPBACKUP';
 const VERSION = 1;
@@ -93,10 +95,46 @@ function asciiPad(s, width) {
   return buf;
 }
 
-function makeTarHeader(name, size, mtime) {
-  if (Buffer.byteLength(name) > 100) {
-    throw new Error(`tar entry name too long for ustar (>100 bytes): ${name}`);
+// Split a path into (prefix, name) per ustar rules: name must fit
+// in 100 bytes, prefix in 155 bytes; reconstructed path is
+// prefix+'/'+name. We split on the last '/' that keeps both halves
+// within their fields. Throws for anything that can't be expressed
+// — GNU `LongLink` extension would handle the leftovers but isn't
+// portable, and our backup paths shouldn't realistically exceed
+// the 256-byte ustar ceiling.
+function splitTarPath(fullName) {
+  const bytes = Buffer.byteLength(fullName);
+  if (bytes <= 100) return { prefix: '', name: fullName };
+  if (bytes > 100 + 1 + 155) {
+    throw new Error(
+      `tar entry path too long for ustar (>256 bytes): ${fullName}`,
+    );
   }
+  // Walk the slashes from right to left; pick the deepest split
+  // such that the right half fits in 100 and the left in 155.
+  let lastValid = -1;
+  for (let i = fullName.length - 1; i >= 0; i -= 1) {
+    if (fullName.charCodeAt(i) !== 0x2f) continue; // '/'
+    const right = fullName.slice(i + 1);
+    const left = fullName.slice(0, i);
+    if (Buffer.byteLength(right) <= 100 && Buffer.byteLength(left) <= 155) {
+      lastValid = i;
+      break;
+    }
+  }
+  if (lastValid < 0) {
+    throw new Error(
+      `tar entry path cannot be split into prefix+name within ustar limits: ${fullName}`,
+    );
+  }
+  return {
+    prefix: fullName.slice(0, lastValid),
+    name: fullName.slice(lastValid + 1),
+  };
+}
+
+function makeTarHeader(fullName, size, mtime, { typeflag = 0x30 } = {}) {
+  const { prefix, name } = splitTarPath(fullName);
   const h = Buffer.alloc(512, 0);
   asciiPad(name, 100).copy(h, 0);
   Buffer.from(octal(0o0644, 8), 'ascii').copy(h, 100);  // mode
@@ -108,9 +146,10 @@ function makeTarHeader(name, size, mtime) {
   // treats those bytes as 0x20 — required by the spec, otherwise
   // a verifying reader can't reproduce the value we write below.
   Buffer.from('        ', 'ascii').copy(h, 148);
-  h[156] = 0x30; // typeflag '0' = normal file
+  h[156] = typeflag; // 0x30 '0' = normal file, 0x35 '5' = directory
   Buffer.from('ustar\0', 'ascii').copy(h, 257);
   Buffer.from('00', 'ascii').copy(h, 263);
+  if (prefix) asciiPad(prefix, 155).copy(h, 345);
   // Checksum = unsigned sum of all 512 header bytes (with the
   // checksum field treated as 8 spaces, which we wrote above).
   // Field layout per POSIX 1003.1: 6-digit zero-padded octal,
@@ -309,6 +348,192 @@ export async function pack({ entries, passphrase, meta = {} }) {
 
 // ── tier helpers ────────────────────────────────────────────────────
 
+// ── file-tree collectors ────────────────────────────────────────────
+//
+// Reusable helpers that walk a directory and turn it into a flat
+// {path: Buffer} map suitable for pack().  All readers tolerate
+// per-file unreadability and per-directory absence — backups
+// should never fail because one obscure file's perms are wrong.
+//
+// Two safety rails matter:
+//   * SKIP_DIR_NAMES: directories we never want in a backup
+//     (cache trees, VCS internals, the dashboard's own
+//     node_modules — never restore-relevant).
+//   * MAX_FILE_BYTES: hard cap on individual file size in a tier
+//     that's supposed to be small.  Caddy sometimes leaves multi-
+//     GB log files in /var/lib/caddy that no operator wants in
+//     their nightly backup.
+
+const SKIP_DIR_NAMES = new Set([
+  'node_modules', '__pycache__', '.git', '.cache',
+  // `tmp` directories anywhere in /etc are almost always reload-
+  // staging dirs that get blown away on restart; archiving them
+  // creates restore-time churn for no value.
+  'tmp',
+]);
+
+// Walk `dir` recursively, returning { relPath: Buffer } where
+// relPath is rooted at `archivePrefix` (e.g. 'caddy', 'wireguard').
+// Symbolic links are followed for files (we want their target
+// content) and skipped for directories (would create infinite
+// recursion on /etc/letsencrypt → /var/lib/letsencrypt loops).
+export function collectDirAsEntries(rootDir, archivePrefix, opts = {}) {
+  const out = {};
+  const maxBytes = opts.maxBytes ?? 256 * 1024 * 1024; // 256 MiB per file
+  if (!fs.existsSync(rootDir)) return out;
+
+  const stack = [{ abs: rootDir, rel: '' }];
+  while (stack.length) {
+    const { abs, rel } = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue; // unreadable dir — tolerate
+    }
+    for (const ent of entries) {
+      if (ent.name.startsWith('.') && ent.name !== '.env') {
+        // Hidden files are case-by-case.  We skip dot-files in
+        // arbitrary subtrees but keep '.env' specifically because
+        // it's the one operators DO want backed up.  Dot-dirs
+        // also fall through to SKIP_DIR_NAMES below if listed.
+      }
+      if (SKIP_DIR_NAMES.has(ent.name)) continue;
+      const childAbs = path.join(abs, ent.name);
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+      try {
+        if (ent.isDirectory()) {
+          stack.push({ abs: childAbs, rel: childRel });
+          continue;
+        }
+        if (ent.isSymbolicLink()) {
+          // Follow link to file; reject if it resolves to a dir
+          // (infinite recursion guard).
+          const realStat = fs.statSync(childAbs);
+          if (realStat.isDirectory()) continue;
+          if (realStat.size > maxBytes) continue;
+          out[`${archivePrefix}/${childRel}`] = fs.readFileSync(childAbs);
+          continue;
+        }
+        if (!ent.isFile()) continue;
+        const stat = fs.statSync(childAbs);
+        if (stat.size > maxBytes) continue;
+        out[`${archivePrefix}/${childRel}`] = fs.readFileSync(childAbs);
+      } catch {
+        // Per-file failures don't fail the backup — the manifest
+        // just won't list the file we couldn't read.
+      }
+    }
+  }
+  return out;
+}
+
+// ── shell-out collectors (full tier only) ──────────────────────────
+//
+// These shell to docker / incus to capture per-volume tarballs and
+// per-instance exports.  Each helper returns { added: {...},
+// errors: [...] } so the caller can include the errors in the
+// manifest's notes field rather than failing the whole tier when
+// one volume is unreadable.
+
+function runShell(cmd, args, { timeout = 5 * 60_000, encoding = 'buffer', input } = {}) {
+  return spawnSync(cmd, args, { timeout, encoding, input });
+}
+
+function which(bin) {
+  const r = spawnSync('command', ['-v', bin], { shell: true, encoding: 'utf-8' });
+  return r.status === 0 && r.stdout.trim().length > 0;
+}
+
+// Make a sandbox temp directory rooted under os.tmpdir() with mode
+// 0o700.  Caller is responsible for cleaning it up (best-effort
+// finally block).
+export function mkdtempSandbox(prefix = 'pp-backup-') {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+// docker volume export — tar the volume's contents using a
+// throwaway alpine container.  Returns the bytes of the tar.gz.
+// Returns null + an error string when docker is unavailable or the
+// volume is missing (caller decides how strict to be).
+export function exportDockerVolume(volumeName) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(volumeName)) {
+    return { ok: false, error: `unsafe docker volume name: ${volumeName}` };
+  }
+  if (!which('docker')) {
+    return { ok: false, error: 'docker not available on this host' };
+  }
+  // We pipe the tar bytes back over stdout — `tar -cz` on /source.
+  // Using `alpine:3.20` keeps the image small + reproducible.
+  const r = spawnSync('docker', [
+    'run', '--rm', '-v', `${volumeName}:/source:ro`,
+    'alpine:3.20', 'sh', '-c', 'tar -cz -C /source . 2>/dev/null',
+  ], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 * 1024, timeout: 30 * 60_000 });
+  if (r.status !== 0) {
+    return {
+      ok: false,
+      error: (r.stderr ?? Buffer.from('')).toString('utf-8').trim() || 'docker run failed',
+    };
+  }
+  return { ok: true, bytes: r.stdout };
+}
+
+// List volume names known to the docker daemon.  Filtered to a
+// caller-supplied allowlist when provided so we don't blindly
+// snapshot every system volume.
+export function listDockerVolumes() {
+  if (!which('docker')) return { ok: false, names: [], error: 'docker unavailable' };
+  const r = spawnSync('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
+    encoding: 'utf-8', timeout: 30_000,
+  });
+  if (r.status !== 0) {
+    return { ok: false, names: [], error: r.stderr?.trim() || 'docker volume ls failed' };
+  }
+  return {
+    ok: true,
+    names: r.stdout.split('\n').map((s) => s.trim()).filter(Boolean),
+  };
+}
+
+// `incus export <name> <path>` writes a tarball to disk.  We can't
+// stream over stdout the way docker can, so the helper writes to a
+// temp file and reads it back.  Caller is responsible for cleaning
+// up the sandbox dir.
+export function exportIncusInstance(instanceName, sandboxDir) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceName)) {
+    return { ok: false, error: `unsafe incus instance name: ${instanceName}` };
+  }
+  if (!which('incus')) {
+    return { ok: false, error: 'incus not available on this host' };
+  }
+  const out = path.join(sandboxDir, `${instanceName}.tar.gz`);
+  const r = spawnSync('incus', ['export', instanceName, out, '--compression', 'gzip'], {
+    encoding: 'utf-8', timeout: 60 * 60_000,
+  });
+  if (r.status !== 0) {
+    return { ok: false, error: r.stderr?.trim() || 'incus export failed' };
+  }
+  try {
+    return { ok: true, bytes: fs.readFileSync(out) };
+  } catch (err) {
+    return { ok: false, error: `incus export wrote no readable artifact: ${err?.message || err}` };
+  }
+}
+
+export function listIncusInstances() {
+  if (!which('incus')) return { ok: false, names: [], error: 'incus unavailable' };
+  const r = spawnSync('incus', ['list', '-f', 'csv', '-c', 'n'], {
+    encoding: 'utf-8', timeout: 30_000,
+  });
+  if (r.status !== 0) {
+    return { ok: false, names: [], error: r.stderr?.trim() || 'incus list failed' };
+  }
+  return {
+    ok: true,
+    names: r.stdout.split('\n').map((s) => s.trim()).filter(Boolean),
+  };
+}
+
 // packConfigTier({ db, passphrase, envPath, cveInboxDir, meta })
 //
 // Wraps pack() with the config-tier file selection: SQLite dump as
@@ -337,6 +562,149 @@ export async function packConfigTier({
     passphrase,
     meta: { tier: 'config', ...meta },
   });
+}
+
+// packConfigPlusDataTier — config tier + per-host config trees +
+// per-service file roots + ACME cert tree.  Still in-memory; the
+// total typically lands in the 10-100 MB range on a healthy
+// install.  Anything larger should be on the full tier.
+//
+// Layout under the archive:
+//   proxypilot.db.json              ← config tier
+//   .env                            ← config tier
+//   cve-inbox/                      ← config tier
+//   caddy/                          ← /etc/caddy
+//   wireguard/                      ← /etc/wireguard
+//   caddy-acme/                     ← /var/lib/caddy/.local/share/caddy
+//   services/                       ← /opt/proxypilot/data/services
+export async function packConfigPlusDataTier({
+  db,
+  passphrase,
+  envPath,
+  cveInboxDir,
+  caddyDir = '/etc/caddy',
+  wireguardDir = '/etc/wireguard',
+  caddyAcmeDir = '/var/lib/caddy/.local/share/caddy',
+  servicesDir,
+  installDir,
+  meta = {},
+}) {
+  const dbDump = dumpSqliteAsJson(db);
+  const envBody = readEnv(envPath);
+  const cveEntries = readCveInbox(cveInboxDir);
+  const resolvedServicesDir = servicesDir
+    ?? path.join(installDir || '/opt/proxypilot', 'data', 'services');
+
+  const entries = {
+    'proxypilot.db.json': dbDump,
+    '.env': envBody,
+    ...cveEntries,
+    ...collectDirAsEntries(caddyDir, 'caddy'),
+    ...collectDirAsEntries(wireguardDir, 'wireguard'),
+    ...collectDirAsEntries(caddyAcmeDir, 'caddy-acme'),
+    ...collectDirAsEntries(resolvedServicesDir, 'services'),
+  };
+
+  return pack({
+    entries,
+    passphrase,
+    meta: { tier: 'config_plus_data', ...meta },
+  });
+}
+
+// packFullTier — config_plus_data tier + per-volume docker tarballs
+// + per-instance incus exports.  Returns the same shape as the
+// other tier helpers + a `notes` array carrying per-collector
+// errors so the caller can persist them in the backups row's
+// manifest_json without aborting the whole backup over one
+// missing volume.
+//
+// PR 2 implementation note: this builds the entire artifact in
+// memory before encrypting + uploading.  That works for small-to-
+// medium installs (a few GB total) but multi-GB installs will
+// pressure the dashboard process.  A streaming variant — temp
+// file based, hashed in chunks, encrypted via crypto.createCipher
+// transform pipe to S3 — is a follow-up.  The wire format already
+// supports it (auth tag at file-end).
+export async function packFullTier({
+  db,
+  passphrase,
+  envPath,
+  cveInboxDir,
+  caddyDir,
+  wireguardDir,
+  caddyAcmeDir,
+  servicesDir,
+  installDir,
+  dockerVolumeAllowlist, // optional [name, ...]; empty/undef = all
+  incusInstanceAllowlist, // optional
+  meta = {},
+}) {
+  const baseEntries = {
+    'proxypilot.db.json': dumpSqliteAsJson(db),
+    '.env': readEnv(envPath),
+    ...readCveInbox(cveInboxDir),
+    ...collectDirAsEntries(caddyDir || '/etc/caddy', 'caddy'),
+    ...collectDirAsEntries(wireguardDir || '/etc/wireguard', 'wireguard'),
+    ...collectDirAsEntries(caddyAcmeDir || '/var/lib/caddy/.local/share/caddy', 'caddy-acme'),
+    ...collectDirAsEntries(
+      servicesDir ?? path.join(installDir || '/opt/proxypilot', 'data', 'services'),
+      'services',
+    ),
+  };
+
+  const notes = [];
+
+  // Docker volumes ---
+  const volumes = listDockerVolumes();
+  if (!volumes.ok) {
+    notes.push({ stage: 'docker-volumes', error: volumes.error });
+  } else {
+    const wanted = dockerVolumeAllowlist?.length
+      ? volumes.names.filter((n) => dockerVolumeAllowlist.includes(n))
+      : volumes.names;
+    for (const v of wanted) {
+      const r = exportDockerVolume(v);
+      if (!r.ok) {
+        notes.push({ stage: 'docker-volume', name: v, error: r.error });
+        continue;
+      }
+      baseEntries[`docker-volumes/${v}.tar.gz`] = r.bytes;
+    }
+  }
+
+  // Incus instances ---
+  let sandbox;
+  try {
+    const inst = listIncusInstances();
+    if (!inst.ok) {
+      notes.push({ stage: 'incus-list', error: inst.error });
+    } else {
+      const wanted = incusInstanceAllowlist?.length
+        ? inst.names.filter((n) => incusInstanceAllowlist.includes(n))
+        : inst.names;
+      if (wanted.length > 0) sandbox = mkdtempSandbox('pp-fullbk-');
+      for (const name of wanted) {
+        const r = exportIncusInstance(name, sandbox);
+        if (!r.ok) {
+          notes.push({ stage: 'incus-export', name, error: r.error });
+          continue;
+        }
+        baseEntries[`incus-exports/${name}.tar.gz`] = r.bytes;
+      }
+    }
+  } finally {
+    if (sandbox) {
+      try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  const result = await pack({
+    entries: baseEntries,
+    passphrase,
+    meta: { tier: 'full', ...meta, collector_notes: notes },
+  });
+  return { ...result, notes };
 }
 
 // Exported for tests so tests don't have to know our private

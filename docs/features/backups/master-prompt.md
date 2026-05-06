@@ -1,5 +1,41 @@
 # NEXT SESSION — Backups + S3-compatible storage + restore dry-run
 
+> **Status (May 2026):** PR 1 + PR 2 both merged on branch
+> `claude/wireguard-update-Oh1q8`.  What's live:
+>
+> - Storage tab: full S3-compatible destination CRUD + Test
+>   Connection (HEAD bucket).  Migrations 200 + 201 + 202.
+> - Backups tab: on-demand + scheduled backups across all three
+>   tiers (config / config_plus_data / full).  Encrypted with
+>   AES-256-GCM, scrypt KDF, gzip(tar) body, file-end auth tag.
+> - Schedules: in-process cron worker (lib/backup-scheduler) with
+>   serial queue + retention pruning (keep N AND days N).
+> - Restore: Mode A (sandbox same host, optional Incus re-import
+>   under -restore-<id> on a private bridge) + Mode C (manifest-
+>   only).  State machine streamed to the operator via
+>   restore_runs.steps_json.
+> - Per-service health-check dispatcher (static / generic_web /
+>   postgres / n8n / meet / generic_stateful).
+> - 48 node --test cases on the pure modules; integration suite
+>   (MinIO container) is a follow-up.
+>
+> What remains for a follow-up session:
+>
+> - Mode B (different host) — explicitly punted in the spec
+>   below.
+> - argon2id KDF swap — header carries `kdf` field; the PR 2
+>   decrypt path already validates it, so the swap is a one-
+>   commit migration.
+> - Streaming pipeline for the full-tier backup — currently
+>   buffers the whole artifact in memory before encrypting +
+>   uploading; OK for small/medium installs but multi-GB needs
+>   a tmp-file-staged stream.  Wire format already supports it
+>   (auth tag at file-end).
+> - MinIO container in CI for round-trip integration tests.
+> - Per-service health checks beyond HTTP gate (postgres COUNT
+>   drift; n8n workflow parity needs an api_key wiring; generic
+>   stateful drift list comparison).
+
 Single focused session, ~3–5 days of work depending on how far you
 take the dry-run piece. Suggested split into two PRs noted at the
 end so the foundation can land first.

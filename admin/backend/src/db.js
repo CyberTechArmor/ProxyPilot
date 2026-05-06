@@ -67,6 +67,18 @@ export function getDb() {
 //   102 Phase 2c — service_detected_ports (cache for the always-visible chip row)
 //   103 Phase 2c hotfix — strip trailing `/*` from service_http_routes.path_prefix
 //   104 Phase 2c — allow_framing + frame_ancestors columns
+//   105 P  — cve_pins (per-user CVE pinning + note)
+//   200 Backups — backup_destinations (S3-compatible storage settings)
+//   201 Backups — backups (one row per packed artifact uploaded to S3)
+//   202 Backups — backup_schedules + restore_runs (PR 2)
+//   203 Backups — local_path + s3_uploaded on backups (local-first)
+//   204 Backups — backup_schedule_destinations (multi-target fan-out)
+//                 + backup_destinations on the backups table
+//                 (per-destination upload tracking)
+//   205 LXC snapshot S3 export — lxc_snapshot_s3_exports
+//   206 LXC snapshot S3 export — bytes_uploaded / bytes_total /
+//                                 cancel_requested for live progress
+//   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -786,6 +798,387 @@ export function initDatabase() {
       )
     `);
     d.exec(`CREATE INDEX IF NOT EXISTS idx_cve_pins_user ON cve_pins(user_id)`);
+  });
+
+  // Backups feature (PR 1 — foundation). One row per S3-compatible
+  // destination the operator has registered. The secret_key column
+  // stores AES-GCM ciphertext via lib/secrets.encryptSecret() — same
+  // at-rest envelope as totp_secret. test_status / test_at carry the
+  // last "test connection" verdict so the UI can surface it without
+  // re-issuing a HEAD on every page load. Exactly one row may have
+  // is_default = 1 at any time; the route layer enforces that with
+  // a transaction (SQLite has no WHERE-clause partial unique-index
+  // form that's portable across the older client we target).
+  runMigration(db, 200, 'backups_destinations', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_destinations (
+        id              TEXT PRIMARY KEY,
+        name            TEXT UNIQUE NOT NULL,
+        endpoint_url    TEXT NOT NULL,
+        bucket          TEXT NOT NULL,
+        region          TEXT,
+        path_prefix     TEXT,
+        access_key_id   TEXT NOT NULL,
+        secret_key_enc  TEXT NOT NULL,
+        use_ssl         INTEGER NOT NULL DEFAULT 1,
+        path_style      INTEGER NOT NULL DEFAULT 0,
+        storage_class   TEXT,
+        is_default      INTEGER NOT NULL DEFAULT 0,
+        test_status     TEXT,
+        test_at         TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_destinations_default
+        ON backup_destinations(is_default)
+    `);
+  });
+
+  // Backups feature — one row per packed-and-uploaded backup
+  // artifact. status starts at 'in_progress'; the route flips it
+  // to 'ok' (with size_bytes + manifest_json) or 'failed' (with
+  // error) at the end of the upload. parent_backup is reserved
+  // for incremental chains in a future round; PR 1 always sets
+  // it NULL. backup_schedules + restore_runs land in PR 2.
+  runMigration(db, 201, 'backups_artifacts', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backups (
+        id              TEXT PRIMARY KEY,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id),
+        tier            TEXT NOT NULL,
+        scope           TEXT,
+        s3_key          TEXT NOT NULL,
+        size_bytes      INTEGER NOT NULL DEFAULT 0,
+        encrypted       INTEGER NOT NULL DEFAULT 1,
+        created_by      TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        manifest_json   TEXT NOT NULL DEFAULT '{}',
+        parent_backup   TEXT REFERENCES backups(id),
+        status          TEXT NOT NULL,
+        error           TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_destination
+        ON backups(destination_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_created
+        ON backups(created_at DESC)
+    `);
+  });
+
+  // PR 2 — schedules + restore runs.
+  //
+  // backup_schedules: one row per cron-driven recurring backup.
+  // The cron worker (lib/backup-scheduler) hydrates from this
+  // table on boot and re-registers on every CRUD mutation. The
+  // last_run_* columns are updated by the worker when each
+  // scheduled job finishes; next_run_at is updated each time the
+  // schedule is (re-)registered so the UI can surface "next run
+  // in N hours" without computing the next tick from cron_expr.
+  //
+  // retention_keep + retention_days work additively: a schedule
+  // with keep=30 + days=90 prunes anything that fails BOTH gates
+  // (i.e. older than 30 backups AND older than 90 days). Either
+  // can be NULL to disable that axis.
+  //
+  // restore_runs: one row per restore attempt — both dry-run and
+  // apply land here so the dashboard's history view is uniform.
+  // steps_json carries the per-step outcomes (start/finish ts,
+  // status, optional output blob) for the live-log panel; the
+  // worker writes it incrementally as each step completes.
+  runMigration(db, 202, 'backups_schedules_and_restores', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_schedules (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id),
+        cron_expr       TEXT NOT NULL,
+        tier            TEXT NOT NULL,
+        scope           TEXT,
+        retention_keep  INTEGER NOT NULL DEFAULT 30,
+        retention_days  INTEGER,
+        passphrase_hint TEXT,
+        passphrase_enc  TEXT,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        last_run_at     TEXT,
+        last_run_status TEXT,
+        last_run_error  TEXT,
+        next_run_at     TEXT,
+        created_by      TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_schedules_destination
+        ON backup_schedules(destination_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_schedules_enabled
+        ON backup_schedules(enabled)
+    `);
+
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS restore_runs (
+        id              TEXT PRIMARY KEY,
+        backup_id       TEXT NOT NULL REFERENCES backups(id),
+        mode            TEXT NOT NULL,
+        target          TEXT NOT NULL,
+        sandbox_dir     TEXT,
+        started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at     TEXT,
+        status          TEXT NOT NULL,
+        steps_json      TEXT NOT NULL DEFAULT '[]',
+        initiated_by    TEXT NOT NULL,
+        notes           TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_backup
+        ON restore_runs(backup_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_started
+        ON restore_runs(started_at DESC)
+    `);
+  });
+
+  // Local-first backups (operator request).
+  //
+  // Pre-203 behaviour: backups went straight from packer to S3.
+  // Pulling them down for restore meant a network round-trip even
+  // when the backup was 10 minutes old.  Operators (rightly)
+  // pushed back: 'I want a local cache so download/restore is
+  // instant; S3 is for off-host durability and long-term storage.'
+  //
+  // New shape:
+  //
+  //   local_path     filesystem path of the on-disk artifact, NULL
+  //                  if the local copy was pruned by retention.
+  //   s3_uploaded    1 once the upload to the destination resolved
+  //                  successfully; 0 if local-only or if the upload
+  //                  failed.  destination_id stays NOT NULL because
+  //                  the row tracks where it eventually went; the
+  //                  bool decides whether the object is actually
+  //                  in the bucket yet.
+  //
+  // Existing rows: backfilled to local_path=NULL, s3_uploaded=1
+  // (PR 1 + PR 2 always uploaded; an existing row that has a
+  // status='ok' must be in S3, otherwise it wouldn't be here).
+  //
+  // destination_id loosened to nullable so a future commit can
+  // ship local-only backups (no S3 dest configured).  The route
+  // layer takes care of the 'no dest = local-only' path.
+  runMigration(db, 203, 'backups_local_first', (d) => {
+    // ALTER TABLE ADD COLUMN with a constant default works in
+    // SQLite and respects existing rows.  No tx wrap needed —
+    // runMigration's outer transaction covers the whole thing.
+    d.exec(`ALTER TABLE backups ADD COLUMN local_path TEXT`);
+    d.exec(`ALTER TABLE backups ADD COLUMN s3_uploaded INTEGER NOT NULL DEFAULT 0`);
+    d.exec(`UPDATE backups SET s3_uploaded = 1 WHERE status = 'ok'`);
+  });
+
+  // Multi-destination fan-out (operator request).
+  //
+  // Pre-204: each schedule + each on-demand backup pointed at
+  // exactly one destination (or none, with the local-first
+  // rework).  Operators with both an on-site MinIO and an off-
+  // site B2 want to push the same nightly backup to BOTH so a
+  // host fire doesn't take the bucket with it.
+  //
+  // Two new shapes:
+  //
+  //   backup_schedule_destinations (junction)
+  //     One row per (schedule, destination) edge.  A schedule
+  //     with zero edges is local-only; one edge = legacy
+  //     behaviour; many edges = fan-out.  ON DELETE CASCADE so
+  //     dropping a schedule or destination cleans both sides.
+  //
+  //   backup_destinations_x_backups (junction)
+  //     One row per (backup-artifact, destination) edge with
+  //     the per-destination upload state (uploaded vs failed
+  //     vs deleted) and the destination-specific S3 key.
+  //     Replaces the single backups.s3_key + backups.s3_uploaded
+  //     pair when fan-out happens; the legacy columns stay for
+  //     back-compat with PR-1/PR-2 callers and are kept in
+  //     lockstep with the junction's "first destination" row.
+  //
+  // The legacy backups.destination_id column is retained but
+  // becomes informational ("primary destination at create time").
+  // Authoritative state lives in the junction.
+  runMigration(db, 204, 'backups_multi_destination', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_schedule_destinations (
+        schedule_id    TEXT NOT NULL REFERENCES backup_schedules(id) ON DELETE CASCADE,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (schedule_id, destination_id)
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bsd_schedule
+      ON backup_schedule_destinations(schedule_id)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bsd_destination
+      ON backup_schedule_destinations(destination_id)`);
+
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_destinations_x_backups (
+        backup_id      TEXT NOT NULL REFERENCES backups(id) ON DELETE CASCADE,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        s3_key         TEXT NOT NULL,
+        status         TEXT NOT NULL CHECK(status IN ('pending','uploaded','failed','deleted')),
+        size_bytes     INTEGER,
+        error          TEXT,
+        uploaded_at    TEXT,
+        deleted_at     TEXT,
+        PRIMARY KEY (backup_id, destination_id)
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bdxb_backup
+      ON backup_destinations_x_backups(backup_id)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bdxb_destination
+      ON backup_destinations_x_backups(destination_id)`);
+
+    // Backfill: every existing schedule with a destination_id
+    // gets a junction row so fan-out reads see it.  Existing
+    // backups with s3_uploaded=1 get a junction row in
+    // 'uploaded' state targeting the same destination.
+    d.exec(`
+      INSERT OR IGNORE INTO backup_schedule_destinations (schedule_id, destination_id)
+      SELECT id, destination_id FROM backup_schedules
+      WHERE destination_id IS NOT NULL
+    `);
+    d.exec(`
+      INSERT OR IGNORE INTO backup_destinations_x_backups
+        (backup_id, destination_id, s3_key, status, size_bytes, uploaded_at)
+      SELECT id, destination_id, s3_key, 'uploaded', size_bytes, created_at
+      FROM backups
+      WHERE destination_id IS NOT NULL AND s3_uploaded = 1
+    `);
+  });
+
+  // LXC snapshot S3 export (operator request).
+  //
+  // Snapshots produced by `incus snapshot create` live exclusively
+  // on the host's Incus storage pool today.  An operator running
+  // multiple hosts wants the option to also push the snapshot
+  // tarball (`incus export`) to one or more S3 destinations so
+  // host-level disk loss doesn't take the snapshot with it.
+  //
+  // We track each (instance, snapshot, destination) export in its
+  // own table — keyed off names (no FK to a host snapshot row,
+  // since Incus snapshots aren't a DB construct in this app).  A
+  // single snapshot can have multiple export rows (one per
+  // destination) so the UI can render 'on-site ✓ · off-site ✓'
+  // alongside the existing snapshot list.
+  //
+  // status:
+  //   pending  — `incus export` started; tarball not yet on S3.
+  //   exported — tarball uploaded successfully.
+  //   failed   — either the export shell-out or the S3 upload
+  //              tripped; error column has the detail.
+  //   deleted  — tarball removed from S3 by the operator.
+  runMigration(db, 205, 'lxc_snapshot_s3_exports', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_snapshot_s3_exports (
+        id              TEXT PRIMARY KEY,
+        container_name  TEXT NOT NULL,
+        snapshot_name   TEXT NOT NULL,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        s3_key          TEXT NOT NULL,
+        size_bytes      INTEGER,
+        status          TEXT NOT NULL CHECK(status IN ('pending','exported','failed','deleted')),
+        error           TEXT,
+        started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at     TEXT,
+        created_by      TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_lxc_snap_export_container
+        ON lxc_snapshot_s3_exports(container_name, snapshot_name)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_lxc_snap_export_destination
+        ON lxc_snapshot_s3_exports(destination_id)
+    `);
+  });
+
+  // LXC snapshot S3 export — live progress (operator request).
+  //
+  // The 205 schema only captured terminal state (pending →
+  // exported / failed / deleted).  Operators want to:
+  //   * see a percentage while a multi-GB tarball uploads,
+  //   * cancel an in-flight upload from the UI,
+  //   * leave the dashboard and come back without losing
+  //     progress visibility.
+  //
+  // bytes_uploaded + bytes_total are written by the Upload's
+  // httpUploadProgress callback (throttled to ~once/500ms so the
+  // DB doesn't churn on every chunk).  cancel_requested is the
+  // poll-and-abort signal — the route layer flips it to 1, the
+  // upload promise's progress callback observes it next tick,
+  // calls upload.abort(), and the helper records status='failed'
+  // with error='canceled by operator'.
+  runMigration(db, 206, 'lxc_snapshot_s3_exports_progress', (d) => {
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN bytes_uploaded INTEGER NOT NULL DEFAULT 0`);
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN bytes_total INTEGER`);
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0`);
+  });
+
+  // Durable notifications.
+  //
+  // Pre-300: the bell + unread count in Layout.jsx were powered
+  // entirely by the in-memory toast history (cap 50, lost on
+  // refresh).  Fine for ephemeral 'I just clicked Save' feedback
+  // but useless for things the operator needs to see hours later
+  // — like 'last night's backup failed' or 'S3 destination has
+  // been unreachable for 12h'.
+  //
+  // Schema notes:
+  //   level         info | warning | error
+  //   source        free-form short string identifying which
+  //                 subsystem fired this — 'backup-schedule' /
+  //                 'backup-s3-healthcheck' / 'firewall' / etc.
+  //                 The route layer doesn't enforce a vocabulary
+  //                 since each subsystem owns its own keys.
+  //   source_id     optional id of the subject row (e.g. a
+  //                 backup_destinations.id when the source is
+  //                 'backup-s3-healthcheck').  Lets the UI link
+  //                 the notification to its origin without us
+  //                 needing a polymorphic FK.
+  //   dedupe_key    when set, posting a new notification with
+  //                 the same dedupe_key updates the existing
+  //                 row's body + last_seen_at instead of
+  //                 inserting a new one.  Keeps the bell from
+  //                 flooding when a daily probe fails 30 days
+  //                 in a row.
+  //   read_at       NULL until the operator clicks/dismisses;
+  //                 unread count = COUNT(*) WHERE read_at IS NULL.
+  runMigration(db, 300, 'notifications', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id            TEXT PRIMARY KEY,
+        level         TEXT NOT NULL CHECK(level IN ('info', 'warning', 'error')),
+        title         TEXT NOT NULL,
+        body          TEXT,
+        source        TEXT NOT NULL,
+        source_id     TEXT,
+        dedupe_key    TEXT,
+        seen_count    INTEGER NOT NULL DEFAULT 1,
+        first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        read_at       TEXT,
+        dismissed_at  TEXT
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_unread
+      ON notifications(read_at, last_seen_at DESC)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_source
+      ON notifications(source, source_id)`);
+    d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe
+      ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   });
 
   // Create file versions table for version control

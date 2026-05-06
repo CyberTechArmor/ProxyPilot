@@ -284,6 +284,75 @@ rm /opt/proxypilot/data/proxypilot.db
 docker compose -f /opt/proxypilot/docker-compose.yml restart
 ```
 
+### Backups + S3 storage + restore dry-run
+
+The Housekeeping page exposes a **Backups** tab driving:
+
+- **Three tiers** of on-demand or scheduled backup:
+  - `config` (~50 KB): SQLite dump as JSON, `.env`, `cve-inbox/` YAMLs.
+  - `config_plus_data` (~10-100 MB): adds `/etc/caddy/`,
+    `/etc/wireguard/`, ACME certs, per-service Caddy file roots.
+  - `full` (multi-GB): adds per-volume Docker tarballs +
+    per-instance `incus export`.
+- **S3-compatible storage** via the **Storage** tab — MinIO,
+  Cloudflare R2, Backblaze B2, AWS S3, Wasabi all work; secrets
+  encrypted at rest with the same envelope as TOTP secrets.
+- **Schedules** (cron syntax) with serial-queue worker and
+  retention pruning (`keep N` AND/OR `delete > N days`).
+- **Restore dry-run**: Mode A (sandbox same host — extracts to a
+  per-run sandbox dir, can re-import Incus instances under
+  `-restore-<short-id>` on a private bridge) or Mode C
+  (manifest-only — verifies every file's sha256 without touching
+  disk).
+
+Wire format: `[4 BE uint32 header_len][JSON header][AES-256-GCM
+ciphertext][16 B GCM tag]`. Body is `gzip(tar(...))`. Header
+carries the KDF (currently scrypt; argon2id swap is a versioning-
+field flip away).
+
+The passphrase used for backup encryption is **never** persisted
+for on-demand backups; it is stored encrypted at rest for
+schedules so the cron worker can run unattended. **Lose the
+passphrase and the backup is unrecoverable.**
+
+### WireGuard VPN: peer connects but throughput is poor or fragmented
+
+ProxyPilot pins a WireGuard `MTU = 1280` on every generated config
+(server-side `wg0.conf` and every `proxypilot vpn peer add` client
+config). 1280 is IPv6's minimum guaranteed MTU and clears every
+common encapsulation overhead stack (PPPoE, double-NAT, mobile
+carriers, Cloudflare Tunnel, Tailscale-over-WG) without
+fragmentation.
+
+If you see a working handshake but stalled large transfers, check
+that **both ends agree on MTU**:
+
+```bash
+# Server side
+sudo wg show wg0
+ip link show wg0          # MTU column should read 1280
+
+# Client side (Linux)
+ip link show wg0          # MTU should also be 1280
+```
+
+Operators on a known all-Ethernet path who want the extra throughput
+can override the default by setting `PROXYPILOT_VPN_MTU=<n>` in the
+shell that runs `proxypilot vpn peer add` (or that runs `update.sh`,
+which retro-fits the value via `scripts/patch-wg-mtu.sh`). Valid
+range is 576-9000; out-of-range values are silently ignored and the
+1280 default is used instead.
+
+To change the MTU on an already-deployed wg0 in place:
+
+```bash
+sudo PROXYPILOT_VPN_MTU=1380 \
+    /opt/proxypilot/scripts/patch-wg-mtu.sh
+```
+
+The script is idempotent — re-running it on a config that already
+has the desired MTU is a no-op.
+
 ---
 
 ## Contributing

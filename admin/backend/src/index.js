@@ -19,9 +19,13 @@ import { vpnRouter } from './routes/vpn.js';
 import { securityRouter } from './routes/security.js';
 import { cvesRouter } from './routes/cves.js';
 import { housekeepingRouter } from './routes/housekeeping.js';
+import { backupsRouter } from './routes/backups.js';
+import { notificationsRouter } from './routes/notifications.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
+import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
+import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -213,6 +217,8 @@ app.use('/api/vpn', authenticateToken, vpnRouter);
 app.use('/api/security', authenticateToken, securityRouter);
 app.use('/api/cves', authenticateToken, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, housekeepingRouter);
+app.use('/api/backups', authenticateToken, backupsRouter);
+app.use('/api/notifications', authenticateToken, notificationsRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
@@ -294,6 +300,24 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     } catch (err) {
       console.error('[L4-startup] failed:', err.message || err);
+    }
+    try {
+      // Hydrate the backup-schedule cron worker.  Each enabled
+      // row in backup_schedules registers a node-cron task; the
+      // worker drains a serial queue so concurrent ticks can't
+      // saturate disk with parallel `incus export` runs.
+      hydrateBackupSchedules();
+    } catch (err) {
+      console.error('[backup-scheduler] hydrate threw:', err.message || err);
+    }
+    try {
+      // Daily S3 connection-test cron — probes every destination
+      // at 02:30 host time (overridable via
+      // PROXYPILOT_S3_HEALTHCHECK_CRON) and posts an error
+      // notification on failure.
+      hydrateS3Healthcheck();
+    } catch (err) {
+      console.error('[s3-healthcheck] hydrate threw:', err.message || err);
     }
   });
 });

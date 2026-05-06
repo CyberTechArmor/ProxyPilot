@@ -333,6 +333,28 @@ export default function LxcContainers() {
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
+  // Optional S3 fan-out for the snapshot.  Empty array = local-
+  // only (the legacy behaviour, default).  Populated only when
+  // the operator picks one or more destinations in the snapshot
+  // dialog.
+  const [snapshotS3DestinationIds, setSnapshotS3DestinationIds] = useState([]);
+  // Backup destinations available for the multi-select; loaded
+  // lazily when the snapshot dialog mounts so we don't pay the
+  // network round-trip on every container detail render.
+  const [backupDestinations, setBackupDestinations] = useState([]);
+  // Retroactive 'Push to S3' picker: when set, opens a small
+  // dialog scoped to one snapshot row.  Operator picks one or
+  // more destinations and the existing fan-out kicks off
+  // asynchronously.
+  const [pushSnapshotName, setPushSnapshotName] = useState(null);
+  const [pushDestinationIds, setPushDestinationIds] = useState([]);
+  const [pushBusy, setPushBusy] = useState(false);
+  // Set of export-row IDs currently being canceled (prevents
+  // double-clicks while the cancel round-trip is in flight).
+  const [cancelingExportIds, setCancelingExportIds] = useState(new Set());
+  // Per-snapshot S3 export state, keyed by snapshot name → array
+  // of { destination_id, destination_name, status, error?, ... }.
+  const [snapshotS3Exports, setSnapshotS3Exports] = useState({});
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   // Progress for the in-flight `Create snapshot` job. Driven by polling
   // /lxc/containers/:name/snapshot-jobs/:jobId. Shape:
@@ -761,12 +783,26 @@ export default function LxcContainers() {
     setTerminalCwd('');
     setInfoOpen(true);
     try {
-      const [stateRes, snapRes] = await Promise.all([
+      const [stateRes, snapRes, expRes, destRes] = await Promise.all([
         api.getLxcContainerState(container.name).catch(() => null),
         api.getLxcSnapshots(container.name).catch(() => ({ snapshots: [] })),
+        // Per-snapshot S3 export rows.  Cheap (small DB query)
+        // and needed before the snapshots list renders so the
+        // 'on-site / off-site' chips are accurate on first paint.
+        api.getLxcSnapshotExports(container.name).catch(() => ({ exports: [] })),
+        // Backup destinations for the 'Also push to S3' picker.
+        // Fetched here (rather than on dialog mount) so the
+        // multi-select renders without a flash on open.
+        api.backupsListStorage().catch(() => ({ destinations: [] })),
       ]);
       if (stateRes) setContainerState(stateRes.state);
       setSnapshots(snapRes.snapshots || []);
+      const grouped = {};
+      for (const r of expRes.exports || []) {
+        (grouped[r.snapshot_name] ||= []).push(r);
+      }
+      setSnapshotS3Exports(grouped);
+      setBackupDestinations(destRes.destinations || []);
     } catch {
       // Silently fail for detail fetch
     }
@@ -1137,6 +1173,135 @@ export default function LxcContainers() {
     }
   };
 
+  // Refresh the per-snapshot S3 export rows for the currently-
+  // selected container.  Used by the polling effect below + by
+  // any handler that needs an immediate refresh after a state
+  // change (push, cancel, delete).
+  const refreshSnapshotExports = async () => {
+    if (!selectedContainer) return;
+    try {
+      const r = await api.getLxcSnapshotExports(selectedContainer.name);
+      const grouped = {};
+      for (const e of r.exports || []) {
+        (grouped[e.snapshot_name] ||= []).push(e);
+      }
+      setSnapshotS3Exports(grouped);
+    } catch { /* tolerated */ }
+  };
+
+  // While ANY snapshot export is in 'pending' state, poll the
+  // exports endpoint every 2.5s so the operator sees the
+  // progress percentage advance.  Polling stops automatically
+  // when nothing's pending.  Survives page refresh because
+  // pending state lives in the DB, not in this component.
+  useEffect(() => {
+    if (!selectedContainer) return undefined;
+    const anyPending = Object.values(snapshotS3Exports).some(
+      (rows) => rows.some((r) => r.status === 'pending')
+    );
+    if (!anyPending) return undefined;
+    const id = setInterval(refreshSnapshotExports, 2500);
+    return () => clearInterval(id);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [snapshotS3Exports, selectedContainer]);
+
+  // Open the 'Push to S3' picker for a specific snapshot.
+  // Default-selects every destination not already exported to.
+  const openPushDialog = (snapshotName) => {
+    const existing = (snapshotS3Exports[snapshotName] || [])
+      .filter((e) => e.status === 'exported' || e.status === 'pending')
+      .map((e) => e.destination_id);
+    const candidates = backupDestinations
+      .filter((d) => !existing.includes(d.id))
+      .map((d) => d.id);
+    setPushSnapshotName(snapshotName);
+    setPushDestinationIds(candidates);
+  };
+
+  const submitPushDialog = async () => {
+    if (!selectedContainer || !pushSnapshotName) return;
+    if (pushDestinationIds.length === 0) {
+      toast({
+        title: 'No destinations selected',
+        description: 'Pick at least one destination to push to.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setPushBusy(true);
+    try {
+      const r = await api.exportLxcSnapshotToS3(
+        selectedContainer.name, pushSnapshotName, pushDestinationIds,
+      );
+      toast({
+        title: 'Push started',
+        description: `Uploading ${pushSnapshotName} to ${r.queued} destination${r.queued === 1 ? '' : 's'}.`,
+      });
+      setPushSnapshotName(null);
+      setPushDestinationIds([]);
+      // Immediate refresh so the 'pending' chips render.  The
+      // polling effect takes over from there.
+      await refreshSnapshotExports();
+    } catch (err) {
+      toast({
+        title: 'Push failed to start',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const cancelSnapshotExport = async (snapshotName, exportId) => {
+    if (!selectedContainer || cancelingExportIds.has(exportId)) return;
+    setCancelingExportIds((prev) => new Set(prev).add(exportId));
+    try {
+      const r = await api.cancelLxcSnapshotS3Export(
+        selectedContainer.name, snapshotName, exportId,
+      );
+      if (r.alreadyFinished) {
+        toast({
+          title: 'Already finished',
+          description: `Export already in '${r.status}' state.`,
+        });
+      } else {
+        toast({ title: 'Cancel requested', description: 'Upload will abort shortly.' });
+      }
+      await refreshSnapshotExports();
+    } catch (err) {
+      toast({
+        title: 'Cancel failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setCancelingExportIds((prev) => {
+        const next = new Set(prev);
+        next.delete(exportId);
+        return next;
+      });
+    }
+  };
+
+  const deleteSnapshotS3Copy = async (snapshotName, exportId, destinationName) => {
+    if (!selectedContainer) return;
+    if (!window.confirm(`Remove the S3 copy of "${snapshotName}" from ${destinationName || 'this destination'}?  Local snapshot stays.`)) return;
+    try {
+      await api.deleteLxcSnapshotS3Export(
+        selectedContainer.name, snapshotName, exportId,
+      );
+      toast({ title: 'S3 copy removed', description: `${snapshotName} deleted from ${destinationName || 'destination'}.` });
+      await refreshSnapshotExports();
+    } catch (err) {
+      toast({
+        title: 'Delete failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+    }
+  };
+
   // Download a previously-taken snapshot as a tarball. incus's export
   // accepts <container>/<snapshot>, so the backend just streams that
   // pipe; the UI side reuses the same progress wiring as handleExport.
@@ -1311,7 +1476,9 @@ export default function LxcContainers() {
       status: 'running',
     });
     try {
-      const start = await api.createLxcSnapshot(ctName, sName, snapshotNote.trim());
+      const start = await api.createLxcSnapshot(
+        ctName, sName, snapshotNote.trim(), snapshotS3DestinationIds,
+      );
       const jobId = start?.jobId;
       if (!jobId) {
         // Older backend without async support — treat the response as
@@ -1340,8 +1507,28 @@ export default function LxcContainers() {
       }
       setSnapshotName('');
       setSnapshotNote('');
+      setSnapshotS3DestinationIds([]);
       const snapRes = await api.getLxcSnapshots(ctName);
       setSnapshots(snapRes.snapshots || []);
+      // Refresh S3 export rows so the snapshots list shows the
+      // 'pending' / 'exported' chips for the just-fired fan-out.
+      // The backend fan-out runs detached and inserts the rows
+      // a moment after the snapshot itself completes, so we
+      // refresh once immediately + once again after 1.5s to
+      // catch the inserts.  After that, the polling effect
+      // (driven by snapshotS3Exports state) takes over.
+      try {
+        const exp = await api.getLxcSnapshotExports(ctName);
+        const grouped = {};
+        for (const r of exp.exports || []) {
+          (grouped[r.snapshot_name] ||= []).push(r);
+        }
+        setSnapshotS3Exports(grouped);
+      } catch { /* tolerated */ }
+      if (snapshotS3DestinationIds.length > 0) {
+        // Detached delayed refresh — race-window catch.
+        setTimeout(() => { refreshSnapshotExports(); }, 1500);
+      }
     } catch (err) {
       toast({ title: 'Snapshot failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -2927,6 +3114,58 @@ export default function LxcContainers() {
                         )}
                       </Button>
                     </div>
+                    {/* S3 fan-out picker: snapshots default to local-
+                        only (just `incus snapshot create`).  When the
+                        operator checks one or more destinations, the
+                        backend ALSO runs `incus export` after the
+                        snapshot completes and pushes the tarball to
+                        each picked destination. */}
+                    {backupDestinations.length > 0 && (
+                      <details className="border rounded text-xs">
+                        <summary className="cursor-pointer px-2 py-1.5 select-none flex items-center justify-between gap-2">
+                          <span className="text-muted-foreground">
+                            Also push to S3
+                            {snapshotS3DestinationIds.length > 0 && (
+                              <span className="ml-1 text-foreground font-medium">
+                                ({snapshotS3DestinationIds.length} selected)
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            optional
+                          </span>
+                        </summary>
+                        <div className="border-t p-2 space-y-1 max-h-32 overflow-y-auto">
+                          {backupDestinations.map((d) => (
+                            <label
+                              key={d.id}
+                              className="flex items-center gap-2 cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={snapshotS3DestinationIds.includes(d.id)}
+                                onChange={() => setSnapshotS3DestinationIds((prev) =>
+                                  prev.includes(d.id)
+                                    ? prev.filter((x) => x !== d.id)
+                                    : [...prev, d.id]
+                                )}
+                              />
+                              <span className="font-medium truncate flex-1">
+                                {d.name}{d.is_default ? ' (default)' : ''}
+                              </span>
+                              <span className="text-muted-foreground font-mono text-[10px] truncate">
+                                {d.bucket}
+                              </span>
+                            </label>
+                          ))}
+                          <p className="text-[10px] text-muted-foreground pt-1 border-t">
+                            Snapshot lives on this host's Incus pool either way. Picking
+                            destinations runs <code>incus export</code> after the snapshot
+                            and uploads the tarball to each.
+                          </p>
+                        </div>
+                      </details>
+                    )}
                     {/* In-flight snapshot progress: elapsed timer plus a
                         remaining-time hint when the backend has prior
                         durations to estimate from. Stays scoped to the
@@ -2994,12 +3233,99 @@ export default function LxcContainers() {
                                   {snap.created_at && (
                                     <span className="ml-1 text-muted-foreground">{formatDate(snap.created_at)}</span>
                                   )}
+                                  {/* Inline size next to the date.  Prefers the
+                                      local-storage measurement (snap.size from
+                                      the backend's storage-volume enrichment)
+                                      and falls back to the S3 export's
+                                      bytes_total when local sizing isn't
+                                      exposed (older Incus / certain storage
+                                      backends).  Hidden when no signal is
+                                      available either way. */}
+                                  {(() => {
+                                    const localSize = snap.size > 0 ? snap.size : null;
+                                    const exportBytes = (snapshotS3Exports[sName] || [])
+                                      .map((e) => e.bytes_total || e.size_bytes)
+                                      .find((v) => v && v > 0);
+                                    const sizeBytes = localSize ?? exportBytes ?? null;
+                                    if (!sizeBytes) return null;
+                                    return (
+                                      <span
+                                        className="ml-1.5 px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground text-[10px] font-mono"
+                                        title={localSize
+                                          ? 'Local snapshot disk usage'
+                                          : 'Compressed tarball size from S3 export (local size not exposed by storage backend)'}
+                                      >
+                                        {formatSize(sizeBytes)}
+                                      </span>
+                                    );
+                                  })()}
                                   {notes.length > 0 && (
                                     <span className="ml-1 text-muted-foreground flex items-center gap-0.5">
                                       <StickyNote className="h-3 w-3" />
                                       {notes.length}
                                     </span>
                                   )}
+                                  {/* S3 export chips: one per
+                                      destination this snapshot
+                                      was pushed to.  Tooltip
+                                      carries the destination
+                                      name + bucket so an
+                                      operator can disambiguate
+                                      'on-site' from 'off-site'
+                                      without expanding the row. */}
+                                  {(snapshotS3Exports[sName] || []).map((e) => {
+                                    const pct = (e.bytes_total && e.bytes_total > 0)
+                                      ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
+                                      : null;
+                                    const labelText = `${e.destination_name || e.destination_id}${e.destination_bucket ? ` · ${e.destination_bucket}` : ''}${e.error ? ` — ${e.error}` : ''}`;
+                                    return (
+                                      <span
+                                        key={e.id}
+                                        title={labelText}
+                                        className={`ml-1 inline-flex items-center gap-0.5 text-[10px] px-1 rounded border ${
+                                          e.status === 'exported'
+                                            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                            : e.status === 'failed'
+                                            ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'
+                                            : e.status === 'deleted'
+                                            ? 'bg-muted text-muted-foreground border-border'
+                                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                        }`}
+                                      >
+                                        {e.status === 'pending' ? (
+                                          e.cancel_requested
+                                            ? <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                            : '⋯'
+                                        ) : e.status === 'exported' ? '✓' : e.status === 'failed' ? '✕' : '·'}
+                                        {' '}
+                                        {(e.destination_name || 'S3').slice(0, 12)}
+                                        {e.status === 'pending' && pct !== null && (
+                                          <span className="font-mono ml-1">{pct}%</span>
+                                        )}
+                                        {e.status === 'pending' && !e.cancel_requested && (
+                                          <button
+                                            type="button"
+                                            onClick={(ev) => { ev.stopPropagation(); cancelSnapshotExport(sName, e.id); }}
+                                            disabled={cancelingExportIds.has(e.id)}
+                                            className="ml-1 hover:text-foreground disabled:opacity-50"
+                                            title="Cancel this upload"
+                                          >
+                                            ✕
+                                          </button>
+                                        )}
+                                        {e.status === 'exported' && (
+                                          <button
+                                            type="button"
+                                            onClick={(ev) => { ev.stopPropagation(); deleteSnapshotS3Copy(sName, e.id, e.destination_name); }}
+                                            className="ml-1 hover:text-red-500 opacity-60"
+                                            title={`Remove from ${e.destination_name || 'destination'}`}
+                                          >
+                                            🗑
+                                          </button>
+                                        )}
+                                      </span>
+                                    );
+                                  })}
                                 </div>
                                 <div className="flex gap-1">
                                   <Button
@@ -3012,6 +3338,17 @@ export default function LxcContainers() {
                                   >
                                     <Download className="h-3 w-3" />
                                   </Button>
+                                  {backupDestinations.length > 0 && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
+                                      onClick={() => openPushDialog(sName)}
+                                      title="Push this snapshot to one or more S3 destinations"
+                                    >
+                                      Push to S3
+                                    </Button>
+                                  )}
                                   <Button
                                     variant="ghost"
                                     size="sm"
@@ -3032,19 +3369,13 @@ export default function LxcContainers() {
                                   </Button>
                                 </div>
                               </div>
-                              {/* Snapshot detail row: size, stateful, expiry,
-                                  architecture. Each chip is conditionally
-                                  rendered so empty snapshots stay tidy.
-                                  Size comes from the backend's storage-volume
-                                  enrichment and is absent on backends that
-                                  don't expose per-snapshot usage. */}
-                              {(snap.size > 0 || snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
+                              {/* Snapshot detail row: stateful, expiry,
+                                  architecture.  Size moved inline next to
+                                  the snapshot name so an operator scanning
+                                  the list sees disk impact at a glance
+                                  without expanding details. */}
+                              {(snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
                                 <div className="flex flex-wrap items-center gap-1.5 mt-1 ml-5 text-[10.5px] text-muted-foreground">
-                                  {snap.size > 0 && (
-                                    <span className="px-1.5 py-0.5 rounded bg-muted/60" title="Disk space used by this snapshot">
-                                      {formatSize(snap.size)}
-                                    </span>
-                                  )}
                                   {snap.stateful && (
                                     <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30" title="Captured running memory state in addition to filesystem">
                                       stateful
@@ -3475,6 +3806,86 @@ export default function LxcContainers() {
               ) : (
                 'Apply Changes'
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Push-to-S3 dialog: scoped to one snapshot row.  Default-
+          selects every destination not already exported to so
+          common-case clicks ('push to all configured') are
+          one-click.  Operator can deselect; submit posts to the
+          retroactive S3 export route.  Live progress + cancel
+          surface back on the snapshot row's chips via the
+          polling effect. */}
+      <Dialog
+        open={!!pushSnapshotName}
+        onOpenChange={(o) => { if (!o && !pushBusy) setPushSnapshotName(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Push snapshot to S3</DialogTitle>
+            <DialogDescription>
+              Push <code className="font-mono text-xs">{pushSnapshotName}</code> to one or more
+              S3 destinations.  Local snapshot stays where it is — this is an additional
+              off-host copy.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            {backupDestinations.length === 0 ? (
+              <p className="text-xs text-muted-foreground italic">
+                No destinations configured.  Add one under Housekeeping → Storage first.
+              </p>
+            ) : (
+              <div className="border rounded p-2 max-h-48 overflow-y-auto text-xs space-y-1">
+                {backupDestinations.map((d) => {
+                  const exported = (snapshotS3Exports[pushSnapshotName] || [])
+                    .find((e) => e.destination_id === d.id
+                      && (e.status === 'exported' || e.status === 'pending'));
+                  return (
+                    <label
+                      key={d.id}
+                      className={`flex items-center gap-2 py-0.5 rounded px-1 ${
+                        exported ? 'opacity-60' : 'cursor-pointer hover:bg-muted/40'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={pushDestinationIds.includes(d.id)}
+                        disabled={!!exported}
+                        onChange={() => setPushDestinationIds((prev) =>
+                          prev.includes(d.id)
+                            ? prev.filter((x) => x !== d.id)
+                            : [...prev, d.id]
+                        )}
+                      />
+                      <span className="font-medium truncate flex-1">
+                        {d.name}{d.is_default ? ' (default)' : ''}
+                      </span>
+                      <span className="text-muted-foreground font-mono text-[10px] truncate">
+                        {exported ? `(${exported.status})` : d.bucket}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              Already-exported / in-flight destinations are pre-disabled.  The push runs
+              asynchronously — leaving the page is safe; progress chips on the snapshot
+              row resume on return.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPushSnapshotName(null)} disabled={pushBusy}>
+              Cancel
+            </Button>
+            <Button
+              onClick={submitPushDialog}
+              disabled={pushBusy || pushDestinationIds.length === 0 || backupDestinations.length === 0}
+            >
+              {pushBusy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Push to {pushDestinationIds.length === 0 ? 'S3' : `${pushDestinationIds.length} destination${pushDestinationIds.length === 1 ? '' : 's'}`}
             </Button>
           </DialogFooter>
         </DialogContent>

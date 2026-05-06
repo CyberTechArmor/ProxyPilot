@@ -14,6 +14,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
+import {
+  fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
+  cancelSnapshotExport,
+} from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
 
@@ -3243,6 +3247,16 @@ function pruneSnapshotJobs() {
 lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   const { name } = req.params;
   const { snapshotName, note } = req.body;
+  // Optional S3 fan-out: when the operator picked one or more
+  // destinations in the snapshot dialog, the body carries a
+  // s3_destination_ids array.  After the snapshot itself
+  // completes successfully we kick off
+  // fanOutSnapshotExport() in the background — the kickoff
+  // response returns immediately with the snapshot jobId so the
+  // existing UI polling logic stays unchanged.
+  const s3DestinationIds = Array.isArray(req.body?.s3_destination_ids)
+    ? req.body.s3_destination_ids.filter((s) => typeof s === 'string')
+    : [];
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -3256,6 +3270,22 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
       success: false,
       error: 'Invalid snapshot name. Only alphanumeric characters and hyphens are allowed.',
     });
+  }
+
+  // Resolve destinations up front so an operator typo 4xx's
+  // before the snapshot starts.  Also keeps the rows we'll
+  // pass to fanOutSnapshotExport stable across the long-running
+  // shell-out below.
+  const s3Destinations = [];
+  for (const did of s3DestinationIds) {
+    const dest = getDb().prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(did);
+    if (!dest) {
+      return res.status(404).json({
+        success: false,
+        error: `S3 destination not found: ${did}`,
+      });
+    }
+    s3Destinations.push(dest);
   }
 
   pruneSnapshotJobs();
@@ -3327,6 +3357,29 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
       } catch (err) {
         console.error('[LXC] failed to record snapshot duration:', err.message);
       }
+
+      // S3 fan-out: only fires when the operator picked one or
+      // more destinations.  Runs in the background so the UI's
+      // existing snapshot-job polling sees status='done' as
+      // soon as the local snapshot completes; per-destination
+      // export state is queryable via GET
+      // /containers/:name/snapshot-exports.
+      if (s3Destinations.length > 0) {
+        job.s3DestinationCount = s3Destinations.length;
+        job.s3DestinationIds = s3Destinations.map((d) => d.id);
+        // Detached promise — failures are recorded in the
+        // lxc_snapshot_s3_exports table + bell notifications,
+        // not on the snapshot job itself.
+        fanOutSnapshotExport({
+          containerName: name,
+          incusName,
+          snapshotName,
+          destinations: s3Destinations,
+          audit: { user_id: req.user?.id || null, ip: req.ip },
+        }).catch((err) => {
+          console.error('[LXC] snapshot S3 fan-out threw:', err?.message || err);
+        });
+      }
     } else {
       job.status = 'error';
       const out = (stderr || stdout || '').trim();
@@ -3341,7 +3394,132 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
     success: true,
     jobId,
     estimateMs,
-    message: `Snapshot '${snapshotName}' creation started for container '${name}'.`,
+    s3_destination_count: s3Destinations.length,
+    s3_destination_ids: s3Destinations.map((d) => d.id),
+    message: s3Destinations.length === 0
+      ? `Snapshot '${snapshotName}' creation started for container '${name}'.`
+      : `Snapshot '${snapshotName}' creation started for container '${name}'; will fan out to ${s3Destinations.length} S3 destination(s) on success.`,
+  });
+});
+
+// GET /containers/:name/snapshot-exports — list every S3 export
+// row for this container.  Used by the snapshots panel to render
+// 'on-site ✓ · off-site ✗' chips next to each snapshot row.
+lxcRouter.get('/containers/:name/snapshot-exports', (req, res) => {
+  const { name } = req.params;
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid container name.' });
+  }
+  const rows = listSnapshotExports({ containerName: name });
+  res.json({
+    success: true,
+    exports: rows.map((r) => ({
+      id: r.id,
+      snapshot_name: r.snapshot_name,
+      destination_id: r.destination_id,
+      destination_name: r.destination_name || null,
+      destination_bucket: r.destination_bucket || null,
+      s3_key: r.s3_key,
+      size_bytes: r.size_bytes,
+      status: r.status,
+      error: r.error || null,
+      started_at: r.started_at,
+      finished_at: r.finished_at || null,
+      // Live progress (post-206).  bytes_total is set from the
+      // tarball size at the start of the upload; bytes_uploaded
+      // is updated every ~500ms by the Upload's progress event.
+      // cancel_requested = 1 means the operator clicked Cancel
+      // and the worker is mid-abort.
+      bytes_uploaded: r.bytes_uploaded || 0,
+      bytes_total: r.bytes_total || null,
+      cancel_requested: !!r.cancel_requested,
+    })),
+  });
+});
+
+// POST /containers/:name/snapshot/:snapshotName/s3-export — kick
+// off an S3 export for an existing local snapshot.  Lets the
+// operator export a snapshot that was originally created
+// without S3 fan-out (or push it to additional destinations
+// after the fact).  Returns immediately; per-destination state
+// lands in the exports table.
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req, res) => {
+  const { name, snapshotName } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid container or snapshot name.' });
+  }
+  const ids = Array.isArray(req.body?.destination_ids)
+    ? req.body.destination_ids.filter((s) => typeof s === 'string')
+    : [];
+  if (ids.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'destination_ids array is required (at least one destination).',
+    });
+  }
+  const destinations = [];
+  for (const did of ids) {
+    const dest = getDb().prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(did);
+    if (!dest) {
+      return res.status(404).json({ success: false, error: `destination not found: ${did}` });
+    }
+    destinations.push(dest);
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  // Detached: respond immediately, the fan-out runs in the
+  // background and updates lxc_snapshot_s3_exports as it goes.
+  fanOutSnapshotExport({
+    containerName: name, incusName, snapshotName, destinations,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  }).catch((err) => {
+    console.error('[LXC] retroactive snapshot S3 fan-out threw:', err?.message || err);
+  });
+  res.json({
+    success: true,
+    queued: destinations.length,
+    destination_ids: destinations.map((d) => d.id),
+  });
+});
+
+// DELETE /containers/:name/snapshot/:snapshotName/s3-export/:exportId
+// Removes a single S3 copy of a snapshot export.  The local
+// snapshot itself stays — the dashboard's standard
+// `incus snapshot delete` flow handles that.
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId', async (req, res) => {
+  const { exportId } = req.params;
+  const out = await deleteSnapshotExport({
+    exportId,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  });
+  if (!out.ok) {
+    return res.status(out.error === 'export not found' ? 404 : 502).json({
+      success: false, error: out.error,
+    });
+  }
+  res.json({ success: true, alreadyDeleted: !!out.alreadyDeleted });
+});
+
+// POST /containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel
+// Aborts an in-flight upload.  Idempotent: cancelling a row
+// that's already terminal returns alreadyFinished=true.
+// The export row's status flips to 'failed' with
+// error='canceled by operator' once the upload's done()
+// promise rejects on the next event-loop tick.
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel', async (req, res) => {
+  const { exportId } = req.params;
+  const out = await cancelSnapshotExport({
+    exportId,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  });
+  if (!out.ok) {
+    return res.status(out.error === 'export not found' ? 404 : 500).json({
+      success: false, error: out.error,
+    });
+  }
+  res.json({
+    success: true,
+    alreadyFinished: !!out.alreadyFinished,
+    status: out.status || 'pending',
   });
 });
 

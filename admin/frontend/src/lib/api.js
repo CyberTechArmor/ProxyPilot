@@ -47,7 +47,26 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
     credentials: 'include',
   });
 
-  const data = await response.json();
+  // Defensive parse: an empty body or non-JSON body would throw
+  // 'Unexpected end of JSON input' which is unhelpful to the
+  // operator.  Surface the actual HTTP status text + raw body
+  // snippet instead so the toast says something actionable.
+  let data;
+  try {
+    const text = await response.text();
+    data = text.length === 0 ? {} : JSON.parse(text);
+  } catch (parseErr) {
+    if (response.ok) {
+      // Successful status with non-JSON body (e.g. plain text
+      // health endpoint).  Treat as empty payload.
+      data = {};
+    } else {
+      throw new ApiError(
+        `${response.status} ${response.statusText || 'error'} (no JSON body)`,
+        response.status,
+      );
+    }
+  }
 
   if (response.status === 401) {
     // Sudo gate: backend wants password+TOTP re-auth before letting
@@ -652,10 +671,50 @@ export const api = {
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
-  createLxcSnapshot: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot`, {
-    method: 'POST',
-    body: JSON.stringify({ snapshotName, note }),
-  }),
+  // Optional s3DestinationIds: when supplied, the backend kicks
+  // off an `incus export` after the snapshot completes locally
+  // and pushes the tarball to each destination.  Empty/undef =
+  // local-only (legacy behaviour).
+  createLxcSnapshot: (name, snapshotName, note, s3DestinationIds) =>
+    request(`/lxc/containers/${name}/snapshot`, {
+      method: 'POST',
+      body: JSON.stringify({
+        snapshotName,
+        note,
+        s3_destination_ids: Array.isArray(s3DestinationIds) ? s3DestinationIds : [],
+      }),
+    }),
+
+  // Per-snapshot S3 export rows (one per destination).  Used by
+  // the snapshots panel to render 'on-site ✓ · off-site ✗'
+  // chips next to each snapshot.
+  getLxcSnapshotExports: (name) =>
+    request(`/lxc/containers/${name}/snapshot-exports`),
+
+  // Retroactive export: push an existing local snapshot to one
+  // or more S3 destinations after the fact.
+  exportLxcSnapshotToS3: (name, snapshotName, destinationIds) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ destination_ids: destinationIds }),
+      },
+    ),
+
+  deleteLxcSnapshotS3Export: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}`,
+      { method: 'DELETE' },
+    ),
+
+  // Cancel an in-flight S3 export.  No-op when the row already
+  // reached a terminal state (returns { alreadyFinished: true }).
+  cancelLxcSnapshotS3Export: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/cancel`,
+      { method: 'POST' },
+    ),
 
   // Poll an in-flight snapshot job kicked off by createLxcSnapshot.
   // Returns { status, elapsedMs, estimateMs, error? }.
@@ -990,6 +1049,103 @@ export const api = {
   housekeepingUsage: () => request('/housekeeping/usage'),
   housekeepingPrune: (body) =>
     request('/housekeeping/prune', { method: 'POST', body: JSON.stringify(body) }),
+
+  // Backups → Storage tab. CRUD on S3-compatible destinations + a
+  // 'test connection' verb that HEADs the configured bucket.
+  // secret_key is write-only — the GET path never returns it.
+  // Server enforces 'at most one default'; clients can mark a
+  // different row default and the previous one flips off.
+  backupsListStorage: () => request('/backups/storage'),
+  backupsCreateStorage: (body) =>
+    request('/backups/storage', { method: 'POST', body: JSON.stringify(body) }),
+  backupsUpdateStorage: (id, body) =>
+    request(`/backups/storage/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
+  backupsDeleteStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  backupsTestStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  // Run the daily-S3 probe against every destination now.  Same
+  // code path as the cron task; failures post notifications.
+  backupsRunS3Healthcheck: () =>
+    request('/backups/storage/healthcheck', { method: 'POST' }),
+  // Bucket browser: list every object under the destination's
+  // path_prefix, with linked-to-backup annotations.
+  backupsListStorageObjects: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/objects`),
+  backupsDeleteStorageObject: (id, key) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/objects`, {
+      method: 'DELETE',
+      body: JSON.stringify({ key }),
+    }),
+  backupsSetDefaultStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/default`, { method: 'POST' }),
+
+  // Backups → Backups tab. PR 1 ships create / list / show /
+  // download / delete on the config tier; PR 2 adds tiers,
+  // schedules, and restore.
+  backupsList: () => request('/backups'),
+  backupsGet: (id) => request(`/backups/${encodeURIComponent(id)}`),
+  backupsCreate: (body) =>
+    request('/backups', { method: 'POST', body: JSON.stringify(body) }),
+  // backupsDelete — body is optional for back-compat with PR-1
+  // call sites that just want both copies gone (the server-side
+  // default).  Local-first UI passes { delete_local, delete_s3 }
+  // booleans so the operator can keep one copy.
+  backupsDelete: (id, body) =>
+    request(`/backups/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body || {}),
+    }),
+  // Rehydrate the local copy from S3.  Used when retention
+  // pruned the on-disk file but the operator wants fast
+  // download / restore again.  4xx if the row has no S3 copy.
+  backupsPullLocal: (id) =>
+    request(`/backups/${encodeURIComponent(id)}/pull-local`, { method: 'POST' }),
+  // Download is a plain anchor href — the backend streams an
+  // application/octet-stream with Content-Disposition. Resolved as
+  // a path so callers can drop it into <a href={...}> directly.
+  backupsDownloadHref: (id) => `${API_BASE}/backups/${encodeURIComponent(id)}/download`,
+
+  // PR 2: schedules + restore + usage + health classes.
+  backupsUsage: () => request('/backups/usage'),
+  backupsListSchedules: () => request('/backups/schedules'),
+  backupsCreateSchedule: (body) =>
+    request('/backups/schedules', { method: 'POST', body: JSON.stringify(body) }),
+  backupsUpdateSchedule: (id, body) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
+  backupsDeleteSchedule: (id) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  backupsRunScheduleNow: (id) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}/run-now`, { method: 'POST' }),
+  backupsRestore: (id, body) =>
+    request(`/backups/${encodeURIComponent(id)}/restore`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  backupsListRestores: () => request('/backups/restores'),
+  backupsGetRestore: (id) => request(`/backups/restores/${encodeURIComponent(id)}`),
+  backupsHealthClasses: () => request('/backups/health-classes'),
+  // Scope options for the per-service backup scope picker.
+  // Returns one row per registered service with kind / runtime
+  // metadata so the picker can render a meaningful multi-select.
+  backupsScopeOptions: () => request('/backups/scope-options'),
+
+  // Notifications — durable bell-dropdown entries posted by
+  // backend code (cron failures, S3 health-check, ...).  In-
+  // session toasts still flow through use-toast.js; the bell
+  // surfaces both layers.
+  notificationsList: ({ includeDismissed = false } = {}) =>
+    request(`/notifications${includeDismissed ? '?include_dismissed=1' : ''}`),
+  notificationsUnreadCount: () => request('/notifications/unread-count'),
+  notificationsMarkRead: (id) =>
+    request(`/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+  notificationsMarkAllRead: () =>
+    request('/notifications/mark-all-read', { method: 'POST' }),
+  notificationsDismiss: (id) =>
+    request(`/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');

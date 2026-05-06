@@ -23,11 +23,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
 import { putObjectWithControl, deleteObject, buildKey } from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
+import { spawnHostSync, hasHostBinary } from './host-exec.js';
 
 // In-memory map of in-flight uploads so the cancel route can
 // abort them.  Keyed by export row id; value carries the Upload
@@ -56,31 +56,75 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
   if (!SAFE_NAME.test(snapshotName)) {
     return { ok: false, error: `unsafe snapshot name: ${snapshotName}` };
   }
+  // Pre-flight: confirm `incus` exists on the host.  When the
+  // dashboard runs inside a Docker container this check pivots
+  // through nsenter; bare spawn would have looked for `incus` in
+  // the container's PATH (where it isn't) and failed with ENOENT
+  // — exactly the silent 'failed immediately' state operators
+  // hit pre-this-fix.
+  if (!hasHostBinary('incus')) {
+    return { ok: false, error: 'incus binary not found on host' };
+  }
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-snap-export-'));
   try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
-  const out = path.join(dir, `${incusName}-${snapshotName}.tar.gz`);
+
+  // Output path on the HOST namespace.  Use /tmp because nsenter
+  // pivots into the host mount namespace — paths under
+  // os.tmpdir() inside the container aren't reachable from the
+  // host's incus daemon.  /tmp is a tmpfs on most distros, so
+  // this is fast and gets cleaned by reboot anyway; we also
+  // cleanup explicitly in finally.
+  const hostTmpDir = `/tmp/pp-snap-export-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const out = `${hostTmpDir}/${incusName}-${snapshotName}.tar.gz`;
+  // Create the host-side dir first.
+  const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
+  if (mkdir.status !== 0) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    return {
+      ok: false,
+      error: `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`,
+    };
+  }
 
   // `--instance-only` skips other snapshots of the same instance.
   // `--compression gzip` matches what the full-tier backup uses.
   // Timeout is generous — exporting large stateful instances
   // (Postgres) can take 10+ minutes.
-  const r = spawnSync('incus', [
+  const r = spawnHostSync('incus', [
     'export', `${incusName}/${snapshotName}`, out,
     '--instance-only', '--compression', 'gzip',
   ], { encoding: 'utf-8', timeout: 60 * 60_000 });
   if (r.status !== 0) {
+    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     return {
       ok: false,
-      error: (r.stderr || r.stdout || 'incus export failed').trim().slice(0, 1024),
+      error: (r.stderr || r.stdout || r.error?.message || 'incus export failed')
+        .trim().slice(0, 1024),
     };
   }
+
+  // Copy the artifact from the host's /tmp into the dashboard
+  // container's tmp dir so subsequent fs reads (fs.readFileSync
+  // for the upload) work normally.  `cat` over nsenter is the
+  // simplest cross-namespace pipe.
   try {
-    const stat = fs.statSync(out);
-    return { ok: true, dir, path: out, size: stat.size };
+    const cat = spawnHostSync('cat', [out], {
+      encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
+    });
+    if (cat.status !== 0) {
+      throw new Error((cat.stderr?.toString?.() || 'cat failed').trim());
+    }
+    const containerOut = path.join(dir, `${incusName}-${snapshotName}.tar.gz`);
+    fs.writeFileSync(containerOut, cat.stdout);
+    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
+    const stat = fs.statSync(containerOut);
+    return { ok: true, dir, path: containerOut, size: stat.size };
   } catch (err) {
+    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    return { ok: false, error: `incus export wrote no readable artifact: ${err?.message || err}` };
+    return { ok: false, error: `cross-namespace copy failed: ${err?.message || err}` };
   }
 }
 

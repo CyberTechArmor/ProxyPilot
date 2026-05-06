@@ -1063,6 +1063,14 @@ function CveList({ onOpen, refreshKey }) {
   const [data, setData] = useState({ entries: [], host: '', unread: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Top-level tab. Routes entries by combined criteria (verdict +
+  // status):
+  //   active        — needs attention. verdict ∈ {affected, unknown,
+  //                   probe_error}, status NOT in {DISMISSED, RESOLVED}
+  //   not_affected  — verdict says not_affected (regardless of status)
+  //   dismissed     — status = DISMISSED
+  // Per-column filters and search apply WITHIN the chosen tab.
+  const [tab, setTab] = useState('active');
   // Per-column filter state. Tier is sort-only (operator request);
   // Action + Status get dropdown filters.
   const [filterAction, setFilterAction] = useState('all');
@@ -1219,8 +1227,25 @@ function CveList({ onOpen, refreshKey }) {
   // Filtered + sorted rows. Search applies first (cheap client-side
   // substring), then column filters, then sort. Pagination is
   // applied in the render block since it needs the total count.
+  // Helper: which tab does a given entry belong to?
+  // Used both by the filtering pass and to compute the per-tab
+  // counts shown in the tab bar.
+  const entryTab = (e) => {
+    if (e.status === 'DISMISSED') return 'dismissed';
+    const v = e.latest_verdict?.verdict;
+    if (v === 'not_affected') return 'not_affected';
+    return 'active';  // affected / probe_error / unknown / no verdict yet
+  };
+
+  const tabCounts = useMemo(() => {
+    const c = { active: 0, not_affected: 0, dismissed: 0 };
+    for (const e of data.entries) c[entryTab(e)] += 1;
+    return c;
+  }, [data.entries]);
+
   const filtered = useMemo(() => {
     let rows = data.entries.slice();
+    rows = rows.filter(r => entryTab(r) === tab);
     const q = search.trim().toLowerCase();
     if (q) {
       rows = rows.filter(r =>
@@ -1270,12 +1295,12 @@ function CveList({ onOpen, refreshKey }) {
     };
     rows.sort(cmp);
     return rows;
-  }, [data.entries, search, filterAction, filterStatus, pinnedOnly, sort]);
+  }, [data.entries, tab, search, filterAction, filterStatus, pinnedOnly, sort]);
 
-  // Reset to page 1 when filters / search / data change (otherwise
-  // operator gets a confusing "page 5 of 1" after narrowing).
+  // Reset to page 1 when filters / search / tab / data change
+  // (otherwise operator gets a confusing "page 5 of 1" after narrowing).
   useEffect(() => { setPage(1); },
-    [search, filterAction, filterStatus, pinnedOnly, data.entries.length]);
+    [tab, search, filterAction, filterStatus, pinnedOnly, data.entries.length]);
 
   // Optimistic pin toggle — flip locally first, then call the API.
   // Revert on error so the UI doesn't lie.
@@ -1392,6 +1417,34 @@ function CveList({ onOpen, refreshKey }) {
         Claude writes specs into the inbox; the engine acts on AUTO_PATCH entries automatically and
         surfaces ONE_CLICK + ALERT here for operator review.
       </p>
+
+      {/* Top-level tabs. Entries auto-route by their latest verdict
+          + status; per-column filters and search work WITHIN the
+          chosen tab. */}
+      <div className="flex items-center gap-1 border-b border-border">
+        {[
+          { k: 'active',       label: 'Active',       hint: 'Affected, unknown, or probe-error — not dismissed' },
+          { k: 'not_affected', label: 'Not affected', hint: 'Verdict says this host is not affected' },
+          { k: 'dismissed',    label: 'Dismissed',    hint: 'Operator marked DISMISSED' },
+        ].map(({ k, label, hint }) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setTab(k)}
+            title={hint}
+            className={`relative px-4 py-2 text-sm font-medium transition-colors ${
+              tab === k
+                ? 'text-foreground border-b-2 border-primary -mb-px'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {label}
+            <span className={`ml-2 text-xs font-mono ${tab === k ? 'opacity-90' : 'opacity-60'}`}>
+              {tabCounts[k]}
+            </span>
+          </button>
+        ))}
+      </div>
 
       {gitUrl && (
         <div className="text-xs text-muted-foreground space-y-1">
@@ -1534,9 +1587,15 @@ function CveList({ onOpen, refreshKey }) {
           <div className="text-sm text-muted-foreground text-center py-8">
             {loading
               ? 'Loading…'
-              : (search || filterAction !== 'all' || filterStatus !== 'all')
+              : (search || filterAction !== 'all' || filterStatus !== 'all' || pinnedOnly)
                 ? 'No entries match the current filters.'
-                : 'Inbox is empty. Paste a CVE YAML or sync from a git source.'}
+                : tab === 'active'
+                  ? data.entries.length === 0
+                    ? 'Inbox is empty. Paste a CVE YAML or sync from a git source.'
+                    : 'Nothing active — every entry is either Not affected or Dismissed.'
+                  : tab === 'not_affected'
+                    ? 'No entries with a "not affected" verdict yet. Run Check applicability on a row to verify.'
+                    : 'No dismissed entries.'}
           </div>
         ) : (
           visible.map(entry => (

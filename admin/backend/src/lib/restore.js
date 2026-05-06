@@ -36,6 +36,7 @@ import { spawnSync } from 'node:child_process';
 import { getDb, logAudit } from '../db.js';
 import { getObjectStream } from './s3.js';
 import { decrypt, readTar, verifyManifest, parseHeader } from './backup-unpack.js';
+import { safeExtractName } from './restore-paths.js';
 
 // ── small helpers ───────────────────────────────────────────────────
 
@@ -137,16 +138,6 @@ export async function runModeC({ runId, backup, destination, passphrase }) {
 // Mode A = Mode C + extract every file under a per-run sandbox dir
 // + (when the artifact carries Incus exports) re-import each
 // instance under a suffixed name on a private bridge.
-
-function safeExtractName(name) {
-  // Refuse path traversal — no `..` segments, no absolute paths.
-  // The packer only ever emits relative paths, so a `..` here is
-  // a tamper signal.
-  if (name.startsWith('/')) throw new Error(`absolute path in archive: ${name}`);
-  const parts = name.split('/');
-  if (parts.includes('..')) throw new Error(`path traversal in archive: ${name}`);
-  return name;
-}
 
 export async function runModeA({
   runId, backup, destination, passphrase, importIncus = false,

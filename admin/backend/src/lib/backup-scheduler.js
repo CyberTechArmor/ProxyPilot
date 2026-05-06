@@ -30,6 +30,13 @@ import {
   packFullTier,
 } from './backup-pack.js';
 import { putObject, deleteObject, buildKey } from './s3.js';
+import {
+  cronMatches, matchField, computeNextRunMs, isValidCronExpr,
+} from './backup-cron.js';
+
+// Re-export the pure helpers for the route layer + tests so
+// callers don't have to know they live in a sibling module.
+export { cronMatches, matchField, computeNextRunMs, isValidCronExpr };
 
 // Map of schedule_id → cron task.  Used so we can dispose tasks
 // when an operator disables / deletes a schedule.
@@ -45,98 +52,6 @@ let errLogger = (msg, ctx) => console.error(`[backup-scheduler] ${msg}`, ctx ?? 
 
 export function setLogger(fn) { if (typeof fn === 'function') logger = fn; }
 export function setErrLogger(fn) { if (typeof fn === 'function') errLogger = fn; }
-
-// node-cron parser is permissive but not lenient — invalid expressions
-// throw at .schedule() time.  Validate up front so the route layer can
-// 400 with a clear message rather than uncaught-throw-kill the worker.
-export function isValidCronExpr(expr) {
-  if (typeof expr !== 'string' || expr.length === 0) return false;
-  try {
-    return cron.validate(expr);
-  } catch {
-    return false;
-  }
-}
-
-// Compute the next firing time of a cron expression in milliseconds
-// since epoch.  node-cron doesn't expose a `nextDate` helper directly,
-// so we walk the next 366 days at 1-minute resolution looking for
-// matches.  The tradeoff: we're O(366*24*60) at register-time, but
-// this only runs on schedule mutations (rare) so the cost is fine.
-//
-// Returns null if no firing happens within the next year (which
-// indicates a malformed-but-validate-passed expression).
-export function computeNextRunMs(expr, fromMs = Date.now()) {
-  if (!isValidCronExpr(expr)) return null;
-  // node-cron's docs use 5- or 6-field expressions; both work via
-  // its validator.  We don't try to match by sampling minute by
-  // minute (~525k iters/year — fine in JS) — instead we let
-  // node-cron's parser do the work via getNextRun if available.
-  // node-cron@3 exposes `cron.getTasks()` but not nextRun, so the
-  // sampling approach is the portable path.
-  const start = new Date(fromMs + 60_000); // skip the current minute
-  start.setSeconds(0, 0);
-  for (let i = 0; i < 366 * 24 * 60; i += 1) {
-    const t = new Date(start.getTime() + i * 60_000);
-    if (cronMatches(expr, t)) return t.getTime();
-  }
-  return null;
-}
-
-// Hand-rolled cron matcher — node-cron doesn't expose .test() in
-// v3.  Supports the standard 5-field form (m h dom mon dow) and
-// the optional 6-field (with seconds prefix).  Each field accepts
-// '*', a comma list, a range, a /step, or a literal int.
-function cronMatches(expr, dt) {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length < 5 || parts.length > 6) return false;
-  // Drop seconds field if present — we only schedule at minute
-  // resolution.  6-field expressions where seconds != 0 will never
-  // match at our 1-minute sampling and that's fine.
-  const fields = parts.length === 5 ? parts : parts.slice(1);
-  const [mField, hField, domField, monField, dowField] = fields;
-  return (
-    matchField(mField, dt.getMinutes(), 0, 59)
-    && matchField(hField, dt.getHours(), 0, 23)
-    && matchField(domField, dt.getDate(), 1, 31)
-    && matchField(monField, dt.getMonth() + 1, 1, 12)
-    && matchField(dowField, dt.getDay(), 0, 7) // 0 + 7 both = Sunday
-  );
-}
-
-function matchField(field, value, lo, hi) {
-  if (field === '*') return true;
-  for (const piece of field.split(',')) {
-    let step = 1;
-    let body = piece;
-    if (body.includes('/')) {
-      const [b, s] = body.split('/');
-      body = b || '*';
-      step = parseInt(s, 10) || 1;
-    }
-    let from = lo;
-    let to = hi;
-    if (body !== '*') {
-      if (body.includes('-')) {
-        const [a, b] = body.split('-').map((n) => parseInt(n, 10));
-        from = a; to = b;
-      } else {
-        const n = parseInt(body, 10);
-        if (Number.isNaN(n)) continue;
-        from = n; to = n;
-      }
-    }
-    for (let v = from; v <= to; v += step) {
-      // Day-of-week: '7' equals Sunday (== 0).
-      if (lo === 0 && hi === 7 && v === 7) {
-        if (value === 0) return true;
-        continue;
-      }
-      if (v === value) return true;
-    }
-  }
-  return false;
-}
 
 // ── registration ────────────────────────────────────────────────────
 
@@ -420,5 +335,9 @@ export async function __drainForTest() {
 }
 
 export const __test = Object.freeze({
-  cronMatches, matchField, register, unregister, hydrate, computeNextRunMs,
+  register, unregister, hydrate,
+  // Pure helpers re-exported here for tests that don't want to
+  // pull in the full scheduler module (which transitively imports
+  // node-cron).  The canonical home is lib/backup-cron.js.
+  cronMatches, matchField, computeNextRunMs,
 });

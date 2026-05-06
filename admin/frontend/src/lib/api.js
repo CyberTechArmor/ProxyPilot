@@ -1030,6 +1030,11 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify(body || {}),
     }),
+  // Rehydrate the local copy from S3.  Used when retention
+  // pruned the on-disk file but the operator wants fast
+  // download / restore again.  4xx if the row has no S3 copy.
+  backupsPullLocal: (id) =>
+    request(`/backups/${encodeURIComponent(id)}/pull-local`, { method: 'POST' }),
   // Download is a plain anchor href — the backend streams an
   // application/octet-stream with Content-Disposition. Resolved as
   // a path so callers can drop it into <a href={...}> directly.

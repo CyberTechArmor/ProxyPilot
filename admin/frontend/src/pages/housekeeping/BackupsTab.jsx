@@ -26,7 +26,7 @@ import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, CheckCircle2, Clock, Cloud, Download, FileArchive,
-  Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2, XCircle,
+  CloudDownload, Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2, XCircle,
 } from 'lucide-react';
 
 import UsageCard from './UsageCard';
@@ -366,6 +366,28 @@ export default function BackupsTab() {
   const noDestinations = !destinations?.length;
 
   const onRestore = (b) => { setRestoreBackup(b); setRestoreOpen(true); };
+
+  const onPullLocal = async (b) => {
+    setBusyId(b.id);
+    try {
+      const out = await api.backupsPullLocal(b.id);
+      toast({
+        title: out.already_local ? 'Already local' : 'Local copy restored',
+        description: out.already_local
+          ? 'Backup already has a local copy on disk.'
+          : `Streamed ${out.size_bytes ? `${out.size_bytes} bytes` : 'artifact'} from S3 to local.`,
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Pull from S3 failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
   const onRestoreStarted = (runId) => {
     setFocusRunId(runId);
     toast({ title: 'Dry-run started', description: 'See the Restores panel for live progress.' });
@@ -508,6 +530,22 @@ export default function BackupsTab() {
                                   <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
                                   Restore
                                 </Button>
+                                {b.s3_uploaded && !b.has_local && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={busyId === b.id}
+                                    onClick={() => onPullLocal(b)}
+                                    title="Stream the artifact down from S3 to local disk for instant download / restore."
+                                  >
+                                    {busyId === b.id ? (
+                                      <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                                    ) : (
+                                      <CloudDownload className="h-3.5 w-3.5 mr-1.5" />
+                                    )}
+                                    Pull local
+                                  </Button>
+                                )}
                                 <Button asChild variant="outline" size="sm">
                                   <a href={api.backupsDownloadHref(b.id)} download>
                                     <Download className="h-3.5 w-3.5 mr-1.5" />

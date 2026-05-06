@@ -715,6 +715,82 @@ backupsRouter.get('/:id/download', requireAdmin, async (req, res) => {
   obj.stream.pipe(res);
 });
 
+// POST /api/backups/:id/pull-local — rehydrate the local copy by
+// streaming the artifact down from S3.  Useful when local
+// retention has pruned the on-disk copy but the operator wants
+// instant download / restore for it again (avoiding the per-
+// request S3 round-trip).  No-op when the row already has a
+// local copy.
+backupsRouter.post('/:id/pull-local', requireAdmin, requireSudo, async (req, res) => {
+  const row = readBackup(req.params.id);
+  if (!row) return res.status(404).json({ error: 'backup not found' });
+  if (row.status !== 'ok') {
+    return res.status(409).json({ error: `backup is ${row.status}, not 'ok'` });
+  }
+  if (row.local_path) {
+    // Best-effort: confirm the file actually exists.  If it's
+    // missing despite local_path being set (operator deleted
+    // the file by hand), we let the rehydrate proceed.
+    try {
+      fs.statSync(row.local_path);
+      return res.json({ ok: true, already_local: true });
+    } catch { /* fall through */ }
+  }
+  if (!row.s3_uploaded) {
+    return res.status(409).json({ error: 'no S3 copy to pull from — local-only backup' });
+  }
+
+  const dest = getDb().prepare(
+    `SELECT * FROM backup_destinations WHERE id = ?`
+  ).get(row.destination_id);
+  if (!dest) {
+    return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
+  }
+
+  let obj;
+  try {
+    obj = await getObjectStream(dest, row.s3_key);
+  } catch (err) {
+    return res.status(502).json({ error: `S3 download failed: ${err?.message || err}` });
+  }
+
+  // Drain the stream into a buffer + write atomically.  Same
+  // pipeline as the original pack write, just sourced from S3
+  // instead of an in-memory pack result.  The bounded cap
+  // matches lib/restore's streamToBuffer cap.
+  const chunks = [];
+  let total = 0;
+  const MAX = 16 * 1024 * 1024 * 1024;
+  try {
+    for await (const c of obj.stream) {
+      chunks.push(c);
+      total += c.length;
+      if (total > MAX) {
+        throw new Error(`backup body exceeds in-memory cap of ${MAX} bytes`);
+      }
+    }
+  } catch (err) {
+    return res.status(502).json({ error: `S3 stream failed: ${err?.message || err}` });
+  }
+  const buf = Buffer.concat(chunks);
+
+  let localPath;
+  try {
+    localPath = writeLocal(row.id, buf);
+  } catch (err) {
+    return res.status(500).json({ error: `local write failed: ${err?.message || err}` });
+  }
+  getDb().prepare(`UPDATE backups SET local_path = ? WHERE id = ?`).run(localPath, row.id);
+
+  logAudit(req.user.id, 'BACKUP_PULL_LOCAL', 'backup', row.id, {
+    s3_key: row.s3_key,
+    size_bytes: buf.length,
+    local_path: localPath,
+  }, req.ip);
+
+  res.json({ ok: true, local_path: localPath, size_bytes: buf.length });
+});
+
 // DELETE /api/backups/:id — remove the artifact.  Body controls
 // what gets removed:
 //

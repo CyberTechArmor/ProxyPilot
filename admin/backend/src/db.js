@@ -67,6 +67,8 @@ export function getDb() {
 //   102 Phase 2c — service_detected_ports (cache for the always-visible chip row)
 //   103 Phase 2c hotfix — strip trailing `/*` from service_http_routes.path_prefix
 //   104 Phase 2c — allow_framing + frame_ancestors columns
+//   105 P  — cve_pins (per-user CVE pinning + note)
+//   200 Backups — backup_destinations (S3-compatible storage settings)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -786,6 +788,41 @@ export function initDatabase() {
       )
     `);
     d.exec(`CREATE INDEX IF NOT EXISTS idx_cve_pins_user ON cve_pins(user_id)`);
+  });
+
+  // Backups feature (PR 1 — foundation). One row per S3-compatible
+  // destination the operator has registered. The secret_key column
+  // stores AES-GCM ciphertext via lib/secrets.encryptSecret() — same
+  // at-rest envelope as totp_secret. test_status / test_at carry the
+  // last "test connection" verdict so the UI can surface it without
+  // re-issuing a HEAD on every page load. Exactly one row may have
+  // is_default = 1 at any time; the route layer enforces that with
+  // a transaction (SQLite has no WHERE-clause partial unique-index
+  // form that's portable across the older client we target).
+  runMigration(db, 200, 'backups_destinations', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_destinations (
+        id              TEXT PRIMARY KEY,
+        name            TEXT UNIQUE NOT NULL,
+        endpoint_url    TEXT NOT NULL,
+        bucket          TEXT NOT NULL,
+        region          TEXT,
+        path_prefix     TEXT,
+        access_key_id   TEXT NOT NULL,
+        secret_key_enc  TEXT NOT NULL,
+        use_ssl         INTEGER NOT NULL DEFAULT 1,
+        path_style      INTEGER NOT NULL DEFAULT 0,
+        storage_class   TEXT,
+        is_default      INTEGER NOT NULL DEFAULT 0,
+        test_status     TEXT,
+        test_at         TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_destinations_default
+        ON backup_destinations(is_default)
+    `);
   });
 
   // Create file versions table for version control

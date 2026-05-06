@@ -25,6 +25,13 @@ import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, Clock, Loader2, Pencil, Play, Plus, RefreshCw, Timer, Trash2,
 } from 'lucide-react';
+import {
+  SCHEDULE_MODES, DAYS_OF_WEEK, buildCron, parseCron, describeCron,
+} from './cron-builder';
+
+function pad2(n) {
+  return String(Number(n) || 0).padStart(2, '0');
+}
 
 function fmtAge(iso) {
   if (!iso) return '—';
@@ -43,7 +50,16 @@ function fmtAge(iso) {
 const EMPTY_FORM = {
   name: '',
   destination_id: '',
-  cron_expr: '0 3 * * *',
+  // Schedule expressed as either (mode + hour/minute/dow/dom) for
+  // the picker UI, OR a raw cron expression in custom mode.
+  // formToBody() resolves the two into a single cron_expr field on
+  // submit; parseCron() walks the other direction on Edit.
+  schedule_mode: 'daily',
+  schedule_hour: 3,
+  schedule_minute: 0,
+  schedule_dow: 0,
+  schedule_dom: 1,
+  cron_expr: '0 3 * * *', // only used when schedule_mode === 'custom'
   tier: 'config',
   scope: '',
   retention_keep: 30,
@@ -54,10 +70,21 @@ const EMPTY_FORM = {
 };
 
 function formToBody(form, { isEdit }) {
+  // schedule_mode = 'custom' uses the raw cron expression the
+  // operator typed; everything else is resolved through buildCron.
+  const cron_expr = form.schedule_mode === 'custom'
+    ? form.cron_expr.trim()
+    : buildCron({
+        mode: form.schedule_mode,
+        hour: Number(form.schedule_hour),
+        minute: Number(form.schedule_minute),
+        dow: Number(form.schedule_dow),
+        dom: Number(form.schedule_dom),
+      });
   const body = {
     name: form.name.trim(),
     destination_id: form.destination_id,
-    cron_expr: form.cron_expr.trim(),
+    cron_expr,
     tier: form.tier,
     scope: form.scope.trim() || null,
     retention_keep: Number(form.retention_keep) || 0,
@@ -81,9 +108,15 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
   useEffect(() => {
     if (!open) return;
     if (initial) {
+      const parsed = parseCron(initial.cron_expr || '');
       setForm({
         name: initial.name || '',
         destination_id: initial.destination_id || '',
+        schedule_mode: parsed.mode,
+        schedule_hour: parsed.hour ?? 3,
+        schedule_minute: parsed.minute ?? 0,
+        schedule_dow: parsed.dow ?? 0,
+        schedule_dom: parsed.dom ?? 1,
         cron_expr: initial.cron_expr || '0 3 * * *',
         tier: initial.tier || 'config',
         scope: initial.scope || '',
@@ -144,12 +177,100 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
             </select>
           </div>
           <div className="sm:col-span-2 space-y-1">
-            <Label htmlFor="sch-cron">Cron expression</Label>
-            <Input id="sch-cron" value={form.cron_expr} onChange={set('cron_expr')}
-              placeholder="0 3 * * *" autoComplete="off" />
-            <p className="text-[11px] text-muted-foreground">
-              5-field standard form (min hour dom mon dow).  Example: <code>0 3 * * *</code> = nightly 3am.
-            </p>
+            <Label>Schedule</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2">
+              <select
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={form.schedule_mode}
+                onChange={set('schedule_mode')}
+                aria-label="Schedule cadence"
+              >
+                {Object.entries(SCHEDULE_MODES).map(([k, label]) => (
+                  <option key={k} value={k}>{label}</option>
+                ))}
+              </select>
+              {form.schedule_mode === 'weekly' && (
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={form.schedule_dow}
+                  onChange={set('schedule_dow')}
+                  aria-label="Day of week"
+                >
+                  {DAYS_OF_WEEK.map((d) => (
+                    <option key={d.value} value={d.value}>{d.label}</option>
+                  ))}
+                </select>
+              )}
+              {form.schedule_mode === 'monthly' && (
+                <Input
+                  type="number" min="1" max="31"
+                  value={form.schedule_dom}
+                  onChange={set('schedule_dom')}
+                  aria-label="Day of month"
+                  className="w-24"
+                />
+              )}
+              {form.schedule_mode !== 'custom' && form.schedule_mode !== 'hourly' && (
+                <Input
+                  type="time"
+                  value={`${pad2(form.schedule_hour)}:${pad2(form.schedule_minute)}`}
+                  onChange={(e) => {
+                    const [h, m] = (e.target.value || '03:00').split(':');
+                    setForm((f) => ({
+                      ...f,
+                      schedule_hour: Number(h) || 0,
+                      schedule_minute: Number(m) || 0,
+                    }));
+                  }}
+                  className="w-32"
+                  aria-label="Time of day"
+                />
+              )}
+              {form.schedule_mode === 'hourly' && (
+                <div className="flex items-center gap-1.5 text-xs">
+                  <Label htmlFor="sch-hourly-min">at minute</Label>
+                  <Input
+                    id="sch-hourly-min"
+                    type="number" min="0" max="59"
+                    value={form.schedule_minute}
+                    onChange={set('schedule_minute')}
+                    className="w-20"
+                  />
+                </div>
+              )}
+            </div>
+            {form.schedule_mode === 'custom' ? (
+              <>
+                <Input
+                  className="mt-2"
+                  value={form.cron_expr}
+                  onChange={set('cron_expr')}
+                  placeholder="0 3 * * *"
+                  autoComplete="off"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Custom 5-field cron (<code>min hour dom mon dow</code>). Example:
+                  <code> 0 3 * * *</code> = nightly 3am, <code>*/15 * * * *</code> = every 15 min.
+                </p>
+              </>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                {describeCron({
+                  mode: form.schedule_mode,
+                  hour: Number(form.schedule_hour),
+                  minute: Number(form.schedule_minute),
+                  dow: Number(form.schedule_dow),
+                  dom: Number(form.schedule_dom),
+                })}
+                {' '}— resolves to <code>{buildCron({
+                  mode: form.schedule_mode,
+                  hour: Number(form.schedule_hour),
+                  minute: Number(form.schedule_minute),
+                  dow: Number(form.schedule_dow),
+                  dom: Number(form.schedule_dom),
+                })}</code>
+              </p>
+            )}
           </div>
           <div className="space-y-1">
             <Label htmlFor="sch-keep">Retention: keep newest N</Label>

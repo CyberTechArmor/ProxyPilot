@@ -25,7 +25,20 @@ RUN for i in 1 2 3 4 5; do \
 
 # Copy backend package files
 COPY admin/backend/package*.json ./
-RUN npm install --omit=dev
+
+# `npm install` regularly hits transient DNS / mirror flakes too —
+# `node-pty` ships glibc-only prebuilds, so on alpine (musl) it has
+# to be rebuilt from source via node-gyp, which fetches Node headers
+# from unofficial-builds.nodejs.org. A momentary `getaddrinfo
+# EAI_AGAIN` against that host fails the whole `update.sh` rebuild
+# (which always uses --no-cache). Wrap in the same five-attempt
+# exponential-backoff loop the apk add steps use.
+RUN for i in 1 2 3 4 5; do \
+        npm install --omit=dev && break || { \
+            echo "npm install attempt $i/5 failed, sleeping $((i*i*2))s"; \
+            sleep $((i*i*2)); \
+        }; \
+    done && test -d node_modules
 
 # Stage 2: Production image
 FROM node:20-alpine

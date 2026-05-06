@@ -3295,7 +3295,7 @@ export default function LxcContainers() {
                                         {e.status === 'pending' ? (
                                           e.cancel_requested
                                             ? <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                                            : '⋯'
+                                            : <Loader2 className="h-2.5 w-2.5 animate-spin" />
                                         ) : e.status === 'exported' ? '✓' : e.status === 'failed' ? '✕' : '·'}
                                         {' '}
                                         {(e.destination_name || 'S3').slice(0, 12)}
@@ -3369,6 +3369,84 @@ export default function LxcContainers() {
                                   </Button>
                                 </div>
                               </div>
+                              {/* Per-export status detail row.  Visible
+                                  inline (no hover required) so operators
+                                  immediately see what happened.  Renders
+                                  a thin progress bar for each pending
+                                  upload + the full error message for
+                                  each failure + a Retry button that
+                                  re-opens the push dialog with that
+                                  destination preselected.  Sits
+                                  underneath the row's flex (chips +
+                                  actions) rather than inside it so the
+                                  layout stays clean. */}
+                              {(snapshotS3Exports[sName] || []).filter(
+                                (e) => e.status === 'pending' || e.status === 'failed'
+                              ).length > 0 && (
+                                <div className="ml-5 mt-1 space-y-1">
+                                  {(snapshotS3Exports[sName] || [])
+                                    .filter((e) => e.status === 'pending' || e.status === 'failed')
+                                    .map((e) => {
+                                      const pct = (e.bytes_total && e.bytes_total > 0)
+                                        ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
+                                        : null;
+                                      if (e.status === 'pending') {
+                                        return (
+                                          <div key={`status-${e.id}`} className="flex items-center gap-2 text-[10.5px]">
+                                            <span className="text-muted-foreground min-w-[5rem] truncate">
+                                              → {e.destination_name || e.destination_id}
+                                            </span>
+                                            <div className="flex-1 max-w-md h-1 bg-muted rounded overflow-hidden">
+                                              <div
+                                                className="h-full bg-amber-500 transition-[width] duration-700"
+                                                style={{ width: pct !== null ? `${Math.max(2, pct)}%` : '5%' }}
+                                              />
+                                            </div>
+                                            <span className="font-mono text-muted-foreground tabular-nums">
+                                              {e.cancel_requested
+                                                ? 'cancelling…'
+                                                : pct !== null
+                                                  ? `${pct}%`
+                                                  : 'preparing…'}
+                                            </span>
+                                            {!e.cancel_requested && (
+                                              <button
+                                                type="button"
+                                                onClick={() => cancelSnapshotExport(sName, e.id)}
+                                                disabled={cancelingExportIds.has(e.id)}
+                                                className="text-[10px] px-1.5 py-0.5 rounded border border-border hover:bg-muted/40 disabled:opacity-50"
+                                              >
+                                                Cancel
+                                              </button>
+                                            )}
+                                          </div>
+                                        );
+                                      }
+                                      // status === 'failed'
+                                      return (
+                                        <div key={`status-${e.id}`} className="flex items-start gap-2 text-[10.5px] text-red-500">
+                                          <span className="min-w-[5rem] truncate text-red-500/70 shrink-0">
+                                            → {e.destination_name || e.destination_id}
+                                          </span>
+                                          <span className="flex-1 break-words">
+                                            {e.error || 'failed without error message'}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setPushSnapshotName(sName);
+                                              setPushDestinationIds([e.destination_id]);
+                                            }}
+                                            className="text-[10px] px-1.5 py-0.5 rounded border border-border hover:bg-muted/40 text-foreground shrink-0"
+                                            title="Retry this upload"
+                                          >
+                                            Retry
+                                          </button>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
+                              )}
                               {/* Snapshot detail row: stateful, expiry,
                                   architecture.  Size moved inline next to
                                   the snapshot name so an operator scanning

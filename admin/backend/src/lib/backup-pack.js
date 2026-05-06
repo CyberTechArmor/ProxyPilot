@@ -45,6 +45,7 @@ import { spawnSync } from 'node:child_process';
 import {
   freshKey, SCRYPT_PARAMS, ARGON2ID_PARAMS,
 } from './backup-kdf.js';
+import { spawnHostSync, hasHostBinary } from './host-exec.js';
 
 const MAGIC = 'PPBACKUP';
 const VERSION = 2; // v2: argon2id default; v1 (scrypt) still readable
@@ -421,15 +422,6 @@ export function collectDirAsEntries(rootDir, archivePrefix, opts = {}) {
 // manifest's notes field rather than failing the whole tier when
 // one volume is unreadable.
 
-function runShell(cmd, args, { timeout = 5 * 60_000, encoding = 'buffer', input } = {}) {
-  return spawnSync(cmd, args, { timeout, encoding, input });
-}
-
-function which(bin) {
-  const r = spawnSync('command', ['-v', bin], { shell: true, encoding: 'utf-8' });
-  return r.status === 0 && r.stdout.trim().length > 0;
-}
-
 // Make a sandbox temp directory rooted under os.tmpdir() with mode
 // 0o700.  Caller is responsible for cleaning it up (best-effort
 // finally block).
@@ -441,16 +433,21 @@ export function mkdtempSandbox(prefix = 'pp-backup-') {
 // throwaway alpine container.  Returns the bytes of the tar.gz.
 // Returns null + an error string when docker is unavailable or the
 // volume is missing (caller decides how strict to be).
+//
+// All shell-outs go through spawnHostSync so the dashboard
+// container can drive the host's docker / incus daemons via
+// nsenter.  Pre-this-fix the bare spawnSync('docker', ...) call
+// looked for docker in the dashboard container's PATH (where it
+// isn't) and silently skipped every volume — full-tier backups
+// landed with zero docker-volumes/ entries inside the artifact.
 export function exportDockerVolume(volumeName) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(volumeName)) {
     return { ok: false, error: `unsafe docker volume name: ${volumeName}` };
   }
-  if (!which('docker')) {
+  if (!hasHostBinary('docker')) {
     return { ok: false, error: 'docker not available on this host' };
   }
-  // We pipe the tar bytes back over stdout — `tar -cz` on /source.
-  // Using `alpine:3.20` keeps the image small + reproducible.
-  const r = spawnSync('docker', [
+  const r = spawnHostSync('docker', [
     'run', '--rm', '-v', `${volumeName}:/source:ro`,
     'alpine:3.20', 'sh', '-c', 'tar -cz -C /source . 2>/dev/null',
   ], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 * 1024, timeout: 30 * 60_000 });
@@ -463,12 +460,9 @@ export function exportDockerVolume(volumeName) {
   return { ok: true, bytes: r.stdout };
 }
 
-// List volume names known to the docker daemon.  Filtered to a
-// caller-supplied allowlist when provided so we don't blindly
-// snapshot every system volume.
 export function listDockerVolumes() {
-  if (!which('docker')) return { ok: false, names: [], error: 'docker unavailable' };
-  const r = spawnSync('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
+  if (!hasHostBinary('docker')) return { ok: false, names: [], error: 'docker unavailable' };
+  const r = spawnHostSync('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
     encoding: 'utf-8', timeout: 30_000,
   });
   if (r.status !== 0) {
@@ -480,34 +474,47 @@ export function listDockerVolumes() {
   };
 }
 
-// `incus export <name> <path>` writes a tarball to disk.  We can't
-// stream over stdout the way docker can, so the helper writes to a
-// temp file and reads it back.  Caller is responsible for cleaning
-// up the sandbox dir.
+// `incus export <name> <path>` writes a tarball to disk on the
+// HOST (because it runs there via nsenter).  We then `cat` the
+// resulting file back into the dashboard container so the
+// caller can read it normally.  Same cross-namespace dance as
+// snapshot-s3-export.exportSnapshotToTmp().
 export function exportIncusInstance(instanceName, sandboxDir) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceName)) {
     return { ok: false, error: `unsafe incus instance name: ${instanceName}` };
   }
-  if (!which('incus')) {
+  if (!hasHostBinary('incus')) {
     return { ok: false, error: 'incus not available on this host' };
   }
-  const out = path.join(sandboxDir, `${instanceName}.tar.gz`);
-  const r = spawnSync('incus', ['export', instanceName, out, '--compression', 'gzip'], {
+  const hostOut = `/tmp/pp-incus-export-${process.pid}-${Date.now()}-${instanceName}.tar.gz`;
+  const r = spawnHostSync('incus', ['export', instanceName, hostOut, '--compression', 'gzip'], {
     encoding: 'utf-8', timeout: 60 * 60_000,
   });
   if (r.status !== 0) {
+    spawnHostSync('rm', ['-f', hostOut], { encoding: 'utf-8' });
     return { ok: false, error: r.stderr?.trim() || 'incus export failed' };
   }
   try {
-    return { ok: true, bytes: fs.readFileSync(out) };
+    const cat = spawnHostSync('cat', [hostOut], {
+      encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
+    });
+    spawnHostSync('rm', ['-f', hostOut], { encoding: 'utf-8' });
+    if (cat.status !== 0) {
+      throw new Error((cat.stderr?.toString?.() || 'cat failed').trim());
+    }
+    // sandboxDir is for caller's housekeeping; we return the
+    // bytes directly rather than writing through it (the caller
+    // composes the archive in-memory).
+    return { ok: true, bytes: cat.stdout };
   } catch (err) {
-    return { ok: false, error: `incus export wrote no readable artifact: ${err?.message || err}` };
+    spawnHostSync('rm', ['-f', hostOut], { encoding: 'utf-8' });
+    return { ok: false, error: `cross-namespace copy failed: ${err?.message || err}` };
   }
 }
 
 export function listIncusInstances() {
-  if (!which('incus')) return { ok: false, names: [], error: 'incus unavailable' };
-  const r = spawnSync('incus', ['list', '-f', 'csv', '-c', 'n'], {
+  if (!hasHostBinary('incus')) return { ok: false, names: [], error: 'incus unavailable' };
+  const r = spawnHostSync('incus', ['list', '-f', 'csv', '-c', 'n'], {
     encoding: 'utf-8', timeout: 30_000,
   });
   if (r.status !== 0) {

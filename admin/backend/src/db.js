@@ -69,6 +69,7 @@ export function getDb() {
 //   104 Phase 2c — allow_framing + frame_ancestors columns
 //   105 P  — cve_pins (per-user CVE pinning + note)
 //   200 Backups — backup_destinations (S3-compatible storage settings)
+//   201 Backups — backups (one row per packed artifact uploaded to S3)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -822,6 +823,40 @@ export function initDatabase() {
     d.exec(`
       CREATE INDEX IF NOT EXISTS idx_backup_destinations_default
         ON backup_destinations(is_default)
+    `);
+  });
+
+  // Backups feature — one row per packed-and-uploaded backup
+  // artifact. status starts at 'in_progress'; the route flips it
+  // to 'ok' (with size_bytes + manifest_json) or 'failed' (with
+  // error) at the end of the upload. parent_backup is reserved
+  // for incremental chains in a future round; PR 1 always sets
+  // it NULL. backup_schedules + restore_runs land in PR 2.
+  runMigration(db, 201, 'backups_artifacts', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backups (
+        id              TEXT PRIMARY KEY,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id),
+        tier            TEXT NOT NULL,
+        scope           TEXT,
+        s3_key          TEXT NOT NULL,
+        size_bytes      INTEGER NOT NULL DEFAULT 0,
+        encrypted       INTEGER NOT NULL DEFAULT 1,
+        created_by      TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        manifest_json   TEXT NOT NULL DEFAULT '{}',
+        parent_backup   TEXT REFERENCES backups(id),
+        status          TEXT NOT NULL,
+        error           TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_destination
+        ON backups(destination_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_created
+        ON backups(created_at DESC)
     `);
   });
 

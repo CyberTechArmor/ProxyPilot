@@ -22,12 +22,20 @@
 //     clear.
 
 import { Router } from 'express';
+import path from 'node:path';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret } from '../lib/secrets.js';
-import { testConnection } from '../lib/s3.js';
+import {
+  testConnection, putObject, getObjectStream, deleteObject, buildKey,
+} from '../lib/s3.js';
+import { packConfigTier } from '../lib/backup-pack.js';
+
+const INSTALL_DIR = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
+const ENV_PATH = process.env.PROXYPILOT_ENV_PATH || path.join(INSTALL_DIR, '.env');
+const CVE_INBOX_DIR = process.env.PROXYPILOT_CVE_INBOX_DIR || '/var/lib/proxypilot/cve-inbox';
 
 export const backupsRouter = Router();
 
@@ -325,4 +333,259 @@ backupsRouter.post('/storage/:id/default', requireAdmin, requireSudo, (req, res)
   }, req.ip);
 
   res.json({ destination: publicShape(readDest(existing.id)) });
+});
+
+// ── Backup artifacts ────────────────────────────────────────────────
+//
+// PR 1 ships create / list / show / download / delete on the
+// `backups` table.  Tier is config-only in this round; PR 2 adds
+// 'config_plus_data' and 'full' along with restore + scheduling.
+//
+// The create route packs the current host state into an encrypted
+// .ppbackup using lib/backup-pack, uploads it to the chosen
+// destination, and persists a `backups` row with the manifest and
+// resolved size.
+
+function publicBackupShape(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    destination_id: row.destination_id,
+    tier: row.tier,
+    scope: row.scope || null,
+    s3_key: row.s3_key,
+    size_bytes: row.size_bytes,
+    encrypted: !!row.encrypted,
+    created_by: row.created_by || null,
+    created_at: row.created_at,
+    parent_backup: row.parent_backup || null,
+    status: row.status,
+    error: row.error || null,
+    // manifest_json is parsed lazily — surfaced as `manifest` on
+    // GET /:id so list pages don't pay the parse cost N times.
+  };
+}
+
+const createBackupSchema = z.object({
+  // PR 1 only supports the config tier.  PR 2 adds the others; the
+  // schema lists them now so a forward-compatible client can pin
+  // its expectations without us having to change the wire shape.
+  tier: z.enum(['config', 'config_plus_data', 'full']).optional().default('config'),
+  scope: z.string().min(1).max(256).optional().nullable(),
+  destination_id: z.string().min(1).max(64).optional().nullable(),
+  passphrase: z.string().min(8).max(1024),
+}).strict();
+
+function pickDestination(db, destinationId) {
+  if (destinationId) {
+    return db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(destinationId);
+  }
+  return db.prepare(
+    `SELECT * FROM backup_destinations WHERE is_default = 1 LIMIT 1`
+  ).get();
+}
+
+function readBackup(id) {
+  return getDb().prepare(`SELECT * FROM backups WHERE id = ?`).get(id);
+}
+
+// GET /api/backups — list, newest first.  Filterable by destination
+// in a follow-up; PR 1 returns the full set.
+backupsRouter.get('/', requireAdmin, (_req, res) => {
+  const rows = getDb().prepare(
+    `SELECT * FROM backups ORDER BY created_at DESC, id DESC`
+  ).all();
+  res.json({ backups: rows.map(publicBackupShape) });
+});
+
+// GET /api/backups/:id — single row, with manifest expanded.
+backupsRouter.get('/:id', requireAdmin, (req, res) => {
+  const row = readBackup(req.params.id);
+  if (!row) return res.status(404).json({ error: 'backup not found' });
+  let manifest = null;
+  try { manifest = JSON.parse(row.manifest_json || '{}'); } catch { manifest = null; }
+  res.json({ backup: { ...publicBackupShape(row), manifest } });
+});
+
+// POST /api/backups — create on-demand.  Sudo-gated; the operator
+// types a passphrase that is used once for KDF + AES-GCM and never
+// persisted anywhere in our state (not in the audit log, not in the
+// row, not in the manifest).
+backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
+  let body;
+  try {
+    body = createBackupSchema.parse(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  // PR 1 — only the config tier ships.  Reject the others with a
+  // helpful message rather than a generic 400 so a forward-pinned
+  // client gets a clear signal about why their request 4xx'd.
+  if (body.tier !== 'config') {
+    return res.status(400).json({
+      error: `tier "${body.tier}" not supported in this release. ` +
+             `PR 1 ships the config tier only; PR 2 adds config_plus_data + full.`,
+    });
+  }
+
+  const db = getDb();
+  const destination = pickDestination(db, body.destination_id);
+  if (!destination) {
+    return res.status(409).json({
+      error: body.destination_id
+        ? 'destination not found'
+        : 'no default destination — configure one in the Storage tab first',
+    });
+  }
+
+  const id = uuid();
+  const objectName = `${id}.ppbackup`;
+  const s3Key = buildKey(destination, objectName);
+
+  // Insert the row in 'in_progress' state so the GET list reflects
+  // an in-flight backup, then flip to ok / failed once the upload
+  // resolves.  The status flip is the only mutation downstream of
+  // the actual S3 write — keeping the state machine small.
+  db.prepare(`
+    INSERT INTO backups (id, destination_id, tier, scope, s3_key, encrypted,
+                        created_by, manifest_json, status)
+    VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress')
+  `).run(
+    id,
+    destination.id,
+    body.tier,
+    body.scope || null,
+    s3Key,
+    req.user?.id || null,
+  );
+
+  let packed;
+  try {
+    packed = await packConfigTier({
+      db,
+      passphrase: body.passphrase,
+      envPath: ENV_PATH,
+      cveInboxDir: CVE_INBOX_DIR,
+      meta: {
+        scope: body.scope || 'all',
+        backup_id: id,
+        destination_name: destination.name,
+      },
+    });
+  } catch (err) {
+    db.prepare(`UPDATE backups SET status = 'failed', error = ? WHERE id = ?`)
+      .run(`pack failed: ${err?.message || err}`, id);
+    logAudit(req.user.id, 'BACKUP_CREATE_FAILED', 'backup', id, {
+      stage: 'pack', error: err?.message || String(err),
+      destination_id: destination.id, tier: body.tier,
+    }, req.ip);
+    return res.status(500).json({ error: `pack failed: ${err?.message || err}` });
+  }
+
+  try {
+    await putObject(destination, s3Key, packed.buffer, {
+      contentType: 'application/octet-stream',
+    });
+  } catch (err) {
+    db.prepare(`UPDATE backups SET status = 'failed', error = ? WHERE id = ?`)
+      .run(`upload failed: ${err?.message || err}`, id);
+    logAudit(req.user.id, 'BACKUP_CREATE_FAILED', 'backup', id, {
+      stage: 'upload', error: err?.message || String(err),
+      destination_id: destination.id, tier: body.tier,
+    }, req.ip);
+    return res.status(502).json({ error: `upload failed: ${err?.message || err}` });
+  }
+
+  db.prepare(`
+    UPDATE backups SET status = 'ok', size_bytes = ?, manifest_json = ?
+    WHERE id = ?
+  `).run(packed.buffer.length, JSON.stringify(packed.manifest), id);
+
+  logAudit(req.user.id, 'BACKUP_CREATE', 'backup', id, {
+    destination_id: destination.id,
+    destination_name: destination.name,
+    s3_key: s3Key,
+    tier: body.tier,
+    scope: body.scope || null,
+    size_bytes: packed.buffer.length,
+    file_count: packed.manifest.files.length,
+  }, req.ip);
+
+  res.status(201).json({ backup: { ...publicBackupShape(readBackup(id)), manifest: packed.manifest } });
+});
+
+// GET /api/backups/:id/download — stream the encrypted artifact
+// straight from S3 to the operator's browser.  Audit-logged because
+// it puts ciphertext + KDF-protected secrets onto the operator's
+// disk, where it could end up backed up off-host as a side effect.
+backupsRouter.get('/:id/download', requireAdmin, async (req, res) => {
+  const row = readBackup(req.params.id);
+  if (!row) return res.status(404).json({ error: 'backup not found' });
+  if (row.status !== 'ok') {
+    return res.status(409).json({ error: `backup is ${row.status}, not 'ok'` });
+  }
+  const dest = getDb().prepare(
+    `SELECT * FROM backup_destinations WHERE id = ?`
+  ).get(row.destination_id);
+  if (!dest) return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
+
+  let obj;
+  try {
+    obj = await getObjectStream(dest, row.s3_key);
+  } catch (err) {
+    return res.status(502).json({ error: `download failed: ${err?.message || err}` });
+  }
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${row.id}.ppbackup"`);
+  if (obj.contentLength) res.setHeader('Content-Length', String(obj.contentLength));
+
+  logAudit(req.user.id, 'BACKUP_DOWNLOAD', 'backup', row.id, {
+    s3_key: row.s3_key,
+    size_bytes: row.size_bytes,
+  }, req.ip);
+
+  obj.stream.on('error', (err) => {
+    // The headers may have already gone out by the time the body
+    // stream errors out; abort the response rather than leaking a
+    // half-written file with a misleading Content-Length.
+    try { res.destroy(err); } catch { /* ignore */ }
+  });
+  obj.stream.pipe(res);
+});
+
+// DELETE /api/backups/:id — remove the artifact from S3 and drop
+// the row.  Tolerates an already-missing object (404 from S3) so a
+// backup whose object disappeared via a vendor lifecycle rule can
+// still be cleaned up out of the dashboard.
+backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
+  const row = readBackup(req.params.id);
+  if (!row) return res.status(404).json({ error: 'backup not found' });
+
+  const dest = getDb().prepare(
+    `SELECT * FROM backup_destinations WHERE id = ?`
+  ).get(row.destination_id);
+
+  let s3Error = null;
+  if (dest) {
+    try {
+      await deleteObject(dest, row.s3_key);
+    } catch (err) {
+      const code = err?.Code || err?.name || '';
+      if (!/NotFound|NoSuchKey/i.test(code)) {
+        s3Error = err?.message || String(err);
+      }
+    }
+  }
+
+  getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+
+  logAudit(req.user.id, 'BACKUP_DELETE', 'backup', row.id, {
+    s3_key: row.s3_key,
+    destination_id: row.destination_id,
+    s3_error: s3Error,
+  }, req.ip);
+
+  res.json({ ok: true, s3_error: s3Error });
 });

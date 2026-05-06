@@ -1,0 +1,17 @@
+[Unit]
+Description=ProxyPilot CVE engine — host inventory snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m proxypilot.engine inventory
+# Inventory is best-effort and idempotent; restart-on-failure adds
+# nothing because the next timer tick will retry.
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/proxypilot
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

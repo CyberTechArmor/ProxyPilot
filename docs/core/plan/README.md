@@ -116,3 +116,18 @@ next — potentially across multiple Claude Code sessions per phase.
   Phase 10 (Database Management) still owns the future nftables-based
   port-forward engine that may eventually become an alternative backend
   for the Phase 2c `service_port_forwards` rows.
+
+## Out-of-band session prompts (operator-queued work)
+
+Prompts that aren't part of the numbered phase plan — small targeted
+changes the operator wants Claude to pick up in a single session.
+Each is self-contained; pick one, hand it to a fresh session, ship.
+
+**Kickoff:** [`NEXT-SESSION-PROMPT-out-of-band.md`](NEXT-SESSION-PROMPT-out-of-band.md)
+— copy-paste this into the first message of a new session and tell
+Claude which option to take.
+
+| Status | Prompt | Scope |
+|---|---|---|
+| 📝 ready | [`NEXT-SESSION-PROMPT-wireguard-mtu.md`](NEXT-SESSION-PROMPT-wireguard-mtu.md) | Set MTU = 1280 default on every generated WireGuard config + apply to live wg0. ~1 commit. |
+| 📝 ready | [`../../features/backups/master-prompt.md`](../../features/backups/master-prompt.md) | S3-compatible backup destinations + Backups/Cleanup/Storage tabs in Housekeeping + restore dry-run. Larger; suggested PR split inside the prompt. |

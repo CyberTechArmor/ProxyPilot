@@ -445,7 +445,18 @@ install_dependencies() {
     # native) so we don't strictly need the binary at runtime,
     # but having it installed keeps the host-shell debug path
     # one command short of a fix.
-    apt-get install -y qrencode jq sqlite3
+    #
+    # python3 + python3-ruamel.yaml are required by the CVE engine.
+    # The dashboard pivots through nsenter -t 1 to run the engine
+    # on the host; both must be available there. python3 is almost
+    # always already present on Debian/Ubuntu, but ruamel.yaml is
+    # what handles round-trip preservation of operator-pasted YAML
+    # so it has to be installed explicitly.
+    #
+    # git is needed by the read-only inbox-source pull (operator
+    # configures a git URL in the dashboard; the engine clones/
+    # pulls into a staging dir and copies new specs into the inbox).
+    apt-get install -y qrencode jq sqlite3 python3 python3-ruamel.yaml git
     log_success "Dependencies installed"
 }
 
@@ -962,14 +973,24 @@ create_docker_compose() {
         agent_gid=$(getent group proxypilot-agent | cut -d: -f3)
     fi
 
+    # Hostname the engine sees inside the container — used to look up
+    # hosts.<hostname>.action_class in each inbox YAML. Default to the
+    # host's actual hostname so the spec author can address this box.
+    local HOST_HOSTNAME
+    HOST_HOSTNAME=$(hostname)
+
     cat > "${install_dir}/docker-compose.yml" <<EOF
 # Compose Spec — no `version:` key (it's been obsolete since
 # Compose v2 and recent compose CLIs warn on every invocation).
 services:
   proxypilot:
     build:
-      context: ./admin
-      dockerfile: Dockerfile
+      # Context is the install root so the Dockerfile can COPY both
+      # admin/ (Node backend + built frontend) and proxypilot/ (the
+      # CVE engine Python package — used for paste/sync/validate
+      # in-container; AUTO_PATCH execution still pivots to the host).
+      context: .
+      dockerfile: admin/Dockerfile
     container_name: proxypilot-admin
     restart: always
     # ProxyPilot drives caddy / incus / docker / git / npm on the host
@@ -1004,6 +1025,10 @@ services:
       - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /var/run/docker.sock:/var/run/docker.sock
+      # CVE inbox — read-write so paste/edit/delete from the
+      # dashboard land on the host, where the engine systemd
+      # timers pick them up. Read-only would block paste.
+      - /var/lib/proxypilot:/var/lib/proxypilot
       # Phase A host-side agent. We bind-mount the systemd-managed
       # RuntimeDirectory rather than the socket file itself so the
       # mount survives the agent restarting (which recreates the
@@ -1027,6 +1052,11 @@ services:
       - CADDY_STATIC_ROOT=${INSTALL_DIR}/data/services
       - DOCKER_CONTAINER=true
       - PROXYPILOT_AGENT_SOCKET=/run/proxypilot-agent/proxypilot-agent.sock
+      # CVE engine pivots through nsenter -t 1 to run on the host
+      # where python3 + ruamel.yaml + the proxypilot package live.
+      # Install dir is where the engine package was deployed.
+      - PROXYPILOT_INSTALL_DIR=${INSTALL_DIR}
+      - PROXYPILOT_HOSTNAME=${HOST_HOSTNAME}
     env_file:
       - .env
     networks:
@@ -1192,6 +1222,43 @@ main() {
     log_info "Copying ProxyPilot files..."
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
+
+    # Copy the CVE engine (Python package). The dashboard pivots
+    # through nsenter -t 1 to run `python3 -m proxypilot.engine` on
+    # the host with PYTHONPATH=$INSTALL_DIR — so the package must
+    # live here, not in the container.
+    if [[ -d "${SCRIPT_DIR}/proxypilot" ]]; then
+        cp -r "${SCRIPT_DIR}/proxypilot" "$INSTALL_DIR/"
+        log_success "CVE engine package copied to $INSTALL_DIR/proxypilot"
+    fi
+
+    # Inbox directory. Bind-mounted into the dashboard container so
+    # the listing endpoint can read entries directly. World-readable
+    # is fine — entries are advisory data, not secrets — but only
+    # root writes. Engine systemd units run as root.
+    install -d -m 0755 /var/lib/proxypilot/cve-inbox
+
+    # Engine systemd units (inventory hourly, poll every 5 min).
+    if [[ -d "${SCRIPT_DIR}/deploy" ]]; then
+        for unit in proxypilot-engine-inventory.service \
+                    proxypilot-engine-inventory.timer \
+                    proxypilot-engine-poll.service \
+                    proxypilot-engine-poll.timer; do
+            if [[ -f "${SCRIPT_DIR}/deploy/${unit}" ]]; then
+                # Patch the canned ExecStart= to PYTHONPATH=<install>
+                # so the engine module resolves without a system pip
+                # install. Keeps the install hermetic.
+                sed "s#ExecStart=/usr/bin/python3#ExecStart=/usr/bin/env PYTHONPATH=${INSTALL_DIR} /usr/bin/python3#" \
+                    "${SCRIPT_DIR}/deploy/${unit}" \
+                    > "/etc/systemd/system/${unit}"
+                chmod 0644 "/etc/systemd/system/${unit}"
+            fi
+        done
+        systemctl daemon-reload
+        systemctl enable --now proxypilot-engine-inventory.timer 2>/dev/null || true
+        systemctl enable --now proxypilot-engine-poll.timer 2>/dev/null || true
+        log_success "CVE engine systemd timers installed and started"
+    fi
 
     # Install host-side agent (Phase A scaffold). Runs before
     # docker-compose creation so the Compose file can reference the

@@ -764,6 +764,30 @@ export function initDatabase() {
     }
   });
 
+  // CVE pins — per-operator "starred" flags for inbox entries the
+  // operator wants to come back to. Lives in the dashboard DB
+  // rather than the YAML so:
+  //   - The engine contract (only mutates state.status / .last_updated
+  //     / .history) is preserved.
+  //   - Each operator sees their own pins; one team mate flagging
+  //     something doesn't pollute the others' view.
+  // The optional `note` is a one-line label so the pin can mean
+  // something specific ("waiting for upstream DSA", "manual mit
+  // applied", etc.).
+  runMigration(db, 105, 'p_cve_pins', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS cve_pins (
+        user_id   TEXT NOT NULL,
+        cve_id    TEXT NOT NULL,
+        pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        note      TEXT,
+        PRIMARY KEY (user_id, cve_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_cve_pins_user ON cve_pins(user_id)`);
+  });
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

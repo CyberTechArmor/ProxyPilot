@@ -18,6 +18,9 @@ import {
   Shield,
   ShieldAlert,
   Cable,
+  BugPlay,
+  LifeBuoy,
+  HardDrive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -85,6 +88,9 @@ export default function Layout() {
   // still shows the running version for identification.
   const [version, setVersion] = useState('');
 
+  // CVE inbox unread count for the sidebar badge.
+  const [cveUnread, setCveUnread] = useState(0);
+
   // Check admin status from user context and localStorage fallback
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
@@ -95,6 +101,28 @@ export default function Layout() {
       .catch(e => console.error('Error fetching version:', e));
   }, []);
 
+  // Poll the CVE inbox for unread count (entries with
+  // state.operator_seen=false). Badge clears when the operator opens
+  // an entry — the detail page hits api.markCveSeen on mount. 60s
+  // poll is slow enough not to thrash the inbox dir scan, fast
+  // enough for a fresh AUTO_PATCH-rollback page to surface promptly.
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await api.listCves();
+        if (!cancelled) setCveUnread(data.unread || 0);
+      } catch {
+        // Admin without an inbox dir or transient error: leave the
+        // last known count alone rather than blink to 0.
+      }
+    };
+    poll();
+    const id = setInterval(poll, 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [isAdmin]);
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
@@ -102,7 +130,9 @@ export default function Layout() {
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
     { name: 'Firewall', href: '/firewall', icon: Shield, adminOnly: true },
     { name: 'VPN', href: '/vpn', icon: Cable, adminOnly: true },
-    { name: 'Security', href: '/security', icon: ShieldAlert, adminOnly: true },
+    { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
+    { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
+    { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
@@ -177,7 +207,15 @@ export default function Layout() {
                   )}
                 >
                   <item.icon className="h-5 w-5" />
-                  {item.name}
+                  <span className="flex-1">{item.name}</span>
+                  {item.badge ? (
+                    <span
+                      className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-orange-500 text-white text-xs font-semibold"
+                      aria-label={`${item.badge} unread`}
+                    >
+                      {item.badge > 99 ? '99+' : item.badge}
+                    </span>
+                  ) : null}
                 </Link>
               );
             })}

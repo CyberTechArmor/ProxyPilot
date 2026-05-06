@@ -924,6 +924,73 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // CVE inbox — Claude writes spec YAMLs into the inbox dir; the
+  // Python engine reads + executes them per-host. These endpoints
+  // back the dashboard's CVEs section: list view, detail view, and
+  // the operator-driven actions (mark seen, dismiss, run-on-this-host).
+  listCves: () => request('/cves'),
+  getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
+  markCveSeen: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/seen`, { method: 'POST' }),
+  dismissCve: (cveId, reason) =>
+    request(`/cves/${encodeURIComponent(cveId)}/dismiss`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  runCve: (cveId, body = {}) =>
+    request(`/cves/${encodeURIComponent(cveId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // Probe-only check — admin-only, NOT sudo-gated. Returns the
+  // verdict ("affected" / "not_affected" / "no_probe") plus the
+  // probe's stdout/stderr.
+  checkCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/check`, { method: 'POST' }),
+  // Pins — per-user UI state. PUT pins (and updates the note);
+  // DELETE unpins.
+  pinCve: (cveId, note) =>
+    request(`/cves/${encodeURIComponent(cveId)}/pin`, {
+      method: 'PUT',
+      body: JSON.stringify(note ? { note } : {}),
+    }),
+  unpinCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/pin`, { method: 'DELETE' }),
+
+  // Operator-managed inbox writes. The backend extracts the cve id
+  // from the YAML body, so the paste flow never needs to think about
+  // filenames; saveCveEdit pins the URL id to catch typos. Both go
+  // through the engine's `validate` subcommand server-side.
+  pasteCve: (content) =>
+    request('/cves', { method: 'POST', body: JSON.stringify({ content }) }),
+  saveCveEdit: (cveId, content) =>
+    request(`/cves/${encodeURIComponent(cveId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  deleteCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}`, { method: 'DELETE' }),
+  pollCves: () => request('/cves/poll', { method: 'POST' }),
+
+  // Read-only git source. Operators set a repo URL via PUT; the
+  // engine pulls + imports new specs on POST /git-sync. Sync is
+  // additive — existing entries (paste OR git from a different URL)
+  // are never overwritten.
+  getCveGitConfig: () => request('/cves/git-config'),
+  setCveGitConfig: (url) =>
+    request('/cves/git-config', {
+      method: 'PUT',
+      body: JSON.stringify({ url: (url || '').trim() }),
+    }),
+  syncCveGit: () => request('/cves/git-sync', { method: 'POST' }),
+
+  // Housekeeping — disk-usage view (docker df + backup dir) plus
+  // opt-in prune actions for stale artifacts. Pruning is sudo-gated
+  // and per-category — empty body = no-op.
+  housekeepingUsage: () => request('/housekeeping/usage'),
+  housekeepingPrune: (body) =>
+    request('/housekeeping/prune', { method: 'POST', body: JSON.stringify(body) }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

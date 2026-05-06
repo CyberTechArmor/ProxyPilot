@@ -19,6 +19,7 @@ import { vpnRouter } from './routes/vpn.js';
 import { securityRouter } from './routes/security.js';
 import { cvesRouter } from './routes/cves.js';
 import { housekeepingRouter } from './routes/housekeeping.js';
+import { backupsRouter } from './routes/backups.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
@@ -213,6 +214,7 @@ app.use('/api/vpn', authenticateToken, vpnRouter);
 app.use('/api/security', authenticateToken, securityRouter);
 app.use('/api/cves', authenticateToken, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, housekeepingRouter);
+app.use('/api/backups', authenticateToken, backupsRouter);
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

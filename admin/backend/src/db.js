@@ -70,6 +70,7 @@ export function getDb() {
 //   105 P  — cve_pins (per-user CVE pinning + note)
 //   200 Backups — backup_destinations (S3-compatible storage settings)
 //   201 Backups — backups (one row per packed artifact uploaded to S3)
+//   202 Backups — backup_schedules + restore_runs (PR 2)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -857,6 +858,82 @@ export function initDatabase() {
     d.exec(`
       CREATE INDEX IF NOT EXISTS idx_backups_created
         ON backups(created_at DESC)
+    `);
+  });
+
+  // PR 2 — schedules + restore runs.
+  //
+  // backup_schedules: one row per cron-driven recurring backup.
+  // The cron worker (lib/backup-scheduler) hydrates from this
+  // table on boot and re-registers on every CRUD mutation. The
+  // last_run_* columns are updated by the worker when each
+  // scheduled job finishes; next_run_at is updated each time the
+  // schedule is (re-)registered so the UI can surface "next run
+  // in N hours" without computing the next tick from cron_expr.
+  //
+  // retention_keep + retention_days work additively: a schedule
+  // with keep=30 + days=90 prunes anything that fails BOTH gates
+  // (i.e. older than 30 backups AND older than 90 days). Either
+  // can be NULL to disable that axis.
+  //
+  // restore_runs: one row per restore attempt — both dry-run and
+  // apply land here so the dashboard's history view is uniform.
+  // steps_json carries the per-step outcomes (start/finish ts,
+  // status, optional output blob) for the live-log panel; the
+  // worker writes it incrementally as each step completes.
+  runMigration(db, 202, 'backups_schedules_and_restores', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_schedules (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id),
+        cron_expr       TEXT NOT NULL,
+        tier            TEXT NOT NULL,
+        scope           TEXT,
+        retention_keep  INTEGER NOT NULL DEFAULT 30,
+        retention_days  INTEGER,
+        passphrase_hint TEXT,
+        passphrase_enc  TEXT,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        last_run_at     TEXT,
+        last_run_status TEXT,
+        last_run_error  TEXT,
+        next_run_at     TEXT,
+        created_by      TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_schedules_destination
+        ON backup_schedules(destination_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backup_schedules_enabled
+        ON backup_schedules(enabled)
+    `);
+
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS restore_runs (
+        id              TEXT PRIMARY KEY,
+        backup_id       TEXT NOT NULL REFERENCES backups(id),
+        mode            TEXT NOT NULL,
+        target          TEXT NOT NULL,
+        sandbox_dir     TEXT,
+        started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at     TEXT,
+        status          TEXT NOT NULL,
+        steps_json      TEXT NOT NULL DEFAULT '[]',
+        initiated_by    TEXT NOT NULL,
+        notes           TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_backup
+        ON restore_runs(backup_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_started
+        ON restore_runs(started_at DESC)
     `);
   });
 

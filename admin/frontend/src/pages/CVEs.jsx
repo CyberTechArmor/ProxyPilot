@@ -274,29 +274,58 @@ function OriginPill({ origin, gitUrl }) {
   return null;
 }
 
+// Compact "x time ago" formatter for the Added / Updated columns.
+// We don't pull a date library for one helper.
+function relTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const diffSec = (Date.now() - t) / 1000;
+  if (diffSec < 60) return 'just now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)}d ago`;
+  if (diffSec < 86400 * 365) return `${Math.floor(diffSec / 86400 / 30)}mo ago`;
+  return `${Math.floor(diffSec / 86400 / 365)}y ago`;
+}
+
 function CveListRow({ entry, onOpen }) {
+  // Layout (12 cols, all aligned to the column header below):
+  //   3   CVE
+  //   3   Name
+  //   1   Tier
+  //   1   Action
+  //   2   Status
+  //   1   Added
+  //   1   Updated
   return (
     <button
       type="button"
       onClick={() => onOpen(entry.cve)}
-      className="w-full text-left grid grid-cols-12 gap-3 items-center px-3 py-2 border-b hover:bg-accent/40"
+      className="w-full text-left grid grid-cols-12 gap-3 items-center px-3 py-2 border-b border-border/50 hover:bg-accent/40"
     >
       <div className="col-span-12 sm:col-span-3 font-mono text-sm flex items-center gap-2">
         {!entry.operator_seen && (
-          <span className="h-2 w-2 rounded-full bg-orange-500" aria-label="unread" />
+          <span className="h-2 w-2 rounded-full bg-orange-500 shrink-0" aria-label="unread" />
         )}
-        {entry.cve}
+        <span className="truncate">{entry.cve}</span>
         <OriginPill origin={entry.origin} gitUrl={entry.origin_git_url} />
       </div>
-      <div className="col-span-7 sm:col-span-4 text-sm text-muted-foreground truncate">
+      <div className="col-span-12 sm:col-span-3 text-sm text-muted-foreground truncate">
         {entry.name || '—'}
       </div>
       <div className="col-span-2 sm:col-span-1 text-xs">
         {entry.tier ? `T${entry.tier}` : ''}
       </div>
-      <div className="col-span-3 sm:col-span-2"><ActionPill action={entry.action_class} /></div>
-      <div className="col-span-12 sm:col-span-2 flex justify-start sm:justify-end">
-        <StatusPill status={entry.status} />
+      <div className="col-span-3 sm:col-span-1"><ActionPill action={entry.action_class} /></div>
+      <div className="col-span-3 sm:col-span-2"><StatusPill status={entry.status} /></div>
+      <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
+           title={entry.added ? new Date(entry.added).toLocaleString() : ''}>
+        {relTime(entry.added)}
+      </div>
+      <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
+           title={entry.last_updated ? new Date(entry.last_updated).toLocaleString() : ''}>
+        {relTime(entry.last_updated)}
       </div>
     </button>
   );
@@ -957,14 +986,34 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   );
 }
 
+// Pagination threshold — below this we show all rows and skip the
+// pagination controls entirely. 100 keeps single-host installs
+// uncluttered while taming fleets where the inbox grows.
+const PAGINATE_AT = 100;
+const DEFAULT_PAGE_SIZE = 25;
+
 function CveList({ onOpen, refreshKey }) {
   const { toast } = useToast();
   const [data, setData] = useState({ entries: [], host: '', unread: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Per-column filter state. `tier` is a number-or-"all". Status +
+  // action are uppercase strings or "all".
   const [filterAction, setFilterAction] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
-  const [sortBy, setSortBy] = useState('tier');
+  const [filterTier, setFilterTier] = useState('all');
+  // Sort by clicking the column header. `dir` toggles asc/desc on
+  // re-click of the same column. Default: tier asc (most-critical first).
+  const [sort, setSort] = useState({ key: 'tier', dir: 'asc' });
+  // Free-text search across CVE id + name + sources (sources match
+  // is best-effort against the listing's `name` since the listing
+  // doesn't ship sources to keep payload small — sources are matched
+  // when the operator types something like "openssl" by checking
+  // the CVE id and name).
+  const [search, setSearch] = useState('');
+  // Pagination — only kicks in above PAGINATE_AT entries.
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [page, setPage] = useState(1);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteContent, setPasteContent] = useState('');
   const [pasting, setPasting] = useState(false);
@@ -1098,30 +1147,94 @@ function CveList({ onOpen, refreshKey }) {
     }
   };
 
-  const visible = useMemo(() => {
+  // Filtered + sorted rows. Search applies first (cheap client-side
+  // substring), then column filters, then sort. Pagination is
+  // applied in the render block since it needs the total count.
+  const filtered = useMemo(() => {
     let rows = data.entries.slice();
+    const q = search.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(r =>
+        r.cve.toLowerCase().includes(q)
+        || (r.name || '').toLowerCase().includes(q)
+        || (r.origin_git_url || '').toLowerCase().includes(q)
+      );
+    }
     if (filterAction !== 'all') rows = rows.filter(r => r.action_class === filterAction);
     if (filterStatus !== 'all') rows = rows.filter(r => r.status === filterStatus);
-    rows.sort((a, b) => {
-      if (sortBy === 'tier') {
-        const at = parseInt(a.tier, 10) || 99;
-        const bt = parseInt(b.tier, 10) || 99;
-        if (at !== bt) return at - bt;
-        return (b.last_updated || '').localeCompare(a.last_updated || '');
-      }
-      if (sortBy === 'last_updated') {
-        return (b.last_updated || '').localeCompare(a.last_updated || '');
-      }
-      return a.cve.localeCompare(b.cve);
-    });
-    return rows;
-  }, [data.entries, filterAction, filterStatus, sortBy]);
+    if (filterTier !== 'all')   rows = rows.filter(r => String(r.tier ?? '') === String(filterTier));
 
-  const FilterChip = ({ active, onClick, children }) => (
+    const cmp = (a, b) => {
+      const dir = sort.dir === 'desc' ? -1 : 1;
+      switch (sort.key) {
+        case 'cve':
+          return dir * a.cve.localeCompare(b.cve);
+        case 'name':
+          return dir * (a.name || '').localeCompare(b.name || '');
+        case 'tier': {
+          const at = parseInt(a.tier, 10);
+          const bt = parseInt(b.tier, 10);
+          // Missing tiers sort to the bottom regardless of direction.
+          if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+          if (Number.isNaN(at)) return 1;
+          if (Number.isNaN(bt)) return -1;
+          if (at !== bt) return dir * (at - bt);
+          return -1 * (a.last_updated || '').localeCompare(b.last_updated || '');
+        }
+        case 'action':
+          return dir * (a.action_class || '').localeCompare(b.action_class || '');
+        case 'status':
+          return dir * (a.status || '').localeCompare(b.status || '');
+        case 'added':
+          return dir * (a.added || '').localeCompare(b.added || '');
+        case 'updated':
+          return dir * (a.last_updated || '').localeCompare(b.last_updated || '');
+        default:
+          return 0;
+      }
+    };
+    rows.sort(cmp);
+    return rows;
+  }, [data.entries, search, filterAction, filterStatus, filterTier, sort]);
+
+  // Reset to page 1 when filters / search / data change (otherwise
+  // operator gets a confusing "page 5 of 1" after narrowing).
+  useEffect(() => { setPage(1); },
+    [search, filterAction, filterStatus, filterTier, data.entries.length]);
+
+  const paginate = filtered.length > PAGINATE_AT;
+  const totalPages = paginate ? Math.max(1, Math.ceil(filtered.length / pageSize)) : 1;
+  const visible = paginate
+    ? filtered.slice((page - 1) * pageSize, page * pageSize)
+    : filtered;
+
+  const toggleSort = (key) => {
+    setSort(s => s.key === key
+      ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: 'asc' });
+  };
+
+  const SortHeader = ({ k, children, className = '' }) => (
+    <button
+      type="button"
+      onClick={() => toggleSort(k)}
+      className={`text-left flex items-center gap-1 hover:text-foreground transition-colors ${className}`}
+      title={`Sort by ${k}`}
+    >
+      {children}
+      {sort.key === k && (
+        <span className="text-foreground" aria-label={sort.dir}>
+          {sort.dir === 'asc' ? '↑' : '↓'}
+        </span>
+      )}
+    </button>
+  );
+
+  const FilterChip = ({ active, onClick, children, size = 'sm' }) => (
     <button
       type="button"
       onClick={onClick}
-      className={`text-xs px-2 py-1 rounded border transition-colors ${
+      className={`${size === 'xs' ? 'text-[10px] px-1.5 py-0.5' : 'text-xs px-2 py-1'} rounded border transition-colors ${
         active ? 'bg-primary text-primary-foreground border-primary'
                : 'bg-transparent text-muted-foreground border-border hover:bg-accent'
       }`}
@@ -1197,38 +1310,85 @@ function CveList({ onOpen, refreshKey }) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 border rounded p-2">
-        <span className="text-xs text-muted-foreground">Action:</span>
-        {['all', 'AUTO_PATCH', 'ONE_CLICK', 'ALERT'].map(v => (
-          <FilterChip key={v} active={filterAction === v} onClick={() => setFilterAction(v)}>
-            {v}
-          </FilterChip>
-        ))}
-        <span className="text-xs text-muted-foreground ml-3">Status:</span>
-        {['all', 'NEW', 'QUEUED', 'IN-PROGRESS', 'RESOLVED', 'BLOCKED', 'DISMISSED', 'ALERT-AUTO-ROLLBACK'].map(v => (
-          <FilterChip key={v} active={filterStatus === v} onClick={() => setFilterStatus(v)}>
-            {v}
-          </FilterChip>
-        ))}
-        <span className="text-xs text-muted-foreground ml-3">Sort:</span>
-        {[['tier', 'tier'], ['last_updated', 'updated'], ['cve', 'CVE id']].map(([v, label]) => (
-          <FilterChip key={v} active={sortBy === v} onClick={() => setSortBy(v)}>
-            {label}
-          </FilterChip>
-        ))}
+      {/* Search bar — full-width, instant client-side filter across
+          CVE id + name + origin_git_url. */}
+      <div className="relative">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search CVE id, name, or git URL…"
+          className="w-full text-sm bg-muted/30 border border-border rounded px-3 py-2 pr-9 placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/50"
+        />
+        {search && (
+          <button
+            type="button"
+            onClick={() => setSearch('')}
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
       </div>
 
+      {/* Table — header is sticky; rows scroll under it. The header
+          contains TWO rows per column: the click-to-sort label, and
+          the per-column filter chips beneath. */}
       <div className="border rounded">
-        <div className="grid grid-cols-12 gap-3 px-3 py-2 text-xs text-muted-foreground border-b bg-muted/20">
-          <div className="col-span-12 sm:col-span-3">CVE</div>
-          <div className="col-span-7 sm:col-span-4">Name</div>
-          <div className="col-span-2 sm:col-span-1">Tier</div>
-          <div className="col-span-3 sm:col-span-2">Action</div>
-          <div className="col-span-12 sm:col-span-2 sm:text-right">Status</div>
+        <div className="sticky top-0 z-10 bg-card border-b">
+          {/* Row 1 — column labels with sort indicators. */}
+          <div className="grid grid-cols-12 gap-3 px-3 py-2 text-xs text-muted-foreground bg-muted/30">
+            <SortHeader k="cve"     className="col-span-12 sm:col-span-3">CVE</SortHeader>
+            <SortHeader k="name"    className="col-span-12 sm:col-span-3">Name</SortHeader>
+            <SortHeader k="tier"    className="col-span-2 sm:col-span-1">Tier</SortHeader>
+            <SortHeader k="action"  className="col-span-3 sm:col-span-1">Action</SortHeader>
+            <SortHeader k="status"  className="col-span-3 sm:col-span-2">Status</SortHeader>
+            <SortHeader k="added"   className="col-span-2 sm:col-span-1">Added</SortHeader>
+            <SortHeader k="updated" className="col-span-2 sm:col-span-1">Updated</SortHeader>
+          </div>
+          {/* Row 2 — filter chips under each filterable column. CVE +
+              Name + Added + Updated have no chips (they go through
+              the search box / are continuous values). */}
+          <div className="grid grid-cols-12 gap-3 px-3 py-2 bg-card border-t border-border/40">
+            <div className="col-span-12 sm:col-span-3" />
+            <div className="col-span-12 sm:col-span-3" />
+            <div className="col-span-2 sm:col-span-1 flex flex-wrap gap-1">
+              <FilterChip size="xs" active={filterTier === 'all'} onClick={() => setFilterTier('all')}>all</FilterChip>
+              {[1, 2, 3, 4].map(t => (
+                <FilterChip size="xs" key={t} active={String(filterTier) === String(t)} onClick={() => setFilterTier(t)}>
+                  T{t}
+                </FilterChip>
+              ))}
+            </div>
+            <div className="col-span-3 sm:col-span-1 flex flex-wrap gap-1">
+              <FilterChip size="xs" active={filterAction === 'all'} onClick={() => setFilterAction('all')}>all</FilterChip>
+              {['AUTO_PATCH', 'ONE_CLICK', 'ALERT'].map(v => (
+                <FilterChip size="xs" key={v} active={filterAction === v} onClick={() => setFilterAction(v)}>
+                  {v.replace('AUTO_PATCH', 'AUTO').replace('ONE_CLICK', 'ONE')}
+                </FilterChip>
+              ))}
+            </div>
+            <div className="col-span-3 sm:col-span-2 flex flex-wrap gap-1">
+              <FilterChip size="xs" active={filterStatus === 'all'} onClick={() => setFilterStatus('all')}>all</FilterChip>
+              {['NEW', 'QUEUED', 'IN-PROGRESS', 'RESOLVED', 'BLOCKED', 'DISMISSED', 'ALERT-AUTO-ROLLBACK'].map(v => (
+                <FilterChip size="xs" key={v} active={filterStatus === v} onClick={() => setFilterStatus(v)}>
+                  {v.replace('ALERT-AUTO-ROLLBACK', 'ROLLBACK').replace('IN-PROGRESS', 'IN-PROG')}
+                </FilterChip>
+              ))}
+            </div>
+            <div className="col-span-2 sm:col-span-1" />
+            <div className="col-span-2 sm:col-span-1" />
+          </div>
         </div>
+
         {visible.length === 0 ? (
           <div className="text-sm text-muted-foreground text-center py-8">
-            {loading ? 'Loading…' : 'No entries match the current filters.'}
+            {loading
+              ? 'Loading…'
+              : (search || filterAction !== 'all' || filterStatus !== 'all' || filterTier !== 'all')
+                ? 'No entries match the current filters.'
+                : 'Inbox is empty. Paste a CVE YAML or sync from a git source.'}
           </div>
         ) : (
           visible.map(entry => (
@@ -1236,6 +1396,35 @@ function CveList({ onOpen, refreshKey }) {
           ))
         )}
       </div>
+
+      {/* Pagination footer — only when total exceeds PAGINATE_AT.
+          Smaller inboxes render all rows; the threshold makes the
+          common single-host case uncluttered. */}
+      {paginate && (
+        <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span>Page size:</span>
+            {[25, 50, 100].map(n => (
+              <FilterChip key={n} size="xs" active={pageSize === n} onClick={() => setPageSize(n)}>
+                {n}
+              </FilterChip>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}>
+              Prev
+            </Button>
+            <span className="font-mono">page {page} of {totalPages}</span>
+            <Button variant="outline" size="sm" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}>
+              Next
+            </Button>
+          </div>
+          <div>
+            {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+            {filtered.length !== data.entries.length && ` (of ${data.entries.length})`}
+          </div>
+        </div>
+      )}
 
       <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
         <DialogContent className="sm:max-w-2xl">

@@ -887,6 +887,38 @@ EOF
         fi
     fi
 
+    # Docker on Debian 13 / Ubuntu 24.04+ (Linux 6.x): the kernel no
+    # longer auto-loads br_netfilter, which Docker's default bridge
+    # networking depends on.  Operators who installed ProxyPilot
+    # before the install.sh fix landed see docker.service fail on
+    # boot with a cryptic 'bridge: filtering via arp/ip/ip6tables
+    # is no longer available by default' kernel hint.  Self-heal
+    # here so an `update.sh` run picks them up retroactively.
+    if [[ ! -f /etc/modules-load.d/proxypilot-docker.conf ]]; then
+        log "${BLUE}Pinning Docker kernel modules (br_netfilter, overlay)...${NC}"
+        cat > /etc/modules-load.d/proxypilot-docker.conf <<'KMODS'
+# Loaded by ProxyPilot's update.sh — Docker's default bridge
+# networking needs br_netfilter; the overlay storage driver needs
+# overlay.  Linux 6.x removed automatic loading; we pin them here.
+br_netfilter
+overlay
+KMODS
+        modprobe br_netfilter 2>/dev/null || \
+            log "${YELLOW}Warning: br_netfilter modprobe failed — reboot recommended${NC}"
+        modprobe overlay 2>/dev/null || true
+        # If docker.service is currently in failed state, try to
+        # bring it back up now that the modules are loaded.  Ignore
+        # systemctl exit codes; a failed start here just means the
+        # operator will see the same error they were seeing before
+        # the update + a reboot will pick up the persisted modules.
+        if systemctl is-failed --quiet docker 2>/dev/null; then
+            log "${BLUE}Restarting docker.service (was in failed state)...${NC}"
+            systemctl reset-failed docker 2>/dev/null || true
+            systemctl start docker 2>/dev/null || \
+                log "${YELLOW}docker.service failed to start; reboot to apply module changes${NC}"
+        fi
+    fi
+
     if [[ -x "$SCRIPT_DIR/scripts/install-ssh-access.sh" ]]; then
         log "${BLUE}Refreshing SSH access manager...${NC}"
         if ! PROXYPILOT_BIN=/usr/local/bin/proxypilot \

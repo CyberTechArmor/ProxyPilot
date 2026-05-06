@@ -352,6 +352,29 @@ install_docker() {
         apt-get update -y
         apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
+        # Linux 6.x (Debian 13 / Ubuntu 24.04+) no longer auto-loads
+        # br_netfilter, which Docker's default bridge networking
+        # depends on.  Without it, `docker.service` fails on first
+        # boot with the cryptic kernel hint:
+        #   bridge: filtering via arp/ip/ip6tables is no longer
+        #   available by default. Update your scripts to load
+        #   br_netfilter if you need this.
+        # We persist the module list so reboots don't regress, then
+        # modprobe them now so the very next `systemctl start docker`
+        # below has them in place.  `overlay` is the Docker storage
+        # driver's kernel module — also explicitly loaded for the
+        # same reason on minimal-kernel Debian images.
+        cat > /etc/modules-load.d/proxypilot-docker.conf <<'KMODS'
+# Loaded by ProxyPilot's install.sh on first boot.  Docker's
+# default bridge networking needs br_netfilter; the overlay
+# storage driver needs overlay.  Linux 6.x removed automatic
+# loading of both, so we pin them here.
+br_netfilter
+overlay
+KMODS
+        modprobe br_netfilter 2>/dev/null || log_warn "br_netfilter modprobe failed — Docker bridge networking may not work until next reboot"
+        modprobe overlay 2>/dev/null || true
+
         systemctl enable docker
         systemctl start docker
 

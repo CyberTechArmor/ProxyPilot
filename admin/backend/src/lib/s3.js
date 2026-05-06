@@ -26,6 +26,12 @@ import {
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { decryptSecret } from './secrets.js';
+import { buildKey } from './s3-keys.js';
+
+// Re-export buildKey so existing callers don't need to know it
+// moved.  The function lives in s3-keys.js now to keep the unit-
+// test surface small (see lib/s3-keys.js).
+export { buildKey };
 
 // Build an S3Client from a destination row. The row's secret_key_enc
 // is decrypted in-place; the plaintext lives only in the closure of
@@ -90,16 +96,6 @@ export async function testConnection(dest) {
   } finally {
     try { client?.destroy?.(); } catch { /* ignore */ }
   }
-}
-
-// Build the S3 key for a backup. Callers pass a destination row and
-// a bare object name; this prepends the row's path_prefix (if any)
-// after normalising trailing/leading slashes so we can't accidentally
-// emit a double-slash key (legal in S3 but a UX disaster).
-export function buildKey(dest, objectName) {
-  const prefix = (dest.path_prefix || '').replace(/^\/+/, '').replace(/\/+$/, '');
-  const name = String(objectName).replace(/^\/+/, '');
-  return prefix ? `${prefix}/${name}` : name;
 }
 
 // Stream an object up to S3. `body` may be a Buffer, a string, or a

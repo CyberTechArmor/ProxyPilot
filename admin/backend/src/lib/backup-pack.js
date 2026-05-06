@@ -104,20 +104,23 @@ function makeTarHeader(name, size, mtime) {
   Buffer.from(octal(0, 8), 'ascii').copy(h, 116);       // gid
   Buffer.from(octal(size, 12), 'ascii').copy(h, 124);   // size
   Buffer.from(octal(Math.floor(mtime / 1000), 12), 'ascii').copy(h, 136); // mtime
-  // checksum — fill with spaces while computing
+  // Checksum field: pre-fill with 8 spaces so the computed sum
+  // treats those bytes as 0x20 — required by the spec, otherwise
+  // a verifying reader can't reproduce the value we write below.
   Buffer.from('        ', 'ascii').copy(h, 148);
   h[156] = 0x30; // typeflag '0' = normal file
   Buffer.from('ustar\0', 'ascii').copy(h, 257);
   Buffer.from('00', 'ascii').copy(h, 263);
-  // checksum: unsigned sum of all 512 header bytes (with checksum
-  // field treated as 8 spaces, which we already wrote).
+  // Checksum = unsigned sum of all 512 header bytes (with the
+  // checksum field treated as 8 spaces, which we wrote above).
+  // Field layout per POSIX 1003.1: 6-digit zero-padded octal,
+  // followed by NUL, followed by space — exactly 8 bytes.
   let sum = 0;
   for (let i = 0; i < 512; i += 1) sum += h[i];
-  Buffer.from(octal(sum, 8), 'ascii').copy(h, 148);
-  // ustar requires the checksum field to be 6-digit octal + NUL +
-  // space, not the generic NUL terminator octal() produces.  Fix.
-  h[154] = 0;     // NUL after the digits
-  h[155] = 0x20;  // space
+  const sumOct = sum.toString(8).padStart(6, '0');
+  Buffer.from(sumOct, 'ascii').copy(h, 148); // 6 chars at 148-153
+  h[154] = 0;     // NUL terminator
+  h[155] = 0x20;  // trailing space
   return h;
 }
 

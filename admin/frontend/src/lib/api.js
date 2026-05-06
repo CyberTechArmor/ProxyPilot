@@ -1024,6 +1024,27 @@ export const api = {
   // a path so callers can drop it into <a href={...}> directly.
   backupsDownloadHref: (id) => `${API_BASE}/backups/${encodeURIComponent(id)}/download`,
 
+  // PR 2: schedules + restore + usage + health classes.
+  backupsUsage: () => request('/backups/usage'),
+  backupsListSchedules: () => request('/backups/schedules'),
+  backupsCreateSchedule: (body) =>
+    request('/backups/schedules', { method: 'POST', body: JSON.stringify(body) }),
+  backupsUpdateSchedule: (id, body) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
+  backupsDeleteSchedule: (id) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  backupsRunScheduleNow: (id) =>
+    request(`/backups/schedules/${encodeURIComponent(id)}/run-now`, { method: 'POST' }),
+  backupsRestore: (id, body) =>
+    request(`/backups/${encodeURIComponent(id)}/restore`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  backupsListRestores: () => request('/backups/restores'),
+  backupsGetRestore: (id) => request(`/backups/restores/${encodeURIComponent(id)}`),
+  backupsHealthClasses: () => request('/backups/health-classes'),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

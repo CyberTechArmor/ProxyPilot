@@ -25,8 +25,13 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, CheckCircle2, Clock, Cloud, Download, FileArchive,
-  Loader2, Plus, RefreshCw, Save, Trash2, XCircle,
+  Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2, XCircle,
 } from 'lucide-react';
+
+import UsageCard from './UsageCard';
+import SchedulesPanel from './SchedulesPanel';
+import RestoreDialog from './RestoreDialog';
+import RestoresPanel from './RestoresPanel';
 
 function fmtBytes(n) {
   if (typeof n !== 'number' || Number.isNaN(n) || n <= 0) return '0 B';
@@ -89,7 +94,8 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
 
   const noDestinations = !destinations?.length;
   const passphraseOk = passphrase.length >= 8 && passphrase === confirmPassphrase;
-  const canSubmit = !busy && !noDestinations && passphraseOk && tier === 'config';
+  const canSubmit = !busy && !noDestinations && passphraseOk
+    && (tier === 'config' || tier === 'config_plus_data' || tier === 'full');
 
   const submit = () => {
     if (!canSubmit) return;
@@ -139,8 +145,8 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
               onChange={(e) => setTier(e.target.value)}
             >
               <option value="config">Config — SQLite + .env + cve-inbox (~50 KB, encrypted)</option>
-              <option value="config_plus_data" disabled>Config + data — coming in PR 2</option>
-              <option value="full" disabled>Full — coming in PR 2</option>
+              <option value="config_plus_data">Config + data — adds /etc/caddy + /etc/wireguard + ACME certs + service file roots (~10-100 MB)</option>
+              <option value="full">Full — config_plus_data + every docker volume + every Incus instance (multi-GB)</option>
             </select>
           </div>
           <div className="space-y-1">
@@ -215,6 +221,7 @@ export default function BackupsTab() {
   const { toast } = useToast();
   const [items, setItems] = useState([]);
   const [destinations, setDestinations] = useState([]);
+  const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState(null);
@@ -223,15 +230,21 @@ export default function BackupsTab() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(null);
 
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [restoreBackup, setRestoreBackup] = useState(null);
+  const [focusRunId, setFocusRunId] = useState(null);
+
   const refresh = async () => {
     setLoading(true);
     try {
-      const [list, dests] = await Promise.all([
+      const [list, dests, usageOut] = await Promise.all([
         api.backupsList(),
         api.backupsListStorage(),
+        api.backupsUsage().catch(() => null),
       ]);
       setItems(list.backups || []);
       setDestinations(dests.destinations || []);
+      setUsage(usageOut);
     } catch (err) {
       toast({
         title: 'Could not load backups',
@@ -289,13 +302,19 @@ export default function BackupsTab() {
 
   const noDestinations = !destinations?.length;
 
+  const onRestore = (b) => { setRestoreBackup(b); setRestoreOpen(true); };
+  const onRestoreStarted = (runId) => {
+    setFocusRunId(runId);
+    toast({ title: 'Dry-run started', description: 'See the Restores panel for live progress.' });
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-start gap-3 flex-wrap">
         <p className="text-xs text-muted-foreground max-w-2xl leading-relaxed flex-1 min-w-[260px]">
-          On-demand encrypted backups uploaded to your configured S3-compatible storage.
-          PR 1 ships the config tier (SQLite + .env + cve-inbox, ~50 KB encrypted).
-          Schedules, larger tiers, and restore dry-run land in PR 2.
+          On-demand + scheduled encrypted backups across three tiers (config / config_plus_data /
+          full) with restore dry-run.  Default destination is where new backups land; mark a
+          different one default in the Storage tab to switch.
         </p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
@@ -326,6 +345,8 @@ export default function BackupsTab() {
           </CardHeader>
         </Card>
       )}
+
+      <UsageCard usage={usage} loading={loading} />
 
       {!loading && items.length === 0 && !noDestinations && (
         <Card>
@@ -392,12 +413,18 @@ export default function BackupsTab() {
                         <td className="px-3 py-2 align-top">
                           <div className="flex justify-end gap-1.5">
                             {b.status === 'ok' && (
-                              <Button asChild variant="outline" size="sm">
-                                <a href={api.backupsDownloadHref(b.id)} download>
-                                  <Download className="h-3.5 w-3.5 mr-1.5" />
-                                  Download
-                                </a>
-                              </Button>
+                              <>
+                                <Button variant="outline" size="sm" onClick={() => onRestore(b)}>
+                                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                                  Restore
+                                </Button>
+                                <Button asChild variant="outline" size="sm">
+                                  <a href={api.backupsDownloadHref(b.id)} download>
+                                    <Download className="h-3.5 w-3.5 mr-1.5" />
+                                    Download
+                                  </a>
+                                </Button>
+                              </>
                             )}
                             <Button
                               variant="destructive"
@@ -424,6 +451,10 @@ export default function BackupsTab() {
         </Card>
       )}
 
+      <SchedulesPanel destinations={destinations} onChange={refresh} />
+
+      <RestoresPanel focusRunId={focusRunId} onUnfocus={() => setFocusRunId(null)} />
+
       <CreateDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
@@ -437,6 +468,12 @@ export default function BackupsTab() {
         item={deleting}
         onConfirm={confirmDelete}
         busy={busyId === deleting?.id}
+      />
+      <RestoreDialog
+        open={restoreOpen}
+        onOpenChange={(o) => { if (!o) setRestoreBackup(null); setRestoreOpen(o); }}
+        backup={restoreBackup}
+        onStarted={onRestoreStarted}
       />
     </div>
   );

@@ -331,6 +331,78 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
   res.json({ host: HOSTNAME, entries, unread });
 });
 
+// ── literal-path routes ───────────────────────────────────────────────────
+//
+// Express routes match in registration order. The `:cveId` wildcard
+// below would otherwise swallow `/git-config`, `/git-sync`, and
+// `/poll` (they're valid `:cveId` values from the wildcard's POV)
+// — so the specific paths MUST register first. Reordering this file
+// is the test: every `/<literal>` route should sit above any
+// `/<wildcard>` route on the same HTTP verb.
+
+// Read-only git source URL. Stored in app_settings; the engine
+// reads it via the dashboard backend on each sync request.
+const GIT_URL_KEY = 'cve_git_url';
+
+const gitUrlSchema = z.object({
+  url: z.string().trim().min(0).max(1024)
+    .refine(v => v === '' || /^(https?:\/\/|git@|ssh:\/\/|file:\/\/|\/)/.test(v),
+            { message: 'must be empty or start with https://, ssh://, git@, file://, or /' }),
+}).strict();
+
+cvesRouter.get('/git-config', requireAdmin, async (_req, res) => {
+  res.json({ url: getSetting(GIT_URL_KEY) || '' });
+});
+
+cvesRouter.put('/git-config', requireAdmin, requireSudo, async (req, res) => {
+  let body;
+  try {
+    body = gitUrlSchema.parse(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  setSetting(GIT_URL_KEY, body.url);
+  logAudit(req.user.id, 'CVE_GIT_CONFIG', 'cve', null,
+           { url_set: !!body.url }, req.ip);
+  res.json({ ok: true, url: body.url });
+});
+
+cvesRouter.post('/git-sync', requireAdmin, requireSudo, async (req, res) => {
+  const url = (getSetting(GIT_URL_KEY) || '').trim();
+  if (!url) {
+    return res.status(400).json({
+      error: 'no git source configured; set one via PUT /api/cves/git-config',
+    });
+  }
+  try {
+    const out = await runEngine(['sync-git', '--git-url', url],
+      { timeoutMs: 5 * 60 * 1000 });
+    logAudit(req.user.id, 'CVE_GIT_SYNC', 'cve', null, {
+      git_commit: out?.git_commit ?? null,
+      branch: out?.branch ?? null,
+      subpath: out?.subpath ?? null,
+      imported: (out?.imported || []).length,
+      errors: (out?.errors || []).length,
+    }, req.ip);
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
+  try {
+    const out = await runEngine(['poll'], { timeoutMs: 35 * 60 * 1000 });
+    logAudit(req.user.id, 'CVE_POLL', 'cve', null,
+             { entries: out?.entries?.length ?? null }, req.ip);
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── wildcard `:cveId` routes (must register AFTER literal paths above) ────
+
 cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
   const path = safePath(req.params.cveId);
   if (!path) return res.status(400).json({ error: 'invalid CVE id' });
@@ -516,84 +588,4 @@ cvesRouter.delete('/:cveId', requireAdmin, requireSudo, async (req, res) => {
   }
   logAudit(req.user.id, 'CVE_DELETE', 'cve', req.params.cveId, {}, req.ip);
   res.json({ ok: true });
-});
-
-// POST /api/cves/poll — trigger an immediate engine poll. Useful right
-// after pasting a new entry so the operator doesn't have to wait for
-// the 5-minute timer. AUTO_PATCH entries that probe positive will run
-// during this call; the response includes the per-entry summary.
-cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
-  try {
-    const out = await runEngine(['poll'], { timeoutMs: 35 * 60 * 1000 });
-    logAudit(req.user.id, 'CVE_POLL', 'cve', null,
-             { entries: out?.entries?.length ?? null }, req.ip);
-    res.json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── read-only git source config + sync ────────────────────────────────────
-//
-// Operators point ProxyPilot at a git repo (typically a Claude-curated
-// catalog of CVE specs) and the engine pulls new entries on demand.
-// The sync is strictly additive: existing entries — including their
-// origin (paste / a previous git URL) — never get overwritten or
-// removed when the URL changes.
-//
-// State flow:
-//   1. PUT /api/cves/git-config { url } — operator sets / changes URL.
-//   2. POST /api/cves/git-sync — pulls + imports new specs.
-//   3. Each import lands in the inbox with `_proxypilot.origin: git`,
-//      `git_url`, `git_commit`. Engine + dashboard treat these as
-//      opaque metadata.
-
-const GIT_URL_KEY = 'cve_git_url';
-
-// Permissive enough to allow https / git@ / file:// for tests, strict
-// enough to block obvious shell-meta. The engine wraps the URL in argv
-// for subprocess.run so injection isn't possible, but we still want a
-// readable error in the dashboard rather than a cryptic git failure.
-const gitUrlSchema = z.object({
-  url: z.string().trim().min(0).max(1024)
-    .refine(v => v === '' || /^(https?:\/\/|git@|ssh:\/\/|file:\/\/|\/)/.test(v),
-            { message: 'must be empty or start with https://, ssh://, git@, file://, or /' }),
-}).strict();
-
-cvesRouter.get('/git-config', requireAdmin, async (_req, res) => {
-  res.json({ url: getSetting(GIT_URL_KEY) || '' });
-});
-
-cvesRouter.put('/git-config', requireAdmin, requireSudo, async (req, res) => {
-  let body;
-  try {
-    body = gitUrlSchema.parse(req.body || {});
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-  setSetting(GIT_URL_KEY, body.url);
-  logAudit(req.user.id, 'CVE_GIT_CONFIG', 'cve', null,
-           { url_set: !!body.url }, req.ip);
-  res.json({ ok: true, url: body.url });
-});
-
-cvesRouter.post('/git-sync', requireAdmin, requireSudo, async (req, res) => {
-  const url = (getSetting(GIT_URL_KEY) || '').trim();
-  if (!url) {
-    return res.status(400).json({
-      error: 'no git source configured; set one via PUT /api/cves/git-config',
-    });
-  }
-  try {
-    const out = await runEngine(['sync-git', '--git-url', url],
-      { timeoutMs: 5 * 60 * 1000 });
-    logAudit(req.user.id, 'CVE_GIT_SYNC', 'cve', null, {
-      git_commit: out?.git_commit ?? null,
-      imported: (out?.imported || []).length,
-      errors: (out?.errors || []).length,
-    }, req.ip);
-    res.json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });

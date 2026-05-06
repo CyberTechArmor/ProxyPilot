@@ -30,7 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import {
-  AlertTriangle, Check, Cloud, Loader2, Pencil, Plus, RefreshCw, Star, Trash2, X,
+  Activity, AlertTriangle, Check, Cloud, Loader2, Pencil, Plus, RefreshCw, Star, Trash2, X,
 } from 'lucide-react';
 
 // Empty-string optional fields ↦ null on the wire so the server
@@ -329,6 +329,7 @@ export default function StorageTab() {
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [healthchecking, setHealthchecking] = useState(false);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState(null); // dest row, or null = create
@@ -390,6 +391,35 @@ export default function StorageTab() {
   const onEdit = (dest) => { setEditing(dest); setEditorOpen(true); };
   const onCreate = () => { setEditing(null); setEditorOpen(true); };
 
+  const onRunHealthcheck = async () => {
+    setHealthchecking(true);
+    try {
+      const r = await api.backupsRunS3Healthcheck();
+      const failures = (r.results || []).filter((x) => !x.ok);
+      if (failures.length === 0) {
+        toast({
+          title: 'All destinations reachable',
+          description: `Probed ${r.results.length} destination${r.results.length === 1 ? '' : 's'}. All ok.`,
+        });
+      } else {
+        toast({
+          title: `${failures.length} destination${failures.length === 1 ? '' : 's'} unreachable`,
+          description: failures.map((f) => `${f.name}: ${f.error || 'unknown'}`).join('; '),
+          variant: 'destructive',
+        });
+      }
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Health check failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setHealthchecking(false);
+    }
+  };
+
   const onSubmit = async (body) => {
     setSubmitting(true);
     try {
@@ -443,10 +473,22 @@ export default function StorageTab() {
           using the same envelope as TOTP secrets — they're never returned to the UI
           after they're saved.
         </p>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
             <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onRunHealthcheck}
+            disabled={loading || healthchecking || items.length === 0}
+            title="Run the daily S3 probe against every destination now. The same probe runs automatically at 02:30 daily; failures post a notification."
+          >
+            {healthchecking
+              ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              : <Activity className="h-4 w-4 mr-1.5" />}
+            Run health check
           </Button>
           <Button size="sm" onClick={onCreate}>
             <Plus className="h-4 w-4 mr-1.5" /> Add destination

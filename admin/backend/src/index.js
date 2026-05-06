@@ -25,6 +25,7 @@ import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middle
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
+import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -308,6 +309,15 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateBackupSchedules();
     } catch (err) {
       console.error('[backup-scheduler] hydrate threw:', err.message || err);
+    }
+    try {
+      // Daily S3 connection-test cron — probes every destination
+      // at 02:30 host time (overridable via
+      // PROXYPILOT_S3_HEALTHCHECK_CRON) and posts an error
+      // notification on failure.
+      hydrateS3Healthcheck();
+    } catch (err) {
+      console.error('[s3-healthcheck] hydrate threw:', err.message || err);
     }
   });
 });

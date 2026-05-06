@@ -69,6 +69,7 @@ import {
 } from '../lib/backup-scheduler.js';
 import { runModeA, runModeC } from '../lib/restore.js';
 import { listHealthClasses } from '../lib/health-checks.js';
+import { runOnce as runS3Healthcheck } from '../lib/backup-s3-healthcheck.js';
 
 const INSTALL_DIR = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
 const ENV_PATH = process.env.PROXYPILOT_ENV_PATH || path.join(INSTALL_DIR, '.env');
@@ -326,6 +327,20 @@ backupsRouter.delete('/storage/:id', requireAdmin, requireSudo, (req, res) => {
   }, req.ip);
 
   res.json({ ok: true });
+});
+
+// POST /api/backups/storage/healthcheck — fire the daily probe
+// against every destination NOW.  Same code path as the cron job;
+// surface the per-destination verdicts in the response so the UI
+// can show a 'just-tested' state without requiring an immediate
+// refresh of /storage.
+backupsRouter.post('/storage/healthcheck', requireAdmin, requireSudo, async (req, res) => {
+  const results = await runS3Healthcheck();
+  logAudit(req.user.id, 'BACKUP_S3_HEALTHCHECK_RUN', 'backup_destination', null, {
+    destinations: results.length,
+    failures: results.filter((r) => !r.ok).length,
+  }, req.ip);
+  res.json({ results });
 });
 
 // POST /api/backups/storage/:id/test — issue a HEAD bucket. The S3

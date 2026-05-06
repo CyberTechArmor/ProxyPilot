@@ -1007,6 +1007,10 @@ export const api = {
     request(`/backups/storage/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   backupsTestStorage: (id) =>
     request(`/backups/storage/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  // Run the daily-S3 probe against every destination now.  Same
+  // code path as the cron task; failures post notifications.
+  backupsRunS3Healthcheck: () =>
+    request('/backups/storage/healthcheck', { method: 'POST' }),
   backupsSetDefaultStorage: (id) =>
     request(`/backups/storage/${encodeURIComponent(id)}/default`, { method: 'POST' }),
 

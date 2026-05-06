@@ -25,8 +25,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Pin, PinOff,
-  Plus, RefreshCw, Save, ShieldCheck, ShieldQuestion, Star, Stethoscope, Trash2,
-  X, Zap,
+  Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, ShieldQuestion, Star,
+  Stethoscope, Trash2, X, Zap,
 } from 'lucide-react';
 
 // A real, working CVE inbox spec — round-trips through the engine's
@@ -290,6 +290,34 @@ function relTime(iso) {
   return `${Math.floor(diffSec / 86400 / 365)}y ago`;
 }
 
+// Visual encoding for the four verdicts the engine produces. The
+// Applicability block on the detail page and the row badge both
+// read this so they agree on colour + icon.
+const VERDICT_VISUAL = {
+  affected:     { Icon: ShieldAlert,    cls: 'text-red-500',     label: 'Host IS affected' },
+  not_affected: { Icon: ShieldCheck,    cls: 'text-emerald-500', label: 'Host is NOT affected' },
+  probe_error:  { Icon: ShieldQuestion, cls: 'text-amber-500',   label: 'Probe error — verdict not conclusive' },
+  no_probe:     { Icon: ShieldQuestion, cls: 'text-amber-500',   label: 'No probe in spec' },
+  unknown:      { Icon: ShieldQuestion, cls: 'text-muted-foreground/60', label: 'Unknown — run Check applicability' },
+};
+
+// Compact shield icon used on each list row so the operator sees
+// affected/not at a glance without opening the detail page. Tooltip
+// shows the verdict label + when it was last checked.
+function VerdictShield({ verdict, ts, size = 'sm' }) {
+  const v = (verdict && VERDICT_VISUAL[verdict]) || VERDICT_VISUAL.unknown;
+  const Icon = v.Icon;
+  const dim = size === 'sm' ? 'h-4 w-4' : 'h-5 w-5';
+  const title = ts
+    ? `${v.label} · checked ${new Date(ts).toLocaleString()}`
+    : v.label;
+  return (
+    <span className={`shrink-0 ${v.cls}`} title={title} aria-label={v.label}>
+      <Icon className={dim} />
+    </span>
+  );
+}
+
 // Star toggle. Stops row click propagation so clicking the star
 // pins/unpins without also navigating into the detail view.
 function PinButton({ pinned, onToggle, size = 'sm', stopPropagation = false, className = '' }) {
@@ -346,6 +374,10 @@ function CveListRow({ entry, onOpen, onTogglePin }) {
           pinned={!!entry.pin}
           stopPropagation
           onToggle={() => onTogglePin?.(entry)}
+        />
+        <VerdictShield
+          verdict={entry.latest_verdict?.verdict}
+          ts={entry.latest_verdict?.ts}
         />
         {!entry.operator_seen && (
           <span className="h-2 w-2 rounded-full bg-orange-500 shrink-0" aria-label="unread" />
@@ -463,57 +495,52 @@ function extractAffectsBlock(body) {
 //   2. latest_note from state.history (engine's most recent event)
 // Falls back to "unknown — no probe run yet" with a hint to click
 // Check applicability.
-function ApplicabilityBlock({ cveId, lastCheck, latestNote, added, lastUpdated,
-                             operatorAction, affectsBlock }) {
-  // Priority 1: just-clicked check.
-  let verdict = null;     // "affected" | "not_affected" | "unknown"
-  let detail = null;
-  let source = null;
-  let when = null;
+function ApplicabilityBlock({ cveId, lastCheck, latestVerdict, operatorAction,
+                              affectsBlock }) {
+  // Verdict source priority:
+  //   1. Just-clicked check (lastCheck) — freshest, includes stdout
+  //   2. Backend's latest_verdict — derived from the most recent
+  //      history entry that had a structured verdict field
+  // No text-matching on history change strings — that was the bug
+  // behind "verdict disappears on revisit" (#9).
+  const verdict = lastCheck?.verdict || latestVerdict?.verdict || 'unknown';
+  const exitCode = lastCheck?.exit_code ?? latestVerdict?.exit_code ?? null;
+  const when = lastCheck ? 'now' : latestVerdict?.ts || null;
+  const source = lastCheck ? 'just-checked'
+              : latestVerdict?.actor || null;
+  const probeStdout = lastCheck?.stdout || '';
+  const probeStderr = lastCheck?.stderr || '';
 
-  if (lastCheck?.verdict) {
-    verdict = lastCheck.verdict === 'affected' ? 'affected'
-            : lastCheck.verdict === 'not_affected' ? 'not_affected'
-            : 'unknown';
-    detail = `probe exit=${lastCheck.exit_code}` +
-             (lastCheck.duration_s != null ? ` · ${lastCheck.duration_s.toFixed(2)}s` : '');
-    source = 'just-checked';
-    when = 'now';
-  } else if (latestNote?.change) {
-    const c = String(latestNote.change).toLowerCase();
-    if (/host not affected|not_affected|exit=[1-9]/.test(c)) {
-      verdict = 'not_affected';
-    } else if (/affected|exit=0|verify probe still exits 0/.test(c)) {
-      verdict = 'affected';
-    } else if (/resolved|patch verified/.test(c)) {
-      verdict = 'not_affected';
-    }
-    detail = latestNote.change;
-    source = `${latestNote.actor || 'engine'}`;
-    when = latestNote.ts;
-  }
-
+  const v = VERDICT_VISUAL[verdict] || VERDICT_VISUAL.unknown;
+  const Icon = v.Icon;
   const tone = verdict === 'not_affected'
     ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
     : verdict === 'affected'
     ? 'border-red-500/40 bg-red-500/10 text-red-300'
+    : verdict === 'probe_error'
+    ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
     : 'border-border bg-muted/30 text-muted-foreground';
-  const Icon = verdict === 'not_affected' ? ShieldCheck
-             : verdict === 'affected'     ? ShieldQuestion
-             : ShieldQuestion;
-  const label = verdict === 'not_affected' ? 'Host is NOT affected'
-              : verdict === 'affected'     ? 'Host IS affected'
-              : 'Unknown — run Check applicability for a current verdict';
 
   return (
     <div className={`rounded-lg border-2 px-4 py-3 ${tone}`}>
       <div className="flex items-center gap-2 mb-1">
         <Icon className="h-5 w-5" />
-        <span className="font-semibold">{label}</span>
+        <span className="font-semibold">{v.label}</span>
       </div>
-      {detail && (
+
+      {/* Detail line + (source, when). Always render exit code when
+          we have one — operators want to know the probe actually ran. */}
+      {(exitCode != null || when || source) && (
         <div className="text-xs space-y-0.5 mt-2 opacity-90">
-          <div><span className="opacity-70">Last signal: </span><span className="font-mono break-words">{detail}</span></div>
+          {exitCode != null && (
+            <div>
+              <span className="opacity-70">Probe: </span>
+              <span className="font-mono">exit={exitCode}</span>
+              {lastCheck?.duration_s != null && (
+                <span className="font-mono"> · {lastCheck.duration_s.toFixed(2)}s</span>
+              )}
+            </div>
+          )}
           {(source || when) && (
             <div className="opacity-70">
               {source && <span>from <span className="font-mono">{source}</span></span>}
@@ -523,6 +550,30 @@ function ApplicabilityBlock({ cveId, lastCheck, latestNote, added, lastUpdated,
           )}
         </div>
       )}
+
+      {/* Probe output — only available when we just clicked Check
+          (the engine's run-output isn't persisted in the YAML).
+          Captures Claude's `echo "AFFECTED: liblzma5 5.6.1"` so the
+          operator sees the probe's reasoning, not just the exit
+          code. */}
+      {(probeStdout || probeStderr) && (
+        <details className="text-xs mt-2 opacity-90">
+          <summary className="cursor-pointer opacity-70 hover:opacity-100 select-none">
+            Probe output
+          </summary>
+          {probeStdout && (
+            <pre className="font-mono text-[11px] mt-1 p-2 bg-black/20 rounded whitespace-pre-wrap break-words">
+              {probeStdout}
+            </pre>
+          )}
+          {probeStderr && (
+            <pre className="font-mono text-[11px] mt-1 p-2 bg-black/20 rounded whitespace-pre-wrap break-words">
+              <span className="opacity-60">--stderr--</span>{'\n'}{probeStderr}
+            </pre>
+          )}
+        </details>
+      )}
+
       {operatorAction && operatorAction !== 'none' && (
         <div className="text-xs mt-2 opacity-90">
           <span className="opacity-70">Operator action required: </span>
@@ -882,9 +933,7 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                   <ApplicabilityBlock
                     cveId={cveId}
                     lastCheck={lastCheck}
-                    latestNote={data?.latest_note}
-                    added={data?.added}
-                    lastUpdated={data?.last_updated}
+                    latestVerdict={data?.latest_verdict}
                     operatorAction={data?.operator_action_required}
                     affectsBlock={extractAffectsBlock(yamlBody)}
                   />

@@ -72,6 +72,9 @@ export function getDb() {
 //   201 Backups — backups (one row per packed artifact uploaded to S3)
 //   202 Backups — backup_schedules + restore_runs (PR 2)
 //   203 Backups — local_path + s3_uploaded on backups (local-first)
+//   204 Backups — backup_schedule_destinations (multi-target fan-out)
+//                 + backup_destinations on the backups table
+//                 (per-destination upload tracking)
 //   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
@@ -972,6 +975,84 @@ export function initDatabase() {
     d.exec(`ALTER TABLE backups ADD COLUMN local_path TEXT`);
     d.exec(`ALTER TABLE backups ADD COLUMN s3_uploaded INTEGER NOT NULL DEFAULT 0`);
     d.exec(`UPDATE backups SET s3_uploaded = 1 WHERE status = 'ok'`);
+  });
+
+  // Multi-destination fan-out (operator request).
+  //
+  // Pre-204: each schedule + each on-demand backup pointed at
+  // exactly one destination (or none, with the local-first
+  // rework).  Operators with both an on-site MinIO and an off-
+  // site B2 want to push the same nightly backup to BOTH so a
+  // host fire doesn't take the bucket with it.
+  //
+  // Two new shapes:
+  //
+  //   backup_schedule_destinations (junction)
+  //     One row per (schedule, destination) edge.  A schedule
+  //     with zero edges is local-only; one edge = legacy
+  //     behaviour; many edges = fan-out.  ON DELETE CASCADE so
+  //     dropping a schedule or destination cleans both sides.
+  //
+  //   backup_destinations_x_backups (junction)
+  //     One row per (backup-artifact, destination) edge with
+  //     the per-destination upload state (uploaded vs failed
+  //     vs deleted) and the destination-specific S3 key.
+  //     Replaces the single backups.s3_key + backups.s3_uploaded
+  //     pair when fan-out happens; the legacy columns stay for
+  //     back-compat with PR-1/PR-2 callers and are kept in
+  //     lockstep with the junction's "first destination" row.
+  //
+  // The legacy backups.destination_id column is retained but
+  // becomes informational ("primary destination at create time").
+  // Authoritative state lives in the junction.
+  runMigration(db, 204, 'backups_multi_destination', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_schedule_destinations (
+        schedule_id    TEXT NOT NULL REFERENCES backup_schedules(id) ON DELETE CASCADE,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (schedule_id, destination_id)
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bsd_schedule
+      ON backup_schedule_destinations(schedule_id)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bsd_destination
+      ON backup_schedule_destinations(destination_id)`);
+
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS backup_destinations_x_backups (
+        backup_id      TEXT NOT NULL REFERENCES backups(id) ON DELETE CASCADE,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        s3_key         TEXT NOT NULL,
+        status         TEXT NOT NULL CHECK(status IN ('pending','uploaded','failed','deleted')),
+        size_bytes     INTEGER,
+        error          TEXT,
+        uploaded_at    TEXT,
+        deleted_at     TEXT,
+        PRIMARY KEY (backup_id, destination_id)
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bdxb_backup
+      ON backup_destinations_x_backups(backup_id)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_bdxb_destination
+      ON backup_destinations_x_backups(destination_id)`);
+
+    // Backfill: every existing schedule with a destination_id
+    // gets a junction row so fan-out reads see it.  Existing
+    // backups with s3_uploaded=1 get a junction row in
+    // 'uploaded' state targeting the same destination.
+    d.exec(`
+      INSERT OR IGNORE INTO backup_schedule_destinations (schedule_id, destination_id)
+      SELECT id, destination_id FROM backup_schedules
+      WHERE destination_id IS NOT NULL
+    `);
+    d.exec(`
+      INSERT OR IGNORE INTO backup_destinations_x_backups
+        (backup_id, destination_id, s3_key, status, size_bytes, uploaded_at)
+      SELECT id, destination_id, s3_key, 'uploaded', size_bytes, created_at
+      FROM backups
+      WHERE destination_id IS NOT NULL AND s3_uploaded = 1
+    `);
   });
 
   // Durable notifications.

@@ -50,11 +50,10 @@ function fmtAge(iso) {
 
 const EMPTY_FORM = {
   name: '',
-  destination_id: '',
-  // Schedule expressed as either (mode + hour/minute/dow/dom) for
-  // the picker UI, OR a raw cron expression in custom mode.
-  // formToBody() resolves the two into a single cron_expr field on
-  // submit; parseCron() walks the other direction on Edit.
+  // Multi-destination fan-out (post-PR-3 polish).  Empty array =
+  // local-only schedule.  parseCron() and the dialog default-
+  // select() seed this from the existing schedule's junction.
+  destination_ids: [],
   schedule_mode: 'daily',
   schedule_hour: 3,
   schedule_minute: 0,
@@ -71,8 +70,6 @@ const EMPTY_FORM = {
 };
 
 function formToBody(form, { isEdit }) {
-  // schedule_mode = 'custom' uses the raw cron expression the
-  // operator typed; everything else is resolved through buildCron.
   const cron_expr = form.schedule_mode === 'custom'
     ? form.cron_expr.trim()
     : buildCron({
@@ -84,11 +81,12 @@ function formToBody(form, { isEdit }) {
       });
   const body = {
     name: form.name.trim(),
-    destination_id: form.destination_id,
+    // Backend accepts both shapes; we always send the array form
+    // post-204.  Empty array = local-only schedule, the operator
+    // explicitly chose 'no S3 push'.
+    destination_ids: form.destination_ids,
     cron_expr,
     tier: form.tier,
-    // Scope is JSON-stringified by ScopePicker; the config tier
-    // ignores it and the backend tolerates null.
     scope: form.tier === 'config' ? null : (form.scope || null),
     retention_keep: Number(form.retention_keep) || 0,
     retention_days: form.retention_days === '' ? null : Number(form.retention_days),
@@ -112,9 +110,14 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
     if (!open) return;
     if (initial) {
       const parsed = parseCron(initial.cron_expr || '');
+      // Prefer the new destination_ids array; fall back to the
+      // legacy destination_id singular (pre-204 schedules).
+      const destIds = Array.isArray(initial.destination_ids) && initial.destination_ids.length > 0
+        ? initial.destination_ids
+        : (initial.destination_id ? [initial.destination_id] : []);
       setForm({
         name: initial.name || '',
-        destination_id: initial.destination_id || '',
+        destination_ids: destIds,
         schedule_mode: parsed.mode,
         schedule_hour: parsed.hour ?? 3,
         schedule_minute: parsed.minute ?? 0,
@@ -130,16 +133,26 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
         enabled: !!initial.enabled,
       });
     } else {
+      // New schedule: default-select the is_default=1 row, but
+      // the operator can clear the selection for a local-only
+      // schedule before submitting.
       const def = destinations.find((d) => d.is_default) || destinations[0];
-      setForm({ ...EMPTY_FORM, destination_id: def?.id || '' });
+      setForm({ ...EMPTY_FORM, destination_ids: def ? [def.id] : [] });
     }
   }, [open, initial, destinations]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e?.target ? e.target.value : e }));
   const setBool = (k) => (val) => setForm((f) => ({ ...f, [k]: !!val }));
+  const toggleDestination = (id) => setForm((f) => ({
+    ...f,
+    destination_ids: f.destination_ids.includes(id)
+      ? f.destination_ids.filter((x) => x !== id)
+      : [...f.destination_ids, id],
+  }));
 
   const passphraseOk = isEdit ? true : (form.passphrase || '').length >= 8;
-  const formOk = !!form.name.trim() && !!form.destination_id && !!form.cron_expr.trim()
+  // Schedules can be local-only — destination_ids no longer required.
+  const formOk = !!form.name.trim() && !!form.cron_expr.trim()
     && passphraseOk && !!form.tier;
 
   return (
@@ -154,19 +167,44 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
             <Input id="sch-name" value={form.name} onChange={set('name')}
               placeholder="e.g. Nightly config" />
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="sch-dest">Destination</Label>
-            <select id="sch-dest"
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={form.destination_id} onChange={set('destination_id')}
-            >
-              <option value="" disabled>Select…</option>
-              {destinations.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}{d.is_default ? ' (default)' : ''}
-                </option>
-              ))}
-            </select>
+          <div className="sm:col-span-2 space-y-1">
+            <Label>Destinations</Label>
+            <p className="text-[11px] text-muted-foreground">
+              Each scheduled run packs once and pushes the same artifact to <strong>every</strong>
+              checked destination. Pick none for a local-only schedule, one for legacy
+              behaviour, or several to fan out (e.g. on-site MinIO + off-site B2).
+            </p>
+            {destinations.length === 0 ? (
+              <p className="text-xs text-muted-foreground italic border rounded px-3 py-2">
+                No destinations configured. Schedule will run local-only.
+              </p>
+            ) : (
+              <div className="border rounded p-2 max-h-40 overflow-y-auto text-xs space-y-1">
+                {destinations.map((d) => (
+                  <label
+                    key={d.id}
+                    className="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-muted/40 rounded px-1"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={form.destination_ids.includes(d.id)}
+                      onChange={() => toggleDestination(d.id)}
+                    />
+                    <span className="font-medium truncate flex-1">
+                      {d.name}{d.is_default ? ' (default)' : ''}
+                    </span>
+                    <span className="text-muted-foreground font-mono text-[10px] truncate">
+                      {d.bucket}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {form.destination_ids.length === 0
+                ? 'Local-only — no S3 push.'
+                : `Fan-out to ${form.destination_ids.length} destination${form.destination_ids.length === 1 ? '' : 's'}.`}
+            </p>
           </div>
           <div className="space-y-1">
             <Label htmlFor="sch-tier">Tier</Label>
@@ -335,7 +373,14 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
 }
 
 function ScheduleRow({ row, busyId, destinations, onEdit, onDelete, onRunNow }) {
-  const dest = destinations.find((d) => d.id === row.destination_id);
+  // Multi-destination: prefer the new destinations array on the
+  // row.  Pre-204 schedules only carry destination_id; backfill
+  // the singular into a 1-element list so the renderer is uniform.
+  const rowDests = (row.destinations && row.destinations.length > 0)
+    ? row.destinations
+    : (row.destination_id
+        ? destinations.filter((d) => d.id === row.destination_id)
+        : []);
   const busy = busyId === row.id;
   return (
     <div className="border rounded p-3 space-y-2">
@@ -353,8 +398,12 @@ function ScheduleRow({ row, busyId, destinations, onEdit, onDelete, onRunNow }) 
           <span className="font-mono">{row.tier}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-muted-foreground">Destination</span>
-          <span className="font-mono truncate" title={dest?.bucket}>{dest?.name || '?'}</span>
+          <span className="text-muted-foreground">Destinations</span>
+          <span className="font-mono truncate" title={rowDests.map((d) => d.bucket || d.name).join(' · ')}>
+            {rowDests.length === 0
+              ? 'local-only'
+              : (rowDests.length === 1 ? rowDests[0].name : `${rowDests.length}× fan-out`)}
+          </span>
         </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">Keep</span>

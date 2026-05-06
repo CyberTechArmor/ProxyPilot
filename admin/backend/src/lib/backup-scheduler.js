@@ -35,6 +35,7 @@ import {
   cronMatches, matchField, computeNextRunMs, isValidCronExpr,
 } from './backup-cron.js';
 import { resolveScope } from './backup-scope.js';
+import { fanOutUpload, resolveScheduleDestinations } from './backup-fanout.js';
 
 // Re-export the pure helpers for the route layer + tests so
 // callers don't have to know they live in a sibling module.
@@ -146,26 +147,31 @@ async function runSchedule(scheduleId) {
   const db = getDb();
   const row = db.prepare(`SELECT * FROM backup_schedules WHERE id = ?`).get(scheduleId);
   if (!row) return;
-  const dest = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(row.destination_id);
-  if (!dest) {
-    db.prepare(
-      `UPDATE backup_schedules SET last_run_status = 'failed',
-                                   last_run_error = 'destination missing',
-                                   last_run_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).run(row.id);
-    return;
+
+  // Multi-destination: read every junction edge, falling back to
+  // the legacy single destination_id column for pre-204 schedules
+  // that haven't been edited since the migration.  An empty
+  // destinations list = local-only (operator chose 'none').
+  let destinations = resolveScheduleDestinations(row.id);
+  if (destinations.length === 0 && row.destination_id) {
+    const legacy = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`)
+      .get(row.destination_id);
+    if (legacy) destinations = [legacy];
   }
+  const leadDest = destinations[0] || null;
 
   const id = uuid();
   const objectName = `${id}.ppbackup`;
-  const s3Key = buildKey(dest, objectName);
+  const leadS3Key = leadDest ? buildKey(leadDest, objectName) : '';
 
   db.prepare(`
     INSERT INTO backups (id, destination_id, tier, scope, s3_key, encrypted,
                         created_by, manifest_json, status, s3_uploaded)
     VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress', 0)
   `).run(
-    id, dest.id, row.tier, row.scope || null, s3Key,
+    id,
+    leadDest ? leadDest.id : null,
+    row.tier, row.scope || null, leadS3Key,
     `schedule:${row.id}`,
   );
 
@@ -230,21 +236,29 @@ async function runSchedule(scheduleId) {
   db.prepare(`UPDATE backups SET local_path = ?, size_bytes = ?, manifest_json = ? WHERE id = ?`)
     .run(localPath, packed.buffer.length, JSON.stringify(packed.manifest), id);
 
-  let s3Error = null;
-  try {
-    await putObject(dest, s3Key, packed.buffer, {
-      contentType: 'application/octet-stream',
+  // Fan-out S3 push.  Same buffer to every destination wired to
+  // this schedule.  Local-only schedules (zero destinations)
+  // skip the fan-out entirely — the run is still marked ok
+  // because the local copy is canonical.
+  let fanOutResults = { results: [] };
+  if (destinations.length > 0) {
+    fanOutResults = await fanOutUpload({
+      buffer: packed.buffer,
+      backupId: id,
+      destinations,
+      audit: { source: `schedule:${row.id}` },
     });
-    db.prepare(`UPDATE backups SET s3_uploaded = 1 WHERE id = ?`).run(id);
-  } catch (err) {
-    s3Error = err?.message || String(err);
-    // Best-effort upload — local copy is good, so the backup is
-    // usable.  Log the S3 failure so the next retention pass /
-    // operator inspection can surface it.
+  }
+  const fanOutFailures = fanOutResults.results.filter((r) => !r.ok);
+  let s3Error = null;
+  if (fanOutFailures.length > 0) {
+    s3Error = fanOutFailures.length === destinations.length
+      ? `every S3 destination failed (local copy ok): ${fanOutFailures[0].error}`
+      : `${fanOutFailures.length}/${destinations.length} S3 destinations failed (local copy ok)`;
   }
 
   db.prepare(`UPDATE backups SET status = 'ok', error = ? WHERE id = ?`)
-    .run(s3Error ? `S3 upload failed (local copy ok): ${s3Error}` : null, id);
+    .run(s3Error, id);
 
   db.prepare(`
     UPDATE backup_schedules
@@ -255,13 +269,20 @@ async function runSchedule(scheduleId) {
   logAudit(null, 'BACKUP_SCHEDULED_RUN', 'backup', id, {
     schedule_id: row.id,
     schedule_name: row.name,
-    destination_id: dest.id,
-    s3_key: s3Key,
+    destination_count: destinations.length,
+    destination_ids: destinations.map((d) => d.id),
+    fanout_ok: fanOutResults.results.filter((r) => r.ok).length,
+    fanout_failures: fanOutFailures.length,
     tier: row.tier,
     size_bytes: packed.buffer.length,
+    local_only: destinations.length === 0,
   }, null);
 
-  await applyRetention(row, dest);
+  // Retention is local-first: drops the on-disk copy after the
+  // keep/days gates trip.  Pass any destination so the helper has
+  // schedule context (it doesn't actually touch S3 anymore — see
+  // applyRetention's comment about the local-first semantics).
+  await applyRetention(row, leadDest);
 
   // Re-compute next_run_at so the UI updates without waiting for
   // a manual refresh of the schedule page.

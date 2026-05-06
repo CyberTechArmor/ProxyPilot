@@ -71,6 +71,10 @@ import { runModeA, runModeC } from '../lib/restore.js';
 import { listHealthClasses } from '../lib/health-checks.js';
 import { runOnce as runS3Healthcheck } from '../lib/backup-s3-healthcheck.js';
 import { resolveScope, listScopeOptions } from '../lib/backup-scope.js';
+import {
+  fanOutUpload, fanOutDelete,
+  resolveBackupDestinations, resolveScheduleDestinations,
+} from '../lib/backup-fanout.js';
 
 const INSTALL_DIR = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
 const ENV_PATH = process.env.PROXYPILOT_ENV_PATH || path.join(INSTALL_DIR, '.env');
@@ -486,6 +490,19 @@ backupsRouter.post('/storage/:id/default', requireAdmin, requireSudo, (req, res)
 
 function publicBackupShape(row) {
   if (!row) return null;
+  // Per-destination upload state from the junction (post-204).
+  // Pre-204 rows backfill from the legacy s3_uploaded /
+  // destination_id pair.  An empty array means local-only.
+  const fanout = row.id ? resolveBackupDestinations(row.id).map((e) => ({
+    destination_id: e.destination_id,
+    destination_name: e.destination_name,
+    destination_bucket: e.destination_bucket,
+    s3_key: e.s3_key,
+    status: e.status,
+    error: e.error || null,
+    uploaded_at: e.uploaded_at || null,
+    deleted_at: e.deleted_at || null,
+  })) : [];
   return {
     id: row.id,
     destination_id: row.destination_id,
@@ -499,12 +516,14 @@ function publicBackupShape(row) {
     parent_backup: row.parent_backup || null,
     status: row.status,
     error: row.error || null,
-    // local-first columns from migration 203.  local_path is
-    // surfaced as a boolean flag (the actual filesystem path is
-    // operator-irrelevant for the UI); s3_uploaded reports
-    // whether a copy made it to the configured destination.
     has_local: !!row.local_path,
-    s3_uploaded: !!row.s3_uploaded,
+    // Legacy single-destination flag.  Aggregate of the junction:
+    // true iff at least one fan-out edge is in 'uploaded' state.
+    s3_uploaded: fanout.some((f) => f.status === 'uploaded') || !!row.s3_uploaded,
+    // Per-destination state for the UI.
+    destinations: fanout,
+    destination_count_ok: fanout.filter((f) => f.status === 'uploaded').length,
+    destination_count_failed: fanout.filter((f) => f.status === 'failed').length,
     // manifest_json is parsed lazily — surfaced as `manifest` on
     // GET /:id so list pages don't pay the parse cost N times.
   };
@@ -516,7 +535,14 @@ const createBackupSchema = z.object({
   // its expectations without us having to change the wire shape.
   tier: z.enum(['config', 'config_plus_data', 'full']).optional().default('config'),
   scope: z.string().min(1).max(256).optional().nullable(),
+  // Multi-destination fan-out (post-PR-3 polish).  Accepts:
+  //   destination_ids: []        → local-only (no S3 push)
+  //   destination_ids: [a]       → single target (legacy shape)
+  //   destination_ids: [a, b]    → fan-out
+  // destination_id (singular) is kept for back-compat with PR-1
+  // / PR-2 callers and gets translated to a 1-element list.
   destination_id: z.string().min(1).max(64).optional().nullable(),
+  destination_ids: z.array(z.string().min(1).max(64)).max(16).optional(),
   passphrase: z.string().min(8).max(1024),
 }).strict();
 
@@ -587,36 +613,44 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
   // surfaces as a 400 from the zod enum, not silently as a default.
 
   const db = getDb();
-  // Local-first: a missing destination is no longer fatal.  If
-  // body.destination_id was supplied but doesn't exist, that's
-  // still an operator typo → 404.  Otherwise we proceed local-only
-  // (destination = null).  S3 push happens only when destination
-  // is non-null AND succeeds.
-  let destination = null;
-  if (body.destination_id) {
-    destination = pickDestination(db, body.destination_id);
-    if (!destination) {
-      return res.status(404).json({ error: 'destination not found' });
+  // Resolve destinations.  Three accepted shapes (validated above):
+  //   destination_ids: []        → local-only
+  //   destination_ids: [a, b]    → fan-out
+  //   destination_id: a          → legacy 1-element shape
+  // Anything else → 404 if a name is supplied that we can't find.
+  let destinations = [];
+  if (Array.isArray(body.destination_ids)) {
+    for (const did of body.destination_ids) {
+      const d = pickDestination(db, did);
+      if (!d) return res.status(404).json({ error: `destination not found: ${did}` });
+      destinations.push(d);
     }
+  } else if (body.destination_id) {
+    const d = pickDestination(db, body.destination_id);
+    if (!d) return res.status(404).json({ error: 'destination not found' });
+    destinations.push(d);
   } else {
-    // Use the configured default if one exists; otherwise local-
-    // only.  pickDestination(null, null) returns the is_default=1
-    // row when present.
-    destination = pickDestination(db, null);
+    // Neither shape supplied: fall back to the configured default
+    // (legacy behaviour).  An install with no default destination
+    // proceeds local-only.
+    const def = pickDestination(db, null);
+    if (def) destinations.push(def);
   }
 
   const id = uuid();
-  const objectName = `${id}.ppbackup`;
-  // s3Key is computed for the row even when there's no destination
-  // configured — keeps the column NOT NULL friendly and makes a
-  // future upload retry trivial.  Empty string when no destination.
-  const s3Key = destination ? buildKey(destination, objectName) : '';
+  // Lead destination drives the legacy s3_key + destination_id
+  // columns for back-compat with PR-1/PR-2 readers.  Subsequent
+  // destinations are tracked exclusively in the junction.
+  const leadDest = destinations[0] || null;
+  const leadObjectName = `${id}.ppbackup`;
+  const leadS3Key = leadDest ? buildKey(leadDest, leadObjectName) : '';
 
   // Insert the row in 'in_progress' state so the GET list reflects
   // an in-flight backup; the column flips happen after each stage:
   //   pack ok       → size_bytes + manifest_json populated
   //   local write   → local_path populated
-  //   S3 upload     → s3_uploaded flipped to 1 (when applicable)
+  //   fan-out       → backup_destinations_x_backups rows + the
+  //                   lead destination's legacy s3_uploaded flag
   //   final         → status flipped to 'ok' or 'failed'
   db.prepare(`
     INSERT INTO backups (id, destination_id, tier, scope, s3_key, encrypted,
@@ -624,10 +658,10 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress', 0)
   `).run(
     id,
-    destination ? destination.id : null,
+    leadDest ? leadDest.id : null,
     body.tier,
     body.scope || null,
-    s3Key,
+    leadS3Key,
     req.user?.id || null,
   );
 
@@ -641,7 +675,8 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     const sharedMeta = {
       scope: body.scope || 'all',
       backup_id: id,
-      destination_name: destination ? destination.name : '(local-only)',
+      destination_count: destinations.length,
+      destination_names: destinations.length ? destinations.map((d) => d.name) : ['(local-only)'],
     };
     if (body.tier === 'config') {
       packed = await packConfigTier({
@@ -678,7 +713,7 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
       .run(`pack failed: ${err?.message || err}`, id);
     logAudit(req.user.id, 'BACKUP_CREATE_FAILED', 'backup', id, {
       stage: 'pack', error: err?.message || String(err),
-      destination_id: destination ? destination.id : null, tier: body.tier,
+      destination_ids: destinations.map((d) => d.id), tier: body.tier,
     }, req.ip);
     return res.status(500).json({ error: `pack failed: ${err?.message || err}` });
   }
@@ -701,35 +736,44 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
   db.prepare(`UPDATE backups SET local_path = ?, size_bytes = ?, manifest_json = ? WHERE id = ?`)
     .run(localPath, packed.buffer.length, JSON.stringify(packed.manifest), id);
 
-  // Optional S3 upload.  Best-effort: a failed upload doesn't
-  // fail the whole create — the local copy is the canonical
-  // artifact, the operator can retry the S3 push later (PR
-  // follow-up).  status flips to 'ok' regardless of S3 outcome
-  // so the row is restorable from local right away.
-  let s3Error = null;
-  if (destination) {
-    try {
-      await putObject(destination, s3Key, packed.buffer, {
-        contentType: 'application/octet-stream',
-      });
-      db.prepare(`UPDATE backups SET s3_uploaded = 1 WHERE id = ?`).run(id);
-    } catch (err) {
-      s3Error = err?.message || String(err);
-      logAudit(req.user.id, 'BACKUP_S3_UPLOAD_FAILED', 'backup', id, {
-        destination_id: destination.id, error: s3Error,
-      }, req.ip);
-    }
+  // Fan-out S3 push.  Same buffer goes to every destination in
+  // body.destination_ids (or the legacy single-destination
+  // shape).  Per-destination outcomes land in the
+  // backup_destinations_x_backups junction; failures don't fail
+  // the whole create because the local copy is canonical.
+  let fanOutResults = { results: [] };
+  if (destinations.length > 0) {
+    fanOutResults = await fanOutUpload({
+      buffer: packed.buffer,
+      backupId: id,
+      destinations,
+      audit: { user_id: req.user?.id, ip: req.ip, source: 'on-demand' },
+    });
   }
+  const fanOutFailures = fanOutResults.results.filter((r) => !r.ok);
+  const fanOutOk = fanOutResults.results.filter((r) => r.ok);
 
+  // status='ok' once the local copy is on disk; the row is
+  // restorable from local even if every S3 push failed.  When
+  // every destination failed we record the lead error in the
+  // legacy error column for back-compat with PR-1/PR-2 UIs.
+  let summaryError = null;
+  if (fanOutFailures.length > 0) {
+    summaryError = fanOutFailures.length === destinations.length
+      ? `every S3 destination failed (local copy ok): ${fanOutFailures[0].error}`
+      : `${fanOutFailures.length}/${destinations.length} S3 destinations failed (local copy ok)`;
+  }
   db.prepare(`UPDATE backups SET status = 'ok', error = ? WHERE id = ?`)
-    .run(s3Error ? `S3 upload failed (local copy ok): ${s3Error}` : null, id);
+    .run(summaryError, id);
 
   logAudit(req.user.id, 'BACKUP_CREATE', 'backup', id, {
-    destination_id: destination ? destination.id : null,
-    destination_name: destination ? destination.name : null,
-    s3_key: s3Key || null,
-    s3_uploaded: !s3Error && !!destination,
-    s3_error: s3Error,
+    destination_count: destinations.length,
+    destination_ids: destinations.map((d) => d.id),
+    destination_names: destinations.map((d) => d.name),
+    fanout_ok: fanOutOk.length,
+    fanout_failures: fanOutFailures.map((f) => ({
+      destination_id: f.destination_id, error: f.error,
+    })),
     local_path: localPath,
     tier: body.tier,
     scope: body.scope || null,
@@ -739,7 +783,8 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
 
   res.status(201).json({
     backup: { ...publicBackupShape(readBackup(id)), manifest: packed.manifest },
-    s3_error: s3Error,
+    fanout: fanOutResults.results,
+    s3_error: fanOutFailures.length > 0 ? summaryError : null,
   });
 });
 
@@ -900,55 +945,56 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
   const body = req.body || {};
   const wantDeleteLocal = body.delete_local === undefined ? true : !!body.delete_local;
   const wantDeleteS3 = body.delete_s3 === undefined ? true : !!body.delete_s3;
+  // Optional: restrict S3 deletion to a subset of destinations.
+  // Empty/undefined = every uploaded edge.  Used by the per-
+  // destination 'remove from this S3 only' UI button (pending).
+  const limitDestinations = Array.isArray(body.delete_s3_destination_ids)
+    ? body.delete_s3_destination_ids
+    : null;
 
   let s3Error = null;
   let localRemoved = false;
-  let s3Removed = false;
+  let s3Results = { results: [] };
 
   if (wantDeleteLocal && row.local_path) {
     try {
       localRemoved = deleteLocal(row.local_path);
     } catch (err) {
-      // A permission error here shouldn't block S3 cleanup; surface
-      // it but keep going.
       s3Error = `local delete failed: ${err?.message || err}`;
     }
   }
 
-  if (wantDeleteS3 && row.s3_uploaded) {
-    const dest = getDb().prepare(
-      `SELECT * FROM backup_destinations WHERE id = ?`
-    ).get(row.destination_id);
-    if (dest) {
-      try {
-        await deleteObject(dest, row.s3_key);
-        s3Removed = true;
-      } catch (err) {
-        const code = err?.Code || err?.name || '';
-        if (!/NotFound|NoSuchKey/i.test(code)) {
-          s3Error = (s3Error ? s3Error + '; ' : '') + (err?.message || String(err));
-        } else {
-          s3Removed = true; // already gone counts as removed
-        }
-      }
+  if (wantDeleteS3) {
+    s3Results = await fanOutDelete({
+      backupId: row.id,
+      destinationIds: limitDestinations,
+    });
+    const failed = s3Results.results.filter((r) => !r.ok);
+    if (failed.length > 0) {
+      s3Error = (s3Error ? s3Error + '; ' : '')
+        + `S3 destination(s) failed: ${failed.map((f) => f.error).join('; ')}`;
     }
   }
 
-  // Recompute what's left.  Drop the row only when both copies are
-  // gone (locally removed + S3 removed-or-was-never-uploaded).
+  // Refresh the per-destination junction state after the fan-out
+  // delete so we can decide whether to drop the row outright.
+  const remainingS3 = getDb().prepare(`
+    SELECT COUNT(*) AS c FROM backup_destinations_x_backups
+    WHERE backup_id = ? AND status = 'uploaded'
+  `).get(row.id).c;
+
   const stillLocal = (!wantDeleteLocal && row.local_path) ? true : false;
-  const stillS3 = (!wantDeleteS3 && row.s3_uploaded) ? true : (!s3Removed && row.s3_uploaded);
+  const stillS3 = remainingS3 > 0;
 
   if (!stillLocal && !stillS3) {
     getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
   } else {
-    // Partial delete — clear the columns for the copy we removed.
     const updates = [];
     const args = [];
     if (wantDeleteLocal && (localRemoved || row.local_path)) {
       updates.push('local_path = NULL');
     }
-    if (wantDeleteS3 && s3Removed) {
+    if (wantDeleteS3 && remainingS3 === 0) {
       updates.push('s3_uploaded = 0');
     }
     if (updates.length) {
@@ -957,11 +1003,19 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
     }
   }
 
+  // s3Removed = true iff we attempted S3 deletes and all targeted
+  // destinations succeeded.  Maintains the PR-1/PR-2 response
+  // shape so existing UI callers don't break.
+  const s3Removed = wantDeleteS3
+    && s3Results.results.length > 0
+    && s3Results.results.every((r) => r.ok);
+
   logAudit(req.user.id, 'BACKUP_DELETE', 'backup', row.id, {
     delete_local: wantDeleteLocal,
     delete_s3: wantDeleteS3,
     local_removed: localRemoved,
     s3_removed: s3Removed,
+    s3_per_destination: s3Results.results,
     s3_key: row.s3_key,
     destination_id: row.destination_id,
     s3_error: s3Error,
@@ -972,6 +1026,7 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
     ok: true,
     local_removed: localRemoved,
     s3_removed: s3Removed,
+    s3_per_destination: s3Results.results,
     s3_error: s3Error,
     row_dropped: !stillLocal && !stillS3,
   });
@@ -986,10 +1041,24 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
 
 function publicScheduleShape(row) {
   if (!row) return null;
+  // Multi-destination junction (post-204).  Empty array = local-
+  // only schedule.  PR-2-era schedules with a non-null
+  // destination_id were backfilled into the junction during the
+  // 204 migration so they show up here too.
+  const destinations = row.id
+    ? resolveScheduleDestinations(row.id).map((d) => ({
+        id: d.id, name: d.name, bucket: d.bucket,
+      }))
+    : [];
   return {
     id: row.id,
     name: row.name,
+    // Legacy single-destination column.  First entry of the
+    // junction list at the SQL level.  UI clients should prefer
+    // destination_ids/destinations.
     destination_id: row.destination_id,
+    destination_ids: destinations.map((d) => d.id),
+    destinations,
     cron_expr: row.cron_expr,
     tier: row.tier,
     scope: row.scope || null,
@@ -1008,7 +1077,10 @@ function publicScheduleShape(row) {
 
 const scheduleSchema = z.object({
   name: z.string().min(1).max(128),
-  destination_id: z.string().min(1).max(64),
+  // Legacy single-destination shape.  Optional now — operators
+  // either pass this OR destination_ids OR neither (= local-only).
+  destination_id: z.string().min(1).max(64).optional().nullable(),
+  destination_ids: z.array(z.string().min(1).max(64)).max(16).optional(),
   cron_expr: z.string().min(1).max(128),
   tier: z.enum(['config', 'config_plus_data', 'full']),
   scope: z.string().min(1).max(256).optional().nullable(),
@@ -1035,6 +1107,44 @@ backupsRouter.get('/schedules', requireAdmin, (_req, res) => {
   res.json({ schedules: rows.map(publicScheduleShape) });
 });
 
+// resolveScheduleBodyDestinations — collapse the three accepted
+// shapes (destination_ids array / destination_id singular / neither)
+// into a single ordered list of destination row IDs.  4xx-friendly:
+// returns { error } when any name doesn't resolve.
+function resolveScheduleBodyDestinations(body) {
+  const db = getDb();
+  let ids = [];
+  if (Array.isArray(body.destination_ids)) {
+    ids = body.destination_ids;
+  } else if (body.destination_id) {
+    ids = [body.destination_id];
+  }
+  for (const did of ids) {
+    const ok = db.prepare(`SELECT id FROM backup_destinations WHERE id = ?`).get(did);
+    if (!ok) return { error: `destination not found: ${did}` };
+  }
+  return { ids };
+}
+
+function writeScheduleDestinations(scheduleId, destinationIds) {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM backup_schedule_destinations WHERE schedule_id = ?`)
+      .run(scheduleId);
+    const ins = db.prepare(`
+      INSERT INTO backup_schedule_destinations (schedule_id, destination_id)
+      VALUES (?, ?)
+    `);
+    for (const did of destinationIds) ins.run(scheduleId, did);
+    // Keep the legacy backup_schedules.destination_id column in
+    // sync with the lead destination.  PR-1/PR-2 readers (the
+    // health-check, the audit log) treat it as informational.
+    db.prepare(`UPDATE backup_schedules SET destination_id = ? WHERE id = ?`)
+      .run(destinationIds[0] || null, scheduleId);
+  });
+  tx();
+}
+
 backupsRouter.post('/schedules', requireAdmin, requireSudo, (req, res) => {
   let body;
   try { body = scheduleSchema.parse(req.body || {}); }
@@ -1043,9 +1153,9 @@ backupsRouter.post('/schedules', requireAdmin, requireSudo, (req, res) => {
   if (!isValidCronExpr(body.cron_expr)) {
     return res.status(400).json({ error: `invalid cron_expr: ${body.cron_expr}` });
   }
-  const dest = getDb().prepare(`SELECT id FROM backup_destinations WHERE id = ?`)
-    .get(body.destination_id);
-  if (!dest) return res.status(409).json({ error: 'destination not found' });
+  const resolved = resolveScheduleBodyDestinations(body);
+  if (resolved.error) return res.status(409).json({ error: resolved.error });
+  const destinationIds = resolved.ids;
 
   const id = uuid();
   const enabled = body.enabled === false ? 0 : 1;
@@ -1058,7 +1168,9 @@ backupsRouter.post('/schedules', requireAdmin, requireSudo, (req, res) => {
                                   enabled, next_run_at, created_by)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    id, body.name, body.destination_id, body.cron_expr, body.tier, body.scope || null,
+    id, body.name,
+    destinationIds[0] || null,
+    body.cron_expr, body.tier, body.scope || null,
     body.retention_keep ?? 30,
     body.retention_days ?? null,
     body.passphrase_hint || null,
@@ -1067,13 +1179,15 @@ backupsRouter.post('/schedules', requireAdmin, requireSudo, (req, res) => {
     nextMs ? new Date(nextMs).toISOString() : null,
     req.user?.id || null,
   );
+  writeScheduleDestinations(id, destinationIds);
 
   const row = readSchedule(id);
   if (enabled) schedulerRegister(row);
 
   logAudit(req.user.id, 'BACKUP_SCHEDULE_CREATE', 'backup_schedule', id, {
     name: body.name, cron_expr: body.cron_expr, tier: body.tier,
-    destination_id: body.destination_id, enabled: !!enabled,
+    destination_ids: destinationIds, enabled: !!enabled,
+    local_only: destinationIds.length === 0,
   }, req.ip);
 
   res.status(201).json({ schedule: publicScheduleShape(row) });
@@ -1090,17 +1204,21 @@ backupsRouter.put('/schedules/:id', requireAdmin, requireSudo, (req, res) => {
   if (body.cron_expr !== undefined && !isValidCronExpr(body.cron_expr)) {
     return res.status(400).json({ error: `invalid cron_expr: ${body.cron_expr}` });
   }
-  if (body.destination_id !== undefined) {
-    const ok = getDb().prepare(`SELECT id FROM backup_destinations WHERE id = ?`)
-      .get(body.destination_id);
-    if (!ok) return res.status(409).json({ error: 'destination not found' });
+  // Validate any destinations the operator passed up.  Either
+  // shape may be present; we resolve to a single list for the
+  // junction write below.  When neither is present, destinations
+  // stay unchanged.
+  let destinationIdsToWrite = null;
+  if (body.destination_ids !== undefined || body.destination_id !== undefined) {
+    const resolved = resolveScheduleBodyDestinations(body);
+    if (resolved.error) return res.status(409).json({ error: resolved.error });
+    destinationIdsToWrite = resolved.ids;
   }
 
   const updates = [];
   const args = [];
   function set(col, val) { updates.push(`${col} = ?`); args.push(val); }
   if (body.name !== undefined) set('name', body.name);
-  if (body.destination_id !== undefined) set('destination_id', body.destination_id);
   if (body.cron_expr !== undefined) set('cron_expr', body.cron_expr);
   if (body.tier !== undefined) set('tier', body.tier);
   if (body.scope !== undefined) set('scope', body.scope || null);
@@ -1121,6 +1239,12 @@ backupsRouter.put('/schedules/:id', requireAdmin, requireSudo, (req, res) => {
       `UPDATE backup_schedules SET ${updates.join(', ')} WHERE id = ?`
     ).run(...args);
   }
+  // Junction rewrite happens AFTER the column updates so the
+  // legacy destination_id column gets re-aligned to the new
+  // lead destination.
+  if (destinationIdsToWrite !== null) {
+    writeScheduleDestinations(existing.id, destinationIdsToWrite);
+  }
 
   const after = readSchedule(existing.id);
   // Re-register so the worker picks up the new cron / enabled state.
@@ -1130,6 +1254,8 @@ backupsRouter.put('/schedules/:id', requireAdmin, requireSudo, (req, res) => {
   logAudit(req.user.id, 'BACKUP_SCHEDULE_UPDATE', 'backup_schedule', existing.id, {
     fields_changed: Object.keys(body).filter((k) => k !== 'passphrase'),
     passphrase_rotated: body.passphrase !== undefined,
+    destinations_changed: destinationIdsToWrite !== null,
+    destination_ids: destinationIdsToWrite,
   }, req.ip);
 
   res.json({ schedule: publicScheduleShape(after) });

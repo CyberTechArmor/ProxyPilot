@@ -84,7 +84,10 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
   // hidden for the config tier (which captures dashboard state,
   // not per-service).
   const [scope, setScope] = useState(null);
-  const [destinationId, setDestinationId] = useState('');
+  // Multi-destination fan-out (post-PR-3 polish).  Empty array
+  // means local-only.  Default-selects the is_default=1 row when
+  // one exists, matching legacy single-target behaviour.
+  const [destinationIds, setDestinationIds] = useState([]);
   const [passphrase, setPassphrase] = useState('');
   const [confirmPassphrase, setConfirmPassphrase] = useState('');
 
@@ -92,17 +95,23 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
     if (!open) return;
     setTier('config');
     setScope(null);
-    // Default-select the row marked default; falls back to first.
     const def = destinations?.find((d) => d.is_default) || destinations?.[0];
-    setDestinationId(def?.id || '');
+    setDestinationIds(def ? [def.id] : []);
     setPassphrase('');
     setConfirmPassphrase('');
   }, [open, destinations]);
 
-  const noDestinations = !destinations?.length;
   const passphraseOk = passphrase.length >= 8 && passphrase === confirmPassphrase;
-  const canSubmit = !busy && !noDestinations && passphraseOk
+  // Backups now allow zero destinations (local-only).  Submit is
+  // gated only by passphrase + tier validity.
+  const canSubmit = !busy && passphraseOk
     && (tier === 'config' || tier === 'config_plus_data' || tier === 'full');
+
+  const toggleDestination = (id) => {
+    setDestinationIds((prev) => prev.includes(id)
+      ? prev.filter((x) => x !== id)
+      : [...prev, id]);
+  };
 
   const submit = () => {
     if (!canSubmit) return;
@@ -111,7 +120,7 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
       // scope is already JSON-stringified by ScopePicker; the
       // config tier ignores it and the backend tolerates null.
       scope: tier === 'config' ? null : (scope || null),
-      destination_id: destinationId || null,
+      destination_ids: destinationIds,
       passphrase,
     });
   };
@@ -123,27 +132,45 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
           <DialogTitle>Create backup</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
-          {noDestinations && (
-            <div className="text-xs text-amber-700 dark:text-amber-400 border border-amber-500/30 bg-amber-500/10 rounded px-3 py-2">
-              No storage destinations configured. Add one under the Storage tab first.
-            </div>
-          )}
           <div className="space-y-1">
-            <Label htmlFor="bk-destination">Destination</Label>
-            <select
-              id="bk-destination"
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={destinationId}
-              onChange={(e) => setDestinationId(e.target.value)}
-              disabled={noDestinations}
-            >
-              <option value="" disabled>Select a destination</option>
-              {(destinations || []).map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}{d.is_default ? ' (default)' : ''} — {d.bucket}
-                </option>
-              ))}
-            </select>
+            <Label>Destinations</Label>
+            <p className="text-[11px] text-muted-foreground">
+              Pack once locally, then push to <strong>each</strong> selected destination
+              in turn. Pick none for a local-only backup, one for legacy single-target,
+              or several to fan out across an on-site mirror plus an off-site archive.
+            </p>
+            {(destinations || []).length === 0 ? (
+              <p className="text-xs text-muted-foreground italic border rounded px-3 py-2">
+                No storage destinations configured — backup will be local-only.
+                Add destinations under the Storage tab to enable S3 fan-out.
+              </p>
+            ) : (
+              <div className="border rounded p-2 max-h-40 overflow-y-auto text-xs space-y-1">
+                {(destinations || []).map((d) => (
+                  <label
+                    key={d.id}
+                    className="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-muted/40 rounded px-1"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={destinationIds.includes(d.id)}
+                      onChange={() => toggleDestination(d.id)}
+                    />
+                    <span className="font-medium truncate flex-1">
+                      {d.name}{d.is_default ? ' (default)' : ''}
+                    </span>
+                    <span className="text-muted-foreground font-mono text-[10px] truncate">
+                      {d.bucket}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {destinationIds.length === 0
+                ? 'Local-only — no S3 push.'
+                : `Will push to ${destinationIds.length} destination${destinationIds.length === 1 ? '' : 's'}.`}
+            </p>
           </div>
           <div className="space-y-1">
             <Label htmlFor="bk-tier">Tier</Label>
@@ -408,7 +435,7 @@ export default function BackupsTab() {
             <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
-          <Button size="sm" onClick={() => setCreateOpen(true)} disabled={noDestinations}>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" />
             Create backup
           </Button>
@@ -421,11 +448,12 @@ export default function BackupsTab() {
             <div className="flex items-start gap-3">
               <Cloud className="h-5 w-5 mt-0.5 text-muted-foreground" />
               <div className="space-y-1">
-                <CardTitle className="text-base">No storage configured</CardTitle>
+                <CardTitle className="text-base">No S3 destinations configured</CardTitle>
                 <CardDescription className="text-xs">
-                  Configure an S3-compatible destination under the Storage tab before
-                  creating backups. ProxyPilot supports MinIO, Cloudflare R2, Backblaze
-                  B2, AWS S3, and Wasabi out of the box.
+                  Backups will be <strong>local-only</strong> until you add at least one
+                  S3-compatible destination (MinIO, Cloudflare R2, Backblaze B2, AWS S3,
+                  Wasabi, …) under the Storage tab. Off-host durability requires at
+                  least one destination.
                 </CardDescription>
               </div>
             </div>
@@ -435,7 +463,7 @@ export default function BackupsTab() {
 
       <UsageCard usage={usage} loading={loading} />
 
-      {!loading && items.length === 0 && !noDestinations && (
+      {!loading && items.length === 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">No backups yet</CardTitle>

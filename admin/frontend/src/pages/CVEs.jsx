@@ -24,8 +24,9 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Plus,
-  RefreshCw, Save, ShieldCheck, ShieldQuestion, Stethoscope, Trash2, X, Zap,
+  ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Pin, PinOff,
+  Plus, RefreshCw, Save, ShieldCheck, ShieldQuestion, Star, Stethoscope, Trash2,
+  X, Zap,
 } from 'lucide-react';
 
 // A real, working CVE inbox spec — round-trips through the engine's
@@ -289,7 +290,28 @@ function relTime(iso) {
   return `${Math.floor(diffSec / 86400 / 365)}y ago`;
 }
 
-function CveListRow({ entry, onOpen }) {
+// Star toggle. Stops row click propagation so clicking the star
+// pins/unpins without also navigating into the detail view.
+function PinButton({ pinned, onToggle, size = 'sm', stopPropagation = false, className = '' }) {
+  const cls = pinned ? 'text-amber-400' : 'text-muted-foreground/50 hover:text-amber-400';
+  const dim = size === 'sm' ? 'h-4 w-4' : 'h-5 w-5';
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        if (stopPropagation) e.stopPropagation();
+        onToggle();
+      }}
+      aria-label={pinned ? 'Unpin' : 'Pin'}
+      title={pinned ? 'Unpin (click to remove)' : 'Pin to come back to this'}
+      className={`shrink-0 transition-colors ${cls} ${className}`}
+    >
+      <Star className={dim} fill={pinned ? 'currentColor' : 'none'} strokeWidth={pinned ? 0 : 1.75} />
+    </button>
+  );
+}
+
+function CveListRow({ entry, onOpen, onTogglePin }) {
   // Layout (12 cols, all aligned to the column header below):
   //   3   CVE
   //   3   Name
@@ -305,6 +327,11 @@ function CveListRow({ entry, onOpen }) {
       className="w-full text-left grid grid-cols-12 gap-3 items-center px-3 py-2 border-b border-border/50 hover:bg-accent/40"
     >
       <div className="col-span-12 sm:col-span-3 font-mono text-sm flex items-center gap-2">
+        <PinButton
+          pinned={!!entry.pin}
+          stopPropagation
+          onToggle={() => onTogglePin?.(entry)}
+        />
         {!entry.operator_seen && (
           <span className="h-2 w-2 rounded-full bg-orange-500 shrink-0" aria-label="unread" />
         )}
@@ -590,6 +617,24 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
     }
   };
 
+  const onTogglePin = async () => {
+    const wasPinned = !!data?.pin;
+    // Optimistic update.
+    setData(d => d ? { ...d, pin: wasPinned ? null : { note: null } } : d);
+    try {
+      if (wasPinned) await api.unpinCve(cveId);
+      else await api.pinCve(cveId);
+      onChangedRef.current?.();
+    } catch (err) {
+      setData(d => d ? { ...d, pin: wasPinned ? data.pin : null } : d);
+      toast({
+        title: 'Pin failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    }
+  };
+
   const onCheck = async () => {
     setChecking(true);
     try {
@@ -709,6 +754,12 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
         <Button variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
         </Button>
+        <PinButton
+          pinned={!!data?.pin}
+          size="md"
+          onToggle={onTogglePin}
+          className="ml-1"
+        />
         <h1 className="text-lg font-semibold font-mono">{cveId}</h1>
         <div className="ml-auto flex items-center gap-2">
           <ActionPill action={action} />
@@ -1002,6 +1053,10 @@ function CveList({ onOpen, refreshKey }) {
   const [filterAction, setFilterAction] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterTier, setFilterTier] = useState('all');
+  // Pinned-only toggle. When on, only entries the current operator
+  // has starred render. Pinned entries always sort to the top
+  // regardless — this filter is the inverse: hide everything else.
+  const [pinnedOnly, setPinnedOnly] = useState(false);
   // Sort by clicking the column header. `dir` toggles asc/desc on
   // re-click of the same column. Default: tier asc (most-critical first).
   const [sort, setSort] = useState({ key: 'tier', dir: 'asc' });
@@ -1163,8 +1218,15 @@ function CveList({ onOpen, refreshKey }) {
     if (filterAction !== 'all') rows = rows.filter(r => r.action_class === filterAction);
     if (filterStatus !== 'all') rows = rows.filter(r => r.status === filterStatus);
     if (filterTier !== 'all')   rows = rows.filter(r => String(r.tier ?? '') === String(filterTier));
+    if (pinnedOnly)             rows = rows.filter(r => !!r.pin);
 
     const cmp = (a, b) => {
+      // Pinned entries always sort to the top, regardless of the
+      // active sort column. The active sort still orders within the
+      // pinned + unpinned groups.
+      const ap = a.pin ? 0 : 1;
+      const bp = b.pin ? 0 : 1;
+      if (ap !== bp) return ap - bp;
       const dir = sort.dir === 'desc' ? -1 : 1;
       switch (sort.key) {
         case 'cve':
@@ -1200,7 +1262,38 @@ function CveList({ onOpen, refreshKey }) {
   // Reset to page 1 when filters / search / data change (otherwise
   // operator gets a confusing "page 5 of 1" after narrowing).
   useEffect(() => { setPage(1); },
-    [search, filterAction, filterStatus, filterTier, data.entries.length]);
+    [search, filterAction, filterStatus, filterTier, pinnedOnly, data.entries.length]);
+
+  // Optimistic pin toggle — flip locally first, then call the API.
+  // Revert on error so the UI doesn't lie.
+  const togglePin = useCallback(async (entry) => {
+    const wasPinned = !!entry.pin;
+    setData(d => ({
+      ...d,
+      entries: d.entries.map(e => e.cve === entry.cve
+        ? { ...e, pin: wasPinned ? null : { note: null, pinned_at: new Date().toISOString() } }
+        : e),
+    }));
+    try {
+      if (wasPinned) await api.unpinCve(entry.cve);
+      else await api.pinCve(entry.cve);
+    } catch (err) {
+      // Revert + toast.
+      setData(d => ({
+        ...d,
+        entries: d.entries.map(e => e.cve === entry.cve
+          ? { ...e, pin: wasPinned ? entry.pin : null }
+          : e),
+      }));
+      toast({
+        title: 'Pin failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    }
+  }, [toast]);
+
+  const pinnedCount = data.entries.filter(e => e.pin).length;
 
   const paginate = filtered.length > PAGINATE_AT;
   const totalPages = paginate ? Math.max(1, Math.ceil(filtered.length / pageSize)) : 1;
@@ -1311,25 +1404,41 @@ function CveList({ onOpen, refreshKey }) {
       )}
 
       {/* Search bar — full-width, instant client-side filter across
-          CVE id + name + origin_git_url. */}
-      <div className="relative">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search CVE id, name, or git URL…"
-          className="w-full text-sm bg-muted/30 border border-border rounded px-3 py-2 pr-9 placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/50"
-        />
-        {search && (
-          <button
-            type="button"
-            onClick={() => setSearch('')}
-            aria-label="Clear search"
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
+          CVE id + name + origin_git_url. Pinned-only toggle sits
+          next to it so the two main filters share a row. */}
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search CVE id, name, or git URL…"
+            className="w-full text-sm bg-muted/30 border border-border rounded px-3 py-2 pr-9 placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/50"
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setPinnedOnly(v => !v)}
+          className={`shrink-0 inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border transition-colors ${
+            pinnedOnly
+              ? 'bg-amber-400/15 text-amber-300 border-amber-500/40'
+              : 'bg-transparent text-muted-foreground border-border hover:bg-accent'
+          }`}
+          title="Show only entries you've pinned"
+        >
+          <Star className="h-3.5 w-3.5" fill={pinnedOnly ? 'currentColor' : 'none'} />
+          Pinned only{pinnedCount > 0 ? ` (${pinnedCount})` : ''}
+        </button>
       </div>
 
       {/* Table — header is sticky; rows scroll under it. The header
@@ -1392,7 +1501,12 @@ function CveList({ onOpen, refreshKey }) {
           </div>
         ) : (
           visible.map(entry => (
-            <CveListRow key={entry.cve} entry={entry} onOpen={onOpen} />
+            <CveListRow
+              key={entry.cve}
+              entry={entry}
+              onOpen={onOpen}
+              onTogglePin={togglePin}
+            />
           ))
         )}
       </div>

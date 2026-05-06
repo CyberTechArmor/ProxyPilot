@@ -24,7 +24,7 @@ import { join, basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { logAudit, getSetting, setSetting } from '../db.js';
+import { logAudit, getSetting, setSetting, getDb } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 
 export const cvesRouter = Router();
@@ -370,7 +370,7 @@ async function writeYamlAtomic(targetPath, body) {
 
 // ── routes ──────────────────────────────────────────────────────────────────
 
-cvesRouter.get('/', requireAdmin, async (_req, res) => {
+cvesRouter.get('/', requireAdmin, async (req, res) => {
   let names;
   try {
     names = await readdir(INBOX_DIR);
@@ -378,6 +378,17 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
     if (err.code === 'ENOENT') return res.json({ host: HOSTNAME, entries: [], unread: 0 });
     return res.status(500).json({ error: err.message });
   }
+
+  // Bulk-fetch the current operator's pin set so each row knows
+  // its own pinned state without a per-row query.
+  const pinRows = (() => {
+    try {
+      return getDb().prepare(
+        `SELECT cve_id, note, pinned_at FROM cve_pins WHERE user_id = ?`
+      ).all(req.user.id);
+    } catch { return []; }
+  })();
+  const pinByCve = new Map(pinRows.map(r => [r.cve_id, r]));
 
   const entries = [];
   let unread = 0;
@@ -435,6 +446,12 @@ cvesRouter.get('/', requireAdmin, async (_req, res) => {
         actor: latestHistory.actor,
         change: latestHistory.change,
       } : null,
+      // Per-user pin state. `null` when the current user hasn't
+      // pinned this entry; an object with note + pinned_at when they
+      // have. The frontend renders the star + sorts pinned-first.
+      pin: pinByCve.has(cve)
+        ? { note: pinByCve.get(cve).note, pinned_at: pinByCve.get(cve).pinned_at }
+        : null,
     });
   }
   res.json({ host: HOSTNAME, entries, unread });
@@ -527,6 +544,13 @@ cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
   const action = extractHostAction(body, HOSTNAME) || 'ALERT';
   const status = (extractNested('state', 'status', body) || 'NEW').toUpperCase().replace('_', '-');
   const importedAt = extractNested('_proxypilot', 'imported_at', body);
+  let pin = null;
+  try {
+    const row = getDb().prepare(
+      `SELECT note, pinned_at FROM cve_pins WHERE user_id = ? AND cve_id = ?`
+    ).get(req.user.id, req.params.cveId);
+    if (row) pin = row;
+  } catch { /* table missing or DB error → no pin info */ }
   res.json({
     cve: req.params.cveId,
     action_class: action,
@@ -539,7 +563,52 @@ cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
     added: importedAt || (st ? st.ctime.toISOString() : null),
     operator_action_required: extractNested('state', 'operator_action_required', body),
     latest_note: extractLatestHistory(body),
+    pin,
   });
+});
+
+// PUT /api/cves/:id/pin — pin (or update note on) an entry for the
+// current operator. DELETE removes the pin. Admin-only — pins are
+// per-user UI state, not destructive against host or DB beyond the
+// pinning user's own row.
+const pinBodySchema = z.object({
+  note: z.string().trim().max(280).optional(),
+}).strict();
+
+cvesRouter.put('/:cveId/pin', requireAdmin, async (req, res) => {
+  if (!CVE_ID_RE.test(req.params.cveId)) {
+    return res.status(400).json({ error: 'invalid CVE id' });
+  }
+  let body;
+  try { body = pinBodySchema.parse(req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  try {
+    getDb().prepare(
+      `INSERT INTO cve_pins (user_id, cve_id, pinned_at, note)
+       VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+       ON CONFLICT (user_id, cve_id)
+       DO UPDATE SET note = excluded.note`
+    ).run(req.user.id, req.params.cveId, body.note || null);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  // No audit log — pins are noisy and per-user; the activity is
+  // already implicit in subsequent CVE_RUN / CVE_DISMISS events.
+  res.json({ ok: true, pinned: true, note: body.note || null });
+});
+
+cvesRouter.delete('/:cveId/pin', requireAdmin, async (req, res) => {
+  if (!CVE_ID_RE.test(req.params.cveId)) {
+    return res.status(400).json({ error: 'invalid CVE id' });
+  }
+  try {
+    getDb().prepare(
+      `DELETE FROM cve_pins WHERE user_id = ? AND cve_id = ?`
+    ).run(req.user.id, req.params.cveId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  res.json({ ok: true, pinned: false });
 });
 
 cvesRouter.post('/:cveId/seen', requireAdmin, async (req, res) => {

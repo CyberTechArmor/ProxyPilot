@@ -455,3 +455,69 @@ test('detail returns added + latest_note + last_updated', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── pins (per-user "starred" flag in dashboard SQLite) ───────────────────────
+
+test('PUT /:id/pin pins; DELETE unpins', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-7000.yaml'),
+      'cve: CVE-2026-7000\nstate: {status: NEW}\n');
+    const router = await loadRouter(dir, 'vm');
+
+    // Pin with a note.
+    const p1 = await callRouter(router, '/CVE-2026-7000/pin', {
+      method: 'PUT', body: { note: 'awaiting upstream DSA' },
+    });
+    assert.equal(p1.status, 200);
+    assert.equal(p1.body.pinned, true);
+    assert.equal(p1.body.note, 'awaiting upstream DSA');
+
+    // Listing surfaces the pin for the same user.
+    const list1 = await callList(router);
+    const row = list1.body.entries.find(e => e.cve === 'CVE-2026-7000');
+    assert.ok(row.pin, 'listing should show pin object');
+    assert.equal(row.pin.note, 'awaiting upstream DSA');
+
+    // Unpin.
+    const p2 = await callRouter(router, '/CVE-2026-7000/pin', { method: 'DELETE' });
+    assert.equal(p2.status, 200);
+    assert.equal(p2.body.pinned, false);
+
+    const list2 = await callList(router);
+    assert.equal(list2.body.entries.find(e => e.cve === 'CVE-2026-7000').pin, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PUT /:id/pin updates note via upsert', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-7001.yaml'),
+      'cve: CVE-2026-7001\nstate: {status: NEW}\n');
+    const router = await loadRouter(dir, 'vm');
+    await callRouter(router, '/CVE-2026-7001/pin', {
+      method: 'PUT', body: { note: 'first' } });
+    const r = await callRouter(router, '/CVE-2026-7001/pin', {
+      method: 'PUT', body: { note: 'second' } });
+    assert.equal(r.body.note, 'second');
+    const list = await callList(router);
+    const row = list.body.entries.find(e => e.cve === 'CVE-2026-7001');
+    assert.equal(row.pin.note, 'second');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PUT /:id/pin rejects invalid CVE id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/not-a-cve/pin', {
+      method: 'PUT', body: {} });
+    assert.equal(r.status, 400);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

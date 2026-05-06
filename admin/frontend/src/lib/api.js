@@ -947,6 +947,15 @@ export const api = {
   // probe's stdout/stderr.
   checkCve: (cveId) =>
     request(`/cves/${encodeURIComponent(cveId)}/check`, { method: 'POST' }),
+  // Pins — per-user UI state. PUT pins (and updates the note);
+  // DELETE unpins.
+  pinCve: (cveId, note) =>
+    request(`/cves/${encodeURIComponent(cveId)}/pin`, {
+      method: 'PUT',
+      body: JSON.stringify(note ? { note } : {}),
+    }),
+  unpinCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/pin`, { method: 'DELETE' }),
 
   // Operator-managed inbox writes. The backend extracts the cve id
   // from the YAML body, so the paste flow never needs to think about

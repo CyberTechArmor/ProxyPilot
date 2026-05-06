@@ -12,6 +12,11 @@
 // All tests are pure (no DB, no S3, no fs) — they pack data with
 // the real packer, then run it back through the unpacker.
 
+// Pin scrypt for the test suite — see backup-pack.test.js for
+// rationale.  Pack writes scrypt-derived keys; decrypt handles
+// both scrypt + argon2id at runtime.
+process.env.PROXYPILOT_BACKUP_KDF = 'scrypt';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -31,7 +36,11 @@ test('parseHeader: pulls the JSON header off a valid .ppbackup', async () => {
   const buf = await makeArtifact({ 'a.txt': Buffer.from('hi') });
   const out = parseHeader(buf);
   assert.equal(out.header.magic, 'PPBACKUP');
-  assert.equal(out.header.version, 1);
+  // version moved to 2 with the argon2id default in PR-3-polish.
+  // v1 artifacts (scrypt, pre this commit) still decode correctly;
+  // we accept either here so the test isn't tied to the current
+  // default and a future v3 bump doesn't have to update it again.
+  assert.ok(out.header.version >= 1, `unexpected version ${out.header.version}`);
   assert.equal(out.header.tier, 'config');
   assert.equal(out.header.cipher, 'aes-256-gcm');
   assert.ok(out.headerEnd > 4);

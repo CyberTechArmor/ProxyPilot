@@ -15,6 +15,15 @@
 // integration suite (PR 2 adds a MinIO container per the master
 // prompt's Tests section).
 
+// Pin scrypt for the test suite — the default KDF for new
+// artifacts is argon2id (added in the post-PR-2 polish round)
+// but the argon2 package is a native module that won't be
+// installed in every test sandbox.  scrypt is in the node:crypto
+// stdlib, so pinning it keeps the round-trip tests environment-
+// agnostic.  Real deploys default to argon2id; this only
+// affects the test environment.
+process.env.PROXYPILOT_BACKUP_KDF = 'scrypt';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';

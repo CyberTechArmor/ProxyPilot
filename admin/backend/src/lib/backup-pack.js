@@ -25,14 +25,11 @@
 // either layout works, but committing to "tag at end" now means
 // the format won't change when full-tier comes online.
 //
-// KDF: node:crypto.scrypt rather than argon2id.  The spec calls for
-// argon2id, but adding the native `argon2` package to the dashboard
-// has a meaningful cost (Python build deps on the build host, an
-// extra cross-compile path for the Docker image, prebuilt binaries
-// per arch).  scrypt with N=2**15 r=8 p=1 is what the broader Node
-// ecosystem ships when a memory-hard KDF without a native dep is
-// required.  Spec-target argon2id can be added in a follow-up by
-// versioning the `kdf` field in the header — already wired.
+// KDF: argon2id by default (RFC 9106 / OWASP recommended).
+// Operators on hosts where the argon2 native module won't build
+// can pin scrypt via PROXYPILOT_BACKUP_KDF=scrypt.  See
+// lib/backup-kdf.js for the dispatcher.  v1 backups (pre this
+// commit) all use scrypt; the decrypt path handles both.
 //
 // Cipher: AES-256-GCM.  Authenticated encryption matters here
 // (operator backups land on third-party storage); a malleable
@@ -45,33 +42,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import {
+  freshKey, SCRYPT_PARAMS, ARGON2ID_PARAMS,
+} from './backup-kdf.js';
 
 const MAGIC = 'PPBACKUP';
-const VERSION = 1;
+const VERSION = 2; // v2: argon2id default; v1 (scrypt) still readable
 
-// ── KDF + cipher constants ──────────────────────────────────────────
-
-const SCRYPT_PARAMS = Object.freeze({
-  N: 32768, // 2**15 — ~32 MiB of memory, ~50 ms on a modern x86
-  r: 8,
-  p: 1,
-  keyLen: 32, // 256 bits = AES-256 key
-});
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
-
-function deriveKey(passphrase, salt) {
-  return new Promise((resolve, reject) => {
-    crypto.scrypt(
-      Buffer.from(passphrase, 'utf-8'),
-      salt,
-      SCRYPT_PARAMS.keyLen,
-      { N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p, maxmem: 256 * 1024 * 1024 },
-      (err, derived) => err ? reject(err) : resolve(derived),
-    );
-  });
-}
 
 // ── Minimal POSIX (ustar) tar writer ────────────────────────────────
 //
@@ -313,9 +293,14 @@ export async function pack({ entries, passphrase, meta = {} }) {
   const tarBytes = tarPack(archived);
   const compressed = zlib.gzipSync(tarBytes, { level: 9 });
 
-  const salt = crypto.randomBytes(SALT_BYTES);
   const iv = crypto.randomBytes(IV_BYTES);
-  const key = await deriveKey(passphrase, salt);
+  // freshKey: argon2id by default, scrypt when pinned via env.
+  // The KDF spec lands in the header alongside the salt so the
+  // decrypt path can reproduce the key without operator
+  // intervention later.  Pinning to scrypt is also how this
+  // module stays test-runnable in environments where the
+  // argon2 native module won't build.
+  const { key, salt, kdf, kdf_params } = await freshKey(passphrase, SALT_BYTES);
 
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(compressed), cipher.final()]);
@@ -324,8 +309,8 @@ export async function pack({ entries, passphrase, meta = {} }) {
   const header = {
     magic: MAGIC,
     version: VERSION,
-    kdf: 'scrypt',
-    kdf_params: { ...SCRYPT_PARAMS },
+    kdf,
+    kdf_params,
     salt_b64: salt.toString('base64'),
     iv_b64: iv.toString('base64'),
     cipher: 'aes-256-gcm',

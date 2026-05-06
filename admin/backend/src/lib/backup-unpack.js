@@ -28,6 +28,7 @@
 
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { deriveKey } from './backup-kdf.js';
 
 const TAG_BYTES = 16;
 
@@ -74,12 +75,10 @@ export async function decrypt(buf, passphrase) {
   }
   const { header, ciphertextStart, ciphertextEnd, tagStart } = parseHeader(buf);
 
-  // Validate the bits of the header we know how to handle.  A
-  // future kdf=argon2id will trip these; bumping this list is
-  // the explicit migration step.
-  if (header.kdf !== 'scrypt') {
-    throw new Error(`decrypt: unsupported KDF ${header.kdf}`);
-  }
+  // Validate the bits of the header we know how to handle.
+  // KDF dispatch is delegated to lib/backup-kdf.deriveKey()
+  // which throws with a clear message for unknown algorithms,
+  // so we don't redundantly check the kdf field here.
   if (header.cipher !== 'aes-256-gcm') {
     throw new Error(`decrypt: unsupported cipher ${header.cipher}`);
   }
@@ -92,20 +91,16 @@ export async function decrypt(buf, passphrase) {
 
   const salt = Buffer.from(header.salt_b64, 'base64');
   const iv = Buffer.from(header.iv_b64, 'base64');
-  const params = header.kdf_params || {};
-  const key = await new Promise((resolve, reject) => {
-    crypto.scrypt(
-      Buffer.from(passphrase, 'utf-8'),
-      salt,
-      params.keyLen || 32,
-      {
-        N: params.N || 32768,
-        r: params.r || 8,
-        p: params.p || 1,
-        maxmem: 256 * 1024 * 1024,
-      },
-      (err, derived) => err ? reject(err) : resolve(derived),
-    );
+  // deriveKey handles both v1 (kdf='scrypt') and v2
+  // (kdf='argon2id') artifacts in the same call.  Each
+  // dispatch arm reads its params from header.kdf_params with
+  // sensible defaults, so a v1 .ppbackup with the original PR-1
+  // params decrypts identically to before.
+  const key = await deriveKey({
+    kdf: header.kdf,
+    kdf_params: header.kdf_params || {},
+    passphrase,
+    salt,
   });
 
   const ct = buf.slice(ciphertextStart, ciphertextEnd);

@@ -25,7 +25,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Plus,
-  RefreshCw, Save, Trash2, X, Zap,
+  RefreshCw, Save, ShieldCheck, ShieldQuestion, Stethoscope, Trash2, X, Zap,
 } from 'lucide-react';
 
 // A real, working CVE inbox spec — round-trips through the engine's
@@ -360,12 +360,132 @@ function ExplainerBlock({ action, patchSteps, rollbackBody, hasMitigate }) {
   );
 }
 
+// Pull the `affects:` block from the YAML body as a flat key→value
+// dict. Block-form, two levels deep, no recursion — that's all the
+// schema needs and all the dashboard wants to render.
+function extractAffectsBlock(body) {
+  if (!body) return null;
+  const lines = body.split('\n');
+  const out = {};
+  let inBlock = false;
+  let baseIndent = -1;
+  for (const line of lines) {
+    if (!inBlock) {
+      if (/^affects:\s*$/.test(line)) inBlock = true;
+      continue;
+    }
+    if (/^\S/.test(line)) break;
+    const m = line.match(/^( +)(\w[\w_]*):\s*([^\n]*)$/);
+    if (!m) continue;
+    const indent = m[1].length;
+    if (baseIndent === -1) baseIndent = indent;
+    if (indent !== baseIndent) continue;
+    const v = m[3].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+    if (v) out[m[2]] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// "Am I affected?" — the question the operator wants answered first.
+// Verdict comes from (in priority order):
+//   1. lastCheck (operator just clicked Check applicability)
+//   2. latest_note from state.history (engine's most recent event)
+// Falls back to "unknown — no probe run yet" with a hint to click
+// Check applicability.
+function ApplicabilityBlock({ cveId, lastCheck, latestNote, added, lastUpdated,
+                             operatorAction, affectsBlock }) {
+  // Priority 1: just-clicked check.
+  let verdict = null;     // "affected" | "not_affected" | "unknown"
+  let detail = null;
+  let source = null;
+  let when = null;
+
+  if (lastCheck?.verdict) {
+    verdict = lastCheck.verdict === 'affected' ? 'affected'
+            : lastCheck.verdict === 'not_affected' ? 'not_affected'
+            : 'unknown';
+    detail = `probe exit=${lastCheck.exit_code}` +
+             (lastCheck.duration_s != null ? ` · ${lastCheck.duration_s.toFixed(2)}s` : '');
+    source = 'just-checked';
+    when = 'now';
+  } else if (latestNote?.change) {
+    const c = String(latestNote.change).toLowerCase();
+    if (/host not affected|not_affected|exit=[1-9]/.test(c)) {
+      verdict = 'not_affected';
+    } else if (/affected|exit=0|verify probe still exits 0/.test(c)) {
+      verdict = 'affected';
+    } else if (/resolved|patch verified/.test(c)) {
+      verdict = 'not_affected';
+    }
+    detail = latestNote.change;
+    source = `${latestNote.actor || 'engine'}`;
+    when = latestNote.ts;
+  }
+
+  const tone = verdict === 'not_affected'
+    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+    : verdict === 'affected'
+    ? 'border-red-500/40 bg-red-500/10 text-red-300'
+    : 'border-border bg-muted/30 text-muted-foreground';
+  const Icon = verdict === 'not_affected' ? ShieldCheck
+             : verdict === 'affected'     ? ShieldQuestion
+             : ShieldQuestion;
+  const label = verdict === 'not_affected' ? 'Host is NOT affected'
+              : verdict === 'affected'     ? 'Host IS affected'
+              : 'Unknown — run Check applicability for a current verdict';
+
+  return (
+    <div className={`rounded-lg border-2 px-4 py-3 ${tone}`}>
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="h-5 w-5" />
+        <span className="font-semibold">{label}</span>
+      </div>
+      {detail && (
+        <div className="text-xs space-y-0.5 mt-2 opacity-90">
+          <div><span className="opacity-70">Last signal: </span><span className="font-mono break-words">{detail}</span></div>
+          {(source || when) && (
+            <div className="opacity-70">
+              {source && <span>from <span className="font-mono">{source}</span></span>}
+              {source && when && when !== 'now' ? ' · ' : ''}
+              {when && when !== 'now' && <span className="font-mono">{when}</span>}
+            </div>
+          )}
+        </div>
+      )}
+      {operatorAction && operatorAction !== 'none' && (
+        <div className="text-xs mt-2 opacity-90">
+          <span className="opacity-70">Operator action required: </span>
+          <span className="font-mono">{operatorAction}</span>
+        </div>
+      )}
+      {affectsBlock && (
+        <div className="text-xs mt-3 pt-2 border-t border-current/20 opacity-90">
+          <div className="opacity-70 mb-1">Affects (per spec)</div>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">
+            {Object.entries(affectsBlock).map(([k, v]) => (
+              <Fragment key={k}>
+                <dt className="opacity-70">{k.replace(/_/g, ' ')}</dt>
+                <dd className="font-mono break-words">{v}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [running, setRunning] = useState(false);
+  const [checking, setChecking] = useState(false);
+  // Last probe-only result so the Applicability section can show it
+  // immediately after the operator clicks Check, without waiting for
+  // the next refresh round-trip. Cleared on cveId change.
+  const [lastCheck, setLastCheck] = useState(null);
   const [dismissOpen, setDismissOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [editing, setEditing] = useState(false);
@@ -395,6 +515,7 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   useEffect(() => { onChangedRef.current = onChanged; }, [onChanged]);
 
   useEffect(() => {
+    setLastCheck(null);  // discard stale check verdict from prior CVE
     refresh();
     // Mark as seen on open — fire-and-forget; failure doesn't block
     // the read view, the badge will retry on next poll.
@@ -437,6 +558,40 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
       });
     } finally {
       setRunning(false);
+    }
+  };
+
+  const onCheck = async () => {
+    setChecking(true);
+    try {
+      const out = await api.checkCve(cveId);
+      setLastCheck(out);
+      const variantByVerdict = {
+        affected: 'destructive',
+        not_affected: undefined,
+        no_probe: 'destructive',
+      };
+      const titleByVerdict = {
+        affected: 'Host IS affected',
+        not_affected: 'Host is NOT affected',
+        no_probe: 'No probe in spec',
+      };
+      toast({
+        title: titleByVerdict[out?.verdict] || 'Check finished',
+        description: out?.verdict === 'no_probe'
+          ? 'The spec is missing playbook.detect.probe.'
+          : `probe exit=${out?.exit_code} · ${out?.duration_s?.toFixed?.(2) || '?'}s`,
+        variant: variantByVerdict[out?.verdict],
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Check failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -561,6 +716,22 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                 {running ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <BugPlay className="h-4 w-4 mr-1.5" />}
                 Run on this host
               </Button>
+              {/* Check applicability — read-only probe (no patch, no
+                  snapshot, no status change). Available for ALL
+                  action_classes including ALERT, since the answer
+                  ("am I actually affected?") is useful regardless of
+                  whether the engine can auto-patch the answer. */}
+              <Button
+                variant="outline" size="sm"
+                onClick={onCheck}
+                disabled={checking}
+                title="Run only the detection probe — no patch, no snapshot, no state change."
+              >
+                {checking
+                  ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  : <Stethoscope className="h-4 w-4 mr-1.5" />}
+                Check applicability
+              </Button>
               <Button
                 variant="outline" size="sm"
                 onClick={() => copyText(patchSteps.join('\n'), 'Patch')}
@@ -608,6 +779,21 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                   <CardTitle className="text-base">{meta.name || cveId}</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4 text-sm">
+                  {/* Applicability — the "am I affected?" answer.
+                      Reads from (in priority order):
+                        1. lastCheck (just-clicked Check result)
+                        2. data.latest_note (last engine timeline event)
+                      Verdict colour + explainer adapt to each source. */}
+                  <ApplicabilityBlock
+                    cveId={cveId}
+                    lastCheck={lastCheck}
+                    latestNote={data?.latest_note}
+                    added={data?.added}
+                    lastUpdated={data?.last_updated}
+                    operatorAction={data?.operator_action_required}
+                    affectsBlock={extractAffectsBlock(yamlBody)}
+                  />
+
                   <FactGrid items={[
                     ['CVE id',       <span className="font-mono">{cveId}</span>],
                     ['Disclosed',    meta.disclosed],
@@ -616,6 +802,8 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                     ['Blast radius', meta.blast_radius && <span className="font-mono">{meta.blast_radius}</span>],
                     ['Action class', <ActionPill action={action} />],
                     ['Status',       <StatusPill status={status} />],
+                    ['Added',        data?.added && <span className="font-mono text-xs">{new Date(data.added).toLocaleString()}</span>],
+                    ['Last updated', data?.last_updated && <span className="font-mono text-xs">{new Date(data.last_updated).toLocaleString()}</span>],
                   ]} />
 
                   <ExplainerBlock

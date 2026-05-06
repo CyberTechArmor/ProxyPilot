@@ -942,6 +942,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  // Probe-only check — admin-only, NOT sudo-gated. Returns the
+  // verdict ("affected" / "not_affected" / "no_probe") plus the
+  // probe's stdout/stderr.
+  checkCve: (cveId) =>
+    request(`/cves/${encodeURIComponent(cveId)}/check`, { method: 'POST' }),
 
   // Operator-managed inbox writes. The backend extracts the cve id
   // from the YAML body, so the paste flow never needs to think about

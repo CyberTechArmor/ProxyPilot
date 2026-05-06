@@ -589,6 +589,27 @@ const runBodySchema = z.object({
   force_action: z.enum(['AUTO_PATCH', 'ONE_CLICK']).optional(),
 }).strict();
 
+// POST /api/cves/:id/check — run probe only. Read-only against the
+// host (no patch, no snapshot, no state.status mutation), so it's
+// admin-only — NOT sudo-gated. The friction-free reflex action is
+// the whole point: operators check applicability without re-auth.
+cvesRouter.post('/:cveId/check', requireAdmin, async (req, res) => {
+  const path = safePath(req.params.cveId);
+  if (!path) return res.status(400).json({ error: 'invalid CVE id' });
+  const args = ['check', req.params.cveId,
+    '--actor', `operator:${req.user.username || req.user.id}`];
+  try {
+    const out = await runEngine(args, { timeoutMs: 5 * 60 * 1000 });
+    logAudit(req.user.id, 'CVE_CHECK', 'cve', req.params.cveId, {
+      verdict: out?.verdict ?? null,
+      exit_code: out?.exit_code ?? null,
+    }, req.ip);
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 cvesRouter.post('/:cveId/run', requireAdmin, requireSudo, async (req, res) => {
   const path = safePath(req.params.cveId);
   if (!path) return res.status(400).json({ error: 'invalid CVE id' });

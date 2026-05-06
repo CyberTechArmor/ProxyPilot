@@ -46,6 +46,7 @@ from .inbox import (
     STATUS_IN_PROGRESS,
     STATUS_RESOLVED,
     append_history,
+    now_iso as inbox_now_iso,
     save,
     set_status,
     this_hostname,
@@ -202,6 +203,68 @@ def restore_snapshot(snap_id: str, backend: str) -> Tuple[bool, str]:
         # what does the in-place repair.
         return True, "btrfs snapshot retained at " + snap_id
     return False, f"unknown backend {backend}"
+
+
+# ── Probe-only check ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class CheckResult:
+    """Outcome of a probe-only run (no patch, no snapshot, no rollback,
+    no state.status change). The state machine in execute() runs the
+    same probe as step 1, but check() lets the operator ask "am I
+    affected?" without committing to the full machine."""
+    cve: str
+    host: str
+    verdict: str         # "affected" | "not_affected" | "no_probe"
+    exit_code: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    duration_s: float = 0.0
+
+
+def check_only(entry: Entry, *, hostname: Optional[str] = None,
+               record_history: bool = True,
+               actor: str = ENGINE_ACTOR) -> CheckResult:
+    """Run only `playbook.detect.probe`. Optionally append a one-line
+    history entry tagging the operator-visible verdict so timeline
+    consumers can see that someone checked + what they got, without
+    flooding history with every 5-min poll's silent probe.
+
+    Probe semantics (from spec): exit 0 = host IS affected. Anything
+    else = not affected. No snapshot, no patch, no state.status mutation."""
+    host = hostname or this_hostname()
+    probe = entry.detect_probe()
+    if probe is None:
+        result = CheckResult(cve=entry.cve, host=host, verdict="no_probe")
+        if record_history:
+            append_history(entry, host=host, actor=actor,
+                           change="check skipped: no playbook.detect.probe in spec")
+            entry.state["last_updated"] = inbox_now_iso()
+            save(entry)
+        return result
+
+    sr = run_shell(probe, STEP_TIMEOUT_SEC)
+    verdict = "affected" if sr.exit_code == 0 else "not_affected"
+    result = CheckResult(
+        cve=entry.cve, host=host, verdict=verdict,
+        exit_code=sr.exit_code,
+        stdout=sr.stdout, stderr=sr.stderr,
+        duration_s=sr.duration_s,
+    )
+
+    if record_history:
+        # Don't touch state.status — that's the AUTO_PATCH machine's
+        # job. We DO bump last_updated and append a history line so
+        # the dashboard reflects "operator checked: not affected".
+        append_history(
+            entry, host=host, actor=actor,
+            change=f"check: {verdict} (probe exit={sr.exit_code})",
+            stdout_excerpt=_step_excerpt(sr) if (sr.stdout or sr.stderr) else None,
+        )
+        entry.state["last_updated"] = inbox_now_iso()
+        save(entry)
+    return result
 
 
 # ── Main execution ────────────────────────────────────────────────────────────

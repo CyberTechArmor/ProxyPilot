@@ -251,6 +251,73 @@ def test_missing_probe_blocks(tmp_path, monkeypatch):
     assert load_entry(p).status == "BLOCKED"
 
 
+# ── probe-only check_only() ───────────────────────────────────────────────────
+
+def test_check_only_returns_affected_when_probe_exits_zero(tmp_path, monkeypatch):
+    p = _write(tmp_path, "CVE-2099-9999.yaml", _spec())
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell", _scripted([_ok("vulnerable")]))
+    from proxypilot.engine.runner import check_only
+    r = check_only(e, hostname="h1", record_history=False)
+    assert r.verdict == "affected"
+    assert r.exit_code == 0
+    # No history line, no status change.
+    e2 = load_entry(p)
+    assert e2.status == "NEW"
+    hist = e2.state.get("history", [])
+    assert len(list(hist)) == 0
+
+
+def test_check_only_returns_not_affected_on_nonzero_probe(tmp_path, monkeypatch):
+    p = _write(tmp_path, "CVE-2099-9999.yaml", _spec())
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell",
+                        _scripted([_fail(1, "not vulnerable")]))
+    from proxypilot.engine.runner import check_only
+    r = check_only(e, hostname="h1", record_history=False)
+    assert r.verdict == "not_affected"
+    assert r.exit_code == 1
+
+
+def test_check_only_appends_history_when_requested(tmp_path, monkeypatch):
+    p = _write(tmp_path, "CVE-2099-9999.yaml", _spec())
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell",
+                        _scripted([_fail(1, "not vulnerable")]))
+    from proxypilot.engine.runner import check_only
+    r = check_only(e, hostname="h1", record_history=True, actor="operator:test")
+    assert r.verdict == "not_affected"
+    e2 = load_entry(p)
+    # state.status MUST stay NEW — check is read-only.
+    assert e2.status == "NEW"
+    hist = list(e2.state["history"])
+    assert len(hist) == 1
+    assert hist[0]["actor"] == "operator:test"
+    assert "not_affected" in hist[0]["change"]
+
+
+def test_check_only_no_probe_records_skip(tmp_path, monkeypatch):
+    p = _write(tmp_path, "CVE-2099-9999.yaml", """
+        cve: CVE-2099-9999
+        hosts: {h1: {action_class: AUTO_PATCH, tier: 1}}
+        playbook:
+          patch: {steps: ["echo apply"]}
+        state: {status: NEW}
+    """)
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell",
+                        lambda *a, **kw: pytest.fail("must not run shell"))
+    from proxypilot.engine.runner import check_only
+    r = check_only(e, hostname="h1", record_history=True)
+    assert r.verdict == "no_probe"
+    e2 = load_entry(p)
+    hist = list(e2.state["history"])
+    assert len(hist) == 1
+    assert "no playbook.detect.probe" in hist[0]["change"]
+
+
+# ── existing tests below ──────────────────────────────────────────────────────
+
 def test_missing_patch_steps_blocks(tmp_path, monkeypatch):
     _disable_snapshots(monkeypatch)
     p = _write(tmp_path, "CVE-2099-9999.yaml", """

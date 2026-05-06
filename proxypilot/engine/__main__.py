@@ -223,6 +223,37 @@ def cmd_paste(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Run only playbook.detect.probe on a single entry. No snapshot,
+    no patch, no state.status mutation. Optionally appends a history
+    line so the timeline records that someone checked + what verdict
+    they got."""
+    from .runner import check_only
+    inbox = Path(args.inbox or INBOX_DIR)
+    path = inbox / f"{args.cve}.yaml"
+    if not path.is_file():
+        print(json.dumps({"ok": False, "error": f"no entry at {path}"}))
+        return 2
+    entry = load_entry(path)
+    result = check_only(
+        entry, hostname=args.host,
+        record_history=not args.no_history,
+        actor=args.actor or "proxypilot-engine",
+    )
+    out = {
+        "ok": True,
+        "cve": result.cve,
+        "host": result.host,
+        "verdict": result.verdict,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout[-4096:] if result.stdout else "",
+        "stderr": result.stderr[-4096:] if result.stderr else "",
+        "duration_s": result.duration_s,
+    }
+    print(json.dumps(out))
+    return 0
+
+
 def cmd_sync_git(args: argparse.Namespace) -> int:
     """Read-only pull from a git source. Imports any new <CVE>.yaml
     files into the inbox; never overwrites or deletes existing
@@ -304,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("paste", help="validate + write a pasted YAML to <inbox>/<cve>.yaml")
 
+    pc = sub.add_parser("check", help="run probe only; no patch, no snapshot, no status change")
+    pc.add_argument("cve")
+    pc.add_argument("--no-history", action="store_true",
+                    help="do not append a history entry (silent check)")
+    pc.add_argument("--actor", help="history actor (defaults to 'proxypilot-engine')")
+
     psg = sub.add_parser("sync-git", help="read-only pull of inbox specs from a git URL")
     psg.add_argument("--git-url", required=True)
     psg.add_argument("--source-dir", help="staging dir (default /var/lib/proxypilot/cve-inbox-source)")
@@ -325,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_validate(args)
     if args.cmd == "paste":
         return cmd_paste(args)
+    if args.cmd == "check":
+        return cmd_check(args)
     if args.cmd == "sync-git":
         return cmd_sync_git(args)
     p.error(f"unknown command {args.cmd!r}")

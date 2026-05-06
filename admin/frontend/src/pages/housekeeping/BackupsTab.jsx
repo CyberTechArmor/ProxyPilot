@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, CheckCircle2, Clock, Cloud, Download, FileArchive,
@@ -193,8 +194,27 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
   );
 }
 
+// DeleteDialog — operator picks which copies to remove.  Local-
+// first architecture means a backup may exist in two places
+// (local disk + S3); the dialog surfaces both as toggleable
+// switches so the operator can keep the S3 archive while
+// reclaiming local disk space, or vice versa.
 function DeleteDialog({ open, onOpenChange, item, onConfirm, busy }) {
+  const [deleteLocal, setDeleteLocal] = useState(true);
+  const [deleteS3, setDeleteS3] = useState(true);
+
+  useEffect(() => {
+    if (!open || !item) return;
+    // Default the toggles to 'remove what's actually present' so
+    // the operator doesn't see a switch flipped for a copy that
+    // doesn't exist.
+    setDeleteLocal(!!item.has_local);
+    setDeleteS3(!!item.s3_uploaded);
+  }, [open, item]);
+
   if (!item) return null;
+  const noCopiesSelected = !deleteLocal && !deleteS3;
+
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent>
@@ -203,15 +223,49 @@ function DeleteDialog({ open, onOpenChange, item, onConfirm, busy }) {
             <AlertTriangle className="h-5 w-5 text-amber-500" /> Delete backup
           </DialogTitle>
         </DialogHeader>
-        <div className="space-y-2 text-sm text-muted-foreground">
-          <p>
+        <div className="space-y-3 text-sm">
+          <p className="text-muted-foreground">
             Delete <code className="font-mono text-xs text-foreground">{item.id}</code>?
-            This removes the artifact from S3 and the row from the dashboard. Cannot be undone.
+            Cannot be undone.
+          </p>
+          <div className="space-y-2 border rounded p-3">
+            <div className="flex items-center gap-3">
+              <Switch
+                id="del-local"
+                checked={deleteLocal}
+                onCheckedChange={setDeleteLocal}
+                disabled={!item.has_local}
+              />
+              <Label htmlFor="del-local" className={item.has_local ? 'cursor-pointer' : 'text-muted-foreground'}>
+                Remove the local copy on this host
+                {!item.has_local && <span className="ml-1 text-[11px]">(none on disk)</span>}
+              </Label>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch
+                id="del-s3"
+                checked={deleteS3}
+                onCheckedChange={setDeleteS3}
+                disabled={!item.s3_uploaded}
+              />
+              <Label htmlFor="del-s3" className={item.s3_uploaded ? 'cursor-pointer' : 'text-muted-foreground'}>
+                Remove the copy in S3 ({(item.destination_name || 'destination').replace(/^null$/, 'unknown')})
+                {!item.s3_uploaded && <span className="ml-1 text-[11px]">(not uploaded)</span>}
+              </Label>
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            When both copies are removed, the row disappears from the dashboard.
+            When only one is removed, the row stays so the remaining copy is still tracked.
           </p>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={busy}>
+          <Button
+            variant="destructive"
+            onClick={() => onConfirm({ delete_local: deleteLocal, delete_s3: deleteS3 })}
+            disabled={busy || noCopiesSelected}
+          >
             {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
             Delete
           </Button>
@@ -280,14 +334,19 @@ export default function BackupsTab() {
   };
 
   const onDelete = (item) => { setDeleting(item); setDeleteOpen(true); };
-  const confirmDelete = async () => {
+  const confirmDelete = async (choice) => {
     if (!deleting) return;
     setBusyId(deleting.id);
     try {
-      const out = await api.backupsDelete(deleting.id);
+      const out = await api.backupsDelete(deleting.id, choice);
+      const summary = [];
+      if (out.local_removed) summary.push('local');
+      if (out.s3_removed) summary.push('S3');
       toast({
-        title: 'Backup deleted',
-        description: out.s3_error ? `S3 reported: ${out.s3_error}` : undefined,
+        title: out.row_dropped ? 'Backup deleted' : 'Copies removed',
+        description: out.s3_error
+          ? `S3 reported: ${out.s3_error}`
+          : (summary.length ? `Removed: ${summary.join(', ')}.` : undefined),
         variant: out.s3_error ? 'destructive' : undefined,
       });
       setDeleteOpen(false);
@@ -414,6 +473,27 @@ export default function BackupsTab() {
                         </td>
                         <td className="px-3 py-2 align-top">
                           <StatusBadge status={b.status} />
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {b.has_local && (
+                              <span
+                                className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+                                title="Local copy on this host's disk; download + restore read from here"
+                              >
+                                local
+                              </span>
+                            )}
+                            {b.s3_uploaded && (
+                              <span
+                                className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/30"
+                                title="Uploaded to the configured S3 destination"
+                              >
+                                S3
+                              </span>
+                            )}
+                            {!b.has_local && !b.s3_uploaded && (
+                              <span className="text-[10px] text-amber-600">no copy</span>
+                            )}
+                          </div>
                           {b.error && (
                             <div className="text-[11px] text-red-500 max-w-[14rem] truncate" title={b.error}>
                               {b.error}

@@ -57,6 +57,10 @@ import {
   packConfigTier, packConfigPlusDataTier, packFullTier,
 } from '../lib/backup-pack.js';
 import {
+  writeLocal, deleteLocal, localPathFor, openLocalReadStream, localDiskUsage,
+} from '../lib/backup-local-store.js';
+import fs from 'node:fs';
+import {
   register as schedulerRegister,
   unregister as schedulerUnregister,
   enqueue as schedulerEnqueue,
@@ -394,6 +398,12 @@ function publicBackupShape(row) {
     parent_backup: row.parent_backup || null,
     status: row.status,
     error: row.error || null,
+    // local-first columns from migration 203.  local_path is
+    // surfaced as a boolean flag (the actual filesystem path is
+    // operator-irrelevant for the UI); s3_uploaded reports
+    // whether a copy made it to the configured destination.
+    has_local: !!row.local_path,
+    s3_uploaded: !!row.s3_uploaded,
     // manifest_json is parsed lazily — surfaced as `manifest` on
     // GET /:id so list pages don't pay the parse cost N times.
   };
@@ -422,13 +432,24 @@ function readBackup(id) {
   return getDb().prepare(`SELECT * FROM backups WHERE id = ?`).get(id);
 }
 
-// GET /api/backups — list, newest first.  Filterable by destination
-// in a follow-up; PR 1 returns the full set.
+// GET /api/backups — list, newest first.  Joined to
+// backup_destinations so the row carries the destination name
+// alongside the id (the UI's delete dialog uses it directly so
+// the operator sees 'Remove the copy in S3 (RustFS)' rather
+// than 'Remove the copy in S3 (<uuid>)').
 backupsRouter.get('/', requireAdmin, (_req, res) => {
-  const rows = getDb().prepare(
-    `SELECT * FROM backups ORDER BY created_at DESC, id DESC`
-  ).all();
-  res.json({ backups: rows.map(publicBackupShape) });
+  const rows = getDb().prepare(`
+    SELECT b.*, d.name AS destination_name
+    FROM backups b
+    LEFT JOIN backup_destinations d ON d.id = b.destination_id
+    ORDER BY b.created_at DESC, b.id DESC
+  `).all();
+  res.json({
+    backups: rows.map((r) => ({
+      ...publicBackupShape(r),
+      destination_name: r.destination_name || null,
+    })),
+  });
 });
 
 // GET /api/backups/:id — single row, with manifest expanded.
@@ -465,30 +486,44 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
   // surfaces as a 400 from the zod enum, not silently as a default.
 
   const db = getDb();
-  const destination = pickDestination(db, body.destination_id);
-  if (!destination) {
-    return res.status(409).json({
-      error: body.destination_id
-        ? 'destination not found'
-        : 'no default destination — configure one in the Storage tab first',
-    });
+  // Local-first: a missing destination is no longer fatal.  If
+  // body.destination_id was supplied but doesn't exist, that's
+  // still an operator typo → 404.  Otherwise we proceed local-only
+  // (destination = null).  S3 push happens only when destination
+  // is non-null AND succeeds.
+  let destination = null;
+  if (body.destination_id) {
+    destination = pickDestination(db, body.destination_id);
+    if (!destination) {
+      return res.status(404).json({ error: 'destination not found' });
+    }
+  } else {
+    // Use the configured default if one exists; otherwise local-
+    // only.  pickDestination(null, null) returns the is_default=1
+    // row when present.
+    destination = pickDestination(db, null);
   }
 
   const id = uuid();
   const objectName = `${id}.ppbackup`;
-  const s3Key = buildKey(destination, objectName);
+  // s3Key is computed for the row even when there's no destination
+  // configured — keeps the column NOT NULL friendly and makes a
+  // future upload retry trivial.  Empty string when no destination.
+  const s3Key = destination ? buildKey(destination, objectName) : '';
 
   // Insert the row in 'in_progress' state so the GET list reflects
-  // an in-flight backup, then flip to ok / failed once the upload
-  // resolves.  The status flip is the only mutation downstream of
-  // the actual S3 write — keeping the state machine small.
+  // an in-flight backup; the column flips happen after each stage:
+  //   pack ok       → size_bytes + manifest_json populated
+  //   local write   → local_path populated
+  //   S3 upload     → s3_uploaded flipped to 1 (when applicable)
+  //   final         → status flipped to 'ok' or 'failed'
   db.prepare(`
     INSERT INTO backups (id, destination_id, tier, scope, s3_key, encrypted,
-                        created_by, manifest_json, status)
-    VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress')
+                        created_by, manifest_json, status, s3_uploaded)
+    VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress', 0)
   `).run(
     id,
-    destination.id,
+    destination ? destination.id : null,
     body.tier,
     body.scope || null,
     s3Key,
@@ -500,7 +535,7 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     const sharedMeta = {
       scope: body.scope || 'all',
       backup_id: id,
-      destination_name: destination.name,
+      destination_name: destination ? destination.name : '(local-only)',
     };
     if (body.tier === 'config') {
       packed = await packConfigTier({
@@ -535,116 +570,227 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
       .run(`pack failed: ${err?.message || err}`, id);
     logAudit(req.user.id, 'BACKUP_CREATE_FAILED', 'backup', id, {
       stage: 'pack', error: err?.message || String(err),
-      destination_id: destination.id, tier: body.tier,
+      destination_id: destination ? destination.id : null, tier: body.tier,
     }, req.ip);
     return res.status(500).json({ error: `pack failed: ${err?.message || err}` });
   }
 
+  // Local first.  Always.  This is the canonical copy from the
+  // dashboard's POV; restore + download read from local before
+  // touching S3 so a freshly-created backup is restore-testable
+  // without a network round-trip.
+  let localPath;
   try {
-    await putObject(destination, s3Key, packed.buffer, {
-      contentType: 'application/octet-stream',
-    });
+    localPath = writeLocal(id, packed.buffer);
   } catch (err) {
     db.prepare(`UPDATE backups SET status = 'failed', error = ? WHERE id = ?`)
-      .run(`upload failed: ${err?.message || err}`, id);
+      .run(`local write failed: ${err?.message || err}`, id);
     logAudit(req.user.id, 'BACKUP_CREATE_FAILED', 'backup', id, {
-      stage: 'upload', error: err?.message || String(err),
-      destination_id: destination.id, tier: body.tier,
+      stage: 'local-write', error: err?.message || String(err),
     }, req.ip);
-    return res.status(502).json({ error: `upload failed: ${err?.message || err}` });
+    return res.status(500).json({ error: `local write failed: ${err?.message || err}` });
+  }
+  db.prepare(`UPDATE backups SET local_path = ?, size_bytes = ?, manifest_json = ? WHERE id = ?`)
+    .run(localPath, packed.buffer.length, JSON.stringify(packed.manifest), id);
+
+  // Optional S3 upload.  Best-effort: a failed upload doesn't
+  // fail the whole create — the local copy is the canonical
+  // artifact, the operator can retry the S3 push later (PR
+  // follow-up).  status flips to 'ok' regardless of S3 outcome
+  // so the row is restorable from local right away.
+  let s3Error = null;
+  if (destination) {
+    try {
+      await putObject(destination, s3Key, packed.buffer, {
+        contentType: 'application/octet-stream',
+      });
+      db.prepare(`UPDATE backups SET s3_uploaded = 1 WHERE id = ?`).run(id);
+    } catch (err) {
+      s3Error = err?.message || String(err);
+      logAudit(req.user.id, 'BACKUP_S3_UPLOAD_FAILED', 'backup', id, {
+        destination_id: destination.id, error: s3Error,
+      }, req.ip);
+    }
   }
 
-  db.prepare(`
-    UPDATE backups SET status = 'ok', size_bytes = ?, manifest_json = ?
-    WHERE id = ?
-  `).run(packed.buffer.length, JSON.stringify(packed.manifest), id);
+  db.prepare(`UPDATE backups SET status = 'ok', error = ? WHERE id = ?`)
+    .run(s3Error ? `S3 upload failed (local copy ok): ${s3Error}` : null, id);
 
   logAudit(req.user.id, 'BACKUP_CREATE', 'backup', id, {
-    destination_id: destination.id,
-    destination_name: destination.name,
-    s3_key: s3Key,
+    destination_id: destination ? destination.id : null,
+    destination_name: destination ? destination.name : null,
+    s3_key: s3Key || null,
+    s3_uploaded: !s3Error && !!destination,
+    s3_error: s3Error,
+    local_path: localPath,
     tier: body.tier,
     scope: body.scope || null,
     size_bytes: packed.buffer.length,
     file_count: packed.manifest.files.length,
   }, req.ip);
 
-  res.status(201).json({ backup: { ...publicBackupShape(readBackup(id)), manifest: packed.manifest } });
+  res.status(201).json({
+    backup: { ...publicBackupShape(readBackup(id)), manifest: packed.manifest },
+    s3_error: s3Error,
+  });
 });
 
-// GET /api/backups/:id/download — stream the encrypted artifact
-// straight from S3 to the operator's browser.  Audit-logged because
-// it puts ciphertext + KDF-protected secrets onto the operator's
-// disk, where it could end up backed up off-host as a side effect.
+// GET /api/backups/:id/download — stream the encrypted artifact to
+// the operator's browser.  Local-first: if local_path exists on
+// disk we stream from there (instant, no network).  Otherwise fall
+// back to S3.  If neither has a copy, 409.
 backupsRouter.get('/:id/download', requireAdmin, async (req, res) => {
   const row = readBackup(req.params.id);
   if (!row) return res.status(404).json({ error: 'backup not found' });
   if (row.status !== 'ok') {
     return res.status(409).json({ error: `backup is ${row.status}, not 'ok'` });
   }
+
+  // Try local first.
+  if (row.local_path) {
+    try {
+      const stat = fs.statSync(row.local_path);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${row.id}.ppbackup"`);
+      res.setHeader('Content-Length', String(stat.size));
+      res.setHeader('X-PP-Source', 'local');
+      logAudit(req.user.id, 'BACKUP_DOWNLOAD', 'backup', row.id, {
+        source: 'local', size_bytes: stat.size,
+      }, req.ip);
+      const stream = openLocalReadStream(row.id);
+      stream.on('error', (err) => {
+        try { res.destroy(err); } catch { /* ignore */ }
+      });
+      return stream.pipe(res);
+    } catch (err) {
+      // Local file is gone (was pruned out from under us, or perms
+      // tightened).  Fall through to S3 if available.
+      if (err?.code !== 'ENOENT' && !row.s3_uploaded) {
+        return res.status(500).json({ error: `local read failed: ${err?.message || err}` });
+      }
+    }
+  }
+
+  // S3 fallback.
+  if (!row.s3_uploaded) {
+    return res.status(409).json({ error: 'no copy available — local was pruned and S3 upload never succeeded' });
+  }
   const dest = getDb().prepare(
     `SELECT * FROM backup_destinations WHERE id = ?`
   ).get(row.destination_id);
-  if (!dest) return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
-
+  if (!dest) {
+    return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
+  }
   let obj;
   try {
     obj = await getObjectStream(dest, row.s3_key);
   } catch (err) {
-    return res.status(502).json({ error: `download failed: ${err?.message || err}` });
+    return res.status(502).json({ error: `S3 download failed: ${err?.message || err}` });
   }
-
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', `attachment; filename="${row.id}.ppbackup"`);
   if (obj.contentLength) res.setHeader('Content-Length', String(obj.contentLength));
-
+  res.setHeader('X-PP-Source', 's3');
   logAudit(req.user.id, 'BACKUP_DOWNLOAD', 'backup', row.id, {
-    s3_key: row.s3_key,
-    size_bytes: row.size_bytes,
+    source: 's3', s3_key: row.s3_key, size_bytes: obj.contentLength || row.size_bytes,
   }, req.ip);
-
   obj.stream.on('error', (err) => {
-    // The headers may have already gone out by the time the body
-    // stream errors out; abort the response rather than leaking a
-    // half-written file with a misleading Content-Length.
     try { res.destroy(err); } catch { /* ignore */ }
   });
   obj.stream.pipe(res);
 });
 
-// DELETE /api/backups/:id — remove the artifact from S3 and drop
-// the row.  Tolerates an already-missing object (404 from S3) so a
-// backup whose object disappeared via a vendor lifecycle rule can
-// still be cleaned up out of the dashboard.
+// DELETE /api/backups/:id — remove the artifact.  Body controls
+// what gets removed:
+//
+//   { delete_local: bool, delete_s3: bool }
+//
+// Both default to true for back-compat with the PR-1 callers
+// that have no body.  When only one copy is removed, the row
+// stays so the dashboard keeps tracking the remaining copy.
+// When both copies are gone, the row is dropped.
 backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
   const row = readBackup(req.params.id);
   if (!row) return res.status(404).json({ error: 'backup not found' });
 
-  const dest = getDb().prepare(
-    `SELECT * FROM backup_destinations WHERE id = ?`
-  ).get(row.destination_id);
+  const body = req.body || {};
+  const wantDeleteLocal = body.delete_local === undefined ? true : !!body.delete_local;
+  const wantDeleteS3 = body.delete_s3 === undefined ? true : !!body.delete_s3;
 
   let s3Error = null;
-  if (dest) {
+  let localRemoved = false;
+  let s3Removed = false;
+
+  if (wantDeleteLocal && row.local_path) {
     try {
-      await deleteObject(dest, row.s3_key);
+      localRemoved = deleteLocal(row.local_path);
     } catch (err) {
-      const code = err?.Code || err?.name || '';
-      if (!/NotFound|NoSuchKey/i.test(code)) {
-        s3Error = err?.message || String(err);
+      // A permission error here shouldn't block S3 cleanup; surface
+      // it but keep going.
+      s3Error = `local delete failed: ${err?.message || err}`;
+    }
+  }
+
+  if (wantDeleteS3 && row.s3_uploaded) {
+    const dest = getDb().prepare(
+      `SELECT * FROM backup_destinations WHERE id = ?`
+    ).get(row.destination_id);
+    if (dest) {
+      try {
+        await deleteObject(dest, row.s3_key);
+        s3Removed = true;
+      } catch (err) {
+        const code = err?.Code || err?.name || '';
+        if (!/NotFound|NoSuchKey/i.test(code)) {
+          s3Error = (s3Error ? s3Error + '; ' : '') + (err?.message || String(err));
+        } else {
+          s3Removed = true; // already gone counts as removed
+        }
       }
     }
   }
 
-  getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+  // Recompute what's left.  Drop the row only when both copies are
+  // gone (locally removed + S3 removed-or-was-never-uploaded).
+  const stillLocal = (!wantDeleteLocal && row.local_path) ? true : false;
+  const stillS3 = (!wantDeleteS3 && row.s3_uploaded) ? true : (!s3Removed && row.s3_uploaded);
+
+  if (!stillLocal && !stillS3) {
+    getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+  } else {
+    // Partial delete — clear the columns for the copy we removed.
+    const updates = [];
+    const args = [];
+    if (wantDeleteLocal && (localRemoved || row.local_path)) {
+      updates.push('local_path = NULL');
+    }
+    if (wantDeleteS3 && s3Removed) {
+      updates.push('s3_uploaded = 0');
+    }
+    if (updates.length) {
+      args.push(row.id);
+      getDb().prepare(`UPDATE backups SET ${updates.join(', ')} WHERE id = ?`).run(...args);
+    }
+  }
 
   logAudit(req.user.id, 'BACKUP_DELETE', 'backup', row.id, {
+    delete_local: wantDeleteLocal,
+    delete_s3: wantDeleteS3,
+    local_removed: localRemoved,
+    s3_removed: s3Removed,
     s3_key: row.s3_key,
     destination_id: row.destination_id,
     s3_error: s3Error,
+    row_dropped: !stillLocal && !stillS3,
   }, req.ip);
 
-  res.json({ ok: true, s3_error: s3Error });
+  res.json({
+    ok: true,
+    local_removed: localRemoved,
+    s3_removed: s3Removed,
+    s3_error: s3Error,
+    row_dropped: !stillLocal && !stillS3,
+  });
 });
 
 // ── Schedules ───────────────────────────────────────────────────────
@@ -876,10 +1022,35 @@ backupsRouter.get('/usage', requireAdmin, (_req, res) => {
     perDestination[key].tiers.push({ tier: r.tier, bytes: r.bytes, count: r.count });
   }
 
+  // Local-first reporting: count rows that have a local copy
+  // separately, plus the on-disk footprint from a real fs scan.
+  // The fs scan catches orphaned files (DB row dropped but file
+  // left behind) — operators want to see those so they can clean
+  // up.
+  const localRows = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes
+    FROM backups WHERE local_path IS NOT NULL AND status = 'ok'
+  `).get();
+  const s3Rows = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes
+    FROM backups WHERE s3_uploaded = 1 AND status = 'ok'
+  `).get();
+  const onDisk = localDiskUsage();
+
   res.json({
     total: { bytes: totalBytes, count: totalCount },
     per_destination: Object.values(perDestination),
     rows, // raw aggregate rows for clients that want to render their own breakdown
+    local: {
+      // From the DB perspective — what we expect to find on disk.
+      tracked: { bytes: localRows.bytes, count: localRows.count },
+      // From the FS perspective — what's actually there.  Drift
+      // between the two surfaces orphans / missing files.
+      on_disk: onDisk,
+    },
+    s3: {
+      tracked: { bytes: s3Rows.bytes, count: s3Rows.count },
+    },
   });
 });
 

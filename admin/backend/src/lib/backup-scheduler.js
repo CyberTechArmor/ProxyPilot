@@ -30,6 +30,7 @@ import {
   packFullTier,
 } from './backup-pack.js';
 import { putObject, deleteObject, buildKey } from './s3.js';
+import { writeLocal, deleteLocal } from './backup-local-store.js';
 import {
   cronMatches, matchField, computeNextRunMs, isValidCronExpr,
 } from './backup-cron.js';
@@ -160,8 +161,8 @@ async function runSchedule(scheduleId) {
 
   db.prepare(`
     INSERT INTO backups (id, destination_id, tier, scope, s3_key, encrypted,
-                        created_by, manifest_json, status)
-    VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress')
+                        created_by, manifest_json, status, s3_uploaded)
+    VALUES (?, ?, ?, ?, ?, 1, ?, '{}', 'in_progress', 0)
   `).run(
     id, dest.id, row.tier, row.scope || null, s3Key,
     `schedule:${row.id}`,
@@ -212,19 +213,35 @@ async function runSchedule(scheduleId) {
     return;
   }
 
+  // Local first.  Same flow as the on-demand POST route — if the
+  // local write fails, the schedule run is failed; if S3 upload
+  // fails the run still succeeds (local copy is the canonical
+  // artifact).
+  let localPath;
+  try {
+    localPath = writeLocal(id, packed.buffer);
+  } catch (err) {
+    fail(id, row.id, `local write failed: ${err?.message || err}`);
+    return;
+  }
+  db.prepare(`UPDATE backups SET local_path = ?, size_bytes = ?, manifest_json = ? WHERE id = ?`)
+    .run(localPath, packed.buffer.length, JSON.stringify(packed.manifest), id);
+
+  let s3Error = null;
   try {
     await putObject(dest, s3Key, packed.buffer, {
       contentType: 'application/octet-stream',
     });
+    db.prepare(`UPDATE backups SET s3_uploaded = 1 WHERE id = ?`).run(id);
   } catch (err) {
-    fail(id, row.id, `upload failed: ${err?.message || err}`);
-    return;
+    s3Error = err?.message || String(err);
+    // Best-effort upload — local copy is good, so the backup is
+    // usable.  Log the S3 failure so the next retention pass /
+    // operator inspection can surface it.
   }
 
-  db.prepare(`
-    UPDATE backups SET status = 'ok', size_bytes = ?, manifest_json = ?
-    WHERE id = ?
-  `).run(packed.buffer.length, JSON.stringify(packed.manifest), id);
+  db.prepare(`UPDATE backups SET status = 'ok', error = ? WHERE id = ?`)
+    .run(s3Error ? `S3 upload failed (local copy ok): ${s3Error}` : null, id);
 
   db.prepare(`
     UPDATE backup_schedules
@@ -264,53 +281,58 @@ function fail(backupId, scheduleId, reason) {
   errLogger('schedule run failed', { schedule_id: scheduleId, backup_id: backupId, reason });
 }
 
-// applyRetention — drop rows + S3 objects that fail BOTH retention
+// applyRetention — prune local copies that fail BOTH retention
 // gates.  Both gates additive; either NULL disables that axis.
 //
-// Safety rail: never prune the most recent backup for a given
-// schedule.  Even with keep=0, the operator deserves at least one
-// successful artifact in the bucket.
-export async function applyRetention(scheduleRow, destRow) {
+// Local-first semantics (operator request): retention applies to
+// the on-disk copy ONLY.  S3 stays as the long-term archive and
+// is managed manually via the dashboard.  After local pruning,
+// the row stays (with local_path = NULL) so the dashboard keeps
+// visibility into the S3-only archive.  When the operator later
+// drops the S3 copy via the UI, the row finally goes away.
+//
+// Safety rail: never prune the most recent local copy for a given
+// schedule.  Even with keep=0 + a one-day-old install, the
+// operator deserves at least one ready-to-restore local artifact.
+export async function applyRetention(scheduleRow, _destRow) {
   const keep = scheduleRow.retention_keep ?? null;
   const days = scheduleRow.retention_days ?? null;
   if (keep == null && days == null) return;
 
   const db = getDb();
+  // Only consider rows that still have a local copy.  Rows that
+  // are S3-only (already pruned locally in a prior pass) are out
+  // of scope for local retention.
   const rows = db.prepare(`
     SELECT * FROM backups
-    WHERE created_by = ? AND status = 'ok'
+    WHERE created_by = ? AND status = 'ok' AND local_path IS NOT NULL
     ORDER BY created_at DESC, id DESC
   `).all(`schedule:${scheduleRow.id}`);
 
-  if (rows.length <= 1) return; // never prune the only remaining
-
-  const cutoffMs = days != null ? Date.now() - days * 86400_000 : null;
+  if (rows.length <= 1) return; // never prune the only remaining local
 
   for (let i = 0; i < rows.length; i += 1) {
     const r = rows[i];
     const ageMs = Date.now() - new Date(r.created_at).getTime();
     const failsKeep = keep != null ? i >= keep : true;
-    const failsDays = cutoffMs != null ? ageMs > days * 86400_000 : true;
+    const failsDays = days != null ? ageMs > days * 86400_000 : true;
 
-    // Both axes must say "prune" before we drop anything.  And i=0
-    // (newest) is always preserved.
+    // Both axes must say "prune" before we drop anything.  i=0
+    // (newest local) is always preserved.
     if (i === 0) continue;
     if (!(failsKeep && failsDays)) continue;
 
     try {
-      await deleteObject(destRow, r.s3_key);
+      deleteLocal(r.local_path);
     } catch (err) {
-      errLogger('retention: S3 delete failed', { backup_id: r.id, error: err?.message });
-      // Don't drop the DB row if S3 still has the object —
-      // otherwise the dashboard loses visibility into the
-      // orphan.  Operator can rerun retention manually after
-      // S3 recovers.
+      errLogger('retention: local delete failed', { backup_id: r.id, error: err?.message });
       continue;
     }
-    db.prepare(`DELETE FROM backups WHERE id = ?`).run(r.id);
-    logAudit(null, 'BACKUP_RETENTION_PRUNE', 'backup', r.id, {
+    db.prepare(`UPDATE backups SET local_path = NULL WHERE id = ?`).run(r.id);
+    logAudit(null, 'BACKUP_RETENTION_PRUNE_LOCAL', 'backup', r.id, {
       schedule_id: scheduleRow.id,
       reason: { keep, days, age_days: Math.floor(ageMs / 86400_000), index: i },
+      s3_uploaded: !!r.s3_uploaded,
     }, null);
   }
 }

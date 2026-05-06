@@ -1017,8 +1017,15 @@ export const api = {
   backupsGet: (id) => request(`/backups/${encodeURIComponent(id)}`),
   backupsCreate: (body) =>
     request('/backups', { method: 'POST', body: JSON.stringify(body) }),
-  backupsDelete: (id) =>
-    request(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // backupsDelete — body is optional for back-compat with PR-1
+  // call sites that just want both copies gone (the server-side
+  // default).  Local-first UI passes { delete_local, delete_s3 }
+  // booleans so the operator can keep one copy.
+  backupsDelete: (id, body) =>
+    request(`/backups/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify(body || {}),
+    }),
   // Download is a plain anchor href — the backend streams an
   // application/octet-stream with Content-Disposition. Resolved as
   // a path so callers can drop it into <a href={...}> directly.

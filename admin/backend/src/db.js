@@ -71,6 +71,7 @@ export function getDb() {
 //   200 Backups — backup_destinations (S3-compatible storage settings)
 //   201 Backups — backups (one row per packed artifact uploaded to S3)
 //   202 Backups — backup_schedules + restore_runs (PR 2)
+//   203 Backups — local_path + s3_uploaded on backups (local-first)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -935,6 +936,41 @@ export function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_restore_runs_started
         ON restore_runs(started_at DESC)
     `);
+  });
+
+  // Local-first backups (operator request).
+  //
+  // Pre-203 behaviour: backups went straight from packer to S3.
+  // Pulling them down for restore meant a network round-trip even
+  // when the backup was 10 minutes old.  Operators (rightly)
+  // pushed back: 'I want a local cache so download/restore is
+  // instant; S3 is for off-host durability and long-term storage.'
+  //
+  // New shape:
+  //
+  //   local_path     filesystem path of the on-disk artifact, NULL
+  //                  if the local copy was pruned by retention.
+  //   s3_uploaded    1 once the upload to the destination resolved
+  //                  successfully; 0 if local-only or if the upload
+  //                  failed.  destination_id stays NOT NULL because
+  //                  the row tracks where it eventually went; the
+  //                  bool decides whether the object is actually
+  //                  in the bucket yet.
+  //
+  // Existing rows: backfilled to local_path=NULL, s3_uploaded=1
+  // (PR 1 + PR 2 always uploaded; an existing row that has a
+  // status='ok' must be in S3, otherwise it wouldn't be here).
+  //
+  // destination_id loosened to nullable so a future commit can
+  // ship local-only backups (no S3 dest configured).  The route
+  // layer takes care of the 'no dest = local-only' path.
+  runMigration(db, 203, 'backups_local_first', (d) => {
+    // ALTER TABLE ADD COLUMN with a constant default works in
+    // SQLite and respects existing rows.  No tx wrap needed —
+    // runMigration's outer transaction covers the whole thing.
+    d.exec(`ALTER TABLE backups ADD COLUMN local_path TEXT`);
+    d.exec(`ALTER TABLE backups ADD COLUMN s3_uploaded INTEGER NOT NULL DEFAULT 0`);
+    d.exec(`UPDATE backups SET s3_uploaded = 1 WHERE status = 'ok'`);
   });
 
   // Create file versions table for version control

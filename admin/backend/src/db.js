@@ -78,6 +78,7 @@ export function getDb() {
 //   205 LXC snapshot S3 export — lxc_snapshot_s3_exports
 //   206 LXC snapshot S3 export — bytes_uploaded / bytes_total /
 //                                 cancel_requested for live progress
+//   207 Backups — restore_runs.backup_id ON DELETE CASCADE
 //   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
@@ -1126,6 +1127,61 @@ export function initDatabase() {
     d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN bytes_total INTEGER`);
     d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0`);
   });
+
+  // restore_runs.backup_id missed an ON DELETE CASCADE in
+  // migration 202.  Without it, any backup that's ever been the
+  // subject of a restore dry-run cannot be deleted — DELETE FROM
+  // backups trips 'FOREIGN KEY constraint failed' because
+  // restore_runs is still pointing at the parent.  Operators
+  // hitting an orphan backup row (retention pruned local + S3
+  // copy gone) couldn't drop it from the dashboard.
+  //
+  // SQLite doesn't support ALTER TABLE to change a foreign key,
+  // so we follow the standard recreate-and-copy pattern:
+  //   1. Build a new table with the corrected schema.
+  //   2. Copy every row from the old table.
+  //   3. Drop the old table.
+  //   4. Rename the new table into place.
+  // disableFks: true on this migration is critical — we're about
+  // to violate referential integrity briefly inside the rename
+  // shuffle and the global FK enforcement would block it.  The
+  // outer runMigration transaction wraps everything, so a partial
+  // failure rolls back cleanly.
+  runMigration(db, 207, 'restore_runs_cascade', (d) => {
+    d.exec(`
+      CREATE TABLE restore_runs__new (
+        id              TEXT PRIMARY KEY,
+        backup_id       TEXT NOT NULL REFERENCES backups(id) ON DELETE CASCADE,
+        mode            TEXT NOT NULL,
+        target          TEXT NOT NULL,
+        sandbox_dir     TEXT,
+        started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at     TEXT,
+        status          TEXT NOT NULL,
+        steps_json      TEXT NOT NULL DEFAULT '[]',
+        initiated_by    TEXT NOT NULL,
+        notes           TEXT
+      )
+    `);
+    d.exec(`
+      INSERT INTO restore_runs__new
+        (id, backup_id, mode, target, sandbox_dir, started_at,
+         finished_at, status, steps_json, initiated_by, notes)
+      SELECT id, backup_id, mode, target, sandbox_dir, started_at,
+             finished_at, status, steps_json, initiated_by, notes
+      FROM restore_runs
+    `);
+    d.exec(`DROP TABLE restore_runs`);
+    d.exec(`ALTER TABLE restore_runs__new RENAME TO restore_runs`);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_backup
+        ON restore_runs(backup_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_restore_runs_started
+        ON restore_runs(started_at DESC)
+    `);
+  }, { disableFks: true });
 
   // Durable notifications.
   //

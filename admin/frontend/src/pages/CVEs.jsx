@@ -311,6 +311,21 @@ function PinButton({ pinned, onToggle, size = 'sm', stopPropagation = false, cla
   );
 }
 
+// Names follow `<package> — <description>` (em-dash). Bold the
+// `<package>` part so the operator can scan by component
+// (systemd / curl / Redis / …) at a glance.
+function FormattedName({ name }) {
+  if (!name) return <span>—</span>;
+  const sep = name.indexOf(' — ');
+  if (sep < 0) return <span className="truncate">{name}</span>;
+  return (
+    <span className="truncate">
+      <span className="font-semibold text-foreground">{name.slice(0, sep)}</span>
+      <span className="text-muted-foreground"> — {name.slice(sep + 3)}</span>
+    </span>
+  );
+}
+
 function CveListRow({ entry, onOpen, onTogglePin }) {
   // Layout (12 cols, all aligned to the column header below):
   //   3   CVE
@@ -338,8 +353,8 @@ function CveListRow({ entry, onOpen, onTogglePin }) {
         <span className="truncate">{entry.cve}</span>
         <OriginPill origin={entry.origin} gitUrl={entry.origin_git_url} />
       </div>
-      <div className="col-span-12 sm:col-span-3 text-sm text-muted-foreground truncate">
-        {entry.name || '—'}
+      <div className="col-span-12 sm:col-span-3 text-sm truncate">
+        <FormattedName name={entry.name} />
       </div>
       <div className="col-span-2 sm:col-span-1 text-xs">
         {entry.tier ? `T${entry.tier}` : ''}
@@ -1048,11 +1063,10 @@ function CveList({ onOpen, refreshKey }) {
   const [data, setData] = useState({ entries: [], host: '', unread: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  // Per-column filter state. `tier` is a number-or-"all". Status +
-  // action are uppercase strings or "all".
+  // Per-column filter state. Tier is sort-only (operator request);
+  // Action + Status get dropdown filters.
   const [filterAction, setFilterAction] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
-  const [filterTier, setFilterTier] = useState('all');
   // Pinned-only toggle. When on, only entries the current operator
   // has starred render. Pinned entries always sort to the top
   // regardless — this filter is the inverse: hide everything else.
@@ -1217,7 +1231,6 @@ function CveList({ onOpen, refreshKey }) {
     }
     if (filterAction !== 'all') rows = rows.filter(r => r.action_class === filterAction);
     if (filterStatus !== 'all') rows = rows.filter(r => r.status === filterStatus);
-    if (filterTier !== 'all')   rows = rows.filter(r => String(r.tier ?? '') === String(filterTier));
     if (pinnedOnly)             rows = rows.filter(r => !!r.pin);
 
     const cmp = (a, b) => {
@@ -1257,12 +1270,12 @@ function CveList({ onOpen, refreshKey }) {
     };
     rows.sort(cmp);
     return rows;
-  }, [data.entries, search, filterAction, filterStatus, filterTier, sort]);
+  }, [data.entries, search, filterAction, filterStatus, pinnedOnly, sort]);
 
   // Reset to page 1 when filters / search / data change (otherwise
   // operator gets a confusing "page 5 of 1" after narrowing).
   useEffect(() => { setPage(1); },
-    [search, filterAction, filterStatus, filterTier, pinnedOnly, data.entries.length]);
+    [search, filterAction, filterStatus, pinnedOnly, data.entries.length]);
 
   // Optimistic pin toggle — flip locally first, then call the API.
   // Revert on error so the UI doesn't lie.
@@ -1336,6 +1349,16 @@ function CveList({ onOpen, refreshKey }) {
 
   return (
     <div className="space-y-4">
+      {/* Sticky chrome: everything from page title down to and
+          including the table header stays pinned at the top of the
+          scroll container while only the row list scrolls below.
+          The parent <main> in Layout.jsx is the scroll context
+          (overflow-y-auto on the inner div); top: 0 sticks relative
+          to its top edge.
+          The negative margin + padding pair lets the sticky band
+          extend to the page gutter so scrolled rows don't peek
+          through the corners. */}
+      <div className="sticky top-0 z-20 bg-background -mx-4 md:-mx-8 px-4 md:px-8 py-2 -mt-2 space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <BugPlay className="h-5 w-5 text-orange-500" />
         <h1 className="text-lg font-semibold">CVEs</h1>
@@ -1444,9 +1467,14 @@ function CveList({ onOpen, refreshKey }) {
       {/* Table — header is sticky; rows scroll under it. The header
           contains TWO rows per column: the click-to-sort label, and
           the per-column filter chips beneath. */}
-      <div className="border rounded">
-        <div className="sticky top-0 z-10 bg-card border-b">
-          {/* Row 1 — column labels with sort indicators. */}
+      {/* Table header rendered inside the outer sticky band so the
+          column labels + filter dropdowns travel with the chrome.
+          Rows render in a separate container below. */}
+      <div className="border border-b-0 rounded-t bg-card">
+        <div className="border-b shadow-sm">
+          {/* Row 1 — column labels with sort indicators. Tier is
+              sort-only per operator request; Action + Status got
+              dropdown filters in the row below. */}
           <div className="grid grid-cols-12 gap-3 px-3 py-2 text-xs text-muted-foreground bg-muted/30">
             <SortHeader k="cve"     className="col-span-12 sm:col-span-3">CVE</SortHeader>
             <SortHeader k="name"    className="col-span-12 sm:col-span-3">Name</SortHeader>
@@ -1456,46 +1484,57 @@ function CveList({ onOpen, refreshKey }) {
             <SortHeader k="added"   className="col-span-2 sm:col-span-1">Added</SortHeader>
             <SortHeader k="updated" className="col-span-2 sm:col-span-1">Updated</SortHeader>
           </div>
-          {/* Row 2 — filter chips under each filterable column. CVE +
-              Name + Added + Updated have no chips (they go through
-              the search box / are continuous values). */}
-          <div className="grid grid-cols-12 gap-3 px-3 py-2 bg-card border-t border-border/40">
+          {/* Row 2 — filter dropdowns under Action + Status. Tier no
+              longer has chips (sort-only); CVE / Name / Added /
+              Updated have no filters (search handles them). */}
+          <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-card border-t border-border/40">
             <div className="col-span-12 sm:col-span-3" />
             <div className="col-span-12 sm:col-span-3" />
-            <div className="col-span-2 sm:col-span-1 flex flex-wrap gap-1">
-              <FilterChip size="xs" active={filterTier === 'all'} onClick={() => setFilterTier('all')}>all</FilterChip>
-              {[1, 2, 3, 4].map(t => (
-                <FilterChip size="xs" key={t} active={String(filterTier) === String(t)} onClick={() => setFilterTier(t)}>
-                  T{t}
-                </FilterChip>
-              ))}
+            <div className="col-span-2 sm:col-span-1" />
+            <div className="col-span-3 sm:col-span-1">
+              <select
+                value={filterAction}
+                onChange={(e) => setFilterAction(e.target.value)}
+                aria-label="Filter by action"
+                className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
+              >
+                <option value="all">All</option>
+                <option value="AUTO_PATCH">AUTO_PATCH</option>
+                <option value="ONE_CLICK">ONE_CLICK</option>
+                <option value="ALERT">ALERT</option>
+              </select>
             </div>
-            <div className="col-span-3 sm:col-span-1 flex flex-wrap gap-1">
-              <FilterChip size="xs" active={filterAction === 'all'} onClick={() => setFilterAction('all')}>all</FilterChip>
-              {['AUTO_PATCH', 'ONE_CLICK', 'ALERT'].map(v => (
-                <FilterChip size="xs" key={v} active={filterAction === v} onClick={() => setFilterAction(v)}>
-                  {v.replace('AUTO_PATCH', 'AUTO').replace('ONE_CLICK', 'ONE')}
-                </FilterChip>
-              ))}
-            </div>
-            <div className="col-span-3 sm:col-span-2 flex flex-wrap gap-1">
-              <FilterChip size="xs" active={filterStatus === 'all'} onClick={() => setFilterStatus('all')}>all</FilterChip>
-              {['NEW', 'QUEUED', 'IN-PROGRESS', 'RESOLVED', 'BLOCKED', 'DISMISSED', 'ALERT-AUTO-ROLLBACK'].map(v => (
-                <FilterChip size="xs" key={v} active={filterStatus === v} onClick={() => setFilterStatus(v)}>
-                  {v.replace('ALERT-AUTO-ROLLBACK', 'ROLLBACK').replace('IN-PROGRESS', 'IN-PROG')}
-                </FilterChip>
-              ))}
+            <div className="col-span-3 sm:col-span-2">
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                aria-label="Filter by status"
+                className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
+              >
+                <option value="all">All</option>
+                <option value="NEW">NEW</option>
+                <option value="QUEUED">QUEUED</option>
+                <option value="IN-PROGRESS">IN-PROGRESS</option>
+                <option value="RESOLVED">RESOLVED</option>
+                <option value="BLOCKED">BLOCKED</option>
+                <option value="DISMISSED">DISMISSED</option>
+                <option value="ALERT-AUTO-ROLLBACK">ALERT-AUTO-ROLLBACK</option>
+              </select>
             </div>
             <div className="col-span-2 sm:col-span-1" />
             <div className="col-span-2 sm:col-span-1" />
           </div>
         </div>
+      </div>
+      </div>{/* /sticky chrome */}
 
+      {/* Rows — scroll beneath the sticky chrome. */}
+      <div className="border border-t-0 rounded-b -mt-4">
         {visible.length === 0 ? (
           <div className="text-sm text-muted-foreground text-center py-8">
             {loading
               ? 'Loading…'
-              : (search || filterAction !== 'all' || filterStatus !== 'all' || filterTier !== 'all')
+              : (search || filterAction !== 'all' || filterStatus !== 'all')
                 ? 'No entries match the current filters.'
                 : 'Inbox is empty. Paste a CVE YAML or sync from a git source.'}
           </div>

@@ -1,17 +1,22 @@
-// Housekeeping — operator-facing disk-usage view + per-category
-// prune actions for stale docker artifacts and ProxyPilot's own
-// pre-update DB backups.
+// Housekeeping — operator-facing umbrella page that bundles three
+// related-but-distinct surfaces under a single nav entry:
 //
-// Design notes:
+//   Backups  — on-demand + scheduled backups (PR 1: stub).
+//   Cleanup  — disk-usage view + per-category prune actions for
+//              stale docker artifacts and ProxyPilot's own pre-
+//              update DB backups.  This used to be the entire page;
+//              moving it under a tab is purely a relocation.
+//   Storage  — S3-compatible destination configuration (PR 1: stub
+//              in this commit, fleshed out in the follow-up commit
+//              that ships the form + table).
 //
-//  - Each category is a card showing total / size / reclaimable
-//    plus a Prune button. The dangerous prunes (all-unused images,
-//    unused volumes) get destructive button styling and a confirm
-//    dialog so the operator can't trip them by accident.
-//  - The "Prune now" button on the dangling-images card is the
-//    one the post-update cleanup also runs automatically — making
-//    it visible here is mostly for "I want to free space without
-//    waiting for the next update."
+// Why one page, not three nav entries: every operator session that
+// touches one of these touches all three.  "Where do I store this
+// backup?" / "Which old artifacts can I prune?" / "When did the
+// last backup run?" all live next to each other in the same mental
+// model.
+//
+// Tab restructure follows docs/features/backups/master-prompt.md.
 
 import { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
@@ -22,9 +27,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  AlertTriangle, Archive, Boxes, Database, HardDrive, Layers, Loader2, RefreshCw, Trash2,
+  AlertTriangle, Archive, Boxes, Cloud, Database, HardDrive, Layers, Loader2, RefreshCw, Save, Trash2,
 } from 'lucide-react';
 
 function fmtBytes(n) {
@@ -151,12 +157,12 @@ function PruneButton({ label, pruneBody, onDone, variant = 'outline', destructiv
   );
 }
 
-export default function Housekeeping() {
-  const { user } = useAuth();
+// Cleanup tab — verbatim relocation of the previous single-page
+// Housekeeping content.  Owns its own data fetch + refresh because
+// `docker system df` is expensive enough that we don't want to fire
+// it just because the operator clicked into the Backups tab.
+function CleanupTab() {
   const { toast } = useToast();
-  const isAdmin = user?.role === 'admin'
-    || JSON.parse(localStorage.getItem('user') || '{}').role === 'admin';
-
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -167,13 +173,16 @@ export default function Housekeeping() {
       setData(await api.housekeepingUsage());
     } catch (err) {
       setError(err instanceof ApiError ? err.message : (err?.message || 'failed to load'));
+      toast({
+        title: 'Could not load disk usage',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
   };
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, []);
-
-  if (!isAdmin) return <Navigate to="/" replace />;
 
   // Pull docker categories out of the df rows, with fallbacks for
   // missing entries so the card always renders something sensible.
@@ -187,22 +196,18 @@ export default function Housekeeping() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 flex-wrap">
-        <HardDrive className="h-5 w-5 text-orange-500" />
-        <h1 className="text-lg font-semibold">Housekeeping</h1>
-        <div className="ml-auto">
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
-        </div>
+      <div className="flex items-start gap-3 flex-wrap">
+        <p className="text-xs text-muted-foreground max-w-2xl leading-relaxed flex-1 min-w-[260px]">
+          Disk usage from the host's docker daemon plus ProxyPilot's pre-update DB backup
+          directory. Pruning is sudo-gated and per-category — nothing fires implicitly.
+          The dashboard's own update flow already prunes dangling images + caps the
+          build cache after every successful update; this page is for everything else.
+        </p>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+          <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </Button>
       </div>
-      <p className="text-xs text-muted-foreground max-w-2xl leading-relaxed">
-        Disk usage from the host's docker daemon plus ProxyPilot's pre-update DB backup
-        directory. Pruning is sudo-gated and per-category — nothing fires implicitly.
-        The dashboard's own update flow already prunes dangling images + caps the
-        build cache after every successful update; this page is for everything else.
-      </p>
 
       {error && (
         <div className="text-sm text-red-500 border border-red-500/30 bg-red-500/10 rounded px-3 py-2">
@@ -332,6 +337,90 @@ export default function Housekeeping() {
           }
         />
       </div>
+    </div>
+  );
+}
+
+// Backups + Storage tabs land in follow-up commits on this branch.
+// Stub renderers keep the tab structure honest in this commit so
+// the relocation diff is easy to review.
+function BackupsTabStub() {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start gap-3">
+          <Save className="h-5 w-5 mt-0.5 text-muted-foreground" />
+          <div className="space-y-1">
+            <CardTitle className="text-base">Backups — coming online</CardTitle>
+            <CardDescription className="text-xs">
+              On-demand and scheduled encrypted backups, with download / dry-run restore.
+              Storage destinations live under the Storage tab.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+    </Card>
+  );
+}
+
+function StorageTabStub() {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start gap-3">
+          <Cloud className="h-5 w-5 mt-0.5 text-muted-foreground" />
+          <div className="space-y-1">
+            <CardTitle className="text-base">Storage — coming online</CardTitle>
+            <CardDescription className="text-xs">
+              Configure one or more S3-compatible destinations (MinIO, R2, B2, AWS S3,
+              Wasabi, …). Multiple destinations supported; one is marked default.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+    </Card>
+  );
+}
+
+export default function Housekeeping() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin'
+    || JSON.parse(localStorage.getItem('user') || '{}').role === 'admin';
+
+  if (!isAdmin) return <Navigate to="/" replace />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <HardDrive className="h-5 w-5 text-orange-500" />
+        <h1 className="text-lg font-semibold">Housekeeping</h1>
+      </div>
+
+      <Tabs defaultValue="backups" className="w-full">
+        <TabsList>
+          <TabsTrigger value="backups">
+            <Save className="h-4 w-4 mr-1.5" />
+            Backups
+          </TabsTrigger>
+          <TabsTrigger value="cleanup">
+            <Trash2 className="h-4 w-4 mr-1.5" />
+            Cleanup
+          </TabsTrigger>
+          <TabsTrigger value="storage">
+            <Cloud className="h-4 w-4 mr-1.5" />
+            Storage
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="backups">
+          <BackupsTabStub />
+        </TabsContent>
+        <TabsContent value="cleanup">
+          <CleanupTab />
+        </TabsContent>
+        <TabsContent value="storage">
+          <StorageTabStub />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

@@ -32,6 +32,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, Archive, Boxes, Cloud, Database, HardDrive, Layers, Loader2, RefreshCw, Save, Trash2,
 } from 'lucide-react';
+import StorageTab from './housekeeping/StorageTab';
 
 function fmtBytes(n) {
   if (typeof n !== 'number' || Number.isNaN(n) || n <= 0) return '0 B';
@@ -363,25 +364,6 @@ function BackupsTabStub() {
   );
 }
 
-function StorageTabStub() {
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start gap-3">
-          <Cloud className="h-5 w-5 mt-0.5 text-muted-foreground" />
-          <div className="space-y-1">
-            <CardTitle className="text-base">Storage — coming online</CardTitle>
-            <CardDescription className="text-xs">
-              Configure one or more S3-compatible destinations (MinIO, R2, B2, AWS S3,
-              Wasabi, …). Multiple destinations supported; one is marked default.
-            </CardDescription>
-          </div>
-        </div>
-      </CardHeader>
-    </Card>
-  );
-}
-
 export default function Housekeeping() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin'
@@ -418,7 +400,7 @@ export default function Housekeeping() {
           <CleanupTab />
         </TabsContent>
         <TabsContent value="storage">
-          <StorageTabStub />
+          <StorageTab />
         </TabsContent>
       </Tabs>
     </div>

@@ -991,6 +991,25 @@ export const api = {
   housekeepingPrune: (body) =>
     request('/housekeeping/prune', { method: 'POST', body: JSON.stringify(body) }),
 
+  // Backups → Storage tab. CRUD on S3-compatible destinations + a
+  // 'test connection' verb that HEADs the configured bucket.
+  // secret_key is write-only — the GET path never returns it.
+  // Server enforces 'at most one default'; clients can mark a
+  // different row default and the previous one flips off.
+  backupsListStorage: () => request('/backups/storage'),
+  backupsCreateStorage: (body) =>
+    request('/backups/storage', { method: 'POST', body: JSON.stringify(body) }),
+  backupsUpdateStorage: (id, body) =>
+    request(`/backups/storage/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
+  backupsDeleteStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  backupsTestStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  backupsSetDefaultStorage: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/default`, { method: 'POST' }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

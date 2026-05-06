@@ -1001,7 +1001,23 @@ backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
       : (remainingS3 > 0 || !!row.s3_uploaded);
 
     if (!stillLocal && !stillS3) {
-      getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+      // restore_runs.backup_id references backups.id WITHOUT
+      // ON DELETE CASCADE (migration 202 predates the cascade
+      // policy we settled on in 204).  Without manually clearing
+      // the dependent rows first, DELETE FROM backups trips
+      // 'FOREIGN KEY constraint failed' for any row that's ever
+      // been the subject of a restore dry-run.  Migration 207
+      // (this commit) recreates restore_runs with CASCADE so
+      // future operators don't need this manual step, but for
+      // existing installs we still need it.  Wrap both deletes
+      // in a transaction so a partial failure doesn't leave
+      // restore_runs orphaned.
+      const db = getDb();
+      const tx = db.transaction(() => {
+        db.prepare(`DELETE FROM restore_runs WHERE backup_id = ?`).run(row.id);
+        db.prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+      });
+      tx();
     } else {
       const updates = [];
       const args = [];

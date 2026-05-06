@@ -32,6 +32,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, Archive, Boxes, Cloud, Database, HardDrive, Layers, Loader2, RefreshCw, Save, Trash2,
 } from 'lucide-react';
+import BackupsTab from './housekeeping/BackupsTab';
 import StorageTab from './housekeeping/StorageTab';
 
 function fmtBytes(n) {
@@ -342,28 +343,6 @@ function CleanupTab() {
   );
 }
 
-// Backups + Storage tabs land in follow-up commits on this branch.
-// Stub renderers keep the tab structure honest in this commit so
-// the relocation diff is easy to review.
-function BackupsTabStub() {
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start gap-3">
-          <Save className="h-5 w-5 mt-0.5 text-muted-foreground" />
-          <div className="space-y-1">
-            <CardTitle className="text-base">Backups — coming online</CardTitle>
-            <CardDescription className="text-xs">
-              On-demand and scheduled encrypted backups, with download / dry-run restore.
-              Storage destinations live under the Storage tab.
-            </CardDescription>
-          </div>
-        </div>
-      </CardHeader>
-    </Card>
-  );
-}
-
 export default function Housekeeping() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin'
@@ -394,7 +373,7 @@ export default function Housekeeping() {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="backups">
-          <BackupsTabStub />
+          <BackupsTab />
         </TabsContent>
         <TabsContent value="cleanup">
           <CleanupTab />

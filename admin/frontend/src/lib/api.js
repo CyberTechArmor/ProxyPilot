@@ -1010,6 +1010,20 @@ export const api = {
   backupsSetDefaultStorage: (id) =>
     request(`/backups/storage/${encodeURIComponent(id)}/default`, { method: 'POST' }),
 
+  // Backups → Backups tab. PR 1 ships create / list / show /
+  // download / delete on the config tier; PR 2 adds tiers,
+  // schedules, and restore.
+  backupsList: () => request('/backups'),
+  backupsGet: (id) => request(`/backups/${encodeURIComponent(id)}`),
+  backupsCreate: (body) =>
+    request('/backups', { method: 'POST', body: JSON.stringify(body) }),
+  backupsDelete: (id) =>
+    request(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Download is a plain anchor href — the backend streams an
+  // application/octet-stream with Content-Disposition. Resolved as
+  // a path so callers can drop it into <a href={...}> directly.
+  backupsDownloadHref: (id) => `${API_BASE}/backups/${encodeURIComponent(id)}/download`,
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

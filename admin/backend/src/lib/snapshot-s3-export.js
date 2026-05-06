@@ -49,6 +49,31 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // on success.  Refuses unsafe Incus identifiers up front so a
 // tampered DB row can't smuggle shell metacharacters into the
 // exec line.
+// exportSnapshotToTmp({ incusName, snapshotName }) → { ok, path?, error? }
+//
+// Materialises the named snapshot into a tarball.  `incus export
+// <instance>/<snapshot>` looks like the right invocation but
+// Incus 6.0.0 rejects it with 'Create instance backup: Invalid
+// instance name' — `incus export` only accepts a plain instance
+// name, not the `instance/snapshot` form.
+//
+// The supported pattern is a three-step dance:
+//   1. `incus copy <instance>/<snapshot> <temp-instance>` —
+//      materialises the snapshot's frozen state into a fresh
+//      throwaway instance.  On copy-on-write storage backends
+//      (btrfs / zfs / lvm-thin) this is instant and zero-cost;
+//      on the dir backend it's a full filesystem copy.
+//   2. `incus export <temp-instance> <out> --instance-only` —
+//      tarballs the temp's filesystem.  --instance-only because
+//      the temp has no sub-snapshots.
+//   3. `incus delete --force <temp-instance>` — cleanup.
+// We always run step 3 in finally so a failure in step 2 doesn't
+// leak the temp instance.
+//
+// Cross-namespace caveat: Incus is on the host, so the export
+// path must be host-side.  We write to /tmp on the host then
+// `cat` the bytes back into the dashboard container.  Same
+// dance backup-pack's exportIncusInstance uses.
 export function exportSnapshotToTmp({ incusName, snapshotName }) {
   if (!SAFE_NAME.test(incusName)) {
     return { ok: false, error: `unsafe instance name: ${incusName}` };
@@ -56,61 +81,53 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
   if (!SAFE_NAME.test(snapshotName)) {
     return { ok: false, error: `unsafe snapshot name: ${snapshotName}` };
   }
-  // Pre-flight: confirm `incus` exists on the host.  When the
-  // dashboard runs inside a Docker container this check pivots
-  // through nsenter; bare spawn would have looked for `incus` in
-  // the container's PATH (where it isn't) and failed with ENOENT
-  // — exactly the silent 'failed immediately' state operators
-  // hit pre-this-fix.
   if (!hasHostBinary('incus')) {
     return { ok: false, error: 'incus binary not found on host' };
   }
 
+  // Random 8-char id for the temp instance name + the host-side
+  // /tmp dir.  Incus instance names match
+  // [a-zA-Z][a-zA-Z0-9-]{0,62} — alphanumeric is a safe subset.
+  const shortId = Math.random().toString(36).slice(2, 10);
+  const tempInstance = `pp-snapxp-${shortId}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-snap-export-'));
   try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
+  const hostTmpDir = `/tmp/pp-snap-export-${process.pid}-${Date.now()}-${shortId}`;
+  const hostOut = `${hostTmpDir}/${incusName}-${snapshotName}.tar.gz`;
 
-  // Output path on the HOST namespace.  Use /tmp because nsenter
-  // pivots into the host mount namespace — paths under
-  // os.tmpdir() inside the container aren't reachable from the
-  // host's incus daemon.  /tmp is a tmpfs on most distros, so
-  // this is fast and gets cleaned by reboot anyway; we also
-  // cleanup explicitly in finally.
-  const hostTmpDir = `/tmp/pp-snap-export-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const out = `${hostTmpDir}/${incusName}-${snapshotName}.tar.gz`;
-  // Create the host-side dir first.
-  const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
-  if (mkdir.status !== 0) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    return {
-      ok: false,
-      error: `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`,
-    };
-  }
-
-  // `--instance-only` skips other snapshots of the same instance.
-  // `--compression gzip` matches what the full-tier backup uses.
-  // Timeout is generous — exporting large stateful instances
-  // (Postgres) can take 10+ minutes.
-  const r = spawnHostSync('incus', [
-    'export', `${incusName}/${snapshotName}`, out,
-    '--instance-only', '--compression', 'gzip',
-  ], { encoding: 'utf-8', timeout: 60 * 60_000 });
-  if (r.status !== 0) {
-    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    return {
-      ok: false,
-      error: (r.stderr || r.stdout || r.error?.message || 'incus export failed')
-        .trim().slice(0, 1024),
-    };
-  }
-
-  // Copy the artifact from the host's /tmp into the dashboard
-  // container's tmp dir so subsequent fs reads (fs.readFileSync
-  // for the upload) work normally.  `cat` over nsenter is the
-  // simplest cross-namespace pipe.
+  let copyDone = false;
   try {
-    const cat = spawnHostSync('cat', [out], {
+    const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
+    if (mkdir.status !== 0) {
+      throw new Error(
+        `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`
+      );
+    }
+
+    // Step 1: copy snapshot → temp instance.
+    const cp = spawnHostSync('incus', [
+      'copy', `${incusName}/${snapshotName}`, tempInstance,
+    ], { encoding: 'utf-8', timeout: 60 * 60_000 });
+    if (cp.status !== 0) {
+      throw new Error(
+        `incus copy snapshot failed: ${(cp.stderr || cp.stdout || 'unknown').trim()}`
+      );
+    }
+    copyDone = true;
+
+    // Step 2: export the temp instance.
+    const ex = spawnHostSync('incus', [
+      'export', tempInstance, hostOut,
+      '--instance-only', '--compression', 'gzip',
+    ], { encoding: 'utf-8', timeout: 60 * 60_000 });
+    if (ex.status !== 0) {
+      throw new Error(
+        `incus export failed: ${(ex.stderr || ex.stdout || 'unknown').trim()}`
+      );
+    }
+
+    // Step 3: pipe the host tarball into the container.
+    const cat = spawnHostSync('cat', [hostOut], {
       encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
     });
     if (cat.status !== 0) {
@@ -118,13 +135,20 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
     }
     const containerOut = path.join(dir, `${incusName}-${snapshotName}.tar.gz`);
     fs.writeFileSync(containerOut, cat.stdout);
-    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
     const stat = fs.statSync(containerOut);
     return { ok: true, dir, path: containerOut, size: stat.size };
   } catch (err) {
-    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    return { ok: false, error: `cross-namespace copy failed: ${err?.message || err}` };
+    return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
+  } finally {
+    // Cleanup runs regardless of outcome.  --force handles
+    // running state in case `incus copy` started the temp.
+    if (copyDone) {
+      spawnHostSync('incus', ['delete', '--force', tempInstance], {
+        encoding: 'utf-8', timeout: 60_000,
+      });
+    }
+    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
   }
 }
 

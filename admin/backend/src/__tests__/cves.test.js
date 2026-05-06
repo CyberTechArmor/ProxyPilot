@@ -456,6 +456,91 @@ test('detail returns added + latest_note + last_updated', async () => {
   }
 });
 
+// ── latest_verdict (structured field, robust against text drift) ─────────────
+
+test('latest_verdict pulls from a structured history entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0030.yaml'), [
+      'cve: CVE-2026-0030',
+      'name: structured-verdict',
+      'hosts: {vm: {action_class: ALERT, tier: 4}}',
+      'state:',
+      '  status: NEW',
+      '  history:',
+      '    - {ts: "2026-01-01T00:00:00Z", actor: claude, change: created}',
+      '    - ts: "2026-05-06T00:00:00Z"',
+      '      actor: operator:thomas',
+      '      change: "check: not_affected (probe exit=1)"',
+      '      verdict: not_affected',
+      '      exit_code: 1',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { body } = await callList(router);
+    const e = body.entries[0];
+    assert.ok(e.latest_verdict);
+    assert.equal(e.latest_verdict.verdict, 'not_affected');
+    assert.equal(e.latest_verdict.exit_code, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('latest_verdict survives a later non-verdict entry on top', async () => {
+  // The bug user #9 hit: after a check, an unrelated history entry
+  // (e.g. Mark dismissed) lands AFTER the check, and the old
+  // text-matching extractor lost the verdict because it only looked
+  // at the absolute-latest item. Now we walk backwards for the
+  // newest entry that has a structured verdict field.
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0031.yaml'), [
+      'cve: CVE-2026-0031',
+      'hosts: {vm: {action_class: ALERT, tier: 4}}',
+      'state:',
+      '  status: DISMISSED',
+      '  history:',
+      '    - ts: "2026-05-06T08:00:00Z"',
+      '      actor: operator:thomas',
+      '      change: "check: not_affected (probe exit=1)"',
+      '      verdict: not_affected',
+      '      exit_code: 1',
+      '    - ts: "2026-05-06T09:00:00Z"',
+      '      actor: operator:thomas',
+      '      change: "dismissed: confirmed not affected"',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { body } = await callList(router);
+    assert.equal(body.entries[0].latest_verdict.verdict, 'not_affected');
+    // latest_note still shows the dismissal (the absolute newest).
+    assert.match(body.entries[0].latest_note.change, /dismissed/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('latest_verdict null when no structured field present', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    await writeFile(join(dir, 'CVE-2026-0032.yaml'), [
+      'cve: CVE-2026-0032',
+      'hosts: {vm: {action_class: ALERT, tier: 4}}',
+      'state:',
+      '  status: NEW',
+      '  history:',
+      '    - {ts: "2026-01-01T00:00:00Z", actor: claude, change: "Initial entry"}',
+      '',
+    ].join('\n'));
+    const router = await loadRouter(dir, 'vm');
+    const { body } = await callList(router);
+    assert.equal(body.entries[0].latest_verdict, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ── pins (per-user "starred" flag in dashboard SQLite) ───────────────────────
 
 test('PUT /:id/pin pins; DELETE unpins', async () => {

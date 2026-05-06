@@ -197,7 +197,12 @@ def cmd_validate(_args: argparse.Namespace) -> int:
 def cmd_paste(args: argparse.Namespace) -> int:
     """Validate stdin YAML, stamp `_proxypilot.origin: paste`, and
     write to <inbox>/<cve>.yaml atomically. Replaces the dashboard's
-    Node-side write path so origin tracking lives in one place."""
+    Node-side write path so origin tracking lives in one place.
+
+    Also runs an automatic check_only after the write (unless
+    --no-auto-check) so the entry lands with a verdict already in
+    history — the operator doesn't have to click Check on every
+    fresh paste."""
     body = sys.stdin.read()
     raw, err = _parse_yaml_body(body)
     if err:
@@ -219,8 +224,28 @@ def cmd_paste(args: argparse.Namespace) -> int:
     except Exception as e:
         print(json.dumps({"ok": False, "error": f"write failed: {e}"}))
         return 2
-    print(json.dumps({"ok": True, "cve": raw["cve"], "path": str(target)}))
+
+    out = {"ok": True, "cve": raw["cve"], "path": str(target)}
+    if not args.no_auto_check:
+        out["auto_check"] = _auto_check(target, args.host)
+    print(json.dumps(out))
     return 0
+
+
+def _auto_check(path: Path, host: Optional[str]) -> dict:
+    """Run check_only against a freshly-imported entry and return a
+    summary {verdict, exit_code} for the JSON output. Failures are
+    swallowed to a {ok: false, error} sub-dict so a broken probe
+    doesn't fail the import that already succeeded on disk."""
+    try:
+        from .inbox import load_entry
+        from .runner import check_only
+        e = load_entry(path)
+        r = check_only(e, hostname=host, record_history=True,
+                       actor="post-import-auto-check")
+        return {"verdict": r.verdict, "exit_code": r.exit_code}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -257,7 +282,12 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_sync_git(args: argparse.Namespace) -> int:
     """Read-only pull from a git source. Imports any new <CVE>.yaml
     files into the inbox; never overwrites or deletes existing
-    entries. Stamps each import with origin=git + commit SHA."""
+    entries. Stamps each import with origin=git + commit SHA.
+
+    After importing, runs check_only against each newly-imported
+    entry (unless --no-auto-check) so the entries land with a
+    verdict already in history. Pre-existing entries are NOT
+    re-checked — they keep whatever verdict they already had."""
     from . import INBOX_DIR
     from .source_git import DEFAULT_SOURCE_DIR, sync
     if not args.git_url:
@@ -266,6 +296,15 @@ def cmd_sync_git(args: argparse.Namespace) -> int:
     inbox = Path(args.inbox or INBOX_DIR)
     src = Path(args.source_dir or DEFAULT_SOURCE_DIR)
     result = sync(args.git_url, inbox_dir=inbox, source_dir=src)
+
+    auto_checks = []
+    if not args.no_auto_check and result.imported:
+        for name in result.imported:
+            auto_checks.append({
+                "cve": name[:-len(".yaml")],
+                **_auto_check(inbox / name, args.host),
+            })
+
     out = {
         "ok": not result.errors,
         "git_url": result.git_url,
@@ -276,6 +315,7 @@ def cmd_sync_git(args: argparse.Namespace) -> int:
         "skipped_existing_count": len(result.skipped_existing),
         "skipped_invalid": result.skipped_invalid,
         "errors": result.errors,
+        "auto_checks": auto_checks,
     }
     print(json.dumps(out))
     return 0 if out["ok"] else 2
@@ -333,7 +373,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("validate", help="validate YAML on stdin; print JSON result")
 
-    sub.add_parser("paste", help="validate + write a pasted YAML to <inbox>/<cve>.yaml")
+    pp = sub.add_parser("paste", help="validate + write a pasted YAML to <inbox>/<cve>.yaml")
+    pp.add_argument("--no-auto-check", action="store_true",
+                    help="skip the post-import probe (entry lands without a verdict)")
 
     pc = sub.add_parser("check", help="run probe only; no patch, no snapshot, no status change")
     pc.add_argument("cve")
@@ -343,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
 
     psg = sub.add_parser("sync-git", help="read-only pull of inbox specs from a git URL")
     psg.add_argument("--git-url", required=True)
+    psg.add_argument("--no-auto-check", action="store_true",
+                     help="skip the post-import probe on each newly imported entry")
     psg.add_argument("--source-dir", help="staging dir (default /var/lib/proxypilot/cve-inbox-source)")
 
     args = p.parse_args(argv)

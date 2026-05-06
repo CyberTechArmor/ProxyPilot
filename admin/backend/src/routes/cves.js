@@ -73,41 +73,40 @@ function extractScalar(body, key) {
   return m[1].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
 }
 
-// Pull the latest entry from state.history. Returns
-// {ts, actor, change} or null if there's no history yet.
+// Walk state.history and return ALL items as structured objects.
+// Each returned object includes ts/actor/change/host plus any extra
+// engine-written fields (verdict, exit_code) — the schema is open.
 //
-// History grows append-only so the last item is the most recent run.
-// We accept BOTH forms ruamel.yaml + hand-pasted YAMLs produce:
+// History grows append-only so items[items.length-1] is the most
+// recent. We accept BOTH forms ruamel.yaml + hand-pasted YAMLs
+// produce:
 //
 //   block:
 //     history:
 //       - ts: "2026-05-05T18:42:11Z"
 //         actor: proxypilot-engine
 //         change: "probe exit=1; host not affected"
+//         verdict: not_affected
+//         exit_code: 1
 //
 //   flow:
 //     history:
-//       - {ts: "2026-05-05T18:42:11Z", actor: claude, change: created}
+//       - {ts: "...", actor: claude, change: created}
 //
 // Mixed within the same `history:` list is allowed and handled.
-function extractLatestHistory(body) {
-  if (!body) return null;
+function extractHistoryItems(body) {
+  if (!body) return [];
   const histStart = body.search(/\n\s+history:\s*\n/);
-  if (histStart < 0) return null;
+  if (histStart < 0) return [];
   const tail = body.slice(histStart);
 
-  // Split history into items by walking line-by-line. An item starts
-  // at any `(indent)- ` line; everything indented further (block form)
-  // OR the rest of the same line (flow form) belongs to that item.
   const lines = tail.split('\n');
-  // Skip the `history:` header line itself.
   const items = [];
   let cur = null;
   let itemIndent = -1;
   for (const line of lines) {
     if (!line.trim()) continue;
     if (/^\S/.test(line)) {
-      // Top-level key — left the history block.
       if (cur) { items.push(cur); cur = null; }
       break;
     }
@@ -118,51 +117,83 @@ function extractLatestHistory(body) {
       cur = { lines: [dash[2]], indent: itemIndent };
       continue;
     }
-    // Continuation line. Belongs to current item only if indented
-    // strictly more than the dash.
     const ind = line.match(/^(\s*)/)[1].length;
     if (cur && ind > itemIndent) {
       cur.lines.push(line.slice(itemIndent + 2));
     }
   }
   if (cur) items.push(cur);
-  if (items.length === 0) return null;
 
-  // Parse the LAST item.
-  const last = items[items.length - 1];
-  const out = { ts: null, actor: null, change: null };
+  // Parse each item into a flat key→value object. Recognises both
+  // flow form (`{k: v, ...}` on one line) and block form (one key
+  // per line). Extra fields like `verdict`/`exit_code` round-trip
+  // alongside the well-known ones.
+  return items.map(item => parseHistoryItem(item));
+}
 
-  // Flow form on first line: `{ts: ..., actor: ..., change: ...}`
-  const head = last.lines[0] || '';
+function parseHistoryItem(item) {
+  const out = {};
+  const head = item.lines[0] || '';
   const flowMatch = head.match(/^\s*\{(.+)\}\s*$/);
   if (flowMatch) {
-    // Naive split — change values can't contain commas / braces in
-    // our schema, which is true for engine writes; operators editing
-    // by hand and inserting commas in flow form are an edge case.
     for (const part of flowMatch[1].split(/,(?![^{]*\})/)) {
       const kv = part.match(/^\s*(\w+):\s*(.*?)\s*$/);
       if (!kv) continue;
-      const key = kv[1];
-      const val = kv[2].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
-      if (key === 'ts' || key === 'actor' || key === 'change' || key === 'host') {
-        out[key] = val;
-      }
+      out[kv[1]] = kv[2].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
     }
-    return out.ts || out.actor || out.change ? out : null;
+    return out;
   }
-
-  // Block form: each line is `key: value`.
-  // First line might be `ts: ...` (the dash already consumed).
-  for (const ln of last.lines) {
+  for (const ln of item.lines) {
     const m = ln.match(/^\s*(\w+):\s*(.*)$/);
     if (!m) continue;
     const key = m[1];
     const val = m[2].replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
-    if (key === 'ts' || key === 'actor' || key === 'change' || key === 'host') {
-      if (!out[key]) out[key] = val;
+    if (!(key in out)) out[key] = val;
+  }
+  return out;
+}
+
+// Latest history item (the absolute newest, regardless of content).
+// This is what the timeline shows; for the verdict signal use
+// extractLatestVerdict instead.
+function extractLatestHistory(body) {
+  const items = extractHistoryItems(body);
+  if (items.length === 0) return null;
+  const last = items[items.length - 1];
+  if (!last.ts && !last.actor && !last.change) return null;
+  // Restrict the well-known fields the listing returns; the structured
+  // verdict signal goes through extractLatestVerdict separately.
+  return {
+    ts: last.ts || null,
+    actor: last.actor || null,
+    change: last.change || null,
+    host: last.host || null,
+  };
+}
+
+// Latest verdict — walks history backwards looking for the first
+// item that has a structured `verdict` field. This is what the
+// engine's check_only writes; older AUTO_PATCH events also write
+// verdicts (TODO once that path adopts extra_fields too). We do
+// NOT text-match the change string — that was fragile in the old
+// code and produced "verdict disappears on revisit" when a non-
+// check history line was the absolute newest.
+//
+// Returns null when no item has a verdict field.
+function extractLatestVerdict(body) {
+  const items = extractHistoryItems(body);
+  for (let i = items.length - 1; i >= 0; i--) {
+    const v = items[i].verdict;
+    if (v && /^[a-z_]+$/.test(v)) {
+      return {
+        verdict: v,
+        exit_code: items[i].exit_code != null ? Number(items[i].exit_code) : null,
+        ts: items[i].ts || null,
+        actor: items[i].actor || null,
+      };
     }
   }
-  return out.ts || out.actor || out.change ? out : null;
+  return null;
 }
 
 // extractNested("state", "status", body) finds the `status:` key
@@ -420,6 +451,7 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
     const added = importedAt
       || (st ? st.ctime.toISOString() : null);
     const latestHistory = extractLatestHistory(body);
+    const latestVerdict = extractLatestVerdict(body);
     entries.push({
       cve,
       name: extractScalar(body, 'name'),
@@ -446,6 +478,12 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
         actor: latestHistory.actor,
         change: latestHistory.change,
       } : null,
+      // Authoritative verdict signal — pulled from the most recent
+      // history entry that has a structured `verdict` field (engine
+      // writes one on every check / AUTO_PATCH probe). Robust
+      // against later non-verdict entries (Claude edits, dismissals)
+      // burying the operator's last check.
+      latest_verdict: latestVerdict,
       // Per-user pin state. `null` when the current user hasn't
       // pinned this entry; an object with note + pinned_at when they
       // have. The frontend renders the star + sorts pinned-first.
@@ -563,6 +601,7 @@ cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
     added: importedAt || (st ? st.ctime.toISOString() : null),
     operator_action_required: extractNested('state', 'operator_action_required', body),
     latest_note: extractLatestHistory(body),
+    latest_verdict: extractLatestVerdict(body),
     pin,
   });
 });

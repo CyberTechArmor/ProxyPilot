@@ -239,13 +239,29 @@ def check_only(entry: Entry, *, hostname: Optional[str] = None,
         result = CheckResult(cve=entry.cve, host=host, verdict="no_probe")
         if record_history:
             append_history(entry, host=host, actor=actor,
-                           change="check skipped: no playbook.detect.probe in spec")
+                           change="check skipped: no playbook.detect.probe in spec",
+                           extra_fields={"verdict": "no_probe"})
             entry.state["last_updated"] = inbox_now_iso()
             save(entry)
         return result
 
     sr = run_shell(probe, STEP_TIMEOUT_SEC)
-    verdict = "affected" if sr.exit_code == 0 else "not_affected"
+    # Probe exit semantics:
+    #   0          → host IS affected (canonical)
+    #   1..123,125 → host is NOT affected (canonical)
+    #   124        → timed out — probe didn't finish, can't conclude
+    #   126        → command not executable — broken probe
+    #   127        → command not found — broken probe (typical when
+    #                Claude wrote `dpkg-query` on a host without dpkg)
+    # The probe_error verdict surfaces the broken cases distinctly so
+    # the operator sees "probe didn't run cleanly" instead of a false
+    # green.
+    if sr.exit_code == 0:
+        verdict = "affected"
+    elif sr.exit_code in (124, 126, 127):
+        verdict = "probe_error"
+    else:
+        verdict = "not_affected"
     result = CheckResult(
         cve=entry.cve, host=host, verdict=verdict,
         exit_code=sr.exit_code,
@@ -257,10 +273,15 @@ def check_only(entry: Entry, *, hostname: Optional[str] = None,
         # Don't touch state.status — that's the AUTO_PATCH machine's
         # job. We DO bump last_updated and append a history line so
         # the dashboard reflects "operator checked: not affected".
+        # The structured `verdict` + `exit_code` fields are the
+        # authoritative signal — the dashboard reads them directly
+        # rather than text-matching the change string. The change
+        # string is the human-readable companion.
         append_history(
             entry, host=host, actor=actor,
             change=f"check: {verdict} (probe exit={sr.exit_code})",
             stdout_excerpt=_step_excerpt(sr) if (sr.stdout or sr.stderr) else None,
+            extra_fields={"verdict": verdict, "exit_code": sr.exit_code},
         )
         entry.state["last_updated"] = inbox_now_iso()
         save(entry)

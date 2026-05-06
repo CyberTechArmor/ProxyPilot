@@ -296,6 +296,39 @@ def test_check_only_appends_history_when_requested(tmp_path, monkeypatch):
     assert "not_affected" in hist[0]["change"]
 
 
+def test_check_only_treats_127_as_probe_error(tmp_path, monkeypatch):
+    # Exit 127 (command not found) means the probe didn't actually
+    # run — the operator should see "probe error", not a confident
+    # "not affected" verdict.
+    p = _write(tmp_path, "CVE-2099-9999.yaml", _spec())
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell",
+                        _scripted([_fail(127, "/bin/sh: dpkg-query: not found")]))
+    from proxypilot.engine.runner import check_only
+    r = check_only(e, hostname="h1", record_history=True)
+    assert r.verdict == "probe_error"
+    assert r.exit_code == 127
+    e2 = load_entry(p)
+    hist = list(e2.state["history"])
+    assert hist[-1]["verdict"] == "probe_error"
+
+
+def test_check_only_writes_structured_verdict_field(tmp_path, monkeypatch):
+    # The structured `verdict` + `exit_code` fields on the history
+    # item are the authoritative signal the dashboard reads. Test
+    # they're present alongside the human-readable `change` string.
+    p = _write(tmp_path, "CVE-2099-9999.yaml", _spec())
+    e = load_entry(p)
+    monkeypatch.setattr(runner_mod, "run_shell",
+                        _scripted([_fail(1, "not vulnerable")]))
+    from proxypilot.engine.runner import check_only
+    check_only(e, hostname="h1", record_history=True)
+    e2 = load_entry(p)
+    hist = list(e2.state["history"])
+    assert hist[-1]["verdict"] == "not_affected"
+    assert hist[-1]["exit_code"] == 1
+
+
 def test_check_only_no_probe_records_skip(tmp_path, monkeypatch):
     p = _write(tmp_path, "CVE-2099-9999.yaml", """
         cve: CVE-2099-9999

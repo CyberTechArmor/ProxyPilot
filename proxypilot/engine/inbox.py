@@ -225,8 +225,14 @@ def append_history(
     actor: str = ENGINE_ACTOR,
     stdout_excerpt: Optional[str] = None,
     stderr_excerpt: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> CommentedMap:
-    """Build and append a history record. Returns the record."""
+    """Build and append a history record. Returns the record.
+
+    `extra_fields` lets callers attach structured metadata (e.g.
+    `{"verdict": "not_affected", "exit_code": 1}` from check_only)
+    without having to embed it in the change string. Readers prefer
+    these structured fields over text-parsing the change."""
     rec = CommentedMap()
     rec["ts"] = now_iso()
     rec["actor"] = actor
@@ -237,6 +243,9 @@ def append_history(
         rec["stdout_excerpt"] = _truncate(stdout_excerpt)
     if stderr_excerpt:
         rec["stderr_excerpt"] = _truncate(stderr_excerpt)
+    if extra_fields:
+        for k, v in extra_fields.items():
+            rec[k] = v
 
     state = entry.state
     hist = state.get("history")

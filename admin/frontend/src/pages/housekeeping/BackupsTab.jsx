@@ -26,7 +26,7 @@ import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import {
   AlertTriangle, CheckCircle2, Clock, Cloud, Download, FileArchive,
-  CloudDownload, Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2, XCircle,
+  Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2, XCircle,
 } from 'lucide-react';
 
 import UsageCard from './UsageCard';
@@ -599,7 +599,7 @@ export default function BackupsTab() {
                                     {busyId === b.id ? (
                                       <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
                                     ) : (
-                                      <CloudDownload className="h-3.5 w-3.5 mr-1.5" />
+                                      <Cloud className="h-3.5 w-3.5 mr-1.5" />
                                     )}
                                     Pull local
                                   </Button>

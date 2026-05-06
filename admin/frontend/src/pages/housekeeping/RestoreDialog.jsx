@@ -51,7 +51,8 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
   const idShort = backup.id.slice(0, 8);
   const matchesId = confirmId.trim() === backup.id || confirmId.trim() === idShort;
   const passphraseOk = passphrase.length >= 8;
-  const canSubmit = !busy && matchesId && passphraseOk && !!target;
+  const hasAnyCopy = !!backup?.has_local || !!backup?.s3_uploaded;
+  const canSubmit = !busy && matchesId && passphraseOk && !!target && hasAnyCopy;
 
   const submit = async () => {
     setBusy(true); setError(null);
@@ -83,11 +84,46 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
           <DialogTitle>Restore dry-run</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
-          <div className="text-xs text-muted-foreground border rounded px-3 py-2">
+          <div className="text-xs text-muted-foreground border rounded px-3 py-2 space-y-0.5">
             <div><span className="text-muted-foreground">Backup:</span> <code className="font-mono text-foreground">{backup.id}</code></div>
             <div><span className="text-muted-foreground">Tier:</span> <span className="font-mono">{backup.tier}</span></div>
             <div><span className="text-muted-foreground">Created:</span> {new Date(backup.created_at).toLocaleString()}</div>
+            <div className="flex items-center gap-2 pt-1">
+              <span className="text-muted-foreground">Source:</span>
+              {backup.has_local && (
+                <span
+                  className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+                  title="Local copy on this host's disk; will be read from local"
+                >
+                  local (instant)
+                </span>
+              )}
+              {!backup.has_local && backup.s3_uploaded && (
+                <span
+                  className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/30"
+                  title="No local copy; will be streamed from S3 first"
+                >
+                  S3 only
+                </span>
+              )}
+              {!backup.has_local && !backup.s3_uploaded && (
+                <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                  no copy available
+                </span>
+              )}
+            </div>
           </div>
+
+          {!backup.has_local && !backup.s3_uploaded && (
+            <div className="text-xs text-amber-700 dark:text-amber-400 border border-amber-500/30 bg-amber-500/10 rounded px-3 py-2 flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>
+                Neither a local copy nor an S3 copy of this backup is available — it
+                may have been pruned by retention while local-only.  Restore can't
+                proceed.
+              </span>
+            </div>
+          )}
 
           <div className="space-y-1">
             <Label htmlFor="r-target">Target</Label>

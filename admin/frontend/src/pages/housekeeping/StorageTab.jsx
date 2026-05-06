@@ -175,7 +175,7 @@ function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault 
   );
 }
 
-function DestinationDialog({ open, onOpenChange, initial, onSubmit, onSubmitting }) {
+function DestinationDialog({ open, onOpenChange, initial, onSubmit, onSubmitting, onSubmitAndTest }) {
   const isEdit = !!initial;
   const [form, setForm] = useState(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
@@ -208,6 +208,16 @@ function DestinationDialog({ open, onOpenChange, initial, onSubmit, onSubmitting
     setBusy(true);
     try {
       await onSubmit(formToBody(form, { isEdit }));
+      onOpenChange(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitAndTest = async () => {
+    setBusy(true);
+    try {
+      await onSubmitAndTest(formToBody(form, { isEdit }));
       onOpenChange(false);
     } finally {
       setBusy(false);
@@ -276,9 +286,15 @@ function DestinationDialog({ open, onOpenChange, initial, onSubmit, onSubmitting
             </Label>
           </div>
         </div>
-        <DialogFooter>
+        <DialogFooter className="gap-2 flex-wrap sm:gap-0">
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy || onSubmitting}>
             Cancel
+          </Button>
+          <Button variant="outline" onClick={submitAndTest} disabled={busy || onSubmitting}>
+            {(busy || onSubmitting)
+              ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              : <RefreshCw className="h-4 w-4 mr-1.5" />}
+            {isEdit ? 'Save & test' : 'Add & test'}
           </Button>
           <Button onClick={submit} disabled={busy || onSubmitting}>
             {(busy || onSubmitting) ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
@@ -420,17 +436,23 @@ export default function StorageTab() {
     }
   };
 
-  const onSubmit = async (body) => {
+  // saveDestination — shared persistence path used by both 'Save'
+  // and 'Save & test'.  Returns the resulting row's id so the
+  // 'Save & test' caller can immediately fire the test endpoint
+  // against it (the just-edited row may have flipped its
+  // test_status from 'ok' to NULL when fields changed; the
+  // operator would otherwise need a second click to re-test).
+  const saveDestination = async (body) => {
     setSubmitting(true);
     try {
       if (editing) {
         await api.backupsUpdateStorage(editing.id, body);
         toast({ title: 'Destination saved' });
-      } else {
-        await api.backupsCreateStorage(body);
-        toast({ title: 'Destination added' });
+        return editing.id;
       }
-      await refresh();
+      const r = await api.backupsCreateStorage(body);
+      toast({ title: 'Destination added' });
+      return r.destination?.id;
     } catch (err) {
       toast({
         title: editing ? 'Could not save' : 'Could not add',
@@ -441,6 +463,42 @@ export default function StorageTab() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const onSubmit = async (body) => {
+    try {
+      await saveDestination(body);
+      await refresh();
+    } catch { /* toast already fired */ throw new Error('save failed'); }
+  };
+
+  const onSubmitAndTest = async (body) => {
+    try {
+      const id = await saveDestination(body);
+      // Fire the test in the background — the dialog has
+      // already closed.  Surface ok/fail via toast so the
+      // operator gets immediate feedback without paying for
+      // a Refresh + glance at the test_status pill.
+      if (id) {
+        try {
+          const verdict = await api.backupsTestStorage(id);
+          toast({
+            title: verdict.ok ? 'Connection ok' : 'Connection failed',
+            description: verdict.ok
+              ? `HEAD bucket round-tripped in ${verdict.latency_ms} ms.`
+              : (verdict.error || 'unknown error'),
+            variant: verdict.ok ? undefined : 'destructive',
+          });
+        } catch (err) {
+          toast({
+            title: 'Test failed',
+            description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+            variant: 'destructive',
+          });
+        }
+      }
+      await refresh();
+    } catch { /* save toast already fired */ throw new Error('save failed'); }
   };
 
   const onDelete = (dest) => { setDeleting(dest); setDeleteOpen(true); };
@@ -534,6 +592,7 @@ export default function StorageTab() {
         onOpenChange={setEditorOpen}
         initial={editing}
         onSubmit={onSubmit}
+        onSubmitAndTest={onSubmitAndTest}
         onSubmitting={submitting}
       />
       <DeleteConfirmDialog

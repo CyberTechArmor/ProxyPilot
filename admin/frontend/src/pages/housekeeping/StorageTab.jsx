@@ -32,6 +32,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   Activity, AlertTriangle, Check, Cloud, Loader2, Pencil, Plus, RefreshCw, Star, Trash2, X,
 } from 'lucide-react';
+import BucketBrowser from './BucketBrowser';
 
 // Empty-string optional fields ↦ null on the wire so the server
 // doesn't store ' ' or '' as a meaningful value.
@@ -109,7 +110,7 @@ function TestStatusBadge({ status, ts }) {
   );
 }
 
-function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault }) {
+function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault, onBrowse }) {
   const busy = busyId === dest.id;
   return (
     <Card className={dest.is_default ? 'ring-1 ring-amber-500/40' : undefined}>
@@ -156,6 +157,14 @@ function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault 
             <Button variant="outline" size="sm" onClick={() => onTest(dest)} disabled={busy}>
               {busy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
               Test
+            </Button>
+            <Button
+              variant="outline" size="sm"
+              onClick={() => onBrowse(dest)}
+              disabled={busy}
+              title="List every object in the bucket under this destination's prefix; surfaces orphans the dashboard isn't tracking."
+            >
+              <Cloud className="h-3.5 w-3.5 mr-1.5" /> Browse
             </Button>
             {!dest.is_default && (
               <Button variant="outline" size="sm" onClick={() => onSetDefault(dest)} disabled={busy}>
@@ -346,6 +355,8 @@ export default function StorageTab() {
   const [busyId, setBusyId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [healthchecking, setHealthchecking] = useState(false);
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browsing, setBrowsing] = useState(null);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState(null); // dest row, or null = create
@@ -406,6 +417,7 @@ export default function StorageTab() {
 
   const onEdit = (dest) => { setEditing(dest); setEditorOpen(true); };
   const onCreate = () => { setEditing(null); setEditorOpen(true); };
+  const onBrowse = (dest) => { setBrowsing(dest); setBrowseOpen(true); };
 
   const onRunHealthcheck = async () => {
     setHealthchecking(true);
@@ -583,6 +595,7 @@ export default function StorageTab() {
             onEdit={onEdit}
             onDelete={onDelete}
             onSetDefault={onSetDefault}
+            onBrowse={onBrowse}
           />
         ))}
       </div>
@@ -594,6 +607,11 @@ export default function StorageTab() {
         onSubmit={onSubmit}
         onSubmitAndTest={onSubmitAndTest}
         onSubmitting={submitting}
+      />
+      <BucketBrowser
+        open={browseOpen}
+        onOpenChange={(o) => { if (!o) setBrowsing(null); setBrowseOpen(o); }}
+        destination={browsing}
       />
       <DeleteConfirmDialog
         open={deleteOpen}

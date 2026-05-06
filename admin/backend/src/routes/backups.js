@@ -51,7 +51,7 @@ import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret } from '../lib/secrets.js';
 import {
-  testConnection, putObject, getObjectStream, deleteObject, buildKey,
+  testConnection, putObject, getObjectStream, deleteObject, buildKey, listObjects,
 } from '../lib/s3.js';
 import {
   packConfigTier, packConfigPlusDataTier, packFullTier,
@@ -370,6 +370,91 @@ backupsRouter.post('/storage/:id/test', requireAdmin, requireSudo, async (req, r
     test_status: status,
     test_at: ts,
   });
+});
+
+// GET /api/backups/storage/:id/objects — browse the bucket.
+//
+// Returns the full key list under the destination's path_prefix.
+// Each entry is annotated with whether the dashboard has a row
+// for it (linked: true) — that lets the UI surface 'orphan'
+// objects the dashboard doesn't track (uploads from a previous
+// install, bucket-side lifecycle moves, manual uploads, ...).
+//
+// admin-gated; not sudo since reading is non-destructive.  PR
+// follow-up could paginate; current cap is 1000 keys per the
+// AWS SDK default.
+backupsRouter.get('/storage/:id/objects', requireAdmin, async (req, res) => {
+  const dest = readDest(req.params.id);
+  if (!dest) return res.status(404).json({ error: 'destination not found' });
+
+  let objects;
+  try {
+    objects = await listObjects(dest);
+  } catch (err) {
+    return res.status(502).json({ error: `S3 list failed: ${err?.message || err}` });
+  }
+
+  // Cross-reference against the backups table so the UI can
+  // tag orphans.  Two pieces of info per row: linked? and the
+  // local backup id (for the linked rows so the UI can deep-
+  // link into the backup detail view).
+  const linkRows = getDb().prepare(
+    `SELECT id, s3_key FROM backups WHERE destination_id = ?`
+  ).all(dest.id);
+  const keyToBackupId = new Map(linkRows.map((r) => [r.s3_key, r.id]));
+
+  res.json({
+    destination: { id: dest.id, name: dest.name, bucket: dest.bucket, path_prefix: dest.path_prefix || null },
+    objects: objects.map((o) => ({
+      key: o.key,
+      size: o.size,
+      last_modified: o.lastModified ? new Date(o.lastModified).toISOString() : null,
+      etag: o.etag || null,
+      linked: keyToBackupId.has(o.key),
+      backup_id: keyToBackupId.get(o.key) || null,
+    })),
+  });
+});
+
+// DELETE /api/backups/storage/:id/objects — remove a specific
+// S3 object by its key.  Body: { key }.  Sudo-gated since this
+// destroys data on shared storage.
+//
+// When the key matches a row in backups, the row's s3_uploaded
+// flag flips to 0 (consistent with the per-backup DELETE path)
+// rather than dropping the row — the local copy may still
+// exist.  When the key is an orphan, no DB mutation is needed.
+backupsRouter.delete('/storage/:id/objects', requireAdmin, requireSudo, async (req, res) => {
+  const dest = readDest(req.params.id);
+  if (!dest) return res.status(404).json({ error: 'destination not found' });
+
+  const key = (req.body || {}).key;
+  if (typeof key !== 'string' || key.length === 0) {
+    return res.status(400).json({ error: 'body.key is required' });
+  }
+
+  try {
+    await deleteObject(dest, key);
+  } catch (err) {
+    const code = err?.Code || err?.name || '';
+    if (!/NotFound|NoSuchKey/i.test(code)) {
+      return res.status(502).json({ error: `S3 delete failed: ${err?.message || err}` });
+    }
+  }
+
+  // Reconcile any backups row whose s3_key matches.
+  const matchedRow = getDb().prepare(
+    `SELECT id FROM backups WHERE destination_id = ? AND s3_key = ?`
+  ).get(dest.id, key);
+  if (matchedRow) {
+    getDb().prepare(`UPDATE backups SET s3_uploaded = 0 WHERE id = ?`).run(matchedRow.id);
+  }
+
+  logAudit(req.user.id, 'BACKUP_S3_OBJECT_DELETE', 'backup_destination', dest.id, {
+    key, matched_backup_id: matchedRow?.id || null,
+  }, req.ip);
+
+  res.json({ ok: true, matched_backup_id: matchedRow?.id || null });
 });
 
 // POST /api/backups/storage/:id/default — mark this destination as

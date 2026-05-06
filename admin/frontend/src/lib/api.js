@@ -1011,6 +1011,15 @@ export const api = {
   // code path as the cron task; failures post notifications.
   backupsRunS3Healthcheck: () =>
     request('/backups/storage/healthcheck', { method: 'POST' }),
+  // Bucket browser: list every object under the destination's
+  // path_prefix, with linked-to-backup annotations.
+  backupsListStorageObjects: (id) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/objects`),
+  backupsDeleteStorageObject: (id, key) =>
+    request(`/backups/storage/${encodeURIComponent(id)}/objects`, {
+      method: 'DELETE',
+      body: JSON.stringify({ key }),
+    }),
   backupsSetDefaultStorage: (id) =>
     request(`/backups/storage/${encodeURIComponent(id)}/default`, { method: 'POST' }),
 

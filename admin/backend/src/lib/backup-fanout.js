@@ -157,6 +157,15 @@ export async function fanOutUpload({
 // destinations and removes each.  Used by the per-row delete
 // path when delete_s3=true (multi-destination version of the
 // existing single-destination behaviour).
+//
+// Legacy fallback: when a backup row predates migration 204 (or
+// when the 204 backfill missed it for whatever reason), the
+// junction is empty.  In that case we fall back to the legacy
+// `backups.s3_key` + `backups.destination_id` pair so an
+// upgraded install doesn't silently leak S3 objects when
+// operators delete pre-204 backups.  The fallback only fires
+// when destinationIds is null OR when the legacy destination
+// is included in the requested filter.
 export async function fanOutDelete({ backupId, destinationIds = null }) {
   const db = getDb();
   // null = walk every uploaded edge; otherwise restrict.
@@ -174,6 +183,40 @@ export async function fanOutDelete({ backupId, destinationIds = null }) {
         WHERE bdxb.backup_id = ? AND bdxb.status = 'uploaded'
           AND bdxb.destination_id IN (${destinationIds.map(() => '?').join(',') || '\'\''})
       `).all(backupId, ...destinationIds);
+
+  // Legacy fallback: if the junction is empty AND the row's
+  // legacy s3_uploaded flag says there's a copy in S3, walk the
+  // legacy single-destination shape.  Avoids silent S3 leaks on
+  // pre-204 rows.
+  if (edges.length === 0) {
+    const legacy = db.prepare(`
+      SELECT id, destination_id, s3_key, s3_uploaded, size_bytes
+      FROM backups WHERE id = ?
+    `).get(backupId);
+    if (legacy && legacy.s3_uploaded && legacy.destination_id && legacy.s3_key) {
+      const passes = destinationIds === null
+        || destinationIds.includes(legacy.destination_id);
+      if (passes) {
+        edges.push({
+          backup_id: backupId,
+          destination_id: legacy.destination_id,
+          s3_key: legacy.s3_key,
+          status: 'uploaded',
+          size_bytes: legacy.size_bytes,
+          // Insert the missing junction row so the rest of the
+          // fan-out loop's UPDATE lands somewhere.  Idempotent
+          // via OR IGNORE.
+        });
+        db.prepare(`
+          INSERT OR IGNORE INTO backup_destinations_x_backups
+            (backup_id, destination_id, s3_key, status, size_bytes, uploaded_at)
+          VALUES (?, ?, ?, 'uploaded', ?, CURRENT_TIMESTAMP)
+        `).run(
+          backupId, legacy.destination_id, legacy.s3_key, legacy.size_bytes,
+        );
+      }
+    }
+  }
 
   const results = [];
   for (const e of edges) {
@@ -200,6 +243,14 @@ export async function fanOutDelete({ backupId, destinationIds = null }) {
       UPDATE backup_destinations_x_backups
       SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP
       WHERE backup_id = ? AND destination_id = ?
+    `).run(backupId, dest.id);
+    // Also clear the legacy s3_uploaded flag if this was the
+    // lead destination — the route layer recomputes
+    // remainingS3 from the junction but the public shape hangs
+    // off the legacy column for some readers.
+    db.prepare(`
+      UPDATE backups SET s3_uploaded = 0
+      WHERE id = ? AND destination_id = ?
     `).run(backupId, dest.id);
     results.push({ destination_id: dest.id, ok: true });
   }

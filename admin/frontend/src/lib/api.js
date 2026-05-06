@@ -47,7 +47,26 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
     credentials: 'include',
   });
 
-  const data = await response.json();
+  // Defensive parse: an empty body or non-JSON body would throw
+  // 'Unexpected end of JSON input' which is unhelpful to the
+  // operator.  Surface the actual HTTP status text + raw body
+  // snippet instead so the toast says something actionable.
+  let data;
+  try {
+    const text = await response.text();
+    data = text.length === 0 ? {} : JSON.parse(text);
+  } catch (parseErr) {
+    if (response.ok) {
+      // Successful status with non-JSON body (e.g. plain text
+      // health endpoint).  Treat as empty payload.
+      data = {};
+    } else {
+      throw new ApiError(
+        `${response.status} ${response.statusText || 'error'} (no JSON body)`,
+        response.status,
+      );
+    }
+  }
 
   if (response.status === 401) {
     // Sudo gate: backend wants password+TOTP re-auth before letting

@@ -939,97 +939,119 @@ backupsRouter.post('/:id/pull-local', requireAdmin, requireSudo, async (req, res
 // stays so the dashboard keeps tracking the remaining copy.
 // When both copies are gone, the row is dropped.
 backupsRouter.delete('/:id', requireAdmin, requireSudo, async (req, res) => {
-  const row = readBackup(req.params.id);
-  if (!row) return res.status(404).json({ error: 'backup not found' });
+  // Express 4 doesn't auto-forward async exceptions to the
+  // global error handler.  Wrap the whole body so any throw
+  // inside fanOutDelete / s3 client / logAudit produces a
+  // structured JSON response instead of an empty body that
+  // makes the frontend's response.json() fail with
+  // 'Unexpected end of JSON input'.
+  try {
+    const row = readBackup(req.params.id);
+    if (!row) return res.status(404).json({ error: 'backup not found' });
 
-  const body = req.body || {};
-  const wantDeleteLocal = body.delete_local === undefined ? true : !!body.delete_local;
-  const wantDeleteS3 = body.delete_s3 === undefined ? true : !!body.delete_s3;
-  // Optional: restrict S3 deletion to a subset of destinations.
-  // Empty/undefined = every uploaded edge.  Used by the per-
-  // destination 'remove from this S3 only' UI button (pending).
-  const limitDestinations = Array.isArray(body.delete_s3_destination_ids)
-    ? body.delete_s3_destination_ids
-    : null;
+    const body = req.body || {};
+    const wantDeleteLocal = body.delete_local === undefined ? true : !!body.delete_local;
+    const wantDeleteS3 = body.delete_s3 === undefined ? true : !!body.delete_s3;
+    // Optional: restrict S3 deletion to a subset of destinations.
+    // Empty/undefined = every uploaded edge.  Used by the per-
+    // destination 'remove from this S3 only' UI button.
+    const limitDestinations = Array.isArray(body.delete_s3_destination_ids)
+      ? body.delete_s3_destination_ids
+      : null;
 
-  let s3Error = null;
-  let localRemoved = false;
-  let s3Results = { results: [] };
+    let s3Error = null;
+    let localRemoved = false;
+    let s3Results = { results: [] };
 
-  if (wantDeleteLocal && row.local_path) {
-    try {
-      localRemoved = deleteLocal(row.local_path);
-    } catch (err) {
-      s3Error = `local delete failed: ${err?.message || err}`;
+    if (wantDeleteLocal && row.local_path) {
+      try {
+        localRemoved = deleteLocal(row.local_path);
+      } catch (err) {
+        s3Error = `local delete failed: ${err?.message || err}`;
+      }
     }
-  }
 
-  if (wantDeleteS3) {
-    s3Results = await fanOutDelete({
-      backupId: row.id,
-      destinationIds: limitDestinations,
+    if (wantDeleteS3) {
+      s3Results = await fanOutDelete({
+        backupId: row.id,
+        destinationIds: limitDestinations,
+      });
+      const failed = s3Results.results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        s3Error = (s3Error ? s3Error + '; ' : '')
+          + `S3 destination(s) failed: ${failed.map((f) => f.error).join('; ')}`;
+      }
+    }
+
+    // Refresh the per-destination junction state after the fan-out
+    // delete so we can decide whether to drop the row outright.
+    const remainingS3 = getDb().prepare(`
+      SELECT COUNT(*) AS c FROM backup_destinations_x_backups
+      WHERE backup_id = ? AND status = 'uploaded'
+    `).get(row.id).c;
+
+    const stillLocal = (!wantDeleteLocal && row.local_path) ? true : false;
+    // S3 'still there' counts BOTH the junction's uploaded edges
+    // AND a legacy s3_uploaded=1 row that fanOutDelete didn't
+    // touch (e.g. operator only requested local delete).  Without
+    // this, dropping a pre-204 row that was untouched by
+    // fanOutDelete would still drop the legacy column visibility.
+    const stillS3 = wantDeleteS3
+      ? remainingS3 > 0
+      : (remainingS3 > 0 || !!row.s3_uploaded);
+
+    if (!stillLocal && !stillS3) {
+      getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
+    } else {
+      const updates = [];
+      const args = [];
+      if (wantDeleteLocal && (localRemoved || row.local_path)) {
+        updates.push('local_path = NULL');
+      }
+      if (wantDeleteS3 && remainingS3 === 0) {
+        updates.push('s3_uploaded = 0');
+      }
+      if (updates.length) {
+        args.push(row.id);
+        getDb().prepare(`UPDATE backups SET ${updates.join(', ')} WHERE id = ?`).run(...args);
+      }
+    }
+
+    const s3Removed = wantDeleteS3
+      && s3Results.results.length > 0
+      && s3Results.results.every((r) => r.ok);
+
+    logAudit(req.user.id, 'BACKUP_DELETE', 'backup', row.id, {
+      delete_local: wantDeleteLocal,
+      delete_s3: wantDeleteS3,
+      local_removed: localRemoved,
+      s3_removed: s3Removed,
+      s3_per_destination: s3Results.results,
+      s3_key: row.s3_key,
+      destination_id: row.destination_id,
+      s3_error: s3Error,
+      row_dropped: !stillLocal && !stillS3,
+    }, req.ip);
+
+    res.json({
+      ok: true,
+      local_removed: localRemoved,
+      s3_removed: s3Removed,
+      s3_per_destination: s3Results.results,
+      s3_error: s3Error,
+      row_dropped: !stillLocal && !stillS3,
     });
-    const failed = s3Results.results.filter((r) => !r.ok);
-    if (failed.length > 0) {
-      s3Error = (s3Error ? s3Error + '; ' : '')
-        + `S3 destination(s) failed: ${failed.map((f) => f.error).join('; ')}`;
-    }
+  } catch (err) {
+    // Last-ditch.  Anything async that bubbles past the inner
+    // try blocks lands here so the operator sees a real error
+    // string instead of a confusing 'Unexpected end of JSON
+    // input' from the response parser.
+    console.error('[backups.delete] uncaught:', err);
+    if (res.headersSent) return;
+    return res.status(500).json({
+      error: `delete failed: ${err?.message || String(err)}`,
+    });
   }
-
-  // Refresh the per-destination junction state after the fan-out
-  // delete so we can decide whether to drop the row outright.
-  const remainingS3 = getDb().prepare(`
-    SELECT COUNT(*) AS c FROM backup_destinations_x_backups
-    WHERE backup_id = ? AND status = 'uploaded'
-  `).get(row.id).c;
-
-  const stillLocal = (!wantDeleteLocal && row.local_path) ? true : false;
-  const stillS3 = remainingS3 > 0;
-
-  if (!stillLocal && !stillS3) {
-    getDb().prepare(`DELETE FROM backups WHERE id = ?`).run(row.id);
-  } else {
-    const updates = [];
-    const args = [];
-    if (wantDeleteLocal && (localRemoved || row.local_path)) {
-      updates.push('local_path = NULL');
-    }
-    if (wantDeleteS3 && remainingS3 === 0) {
-      updates.push('s3_uploaded = 0');
-    }
-    if (updates.length) {
-      args.push(row.id);
-      getDb().prepare(`UPDATE backups SET ${updates.join(', ')} WHERE id = ?`).run(...args);
-    }
-  }
-
-  // s3Removed = true iff we attempted S3 deletes and all targeted
-  // destinations succeeded.  Maintains the PR-1/PR-2 response
-  // shape so existing UI callers don't break.
-  const s3Removed = wantDeleteS3
-    && s3Results.results.length > 0
-    && s3Results.results.every((r) => r.ok);
-
-  logAudit(req.user.id, 'BACKUP_DELETE', 'backup', row.id, {
-    delete_local: wantDeleteLocal,
-    delete_s3: wantDeleteS3,
-    local_removed: localRemoved,
-    s3_removed: s3Removed,
-    s3_per_destination: s3Results.results,
-    s3_key: row.s3_key,
-    destination_id: row.destination_id,
-    s3_error: s3Error,
-    row_dropped: !stillLocal && !stillS3,
-  }, req.ip);
-
-  res.json({
-    ok: true,
-    local_removed: localRemoved,
-    s3_removed: s3Removed,
-    s3_per_destination: s3Results.results,
-    s3_error: s3Error,
-    row_dropped: !stillLocal && !stillS3,
-  });
 });
 
 // ── Schedules ───────────────────────────────────────────────────────

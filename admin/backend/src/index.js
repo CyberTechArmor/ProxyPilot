@@ -23,6 +23,7 @@ import { backupsRouter } from './routes/backups.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
+import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 
@@ -296,6 +297,15 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     } catch (err) {
       console.error('[L4-startup] failed:', err.message || err);
+    }
+    try {
+      // Hydrate the backup-schedule cron worker.  Each enabled
+      // row in backup_schedules registers a node-cron task; the
+      // worker drains a serial queue so concurrent ticks can't
+      // saturate disk with parallel `incus export` runs.
+      hydrateBackupSchedules();
+    } catch (err) {
+      console.error('[backup-scheduler] hydrate threw:', err.message || err);
     }
   });
 });

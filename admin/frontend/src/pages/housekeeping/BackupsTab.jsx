@@ -76,6 +76,10 @@ function StatusBadge({ status }) {
 
 function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
   const [tier, setTier] = useState('config');
+  // scope state stays declared even though the input is hidden —
+  // submit body uses it (always null for now), and a future commit
+  // restoring per-service scoping can re-show the picker without
+  // re-threading state.
   const [scope, setScope] = useState('');
   const [destinationId, setDestinationId] = useState('');
   const [passphrase, setPassphrase] = useState('');
@@ -149,11 +153,11 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
               <option value="full">Full — config_plus_data + every docker volume + every Incus instance (multi-GB)</option>
             </select>
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="bk-scope">Scope <span className="text-muted-foreground">(optional)</span></Label>
-            <Input id="bk-scope" value={scope} onChange={(e) => setScope(e.target.value)}
-              placeholder="all" autoComplete="off" />
-          </div>
+          {/* Scope is reserved for per-service backup scoping in
+              a future release; the current packers always grab
+              everything in the chosen tier.  Field hidden so we
+              don't mislead operators with a knob that doesn't do
+              anything yet.  Backups are created with scope=null. */}
           <div className="space-y-1">
             <Label htmlFor="bk-pass">
               Passphrase <span className="text-muted-foreground">(min 8 chars)</span>
@@ -368,7 +372,7 @@ export default function BackupsTab() {
                   <tr>
                     <th className="text-left font-medium px-3 py-2">When</th>
                     <th className="text-left font-medium px-3 py-2">Tier</th>
-                    <th className="text-left font-medium px-3 py-2">Scope</th>
+                    <th className="text-left font-medium px-3 py-2">Destination</th>
                     <th className="text-left font-medium px-3 py-2">Size</th>
                     <th className="text-left font-medium px-3 py-2">Status</th>
                     <th className="text-right font-medium px-3 py-2">Actions</th>
@@ -394,9 +398,15 @@ export default function BackupsTab() {
                           {b.tier}
                         </td>
                         <td className="px-3 py-2 align-top text-xs text-muted-foreground">
-                          {b.scope || 'all'}
-                          {dest && (
-                            <div className="text-[11px]">→ {dest.name}</div>
+                          {dest ? (
+                            <>
+                              <span className="font-mono">{dest.name}</span>
+                              <div className="text-[11px] truncate max-w-[14rem]" title={dest.bucket}>
+                                {dest.bucket}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="italic">unknown</span>
                           )}
                         </td>
                         <td className="px-3 py-2 align-top font-mono">

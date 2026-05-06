@@ -80,7 +80,7 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Restore backup</DialogTitle>
+          <DialogTitle>Restore dry-run</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
           <div className="text-xs text-muted-foreground border rounded px-3 py-2">

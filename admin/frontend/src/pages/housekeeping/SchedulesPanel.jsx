@@ -283,11 +283,10 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
               value={form.retention_days} onChange={set('retention_days')}
               placeholder="(no time limit)" />
           </div>
-          <div className="sm:col-span-2 space-y-1">
-            <Label htmlFor="sch-scope">Scope <span className="text-muted-foreground">(optional)</span></Label>
-            <Input id="sch-scope" value={form.scope} onChange={set('scope')}
-              placeholder="all" autoComplete="off" />
-          </div>
+          {/* Scope is currently purely a label — the packers don't
+              filter by it.  Reserved for per-service scoping in a
+              future release.  Hidden from the form for now;
+              schedules are created with scope=null. */}
           <div className="space-y-1">
             <Label htmlFor="sch-pass">
               Passphrase

@@ -203,9 +203,12 @@ export default function RestoresPanel({ focusRunId, onUnfocus }) {
         <div className="flex items-start gap-3">
           <Sparkles className="h-5 w-5 mt-0.5 text-muted-foreground" />
           <div className="space-y-1 flex-1">
-            <CardTitle className="text-base">Restores</CardTitle>
+            <CardTitle className="text-base">Restore dry-runs</CardTitle>
             <CardDescription className="text-xs">
-              Past + in-flight restore dry-runs.  Click a row for the live step machine.
+              These are <strong>dry-runs</strong> — verifying that a backup is restorable, not
+              actually overwriting production. Two modes: sandbox (decrypt + extract under a
+              throwaway tmp dir) or manifest-only (decrypt + verify every file's sha256, no disk
+              touch). Click a row for the live step machine.
             </CardDescription>
           </div>
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
@@ -220,9 +223,11 @@ export default function RestoresPanel({ focusRunId, onUnfocus }) {
             <RestoreDetail runId={expandedId} onClose={() => { setExpandedId(null); onUnfocus?.(); }} />
           </div>
         )}
-        {items.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No restore runs yet.</p>
-        ) : (
+        {items.length === 0 && !expandedId ? (
+          <p className="text-xs text-muted-foreground">
+            No dry-runs yet. Click <strong>Restore</strong> on any backup row to verify it's intact.
+          </p>
+        ) : items.length === 0 ? null : (
           <div className="space-y-1">
             {items.map((r) => (
               <button

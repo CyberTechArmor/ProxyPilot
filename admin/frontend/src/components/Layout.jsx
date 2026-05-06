@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/api';
@@ -37,19 +37,46 @@ export default function Layout() {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  // Notification panel state
+  // Notification panel state.
+  //
+  // Two sources merged into the bell dropdown:
+  //   * Backend-posted notifications (durable across reload —
+  //     /api/notifications).  Drive the unread badge.
+  //   * In-session toast history (ephemeral, lost on reload —
+  //     getNotificationHistory()).  Surfaced underneath the
+  //     backend rows so an operator who just clicked Save still
+  //     sees the toast in the dropdown for a few minutes.
   const [notifOpen, setNotifOpen] = useState(false);
-  const [notifications, setNotifications] = useState([]);
+  const [backendNotifs, setBackendNotifs] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const lastSeenRef = useRef(0);
+  const [sessionNotifs, setSessionNotifs] = useState([]);
   const notifPanelRef = useRef(null);
 
-  // Track new notifications
+  // Refresh backend notifications: on mount, every 30s, when the
+  // panel opens.  30s is comfortable for daily-cron-driven entries
+  // that don't need real-time delivery.
+  const refreshBackendNotifs = useCallback(async () => {
+    try {
+      const r = await api.notificationsList();
+      setBackendNotifs(r.notifications || []);
+      setUnreadCount(r.unread_count || 0);
+    } catch {
+      // Tolerate auth-not-yet-loaded etc.; the next poll catches it.
+    }
+  }, []);
+
   useEffect(() => {
-    const history = getNotificationHistory();
-    setNotifications(history);
-    const newCount = history.filter((n) => n.timestamp > lastSeenRef.current).length;
-    setUnreadCount(newCount);
+    refreshBackendNotifs();
+    const id = setInterval(refreshBackendNotifs, 30_000);
+    return () => clearInterval(id);
+  }, [refreshBackendNotifs]);
+
+  // Mirror in-session toasts into a separate list shown beneath
+  // the backend rows.  Doesn't drive the unread badge — those
+  // are confirmations the operator just dismissed by clicking
+  // Save anyway.
+  useEffect(() => {
+    setSessionNotifs(getNotificationHistory());
   }, [toasts]);
 
   // Close panel on outside click
@@ -63,10 +90,26 @@ export default function Layout() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [notifOpen]);
 
-  const openNotifications = () => {
-    setNotifOpen((prev) => !prev);
-    lastSeenRef.current = new Date();
-    setUnreadCount(0);
+  const openNotifications = async () => {
+    const willOpen = !notifOpen;
+    setNotifOpen(willOpen);
+    if (willOpen) {
+      // Mark-all-read on open so the badge clears immediately —
+      // matches the existing UX where opening the panel is the
+      // 'I saw it' signal.  Refresh after to pull the cleared
+      // read_at values.
+      try {
+        await api.notificationsMarkAllRead();
+      } catch { /* tolerated */ }
+      await refreshBackendNotifs();
+    }
+  };
+
+  const dismissNotification = async (id) => {
+    try {
+      await api.notificationsDismiss(id);
+      await refreshBackendNotifs();
+    } catch { /* tolerated; next poll catches up */ }
   };
 
   const formatNotifTime = (date) => {
@@ -244,48 +287,96 @@ export default function Layout() {
                   )}
                 </Button>
 
-                {/* Notification Panel */}
+                {/* Notification Panel — backend rows on top, then
+                    in-session toasts.  Backend rows carry a level
+                    + dismiss action; toasts are read-only and
+                    auto-expire from the in-memory history. */}
                 {notifOpen && (
-                  <div className="fixed bottom-20 left-4 right-4 max-h-96 md:absolute md:bottom-full md:left-0 md:right-auto md:mb-2 md:w-80 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
+                  <div className="fixed bottom-20 left-4 right-4 max-h-96 md:absolute md:bottom-full md:left-0 md:right-auto md:mb-2 md:w-96 bg-card border rounded-lg shadow-xl overflow-hidden z-50">
                     <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/50">
                       <h3 className="text-sm font-semibold">Notifications</h3>
-                      <span className="text-xs text-muted-foreground">{notifications.length} total</span>
+                      <span className="text-xs text-muted-foreground">
+                        {backendNotifs.length} alert{backendNotifs.length === 1 ? '' : 's'}
+                        {sessionNotifs.length > 0 && ` · ${sessionNotifs.length} toast${sessionNotifs.length === 1 ? '' : 's'}`}
+                      </span>
                     </div>
                     <div className="overflow-y-auto max-h-80">
-                      {notifications.length === 0 ? (
+                      {backendNotifs.length === 0 && sessionNotifs.length === 0 && (
                         <div className="px-4 py-8 text-center text-sm text-muted-foreground">
                           No notifications yet
                         </div>
-                      ) : (
-                        notifications.map((notif) => (
-                          <div
-                            key={notif.id}
-                            className={cn(
-                              'px-4 py-3 border-b last:border-0 hover:bg-muted/30 transition-colors',
-                              notif.variant === 'destructive' && 'border-l-2 border-l-red-500'
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <p className={cn(
-                                  'text-sm font-medium truncate',
-                                  notif.variant === 'destructive' && 'text-red-500'
-                                )}>
-                                  {notif.title}
-                                </p>
-                                {notif.description && (
-                                  <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
-                                    {notif.description}
-                                  </p>
-                                )}
-                              </div>
-                              <span className="text-[10px] text-muted-foreground whitespace-nowrap shrink-0">
-                                {formatNotifTime(notif.timestamp)}
-                              </span>
-                            </div>
-                          </div>
-                        ))
                       )}
+                      {backendNotifs.map((n) => (
+                        <div
+                          key={`b-${n.id}`}
+                          className={cn(
+                            'px-4 py-3 border-b last:border-0 hover:bg-muted/30 transition-colors',
+                            n.level === 'error' && 'border-l-2 border-l-red-500',
+                            n.level === 'warning' && 'border-l-2 border-l-amber-500',
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <p className={cn(
+                                'text-sm font-medium truncate',
+                                n.level === 'error' && 'text-red-500',
+                                n.level === 'warning' && 'text-amber-600 dark:text-amber-400',
+                              )}>
+                                {n.title}
+                              </p>
+                              {n.body && (
+                                <p className="text-xs text-muted-foreground mt-0.5 line-clamp-3 break-words">
+                                  {n.body}
+                                </p>
+                              )}
+                              <p className="text-[10px] text-muted-foreground mt-1 font-mono">
+                                {n.source}{n.seen_count > 1 ? ` · seen ${n.seen_count}×` : ''} · {formatNotifTime(n.last_seen_at)}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => dismissNotification(n.id)}
+                              className="text-[10px] text-muted-foreground hover:text-foreground shrink-0 px-1 py-0.5 rounded hover:bg-muted"
+                              title="Dismiss"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {sessionNotifs.length > 0 && backendNotifs.length > 0 && (
+                        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground bg-muted/30 border-b">
+                          Recent toasts
+                        </div>
+                      )}
+                      {sessionNotifs.map((notif) => (
+                        <div
+                          key={`s-${notif.id}`}
+                          className={cn(
+                            'px-4 py-3 border-b last:border-0 hover:bg-muted/30 transition-colors',
+                            notif.variant === 'destructive' && 'border-l-2 border-l-red-500'
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <p className={cn(
+                                'text-sm font-medium truncate',
+                                notif.variant === 'destructive' && 'text-red-500'
+                              )}>
+                                {notif.title}
+                              </p>
+                              {notif.description && (
+                                <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
+                                  {notif.description}
+                                </p>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-muted-foreground whitespace-nowrap shrink-0">
+                              {formatNotifTime(notif.timestamp)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

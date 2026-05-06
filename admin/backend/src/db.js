@@ -72,6 +72,7 @@ export function getDb() {
 //   201 Backups — backups (one row per packed artifact uploaded to S3)
 //   202 Backups — backup_schedules + restore_runs (PR 2)
 //   203 Backups — local_path + s3_uploaded on backups (local-first)
+//   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -971,6 +972,60 @@ export function initDatabase() {
     d.exec(`ALTER TABLE backups ADD COLUMN local_path TEXT`);
     d.exec(`ALTER TABLE backups ADD COLUMN s3_uploaded INTEGER NOT NULL DEFAULT 0`);
     d.exec(`UPDATE backups SET s3_uploaded = 1 WHERE status = 'ok'`);
+  });
+
+  // Durable notifications.
+  //
+  // Pre-300: the bell + unread count in Layout.jsx were powered
+  // entirely by the in-memory toast history (cap 50, lost on
+  // refresh).  Fine for ephemeral 'I just clicked Save' feedback
+  // but useless for things the operator needs to see hours later
+  // — like 'last night's backup failed' or 'S3 destination has
+  // been unreachable for 12h'.
+  //
+  // Schema notes:
+  //   level         info | warning | error
+  //   source        free-form short string identifying which
+  //                 subsystem fired this — 'backup-schedule' /
+  //                 'backup-s3-healthcheck' / 'firewall' / etc.
+  //                 The route layer doesn't enforce a vocabulary
+  //                 since each subsystem owns its own keys.
+  //   source_id     optional id of the subject row (e.g. a
+  //                 backup_destinations.id when the source is
+  //                 'backup-s3-healthcheck').  Lets the UI link
+  //                 the notification to its origin without us
+  //                 needing a polymorphic FK.
+  //   dedupe_key    when set, posting a new notification with
+  //                 the same dedupe_key updates the existing
+  //                 row's body + last_seen_at instead of
+  //                 inserting a new one.  Keeps the bell from
+  //                 flooding when a daily probe fails 30 days
+  //                 in a row.
+  //   read_at       NULL until the operator clicks/dismisses;
+  //                 unread count = COUNT(*) WHERE read_at IS NULL.
+  runMigration(db, 300, 'notifications', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id            TEXT PRIMARY KEY,
+        level         TEXT NOT NULL CHECK(level IN ('info', 'warning', 'error')),
+        title         TEXT NOT NULL,
+        body          TEXT,
+        source        TEXT NOT NULL,
+        source_id     TEXT,
+        dedupe_key    TEXT,
+        seen_count    INTEGER NOT NULL DEFAULT 1,
+        first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        read_at       TEXT,
+        dismissed_at  TEXT
+      )
+    `);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_unread
+      ON notifications(read_at, last_seen_at DESC)`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_source
+      ON notifications(source, source_id)`);
+    d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe
+      ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   });
 
   // Create file versions table for version control

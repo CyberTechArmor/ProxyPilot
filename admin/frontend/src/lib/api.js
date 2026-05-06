@@ -1052,6 +1052,20 @@ export const api = {
   backupsGetRestore: (id) => request(`/backups/restores/${encodeURIComponent(id)}`),
   backupsHealthClasses: () => request('/backups/health-classes'),
 
+  // Notifications — durable bell-dropdown entries posted by
+  // backend code (cron failures, S3 health-check, ...).  In-
+  // session toasts still flow through use-toast.js; the bell
+  // surfaces both layers.
+  notificationsList: ({ includeDismissed = false } = {}) =>
+    request(`/notifications${includeDismissed ? '?include_dismissed=1' : ''}`),
+  notificationsUnreadCount: () => request('/notifications/unread-count'),
+  notificationsMarkRead: (id) =>
+    request(`/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+  notificationsMarkAllRead: () =>
+    request('/notifications/mark-all-read', { method: 'POST' }),
+  notificationsDismiss: (id) =>
+    request(`/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

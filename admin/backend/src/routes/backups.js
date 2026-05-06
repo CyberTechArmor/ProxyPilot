@@ -70,6 +70,7 @@ import {
 import { runModeA, runModeC } from '../lib/restore.js';
 import { listHealthClasses } from '../lib/health-checks.js';
 import { runOnce as runS3Healthcheck } from '../lib/backup-s3-healthcheck.js';
+import { resolveScope, listScopeOptions } from '../lib/backup-scope.js';
 
 const INSTALL_DIR = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
 const ENV_PATH = process.env.PROXYPILOT_ENV_PATH || path.join(INSTALL_DIR, '.env');
@@ -630,6 +631,11 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     req.user?.id || null,
   );
 
+  // Resolve the requested scope (a JSON string on the wire) into
+  // concrete name lists the packer collectors filter against.
+  // null / "all" / unparseable falls through to { all: true }.
+  const scopeFilter = resolveScope(body.scope);
+
   let packed;
   try {
     const sharedMeta = {
@@ -652,6 +658,7 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
         envPath: ENV_PATH,
         cveInboxDir: CVE_INBOX_DIR,
         installDir: INSTALL_DIR,
+        scopeFilter,
         meta: sharedMeta,
       });
     } else {
@@ -662,6 +669,7 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
         envPath: ENV_PATH,
         cveInboxDir: CVE_INBOX_DIR,
         installDir: INSTALL_DIR,
+        scopeFilter,
         meta: sharedMeta,
       });
     }
@@ -1359,6 +1367,13 @@ backupsRouter.get('/restores/:id', requireAdmin, (req, res) => {
 // health-check classes for the restore Mode A UI.
 backupsRouter.get('/health-classes', requireAdmin, (_req, res) => {
   res.json({ classes: listHealthClasses() });
+});
+
+// GET /api/backups/scope-options — operator-facing service list
+// for the per-service scope picker.  One row per registered
+// service with the fields the picker UI cares about.
+backupsRouter.get('/scope-options', requireAdmin, (_req, res) => {
+  res.json({ services: listScopeOptions() });
 });
 
 // ── Late-mounted dynamic /:id routes ───────────────────────────────

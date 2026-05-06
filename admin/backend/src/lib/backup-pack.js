@@ -587,6 +587,11 @@ export async function packConfigPlusDataTier({
   caddyAcmeDir = '/var/lib/caddy/.local/share/caddy',
   servicesDir,
   installDir,
+  // scopeFilter: { all, service_names, ... } from
+  // lib/backup-scope.resolveScope().  When .all is true we pack
+  // every services/<name>/ subdir; otherwise we filter the
+  // collector output to only those names.
+  scopeFilter = { all: true },
   meta = {},
 }) {
   const dbDump = dumpSqliteAsJson(db);
@@ -595,21 +600,53 @@ export async function packConfigPlusDataTier({
   const resolvedServicesDir = servicesDir
     ?? path.join(installDir || '/opt/proxypilot', 'data', 'services');
 
+  const allServiceEntries = collectDirAsEntries(resolvedServicesDir, 'services');
+  const serviceEntries = scopeFilter?.all === false
+    ? filterServiceEntries(allServiceEntries, scopeFilter.service_names || [])
+    : allServiceEntries;
+
   const entries = {
     'proxypilot.db.json': dbDump,
     '.env': envBody,
     ...cveEntries,
+    // Caddy + WireGuard + ACME certs are always full-host —
+    // scope filtering doesn't apply to them.  An operator who
+    // wants per-service caddy fragment scoping should ask for
+    // a follow-up that walks /etc/caddy/sites/<name> the same
+    // way services/ is walked.
     ...collectDirAsEntries(caddyDir, 'caddy'),
     ...collectDirAsEntries(wireguardDir, 'wireguard'),
     ...collectDirAsEntries(caddyAcmeDir, 'caddy-acme'),
-    ...collectDirAsEntries(resolvedServicesDir, 'services'),
+    ...serviceEntries,
   };
 
   return pack({
     entries,
     passphrase,
-    meta: { tier: 'config_plus_data', ...meta },
+    meta: {
+      tier: 'config_plus_data',
+      scope_all: scopeFilter?.all !== false,
+      scope_service_count: scopeFilter?.service_names?.length || 0,
+      ...meta,
+    },
   });
+}
+
+// filterServiceEntries — keep only services/<name>/... entries
+// whose <name> is in the allowlist.  Pure; no fs.
+function filterServiceEntries(entries, serviceNames) {
+  const allowed = new Set(serviceNames);
+  if (allowed.size === 0) return {};
+  const out = {};
+  for (const [archivePath, body] of Object.entries(entries)) {
+    // Path shape under collectDirAsEntries(_, 'services'):
+    //   'services/<name>/<rest...>'
+    const m = archivePath.match(/^services\/([^/]+)/);
+    if (m && allowed.has(m[1])) {
+      out[archivePath] = body;
+    }
+  }
+  return out;
 }
 
 // packFullTier — config_plus_data tier + per-volume docker tarballs
@@ -636,10 +673,24 @@ export async function packFullTier({
   caddyAcmeDir,
   servicesDir,
   installDir,
-  dockerVolumeAllowlist, // optional [name, ...]; empty/undef = all
-  incusInstanceAllowlist, // optional
+  // scopeFilter takes precedence over the legacy
+  // dockerVolumeAllowlist + incusInstanceAllowlist args, which
+  // are kept for back-compat with any external callers.  When
+  // scopeFilter.all is true we honor the legacy allowlists; when
+  // it's false the per-service name lists drive selection.
+  scopeFilter = { all: true },
+  dockerVolumeAllowlist,
+  incusInstanceAllowlist,
   meta = {},
 }) {
+  const allServiceEntries = collectDirAsEntries(
+    servicesDir ?? path.join(installDir || '/opt/proxypilot', 'data', 'services'),
+    'services',
+  );
+  const serviceEntries = scopeFilter?.all === false
+    ? filterServiceEntries(allServiceEntries, scopeFilter.service_names || [])
+    : allServiceEntries;
+
   const baseEntries = {
     'proxypilot.db.json': dumpSqliteAsJson(db),
     '.env': readEnv(envPath),
@@ -647,21 +698,28 @@ export async function packFullTier({
     ...collectDirAsEntries(caddyDir || '/etc/caddy', 'caddy'),
     ...collectDirAsEntries(wireguardDir || '/etc/wireguard', 'wireguard'),
     ...collectDirAsEntries(caddyAcmeDir || '/var/lib/caddy/.local/share/caddy', 'caddy-acme'),
-    ...collectDirAsEntries(
-      servicesDir ?? path.join(installDir || '/opt/proxypilot', 'data', 'services'),
-      'services',
-    ),
+    ...serviceEntries,
   };
 
   const notes = [];
+
+  // Resolve the actual allowlist for each shell-out collector.
+  // Scope-driven names win when the operator chose specific
+  // services; legacy explicit allowlists otherwise.
+  const dockerWanted = scopeFilter?.all === false
+    ? (scopeFilter.docker_container_names || [])
+    : (dockerVolumeAllowlist || null);
+  const incusWanted = scopeFilter?.all === false
+    ? (scopeFilter.incus_instance_names || [])
+    : (incusInstanceAllowlist || null);
 
   // Docker volumes ---
   const volumes = listDockerVolumes();
   if (!volumes.ok) {
     notes.push({ stage: 'docker-volumes', error: volumes.error });
   } else {
-    const wanted = dockerVolumeAllowlist?.length
-      ? volumes.names.filter((n) => dockerVolumeAllowlist.includes(n))
+    const wanted = dockerWanted
+      ? volumes.names.filter((n) => dockerWanted.includes(n))
       : volumes.names;
     for (const v of wanted) {
       const r = exportDockerVolume(v);
@@ -680,8 +738,8 @@ export async function packFullTier({
     if (!inst.ok) {
       notes.push({ stage: 'incus-list', error: inst.error });
     } else {
-      const wanted = incusInstanceAllowlist?.length
-        ? inst.names.filter((n) => incusInstanceAllowlist.includes(n))
+      const wanted = incusWanted
+        ? inst.names.filter((n) => incusWanted.includes(n))
         : inst.names;
       if (wanted.length > 0) sandbox = mkdtempSandbox('pp-fullbk-');
       for (const name of wanted) {

@@ -1069,6 +1069,10 @@ export const api = {
   backupsListRestores: () => request('/backups/restores'),
   backupsGetRestore: (id) => request(`/backups/restores/${encodeURIComponent(id)}`),
   backupsHealthClasses: () => request('/backups/health-classes'),
+  // Scope options for the per-service backup scope picker.
+  // Returns one row per registered service with kind / runtime
+  // metadata so the picker can render a meaningful multi-select.
+  backupsScopeOptions: () => request('/backups/scope-options'),
 
   // Notifications — durable bell-dropdown entries posted by
   // backend code (cron failures, S3 health-check, ...).  In-

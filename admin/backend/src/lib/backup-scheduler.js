@@ -34,6 +34,7 @@ import { writeLocal, deleteLocal } from './backup-local-store.js';
 import {
   cronMatches, matchField, computeNextRunMs, isValidCronExpr,
 } from './backup-cron.js';
+import { resolveScope } from './backup-scope.js';
 
 // Re-export the pure helpers for the route layer + tests so
 // callers don't have to know they live in a sibling module.
@@ -195,6 +196,7 @@ async function runSchedule(scheduleId) {
         envPath: process.env.PROXYPILOT_ENV_PATH || '/opt/proxypilot/.env',
         cveInboxDir: process.env.PROXYPILOT_CVE_INBOX_DIR || '/var/lib/proxypilot/cve-inbox',
         installDir: process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot',
+        scopeFilter: resolveScope(row.scope),
         meta: { backup_id: id, schedule_id: row.id, schedule_name: row.name },
       });
     } else if (row.tier === 'full') {
@@ -203,6 +205,7 @@ async function runSchedule(scheduleId) {
         envPath: process.env.PROXYPILOT_ENV_PATH || '/opt/proxypilot/.env',
         cveInboxDir: process.env.PROXYPILOT_CVE_INBOX_DIR || '/var/lib/proxypilot/cve-inbox',
         installDir: process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot',
+        scopeFilter: resolveScope(row.scope),
         meta: { backup_id: id, schedule_id: row.id, schedule_name: row.name },
       });
     } else {

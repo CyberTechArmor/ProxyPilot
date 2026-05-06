@@ -28,6 +28,7 @@ import {
 import {
   SCHEDULE_MODES, DAYS_OF_WEEK, buildCron, parseCron, describeCron,
 } from './cron-builder';
+import ScopePicker from './ScopePicker';
 
 function pad2(n) {
   return String(Number(n) || 0).padStart(2, '0');
@@ -61,7 +62,7 @@ const EMPTY_FORM = {
   schedule_dom: 1,
   cron_expr: '0 3 * * *', // only used when schedule_mode === 'custom'
   tier: 'config',
-  scope: '',
+  scope: null,
   retention_keep: 30,
   retention_days: '',
   passphrase: '',
@@ -86,7 +87,9 @@ function formToBody(form, { isEdit }) {
     destination_id: form.destination_id,
     cron_expr,
     tier: form.tier,
-    scope: form.scope.trim() || null,
+    // Scope is JSON-stringified by ScopePicker; the config tier
+    // ignores it and the backend tolerates null.
+    scope: form.tier === 'config' ? null : (form.scope || null),
     retention_keep: Number(form.retention_keep) || 0,
     retention_days: form.retention_days === '' ? null : Number(form.retention_days),
     passphrase_hint: form.passphrase_hint.trim() || null,
@@ -119,7 +122,7 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
         schedule_dom: parsed.dom ?? 1,
         cron_expr: initial.cron_expr || '0 3 * * *',
         tier: initial.tier || 'config',
-        scope: initial.scope || '',
+        scope: initial.scope || null,
         retention_keep: initial.retention_keep ?? 30,
         retention_days: initial.retention_days ?? '',
         passphrase: '',
@@ -283,10 +286,15 @@ function ScheduleDialog({ open, onOpenChange, initial, destinations, onSubmit, b
               value={form.retention_days} onChange={set('retention_days')}
               placeholder="(no time limit)" />
           </div>
-          {/* Scope is currently purely a label — the packers don't
-              filter by it.  Reserved for per-service scoping in a
-              future release.  Hidden from the form for now;
-              schedules are created with scope=null. */}
+          {form.tier !== 'config' && (
+            <div className="sm:col-span-2">
+              <ScopePicker
+                value={form.scope}
+                onChange={(v) => setForm((f) => ({ ...f, scope: v }))}
+                disabled={busy}
+              />
+            </div>
+          )}
           <div className="space-y-1">
             <Label htmlFor="sch-pass">
               Passphrase

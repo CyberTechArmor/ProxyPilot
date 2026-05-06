@@ -33,6 +33,7 @@ import UsageCard from './UsageCard';
 import SchedulesPanel from './SchedulesPanel';
 import RestoreDialog from './RestoreDialog';
 import RestoresPanel from './RestoresPanel';
+import ScopePicker from './ScopePicker';
 
 function fmtBytes(n) {
   if (typeof n !== 'number' || Number.isNaN(n) || n <= 0) return '0 B';
@@ -77,11 +78,12 @@ function StatusBadge({ status }) {
 
 function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
   const [tier, setTier] = useState('config');
-  // scope state stays declared even though the input is hidden —
-  // submit body uses it (always null for now), and a future commit
-  // restoring per-service scoping can re-show the picker without
-  // re-threading state.
-  const [scope, setScope] = useState('');
+  // scope: null/'' for 'all', or a JSON-stringified
+  // { service_ids: [...] } when the operator picked a subset.
+  // Only meaningful for tier=config_plus_data + tier=full;
+  // hidden for the config tier (which captures dashboard state,
+  // not per-service).
+  const [scope, setScope] = useState(null);
   const [destinationId, setDestinationId] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [confirmPassphrase, setConfirmPassphrase] = useState('');
@@ -89,7 +91,7 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
   useEffect(() => {
     if (!open) return;
     setTier('config');
-    setScope('');
+    setScope(null);
     // Default-select the row marked default; falls back to first.
     const def = destinations?.find((d) => d.is_default) || destinations?.[0];
     setDestinationId(def?.id || '');
@@ -106,7 +108,9 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
     if (!canSubmit) return;
     onSubmit({
       tier,
-      scope: scope.trim() || null,
+      // scope is already JSON-stringified by ScopePicker; the
+      // config tier ignores it and the backend tolerates null.
+      scope: tier === 'config' ? null : (scope || null),
       destination_id: destinationId || null,
       passphrase,
     });
@@ -154,11 +158,9 @@ function CreateDialog({ open, onOpenChange, destinations, onSubmit, busy }) {
               <option value="full">Full — config_plus_data + every docker volume + every Incus instance (multi-GB)</option>
             </select>
           </div>
-          {/* Scope is reserved for per-service backup scoping in
-              a future release; the current packers always grab
-              everything in the chosen tier.  Field hidden so we
-              don't mislead operators with a knob that doesn't do
-              anything yet.  Backups are created with scope=null. */}
+          {tier !== 'config' && (
+            <ScopePicker value={scope} onChange={setScope} disabled={busy} />
+          )}
           <div className="space-y-1">
             <Label htmlFor="bk-pass">
               Passphrase <span className="text-muted-foreground">(min 8 chars)</span>

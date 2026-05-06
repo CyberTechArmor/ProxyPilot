@@ -835,16 +835,38 @@ fi
 log "${BLUE}[5/7] Installing frontend dependencies...${NC}"
 cd "$FRONTEND_DIR"
 log_verbose "Running: $NPM_CMD install in $FRONTEND_DIR"
-if ! $NPM_CMD install 2>&1 | tee -a "$LOG_FILE"; then
-    log "${RED}Error: Failed to install frontend dependencies${NC}"
+# Same PIPESTATUS-vs-tee gotcha as the build step below: `if ! cmd | tee`
+# checks tee's exit code, not npm's, so a failed install would silently
+# proceed to a build that's missing dependencies.  Use PIPESTATUS to
+# read the real npm exit code.
+$NPM_CMD install 2>&1 | tee -a "$LOG_FILE"
+install_status=${PIPESTATUS[0]}
+if [[ "$install_status" -ne 0 ]]; then
+    log "${RED}Error: Failed to install frontend dependencies (npm exit ${install_status})${NC}"
     exit 1
 fi
 
 # Build frontend
 log "${BLUE}[6/7] Building frontend...${NC}"
 log_verbose "Running: $NPM_CMD run build in $FRONTEND_DIR"
-if ! $NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"; then
-    log "${RED}Error: Failed to build frontend${NC}"
+# `if ! cmd | tee` evaluates the pipeline's last exit code — tee almost
+# always exits 0, so an `npm run build` failure (e.g. a vite resolve
+# error) gets silently swallowed and the rebuild proceeds with a stale
+# admin/frontend/dist/.  An operator then sees a successful Docker
+# image build that ships the previous version's UI.  Use PIPESTATUS to
+# check npm's actual exit code instead.
+$NPM_CMD run build 2>&1 | tee -a "$LOG_FILE"
+build_status=${PIPESTATUS[0]}
+if [[ "$build_status" -ne 0 ]]; then
+    log "${RED}Error: Failed to build frontend (npm exit ${build_status})${NC}"
+    log "${RED}Refusing to continue — Docker rebuild would copy a stale dist/${NC}"
+    log "${RED}into the image, shipping the previous version's UI even though${NC}"
+    log "${RED}the container would appear healthy.  Fix the build error above${NC}"
+    log "${RED}and rerun update.sh.${NC}"
+    exit 1
+fi
+if [[ ! -f "$FRONTEND_DIR/dist/index.html" ]]; then
+    log "${RED}Error: build reported success but $FRONTEND_DIR/dist/index.html is missing${NC}"
     exit 1
 fi
 

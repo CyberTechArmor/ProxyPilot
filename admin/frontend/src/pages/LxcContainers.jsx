@@ -3233,6 +3233,32 @@ export default function LxcContainers() {
                                   {snap.created_at && (
                                     <span className="ml-1 text-muted-foreground">{formatDate(snap.created_at)}</span>
                                   )}
+                                  {/* Inline size next to the date.  Prefers the
+                                      local-storage measurement (snap.size from
+                                      the backend's storage-volume enrichment)
+                                      and falls back to the S3 export's
+                                      bytes_total when local sizing isn't
+                                      exposed (older Incus / certain storage
+                                      backends).  Hidden when no signal is
+                                      available either way. */}
+                                  {(() => {
+                                    const localSize = snap.size > 0 ? snap.size : null;
+                                    const exportBytes = (snapshotS3Exports[sName] || [])
+                                      .map((e) => e.bytes_total || e.size_bytes)
+                                      .find((v) => v && v > 0);
+                                    const sizeBytes = localSize ?? exportBytes ?? null;
+                                    if (!sizeBytes) return null;
+                                    return (
+                                      <span
+                                        className="ml-1.5 px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground text-[10px] font-mono"
+                                        title={localSize
+                                          ? 'Local snapshot disk usage'
+                                          : 'Compressed tarball size from S3 export (local size not exposed by storage backend)'}
+                                      >
+                                        {formatSize(sizeBytes)}
+                                      </span>
+                                    );
+                                  })()}
                                   {notes.length > 0 && (
                                     <span className="ml-1 text-muted-foreground flex items-center gap-0.5">
                                       <StickyNote className="h-3 w-3" />
@@ -3343,19 +3369,13 @@ export default function LxcContainers() {
                                   </Button>
                                 </div>
                               </div>
-                              {/* Snapshot detail row: size, stateful, expiry,
-                                  architecture. Each chip is conditionally
-                                  rendered so empty snapshots stay tidy.
-                                  Size comes from the backend's storage-volume
-                                  enrichment and is absent on backends that
-                                  don't expose per-snapshot usage. */}
-                              {(snap.size > 0 || snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
+                              {/* Snapshot detail row: stateful, expiry,
+                                  architecture.  Size moved inline next to
+                                  the snapshot name so an operator scanning
+                                  the list sees disk impact at a glance
+                                  without expanding details. */}
+                              {(snap.stateful || (snap.expires_at && !snap.expires_at.startsWith('0001')) || snap.architecture) && (
                                 <div className="flex flex-wrap items-center gap-1.5 mt-1 ml-5 text-[10.5px] text-muted-foreground">
-                                  {snap.size > 0 && (
-                                    <span className="px-1.5 py-0.5 rounded bg-muted/60" title="Disk space used by this snapshot">
-                                      {formatSize(snap.size)}
-                                    </span>
-                                  )}
                                   {snap.stateful && (
                                     <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30" title="Captured running memory state in addition to filesystem">
                                       stateful

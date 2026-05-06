@@ -65,9 +65,26 @@ _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}\.yaml$")
 
 
 @dataclass
+class GitSpec:
+    """A parsed source URL: clone target, branch (optional), subpath
+    inside the clone (optional). Equality is over the clone_url +
+    branch — the subpath is a filter applied after clone, not part
+    of the upstream identity."""
+    clone_url: str
+    branch: Optional[str] = None
+    subpath: Optional[str] = None
+    # The URL the operator originally typed, kept verbatim for the
+    # _proxypilot.git_url stamp so they can find the entry's source
+    # by searching their address bar history.
+    original: str = ""
+
+
+@dataclass
 class SyncResult:
     git_url: str
     git_commit: str = ""
+    branch: str = ""
+    subpath: str = ""
     imported: List[str] = field(default_factory=list)
     skipped_existing: List[str] = field(default_factory=list)
     skipped_invalid: List[str] = field(default_factory=list)
@@ -83,44 +100,144 @@ def _run(argv: List[str], cwd: Optional[Path] = None,
     )
 
 
-def clone_or_pull(git_url: str, source_dir: Path) -> str:
-    """Ensure source_dir contains a clone of git_url. Returns the
-    current HEAD SHA. Idempotent: re-running pulls the latest tip."""
-    if not git_url.strip():
+# ── URL parsing ───────────────────────────────────────────────────────────────
+#
+# We accept three shapes so the operator can paste whatever's in front
+# of them without translating it:
+#
+#   1. Plain git URL — clone default branch, walk repo root.
+#         https://github.com/owner/repo.git
+#         git@github.com:owner/repo.git
+#
+#   2. Fragment syntax — explicit, works on any git host.
+#         <url>#<branch>
+#         <url>#<branch>:<subpath>
+#         e.g.  https://gitlab.example.com/x/y.git#main:cves
+#
+#   3. GitHub web /tree/ URL — what the browser address bar shows.
+#         https://github.com/owner/repo/tree/<ref>/<path...>
+#      Refs can contain slashes (e.g. claude/great-mendel-zXSGE), so
+#      we use `git ls-remote --heads` to enumerate the actual branches
+#      and pick the longest prefix match. One network round-trip per
+#      first sync; subsequent syncs hit the existing clone.
+
+_GITHUB_TREE_RE = re.compile(
+    r"^(?P<base>https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/(?P<rest>.+?)/?$"
+)
+
+
+def _ls_remote_branches(repo_url: str, *, timeout: int = 15) -> List[str]:
+    """Return the list of branch names on the remote, or an empty
+    list if ls-remote fails (no network, auth required, etc)."""
+    out = _run(["git", "ls-remote", "--heads", repo_url], timeout=timeout)
+    if out.returncode != 0:
+        return []
+    heads: List[str] = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            heads.append(parts[1][len("refs/heads/"):])
+    return heads
+
+
+def parse_git_source(url: str) -> GitSpec:
+    """Normalise an operator-pasted URL into a GitSpec. Pure for
+    fragment syntax; performs one ls-remote for GitHub /tree/ URLs
+    when the ref is ambiguous (refs with slashes)."""
+    raw = (url or "").strip()
+    if not raw:
         raise ValueError("git_url is empty")
+
+    # Form 2: explicit fragment. Operator-controlled, trumps anything
+    # we'd otherwise infer.
+    if "#" in raw:
+        base, _, frag = raw.partition("#")
+        branch: Optional[str] = frag
+        subpath: Optional[str] = None
+        if ":" in frag:
+            branch, _, subpath = frag.partition(":")
+        return GitSpec(
+            clone_url=base.strip(),
+            branch=(branch.strip() or None),
+            subpath=(subpath.strip().strip("/") or None) if subpath else None,
+            original=raw,
+        )
+
+    # Form 3: GitHub /tree/ URL. Try to disambiguate ref vs. path via
+    # ls-remote; fall back to the simple "first segment is the branch"
+    # if the network lookup fails.
+    m = _GITHUB_TREE_RE.match(raw)
+    if m:
+        clone_url = m.group("base") + ".git"
+        rest = m.group("rest")
+        parts = rest.split("/")
+        # Try longest-prefix-match against the remote's branch list.
+        heads = set(_ls_remote_branches(clone_url))
+        if heads:
+            for i in range(len(parts), 0, -1):
+                cand = "/".join(parts[:i])
+                if cand in heads:
+                    return GitSpec(
+                        clone_url=clone_url, branch=cand,
+                        subpath=("/".join(parts[i:]).strip("/") or None),
+                        original=raw,
+                    )
+        # No ls-remote / no match — assume single-segment branch.
+        branch = parts[0]
+        subpath = "/".join(parts[1:]).strip("/") or None
+        return GitSpec(clone_url=clone_url, branch=branch,
+                       subpath=subpath, original=raw)
+
+    # Form 1: plain URL.
+    return GitSpec(clone_url=raw, original=raw)
+
+
+def clone_or_pull(spec: GitSpec, source_dir: Path) -> str:
+    """Ensure source_dir contains a clone of spec at spec.branch.
+    Returns the current HEAD SHA. Idempotent: re-running pulls the
+    latest tip of the configured branch."""
+    if not spec.clone_url.strip():
+        raise ValueError("clone_url is empty")
 
     source_dir.parent.mkdir(parents=True, exist_ok=True)
     git_dir = source_dir / ".git"
 
     if git_dir.is_dir():
-        # Existing clone. If the configured URL changed, update the
-        # remote. Then fetch + reset to origin/HEAD so a forced-push
-        # upstream doesn't leave us in a divergent state.
+        # Existing clone. If the configured URL or branch changed,
+        # update the remote + switch refs. Then fetch + reset.
         cur = _run(["git", "remote", "get-url", "origin"], cwd=source_dir)
-        if cur.returncode == 0 and cur.stdout.strip() != git_url:
-            _run(["git", "remote", "set-url", "origin", git_url], cwd=source_dir)
-        fetch = _run(["git", "fetch", "--depth", "1", "origin"], cwd=source_dir)
+        if cur.returncode == 0 and cur.stdout.strip() != spec.clone_url:
+            _run(["git", "remote", "set-url", "origin", spec.clone_url],
+                 cwd=source_dir)
+        fetch_args = ["git", "fetch", "--depth", "1", "origin"]
+        if spec.branch:
+            fetch_args.append(spec.branch)
+        fetch = _run(fetch_args, cwd=source_dir)
         if fetch.returncode != 0:
             raise RuntimeError(f"git fetch failed: {fetch.stderr.strip()}")
-        # Resolve the default branch (HEAD ref on origin) so we don't
-        # hardcode `main` vs `master`. Falls back to FETCH_HEAD.
-        head = _run(
-            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            cwd=source_dir,
-        )
-        target = head.stdout.strip() if head.returncode == 0 else "FETCH_HEAD"
+        if spec.branch:
+            target = "FETCH_HEAD"
+        else:
+            head = _run(
+                ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                cwd=source_dir,
+            )
+            target = head.stdout.strip() if head.returncode == 0 else "FETCH_HEAD"
         reset = _run(["git", "reset", "--hard", target], cwd=source_dir)
         if reset.returncode != 0:
             raise RuntimeError(f"git reset failed: {reset.stderr.strip()}")
     else:
-        # Fresh clone. --depth 1 keeps the staging dir small; we
-        # only need the current spec contents, not history.
+        # Fresh clone. --depth 1 keeps the staging dir small; -b adds
+        # branch selection when the operator specified one (or we
+        # parsed it out of a /tree/ URL).
         if source_dir.exists():
-            # Non-git dir at the target — refuse to clobber.
             raise RuntimeError(
                 f"{source_dir} exists and is not a git checkout; refusing to overwrite")
-        clone = _run(["git", "clone", "--depth", "1", git_url, str(source_dir)],
-                     timeout=180)
+        clone_args = ["git", "clone", "--depth", "1"]
+        if spec.branch:
+            clone_args += ["-b", spec.branch]
+        clone_args += [spec.clone_url, str(source_dir)]
+        clone = _run(clone_args, timeout=180)
         if clone.returncode != 0:
             raise RuntimeError(f"git clone failed: {clone.stderr.strip()}")
 
@@ -153,11 +270,19 @@ def sync(git_url: str, *, inbox_dir: Path, source_dir: Path = Path(DEFAULT_SOURC
          ) -> SyncResult:
     """Pull the source repo and copy any spec files that aren't
     already in the inbox. Returns a SyncResult summarising what was
-    imported, skipped, and errored."""
-    result = SyncResult(git_url=git_url)
+    imported, skipped, and errored.
+
+    Accepts the same URL shapes as parse_git_source: plain URL,
+    fragment-syntax (#branch[:subpath]), or GitHub /tree/ URL."""
+    spec = parse_git_source(git_url)
+    result = SyncResult(
+        git_url=spec.original or spec.clone_url,
+        branch=spec.branch or "",
+        subpath=spec.subpath or "",
+    )
 
     try:
-        result.git_commit = clone_or_pull(git_url, source_dir)
+        result.git_commit = clone_or_pull(spec, source_dir)
     except Exception as e:
         result.errors.append(str(e))
         return result
@@ -166,13 +291,36 @@ def sync(git_url: str, *, inbox_dir: Path, source_dir: Path = Path(DEFAULT_SOURC
         result.errors.append(f"source dir not present after clone: {source_dir}")
         return result
 
+    # Constrain the walk to the configured subpath so we don't scan
+    # the whole repo (and don't accidentally import stray YAMLs from
+    # unrelated subdirectories). Path traversal out of the clone via
+    # `..` is rejected — we resolve and check is_relative_to.
+    walk_root = source_dir
+    if spec.subpath:
+        candidate = (source_dir / spec.subpath).resolve()
+        clone_root = source_dir.resolve()
+        # is_relative_to landed in 3.9; explicit check keeps us safe
+        # if the operator pastes "../etc/passwd" or similar.
+        try:
+            candidate.relative_to(clone_root)
+        except ValueError:
+            result.errors.append(
+                f"subpath escapes clone root: {spec.subpath!r}")
+            return result
+        if not candidate.is_dir():
+            result.errors.append(
+                f"subpath does not exist in repo: {spec.subpath!r} "
+                f"(branch={spec.branch or 'default'})")
+            return result
+        walk_root = candidate
+
     inbox_dir.mkdir(parents=True, exist_ok=True)
     yaml = _yaml()
 
-    # Walk the source dir for *.yaml that match the CVE filename
+    # Walk the source (sub)dir for *.yaml that match the CVE filename
     # pattern. Repos can stash READMEs, indexes, fixtures, etc. in
     # the same tree without us trying to import them.
-    for src in sorted(source_dir.rglob("*.yaml")):
+    for src in sorted(walk_root.rglob("*.yaml")):
         if not _CVE_RE.match(src.name):
             continue
         target = inbox_dir / src.name
@@ -194,7 +342,8 @@ def sync(git_url: str, *, inbox_dir: Path, source_dir: Path = Path(DEFAULT_SOURC
                     f"{src.name} (cve mismatch: file={src.stem!r} body={cve_field!r})")
                 continue
             _stamp_origin(raw, origin="git",
-                          git_url=git_url, git_commit=result.git_commit)
+                          git_url=spec.original or spec.clone_url,
+                          git_commit=result.git_commit)
             # Atomic write so a crash mid-copy doesn't leave half a
             # YAML in the inbox for the next poll to choke on.
             tmp = target.with_suffix(target.suffix + ".tmp")

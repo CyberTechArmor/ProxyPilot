@@ -239,6 +239,8 @@ def cmd_sync_git(args: argparse.Namespace) -> int:
         "ok": not result.errors,
         "git_url": result.git_url,
         "git_commit": result.git_commit,
+        "branch": result.branch,
+        "subpath": result.subpath,
         "imported": result.imported,
         "skipped_existing_count": len(result.skipped_existing),
         "skipped_invalid": result.skipped_invalid,

@@ -786,6 +786,9 @@ function CveList({ onOpen, refreshKey }) {
   const [gitDraft, setGitDraft] = useState('');
   const [gitSaving, setGitSaving] = useState(false);
   const [gitSyncing, setGitSyncing] = useState(false);
+  // The most recent sync result so the source caption can show the
+  // parsed branch + subpath alongside the URL.
+  const [lastSync, setLastSync] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
@@ -839,12 +842,19 @@ function CveList({ onOpen, refreshKey }) {
       const imported = (out?.imported || []).length;
       const skipped = out?.skipped_existing_count || 0;
       const errors = (out?.errors || []).length;
+      const branchPart = out?.branch ? ` · branch ${out.branch}` : '';
+      const subPart = out?.subpath ? ` · ${out.subpath}/` : '';
+      const commitPart = out?.git_commit ? ` · ${out.git_commit.slice(0, 7)}` : '';
+      const errorTail = errors && (out?.errors || []).length
+        ? '\n' + (out.errors || []).slice(0, 3).join('\n') : '';
       toast({
         title: errors ? `Synced with ${errors} error(s)` : 'Synced',
-        description: `Imported ${imported}, kept ${skipped} existing` +
-          (out?.git_commit ? ` (commit ${out.git_commit.slice(0, 7)})` : ''),
+        description: `Imported ${imported}, kept ${skipped} existing${branchPart}${subPart}${commitPart}${errorTail}`,
         variant: errors ? 'destructive' : undefined,
       });
+      // Cache the parsed branch/subpath so the source caption can
+      // show what the engine actually walked, not just the URL.
+      setLastSync(out || null);
       await refresh();
     } catch (err) {
       toast({
@@ -967,20 +977,29 @@ function CveList({ onOpen, refreshKey }) {
       </p>
 
       {gitUrl && (
-        <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
-          <GitBranch className="h-3.5 w-3.5" />
-          <span>Source:</span>
-          <button
-            type="button"
-            onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
-            className="font-mono break-all underline-offset-2 hover:underline hover:text-foreground"
-            title="Click to change or clear"
-          >
-            {gitUrl}
-          </button>
-          <span className="text-[10px] opacity-70">
-            (read-only · sync is additive · changing URL never deletes existing entries)
-          </span>
+        <div className="text-xs text-muted-foreground space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <GitBranch className="h-3.5 w-3.5" />
+            <span>Source:</span>
+            <button
+              type="button"
+              onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
+              className="font-mono break-all underline-offset-2 hover:underline hover:text-foreground"
+              title="Click to change or clear"
+            >
+              {gitUrl}
+            </button>
+          </div>
+          {(lastSync?.branch || lastSync?.subpath || lastSync?.git_commit) && (
+            <div className="flex items-center gap-3 flex-wrap pl-5 text-[11px] font-mono opacity-80">
+              {lastSync?.branch && <span>branch: <span className="text-foreground/80">{lastSync.branch}</span></span>}
+              {lastSync?.subpath && <span>path: <span className="text-foreground/80">{lastSync.subpath}/</span></span>}
+              {lastSync?.git_commit && <span>commit: <span className="text-foreground/80">{lastSync.git_commit.slice(0, 7)}</span></span>}
+            </div>
+          )}
+          <div className="pl-5 text-[10px] opacity-70">
+            read-only · sync is additive · changing URL never deletes existing entries
+          </div>
         </div>
       )}
 
@@ -1077,9 +1096,9 @@ function CveList({ onOpen, refreshKey }) {
       </Dialog>
 
       <Dialog open={gitConfigOpen} onOpenChange={setGitConfigOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader><DialogTitle>Git source for CVE specs</DialogTitle></DialogHeader>
-          <div className="space-y-2 text-sm">
+          <div className="space-y-3 text-sm">
             <p className="text-muted-foreground">
               Read-only pull. The engine clones / pulls into a staging dir on the host and
               copies any new <code className="font-mono">CVE-*.yaml</code> files into the
@@ -1093,6 +1112,37 @@ function CveList({ onOpen, refreshKey }) {
               placeholder="https://github.com/your-org/cve-specs.git"
               autoFocus
             />
+            <div className="text-xs text-muted-foreground space-y-2 border-l-2 border-border pl-3">
+              <p className="font-medium text-foreground/80">Accepted URL shapes</p>
+              <ul className="space-y-2 list-disc list-inside">
+                <li>
+                  <span className="font-medium">Plain git URL</span> — clones the default
+                  branch, walks the whole repo for <code className="font-mono">CVE-*.yaml</code>.
+                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
+                    https://github.com/owner/repo.git
+                  </div>
+                </li>
+                <li>
+                  <span className="font-medium">Fragment syntax</span> — explicit branch
+                  (and optional sub-directory). Works on any git host.
+                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
+                    https://github.com/owner/repo.git<span className="text-amber-400">#branch</span>
+                    <br />
+                    https://github.com/owner/repo.git<span className="text-amber-400">#branch:path/to/cves</span>
+                  </div>
+                </li>
+                <li>
+                  <span className="font-medium">GitHub /tree/ URL</span> — the address bar
+                  URL when you're browsing a branch on GitHub. The engine parses the branch
+                  + path automatically (resolves slash-containing branches like{' '}
+                  <code className="font-mono">claude/great-mendel-zXSGE</code> via
+                  ls-remote).
+                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
+                    https://github.com/owner/repo/tree/branch/path/to/cves
+                  </div>
+                </li>
+              </ul>
+            </div>
             <p className="text-xs text-muted-foreground">
               Leave empty to disable. Changes apply on next "Sync git". Both paste and git
               sources can coexist.

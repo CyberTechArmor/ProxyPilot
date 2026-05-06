@@ -333,6 +333,18 @@ export default function LxcContainers() {
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
+  // Optional S3 fan-out for the snapshot.  Empty array = local-
+  // only (the legacy behaviour, default).  Populated only when
+  // the operator picks one or more destinations in the snapshot
+  // dialog.
+  const [snapshotS3DestinationIds, setSnapshotS3DestinationIds] = useState([]);
+  // Backup destinations available for the multi-select; loaded
+  // lazily when the snapshot dialog mounts so we don't pay the
+  // network round-trip on every container detail render.
+  const [backupDestinations, setBackupDestinations] = useState([]);
+  // Per-snapshot S3 export state, keyed by snapshot name → array
+  // of { destination_id, destination_name, status, error?, ... }.
+  const [snapshotS3Exports, setSnapshotS3Exports] = useState({});
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   // Progress for the in-flight `Create snapshot` job. Driven by polling
   // /lxc/containers/:name/snapshot-jobs/:jobId. Shape:
@@ -761,12 +773,26 @@ export default function LxcContainers() {
     setTerminalCwd('');
     setInfoOpen(true);
     try {
-      const [stateRes, snapRes] = await Promise.all([
+      const [stateRes, snapRes, expRes, destRes] = await Promise.all([
         api.getLxcContainerState(container.name).catch(() => null),
         api.getLxcSnapshots(container.name).catch(() => ({ snapshots: [] })),
+        // Per-snapshot S3 export rows.  Cheap (small DB query)
+        // and needed before the snapshots list renders so the
+        // 'on-site / off-site' chips are accurate on first paint.
+        api.getLxcSnapshotExports(container.name).catch(() => ({ exports: [] })),
+        // Backup destinations for the 'Also push to S3' picker.
+        // Fetched here (rather than on dialog mount) so the
+        // multi-select renders without a flash on open.
+        api.backupsListStorage().catch(() => ({ destinations: [] })),
       ]);
       if (stateRes) setContainerState(stateRes.state);
       setSnapshots(snapRes.snapshots || []);
+      const grouped = {};
+      for (const r of expRes.exports || []) {
+        (grouped[r.snapshot_name] ||= []).push(r);
+      }
+      setSnapshotS3Exports(grouped);
+      setBackupDestinations(destRes.destinations || []);
     } catch {
       // Silently fail for detail fetch
     }
@@ -1311,7 +1337,9 @@ export default function LxcContainers() {
       status: 'running',
     });
     try {
-      const start = await api.createLxcSnapshot(ctName, sName, snapshotNote.trim());
+      const start = await api.createLxcSnapshot(
+        ctName, sName, snapshotNote.trim(), snapshotS3DestinationIds,
+      );
       const jobId = start?.jobId;
       if (!jobId) {
         // Older backend without async support — treat the response as
@@ -1340,8 +1368,22 @@ export default function LxcContainers() {
       }
       setSnapshotName('');
       setSnapshotNote('');
+      setSnapshotS3DestinationIds([]);
       const snapRes = await api.getLxcSnapshots(ctName);
       setSnapshots(snapRes.snapshots || []);
+      // Refresh S3 export rows so the snapshots list shows the
+      // 'pending' / 'exported' chips for the just-fired fan-out.
+      // The fan-out runs detached on the backend, so this first
+      // poll usually shows 'pending'; the existing snapshot
+      // panel's refresh button picks up the eventual 'exported'.
+      try {
+        const exp = await api.getLxcSnapshotExports(ctName);
+        const grouped = {};
+        for (const r of exp.exports || []) {
+          (grouped[r.snapshot_name] ||= []).push(r);
+        }
+        setSnapshotS3Exports(grouped);
+      } catch { /* tolerated */ }
     } catch (err) {
       toast({ title: 'Snapshot failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -2927,6 +2969,58 @@ export default function LxcContainers() {
                         )}
                       </Button>
                     </div>
+                    {/* S3 fan-out picker: snapshots default to local-
+                        only (just `incus snapshot create`).  When the
+                        operator checks one or more destinations, the
+                        backend ALSO runs `incus export` after the
+                        snapshot completes and pushes the tarball to
+                        each picked destination. */}
+                    {backupDestinations.length > 0 && (
+                      <details className="border rounded text-xs">
+                        <summary className="cursor-pointer px-2 py-1.5 select-none flex items-center justify-between gap-2">
+                          <span className="text-muted-foreground">
+                            Also push to S3
+                            {snapshotS3DestinationIds.length > 0 && (
+                              <span className="ml-1 text-foreground font-medium">
+                                ({snapshotS3DestinationIds.length} selected)
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            optional
+                          </span>
+                        </summary>
+                        <div className="border-t p-2 space-y-1 max-h-32 overflow-y-auto">
+                          {backupDestinations.map((d) => (
+                            <label
+                              key={d.id}
+                              className="flex items-center gap-2 cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={snapshotS3DestinationIds.includes(d.id)}
+                                onChange={() => setSnapshotS3DestinationIds((prev) =>
+                                  prev.includes(d.id)
+                                    ? prev.filter((x) => x !== d.id)
+                                    : [...prev, d.id]
+                                )}
+                              />
+                              <span className="font-medium truncate flex-1">
+                                {d.name}{d.is_default ? ' (default)' : ''}
+                              </span>
+                              <span className="text-muted-foreground font-mono text-[10px] truncate">
+                                {d.bucket}
+                              </span>
+                            </label>
+                          ))}
+                          <p className="text-[10px] text-muted-foreground pt-1 border-t">
+                            Snapshot lives on this host's Incus pool either way. Picking
+                            destinations runs <code>incus export</code> after the snapshot
+                            and uploads the tarball to each.
+                          </p>
+                        </div>
+                      </details>
+                    )}
                     {/* In-flight snapshot progress: elapsed timer plus a
                         remaining-time hint when the backend has prior
                         durations to estimate from. Stays scoped to the
@@ -3000,6 +3094,33 @@ export default function LxcContainers() {
                                       {notes.length}
                                     </span>
                                   )}
+                                  {/* S3 export chips: one per
+                                      destination this snapshot
+                                      was pushed to.  Tooltip
+                                      carries the destination
+                                      name + bucket so an
+                                      operator can disambiguate
+                                      'on-site' from 'off-site'
+                                      without expanding the row. */}
+                                  {(snapshotS3Exports[sName] || []).map((e) => (
+                                    <span
+                                      key={e.id}
+                                      title={`${e.destination_name || e.destination_id}${e.destination_bucket ? ` · ${e.destination_bucket}` : ''}${e.error ? ` — ${e.error}` : ''}`}
+                                      className={`ml-1 inline-flex items-center gap-0.5 text-[10px] px-1 rounded border ${
+                                        e.status === 'exported'
+                                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                          : e.status === 'failed'
+                                          ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'
+                                          : e.status === 'deleted'
+                                          ? 'bg-muted text-muted-foreground border-border'
+                                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                      }`}
+                                    >
+                                      {e.status === 'pending' ? '⋯' : e.status === 'exported' ? '✓' : e.status === 'failed' ? '✕' : '·'}
+                                      {' '}
+                                      {(e.destination_name || 'S3').slice(0, 12)}
+                                    </span>
+                                  ))}
                                 </div>
                                 <div className="flex gap-1">
                                   <Button

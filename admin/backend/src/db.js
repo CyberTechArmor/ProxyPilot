@@ -75,6 +75,7 @@ export function getDb() {
 //   204 Backups — backup_schedule_destinations (multi-target fan-out)
 //                 + backup_destinations on the backups table
 //                 (per-destination upload tracking)
+//   205 LXC snapshot S3 export — lxc_snapshot_s3_exports
 //   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
@@ -1052,6 +1053,53 @@ export function initDatabase() {
       SELECT id, destination_id, s3_key, 'uploaded', size_bytes, created_at
       FROM backups
       WHERE destination_id IS NOT NULL AND s3_uploaded = 1
+    `);
+  });
+
+  // LXC snapshot S3 export (operator request).
+  //
+  // Snapshots produced by `incus snapshot create` live exclusively
+  // on the host's Incus storage pool today.  An operator running
+  // multiple hosts wants the option to also push the snapshot
+  // tarball (`incus export`) to one or more S3 destinations so
+  // host-level disk loss doesn't take the snapshot with it.
+  //
+  // We track each (instance, snapshot, destination) export in its
+  // own table — keyed off names (no FK to a host snapshot row,
+  // since Incus snapshots aren't a DB construct in this app).  A
+  // single snapshot can have multiple export rows (one per
+  // destination) so the UI can render 'on-site ✓ · off-site ✓'
+  // alongside the existing snapshot list.
+  //
+  // status:
+  //   pending  — `incus export` started; tarball not yet on S3.
+  //   exported — tarball uploaded successfully.
+  //   failed   — either the export shell-out or the S3 upload
+  //              tripped; error column has the detail.
+  //   deleted  — tarball removed from S3 by the operator.
+  runMigration(db, 205, 'lxc_snapshot_s3_exports', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS lxc_snapshot_s3_exports (
+        id              TEXT PRIMARY KEY,
+        container_name  TEXT NOT NULL,
+        snapshot_name   TEXT NOT NULL,
+        destination_id  TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+        s3_key          TEXT NOT NULL,
+        size_bytes      INTEGER,
+        status          TEXT NOT NULL CHECK(status IN ('pending','exported','failed','deleted')),
+        error           TEXT,
+        started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at     TEXT,
+        created_by      TEXT
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_lxc_snap_export_container
+        ON lxc_snapshot_s3_exports(container_name, snapshot_name)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_lxc_snap_export_destination
+        ON lxc_snapshot_s3_exports(destination_id)
     `);
   });
 

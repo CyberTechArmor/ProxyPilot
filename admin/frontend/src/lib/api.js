@@ -671,10 +671,42 @@ export const api = {
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
-  createLxcSnapshot: (name, snapshotName, note) => request(`/lxc/containers/${name}/snapshot`, {
-    method: 'POST',
-    body: JSON.stringify({ snapshotName, note }),
-  }),
+  // Optional s3DestinationIds: when supplied, the backend kicks
+  // off an `incus export` after the snapshot completes locally
+  // and pushes the tarball to each destination.  Empty/undef =
+  // local-only (legacy behaviour).
+  createLxcSnapshot: (name, snapshotName, note, s3DestinationIds) =>
+    request(`/lxc/containers/${name}/snapshot`, {
+      method: 'POST',
+      body: JSON.stringify({
+        snapshotName,
+        note,
+        s3_destination_ids: Array.isArray(s3DestinationIds) ? s3DestinationIds : [],
+      }),
+    }),
+
+  // Per-snapshot S3 export rows (one per destination).  Used by
+  // the snapshots panel to render 'on-site ✓ · off-site ✗'
+  // chips next to each snapshot.
+  getLxcSnapshotExports: (name) =>
+    request(`/lxc/containers/${name}/snapshot-exports`),
+
+  // Retroactive export: push an existing local snapshot to one
+  // or more S3 destinations after the fact.
+  exportLxcSnapshotToS3: (name, snapshotName, destinationIds) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ destination_ids: destinationIds }),
+      },
+    ),
+
+  deleteLxcSnapshotS3Export: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}`,
+      { method: 'DELETE' },
+    ),
 
   // Poll an in-flight snapshot job kicked off by createLxcSnapshot.
   // Returns { status, elapsedMs, estimateMs, error? }.

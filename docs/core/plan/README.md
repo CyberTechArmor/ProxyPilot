@@ -123,6 +123,10 @@ Prompts that aren't part of the numbered phase plan — small targeted
 changes the operator wants Claude to pick up in a single session.
 Each is self-contained; pick one, hand it to a fresh session, ship.
 
+**Kickoff:** [`NEXT-SESSION-PROMPT-out-of-band.md`](NEXT-SESSION-PROMPT-out-of-band.md)
+— copy-paste this into the first message of a new session and tell
+Claude which option to take.
+
 | Status | Prompt | Scope |
 |---|---|---|
 | 📝 ready | [`NEXT-SESSION-PROMPT-wireguard-mtu.md`](NEXT-SESSION-PROMPT-wireguard-mtu.md) | Set MTU = 1280 default on every generated WireGuard config + apply to live wg0. ~1 commit. |

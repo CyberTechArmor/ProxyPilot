@@ -26,8 +26,19 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
-import { putObject, deleteObject, buildKey } from './s3.js';
+import { putObjectWithControl, deleteObject, buildKey } from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
+
+// In-memory map of in-flight uploads so the cancel route can
+// abort them.  Keyed by export row id; value carries the Upload
+// instance + a cancellation flag the progress callback polls.
+//
+// Map content disappears on dashboard restart — that's fine: the
+// upload also dies with the process, and the row's status flips
+// to 'failed' on next boot via the stale-pending sweeper (PR
+// follow-up; for now an orphaned 'pending' row gets cleaned up
+// when the operator next clicks the row's cancel button).
+const ACTIVE_UPLOADS = new Map();
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -140,48 +151,110 @@ export async function fanOutSnapshotExport({
 
   try {
     const buffer = fs.readFileSync(exported.path);
+    // Stamp every pending row with the artifact's total byte
+    // count up front so the UI's progress percentage works on
+    // first paint — no need to wait for the first
+    // httpUploadProgress event.
+    db.prepare(`
+      UPDATE lxc_snapshot_s3_exports
+      SET bytes_total = ?
+      WHERE id IN (${[...exportIds.values()].map(() => '?').join(',')})
+    `).run(buffer.length, ...exportIds.values());
+
+    // Throttle progress writes to the DB.  AWS SDK can emit
+    // dozens of httpUploadProgress events per second on a fast
+    // upload; writing each would churn SQLite for no UI gain
+    // (operators aren't watching at sub-second resolution).
+    const PROGRESS_THROTTLE_MS = 500;
+
     for (const dest of destinations) {
       const exportId = exportIds.get(dest.id);
       const row = db.prepare(`SELECT s3_key FROM lxc_snapshot_s3_exports WHERE id = ?`)
         .get(exportId);
       let error = null;
+      let lastProgressWriteAt = 0;
+      const updateBytes = db.prepare(`
+        UPDATE lxc_snapshot_s3_exports SET bytes_uploaded = ? WHERE id = ?
+      `);
+      const isCanceledRow = db.prepare(`
+        SELECT cancel_requested FROM lxc_snapshot_s3_exports WHERE id = ?
+      `);
+      // Pre-register a placeholder so the cancel route can find
+      // and abort even if the very first putObjectWithControl()
+      // call is still being constructed.
+      ACTIVE_UPLOADS.set(exportId, { aborted: false, uploader: null });
+
       try {
-        await putObject(dest, row.s3_key, buffer, {
+        const handle = putObjectWithControl(dest, row.s3_key, buffer, {
           contentType: 'application/gzip',
+          onProgress: ({ loaded }) => {
+            const now = Date.now();
+            if (now - lastProgressWriteAt >= PROGRESS_THROTTLE_MS) {
+              try { updateBytes.run(loaded, exportId); } catch { /* ignore */ }
+              lastProgressWriteAt = now;
+            }
+          },
+          isCanceled: () => {
+            try {
+              const r = isCanceledRow.get(exportId);
+              return !!(r && r.cancel_requested);
+            } catch { return false; }
+          },
         });
+        ACTIVE_UPLOADS.set(exportId, { aborted: false, uploader: handle.uploader });
+        await handle.done;
+        // Final progress write at completion so the UI sees 100%
+        // even if the throttled callback skipped the last event.
+        try { updateBytes.run(buffer.length, exportId); } catch { /* ignore */ }
         try {
           resolveNotification(`backup-upload:${dest.id}`, { reason: 'snapshot upload ok' });
         } catch { /* tolerated */ }
       } catch (err) {
-        error = err?.message || String(err);
+        // AWS SDK aborts surface as an error.  Distinguish a
+        // canceled-by-operator from a real failure so the bell
+        // doesn't claim 'upload failed' for a deliberate cancel.
+        const canceled = (ACTIVE_UPLOADS.get(exportId)?.aborted)
+          || /aborted|canceled/i.test(err?.name || '')
+          || /aborted|canceled/i.test(err?.message || '');
+        error = canceled
+          ? 'canceled by operator'
+          : (err?.message || String(err));
+      } finally {
+        ACTIVE_UPLOADS.delete(exportId);
       }
+
       if (error) {
+        const canceled = error === 'canceled by operator';
         db.prepare(`
           UPDATE lxc_snapshot_s3_exports
           SET status = 'failed', error = ?, finished_at = CURRENT_TIMESTAMP,
               size_bytes = ?
           WHERE id = ?
         `).run(error.slice(0, 1024), buffer.length, exportId);
-        try {
-          postNotification({
-            level: 'error',
-            title: `Snapshot upload failed: ${dest.name}`,
-            body: `Pushing ${incusName}/${snapshotName} to "${dest.name}" failed: ${error}`,
-            source: 'snapshot-export',
-            source_id: dest.id,
-            dedupe_key: `backup-upload:${dest.id}`,
-          });
-        } catch { /* tolerated */ }
+        if (!canceled) {
+          try {
+            postNotification({
+              level: 'error',
+              title: `Snapshot upload failed: ${dest.name}`,
+              body: `Pushing ${incusName}/${snapshotName} to "${dest.name}" failed: ${error}`,
+              source: 'snapshot-export',
+              source_id: dest.id,
+              dedupe_key: `backup-upload:${dest.id}`,
+            });
+          } catch { /* tolerated */ }
+        }
         results.push({
           destination_id: dest.id, destination_name: dest.name, ok: false, error,
+          canceled,
         });
       } else {
         db.prepare(`
           UPDATE lxc_snapshot_s3_exports
           SET status = 'exported', finished_at = CURRENT_TIMESTAMP,
-              size_bytes = ?, error = NULL
+              size_bytes = ?, error = NULL,
+              bytes_uploaded = ?
           WHERE id = ?
-        `).run(buffer.length, exportId);
+        `).run(buffer.length, buffer.length, exportId);
         results.push({
           destination_id: dest.id, destination_name: dest.name, ok: true,
         });
@@ -203,6 +276,44 @@ export async function fanOutSnapshotExport({
   } catch { /* tolerated */ }
 
   return { results, size_bytes: exported.size };
+}
+
+// cancelSnapshotExport({ exportId, audit }) — flip the row's
+// cancel_requested flag and abort the in-flight Upload if we
+// have one in our active map.  Idempotent: a cancel against a
+// row that's already 'failed' / 'exported' / 'deleted' returns
+// { ok: true, alreadyFinished } without touching anything.
+//
+// The actual state transition to 'failed (canceled by operator)'
+// happens in fanOutSnapshotExport's catch block — calling
+// uploader.abort() rejects the done() promise with an
+// AbortError-shaped error, which the caller's try/catch
+// recognises and writes 'canceled by operator' into the row.
+export async function cancelSnapshotExport({ exportId, audit = {} }) {
+  const db = getDb();
+  const row = db.prepare(`SELECT * FROM lxc_snapshot_s3_exports WHERE id = ?`)
+    .get(exportId);
+  if (!row) return { ok: false, error: 'export not found' };
+  if (row.status !== 'pending') {
+    return { ok: true, alreadyFinished: true, status: row.status };
+  }
+  db.prepare(`
+    UPDATE lxc_snapshot_s3_exports SET cancel_requested = 1 WHERE id = ?
+  `).run(exportId);
+  const handle = ACTIVE_UPLOADS.get(exportId);
+  if (handle) {
+    handle.aborted = true;
+    if (handle.uploader) {
+      try { handle.uploader.abort(); } catch { /* ignore */ }
+    }
+  }
+  try {
+    logAudit(audit.user_id || null, 'LXC_SNAPSHOT_S3_EXPORT_CANCEL', 'lxc_snapshot',
+      `${row.container_name}/${row.snapshot_name}`, {
+        export_id: exportId, destination_id: row.destination_id,
+      }, audit.ip || null);
+  } catch { /* tolerated */ }
+  return { ok: true };
 }
 
 // listSnapshotExports({ containerName, snapshotName? }) — UI feed.

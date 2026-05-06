@@ -76,6 +76,8 @@ export function getDb() {
 //                 + backup_destinations on the backups table
 //                 (per-destination upload tracking)
 //   205 LXC snapshot S3 export — lxc_snapshot_s3_exports
+//   206 LXC snapshot S3 export — bytes_uploaded / bytes_total /
+//                                 cancel_requested for live progress
 //   300 Notifications — durable backend-posted notifications
 const SCHEMA_MIGRATIONS = [];
 
@@ -1101,6 +1103,28 @@ export function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_lxc_snap_export_destination
         ON lxc_snapshot_s3_exports(destination_id)
     `);
+  });
+
+  // LXC snapshot S3 export — live progress (operator request).
+  //
+  // The 205 schema only captured terminal state (pending →
+  // exported / failed / deleted).  Operators want to:
+  //   * see a percentage while a multi-GB tarball uploads,
+  //   * cancel an in-flight upload from the UI,
+  //   * leave the dashboard and come back without losing
+  //     progress visibility.
+  //
+  // bytes_uploaded + bytes_total are written by the Upload's
+  // httpUploadProgress callback (throttled to ~once/500ms so the
+  // DB doesn't churn on every chunk).  cancel_requested is the
+  // poll-and-abort signal — the route layer flips it to 1, the
+  // upload promise's progress callback observes it next tick,
+  // calls upload.abort(), and the helper records status='failed'
+  // with error='canceled by operator'.
+  runMigration(db, 206, 'lxc_snapshot_s3_exports_progress', (d) => {
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN bytes_uploaded INTEGER NOT NULL DEFAULT 0`);
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN bytes_total INTEGER`);
+    d.exec(`ALTER TABLE lxc_snapshot_s3_exports ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0`);
   });
 
   // Durable notifications.

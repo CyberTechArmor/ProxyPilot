@@ -708,6 +708,14 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  // Cancel an in-flight S3 export.  No-op when the row already
+  // reached a terminal state (returns { alreadyFinished: true }).
+  cancelLxcSnapshotS3Export: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/cancel`,
+      { method: 'POST' },
+    ),
+
   // Poll an in-flight snapshot job kicked off by createLxcSnapshot.
   // Returns { status, elapsedMs, estimateMs, error? }.
   getLxcSnapshotJob: (name, jobId) => request(`/lxc/containers/${name}/snapshot-jobs/${jobId}`),

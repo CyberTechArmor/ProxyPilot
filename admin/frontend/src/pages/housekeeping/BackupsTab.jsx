@@ -242,61 +242,89 @@ function DeleteDialog({ open, onOpenChange, item, onConfirm, busy }) {
   }, [open, item]);
 
   if (!item) return null;
+  // Orphan = the row exists in the dashboard but neither a local
+  // file nor an S3 copy is reachable (retention pruned local +
+  // bucket-side lifecycle dropped the object, or both copies
+  // failed at create-time).  We still want operators to be able
+  // to clean these up from the table, so the dialog flips into
+  // a 'drop dashboard row only' mode where the toggles are
+  // hidden and the destructive button is enabled.
+  const isOrphan = !item.has_local && !item.s3_uploaded;
   const noCopiesSelected = !deleteLocal && !deleteS3;
+  const canSubmit = !busy && (isOrphan || !noCopiesSelected);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <AlertTriangle className="h-5 w-5 text-amber-500" /> Delete backup
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+            {isOrphan ? 'Drop orphan row' : 'Delete backup'}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
           <p className="text-muted-foreground">
-            Delete <code className="font-mono text-xs text-foreground">{item.id}</code>?
-            Cannot be undone.
+            {isOrphan ? (
+              <>
+                Backup <code className="font-mono text-xs text-foreground">{item.id}</code> has
+                no local copy <strong>and</strong> nothing reachable in S3 — likely retention
+                pruned local while the bucket was already empty.  Drop the dashboard row?
+                Cannot be undone.
+              </>
+            ) : (
+              <>
+                Delete <code className="font-mono text-xs text-foreground">{item.id}</code>?
+                Cannot be undone.
+              </>
+            )}
           </p>
-          <div className="space-y-2 border rounded p-3">
-            <div className="flex items-center gap-3">
-              <Switch
-                id="del-local"
-                checked={deleteLocal}
-                onCheckedChange={setDeleteLocal}
-                disabled={!item.has_local}
-              />
-              <Label htmlFor="del-local" className={item.has_local ? 'cursor-pointer' : 'text-muted-foreground'}>
-                Remove the local copy on this host
-                {!item.has_local && <span className="ml-1 text-[11px]">(none on disk)</span>}
-              </Label>
+          {!isOrphan && (
+            <div className="space-y-2 border rounded p-3">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="del-local"
+                  checked={deleteLocal}
+                  onCheckedChange={setDeleteLocal}
+                  disabled={!item.has_local}
+                />
+                <Label htmlFor="del-local" className={item.has_local ? 'cursor-pointer' : 'text-muted-foreground'}>
+                  Remove the local copy on this host
+                  {!item.has_local && <span className="ml-1 text-[11px]">(none on disk)</span>}
+                </Label>
+              </div>
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="del-s3"
+                  checked={deleteS3}
+                  onCheckedChange={setDeleteS3}
+                  disabled={!item.s3_uploaded}
+                />
+                <Label htmlFor="del-s3" className={item.s3_uploaded ? 'cursor-pointer' : 'text-muted-foreground'}>
+                  Remove the copy in S3 ({(item.destination_name || 'destination').replace(/^null$/, 'unknown')})
+                  {!item.s3_uploaded && <span className="ml-1 text-[11px]">(not uploaded)</span>}
+                </Label>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <Switch
-                id="del-s3"
-                checked={deleteS3}
-                onCheckedChange={setDeleteS3}
-                disabled={!item.s3_uploaded}
-              />
-              <Label htmlFor="del-s3" className={item.s3_uploaded ? 'cursor-pointer' : 'text-muted-foreground'}>
-                Remove the copy in S3 ({(item.destination_name || 'destination').replace(/^null$/, 'unknown')})
-                {!item.s3_uploaded && <span className="ml-1 text-[11px]">(not uploaded)</span>}
-              </Label>
-            </div>
-          </div>
-          <p className="text-[11px] text-muted-foreground">
-            When both copies are removed, the row disappears from the dashboard.
-            When only one is removed, the row stays so the remaining copy is still tracked.
-          </p>
+          )}
+          {!isOrphan && (
+            <p className="text-[11px] text-muted-foreground">
+              When both copies are removed, the row disappears from the dashboard.
+              When only one is removed, the row stays so the remaining copy is still tracked.
+            </p>
+          )}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
           <Button
             variant="destructive"
-            onClick={() => onConfirm({ delete_local: deleteLocal, delete_s3: deleteS3 })}
-            disabled={busy || noCopiesSelected}
+            onClick={() => onConfirm({
+              delete_local: isOrphan ? true : deleteLocal,
+              delete_s3: isOrphan ? true : deleteS3,
+            })}
+            disabled={!canSubmit}
           >
             {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
-            Delete
+            {isOrphan ? 'Drop row' : 'Delete'}
           </Button>
         </DialogFooter>
       </DialogContent>

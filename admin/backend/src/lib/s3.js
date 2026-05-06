@@ -123,6 +123,58 @@ export async function putObject(dest, key, body, { contentType, storageClass } =
   }
 }
 
+// putObjectWithControl — extended putObject for callers that want
+// progress + cancellation.  Returns the constructed Upload alongside
+// a Promise that resolves on success / rejects on abort or error.
+//
+//   onProgress({ loaded, total })  fires for each httpUploadProgress
+//                                   event the AWS SDK emits.  Single-
+//                                   part PUTs fire once at the end;
+//                                   multipart fires per part.
+//   isCanceled()                    poll callback the helper invokes
+//                                   between progress events.  Return
+//                                   true to abort the upload — we
+//                                   call uploader.abort() which
+//                                   rejects the done() promise with
+//                                   a recognisable error.
+//
+// The S3Client is destroyed in finally so a leaked client doesn't
+// hold the network socket open after a cancel.
+export function putObjectWithControl(dest, key, body, opts = {}) {
+  const { contentType, storageClass, onProgress, isCanceled } = opts;
+  const client = clientForDestination(dest);
+  const uploader = new Upload({
+    client,
+    params: {
+      Bucket: dest.bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType || 'application/octet-stream',
+      StorageClass: storageClass || dest.storage_class || undefined,
+    },
+  });
+  if (typeof onProgress === 'function') {
+    uploader.on('httpUploadProgress', (p) => {
+      try { onProgress({ loaded: p?.loaded || 0, total: p?.total ?? null }); }
+      catch { /* operator-callback failures don't fail the upload */ }
+      // Best-effort cancellation: check on every progress tick.
+      // Single-part uploads only emit once, so this only catches
+      // multipart cancels mid-upload — small bodies will run to
+      // completion before the next poll.  For aggressive cancel
+      // semantics, the route layer should call uploader.abort()
+      // directly (see snapshot-s3-export's exec map).
+      if (typeof isCanceled === 'function' && isCanceled()) {
+        try { uploader.abort(); } catch { /* ignore */ }
+      }
+    });
+  }
+  const done = (async () => {
+    try { return await uploader.done(); }
+    finally { try { client.destroy?.(); } catch { /* ignore */ } }
+  })();
+  return { uploader, done, key };
+}
+
 // Get an object as a Node Readable stream. Caller is responsible for
 // consuming and closing the stream (the S3Client is destroyed once
 // the stream finishes via the `close` event handler we attach).

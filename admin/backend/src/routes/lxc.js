@@ -16,6 +16,7 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
+  cancelSnapshotExport,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -3424,6 +3425,14 @@ lxcRouter.get('/containers/:name/snapshot-exports', (req, res) => {
       error: r.error || null,
       started_at: r.started_at,
       finished_at: r.finished_at || null,
+      // Live progress (post-206).  bytes_total is set from the
+      // tarball size at the start of the upload; bytes_uploaded
+      // is updated every ~500ms by the Upload's progress event.
+      // cancel_requested = 1 means the operator clicked Cancel
+      // and the worker is mid-abort.
+      bytes_uploaded: r.bytes_uploaded || 0,
+      bytes_total: r.bytes_total || null,
+      cancel_requested: !!r.cancel_requested,
     })),
   });
 });
@@ -3488,6 +3497,30 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId',
     });
   }
   res.json({ success: true, alreadyDeleted: !!out.alreadyDeleted });
+});
+
+// POST /containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel
+// Aborts an in-flight upload.  Idempotent: cancelling a row
+// that's already terminal returns alreadyFinished=true.
+// The export row's status flips to 'failed' with
+// error='canceled by operator' once the upload's done()
+// promise rejects on the next event-loop tick.
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/cancel', async (req, res) => {
+  const { exportId } = req.params;
+  const out = await cancelSnapshotExport({
+    exportId,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  });
+  if (!out.ok) {
+    return res.status(out.error === 'export not found' ? 404 : 500).json({
+      success: false, error: out.error,
+    });
+  }
+  res.json({
+    success: true,
+    alreadyFinished: !!out.alreadyFinished,
+    status: out.status || 'pending',
+  });
 });
 
 // GET /containers/:name/snapshot-jobs/:jobId - Poll snapshot progress.

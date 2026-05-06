@@ -432,13 +432,21 @@ backupsRouter.get('/', requireAdmin, (_req, res) => {
 });
 
 // GET /api/backups/:id — single row, with manifest expanded.
-backupsRouter.get('/:id', requireAdmin, (req, res) => {
+//
+// Registered LATE — after all static-named routes (/schedules,
+// /restores, /usage, /health-classes) so they don't get matched
+// as :id values.  Express routes are tried in order; a leading
+// `/:id` with no prefix would swallow every single-segment GET
+// under this router.  The handler itself is up here for code
+// locality with the other backup-row CRUD; the actual mounting
+// happens at the very bottom of the file.
+function getBackupHandler(req, res) {
   const row = readBackup(req.params.id);
   if (!row) return res.status(404).json({ error: 'backup not found' });
   let manifest = null;
   try { manifest = JSON.parse(row.manifest_json || '{}'); } catch { manifest = null; }
   res.json({ backup: { ...publicBackupShape(row), manifest } });
-});
+}
 
 // POST /api/backups — create on-demand.  Sudo-gated; the operator
 // types a passphrase that is used once for KDF + AES-GCM and never
@@ -1005,3 +1013,15 @@ backupsRouter.get('/restores/:id', requireAdmin, (req, res) => {
 backupsRouter.get('/health-classes', requireAdmin, (_req, res) => {
   res.json({ classes: listHealthClasses() });
 });
+
+// ── Late-mounted dynamic /:id routes ───────────────────────────────
+//
+// These MUST be registered after every static-named route above
+// (/schedules, /restores, /usage, /health-classes) — otherwise
+// Express's first-match routing turns 'schedules' / 'restores' /
+// 'usage' / 'health-classes' into :id values and the handler
+// 4xx's with 'backup not found'.  The handlers themselves are
+// defined up where the rest of the per-row backup CRUD lives;
+// only the mounting is late.
+
+backupsRouter.get('/:id', requireAdmin, getBackupHandler);

@@ -57,6 +57,20 @@ else
     chmod 0700 /var/lib/proxypilot/vpn-peers
 fi
 
+# ── 5. Patch in MTU = 1280 on existing wg0.conf ────────────────────
+# The CLI's renderWg0Conf now emits MTU automatically on every
+# regenerate, but a host upgraded from a pre-MTU release won't see
+# that until the next peer mutation. patch-wg-mtu.sh closes the gap
+# idempotently and bounces the interface so the kernel picks up the
+# new MTU on the next handshake. No-op when wg0.conf doesn't exist
+# (operator hasn't run `vpn enable`) or the MTU line is already
+# present.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -x "${SCRIPT_DIR}/patch-wg-mtu.sh" ]]; then
+    "${SCRIPT_DIR}/patch-wg-mtu.sh" || \
+        log "WARNING: patch-wg-mtu.sh exited non-zero; wg0.conf may need a manual MTU line."
+fi
+
 log "VPN module installed."
 log "  enable:    proxypilot vpn enable --endpoint <host:port>"
 log "  status:    wg show wg0  (after enable)"

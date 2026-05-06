@@ -284,6 +284,44 @@ rm /opt/proxypilot/data/proxypilot.db
 docker compose -f /opt/proxypilot/docker-compose.yml restart
 ```
 
+### WireGuard VPN: peer connects but throughput is poor or fragmented
+
+ProxyPilot pins a WireGuard `MTU = 1280` on every generated config
+(server-side `wg0.conf` and every `proxypilot vpn peer add` client
+config). 1280 is IPv6's minimum guaranteed MTU and clears every
+common encapsulation overhead stack (PPPoE, double-NAT, mobile
+carriers, Cloudflare Tunnel, Tailscale-over-WG) without
+fragmentation.
+
+If you see a working handshake but stalled large transfers, check
+that **both ends agree on MTU**:
+
+```bash
+# Server side
+sudo wg show wg0
+ip link show wg0          # MTU column should read 1280
+
+# Client side (Linux)
+ip link show wg0          # MTU should also be 1280
+```
+
+Operators on a known all-Ethernet path who want the extra throughput
+can override the default by setting `PROXYPILOT_VPN_MTU=<n>` in the
+shell that runs `proxypilot vpn peer add` (or that runs `update.sh`,
+which retro-fits the value via `scripts/patch-wg-mtu.sh`). Valid
+range is 576-9000; out-of-range values are silently ignored and the
+1280 default is used instead.
+
+To change the MTU on an already-deployed wg0 in place:
+
+```bash
+sudo PROXYPILOT_VPN_MTU=1380 \
+    /opt/proxypilot/scripts/patch-wg-mtu.sh
+```
+
+The script is idempotent — re-running it on a config that already
+has the desired MTU is a no-op.
+
 ---
 
 ## Contributing

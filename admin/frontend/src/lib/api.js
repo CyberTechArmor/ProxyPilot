@@ -740,6 +740,10 @@ export const api = {
     { method: 'POST' },
   ),
 
+  // Global snapshot-export queue status.  Returns running + queued
+  // jobs across all containers.  Drives the admin-wide banner.
+  getSnapshotExportQueue: () => request('/lxc/containers/snapshot-export-queue'),
+
   // Pre-flight estimate for downloading a previously-taken snapshot.
   getLxcSnapshotExportInfo: (name, snapshotName) =>
     request(`/lxc/containers/${name}/snapshot/${snapshotName}/export-info`),

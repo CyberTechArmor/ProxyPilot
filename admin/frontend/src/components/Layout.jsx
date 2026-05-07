@@ -23,6 +23,8 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
+import SnapshotExportBanner from '@/components/SnapshotExportBanner';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -185,6 +187,7 @@ export default function Layout() {
   );
 
   return (
+    <SnapshotExportProvider>
     <div className="min-h-screen bg-background">
       {/* Mobile top bar (hidden on md+) */}
       <header className="fixed top-0 inset-x-0 z-40 flex h-14 items-center gap-2 border-b bg-card px-4 md:hidden">
@@ -403,10 +406,12 @@ export default function Layout() {
           render their terminal short. Stacked-content pages scroll
           inside the inner div via overflow-y-auto. */}
       <main className="pl-0 md:pl-64 pt-14 md:pt-0 h-screen flex flex-col">
+        <SnapshotExportBanner />
         <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
           <Outlet />
         </div>
       </main>
     </div>
+    </SnapshotExportProvider>
   );
 }

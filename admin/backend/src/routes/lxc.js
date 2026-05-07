@@ -17,6 +17,7 @@ import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
+  getSnapshotExportQueueStatus,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -3496,6 +3497,19 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req,
 });
 
 // POST /containers/snapshot-exports/sweep — manually trigger the
+// GET /containers/snapshot-export-queue — global view of every
+// snapshot export currently running OR queued.  Drives the
+// admin-wide banner so an operator on any page sees the in-flight
+// upload (with a progress percentage) instead of needing to
+// navigate back to the LXC tab.
+lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
+  try {
+    res.json({ success: true, ...getSnapshotExportQueueStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || 'queue status failed' });
+  }
+});
+
 // orphan-temp-instance sweeper.  Same code path as the
 // every-30-minute cron in lib/backup-scheduler; exposed here so
 // an operator who just cancelled a stuck push doesn't have to

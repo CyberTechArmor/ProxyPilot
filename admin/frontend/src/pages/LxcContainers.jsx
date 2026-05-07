@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
+import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
 const STATUS_COLORS = {
   Running: 'bg-green-500',
@@ -303,6 +304,22 @@ function ContainerFiles({ containerName, onOpenTerminal }) {
 
 export default function LxcContainers() {
   const { toast } = useToast();
+  // Global snapshot-export queue state.  Drives the per-button
+  // disabled gating: while this container's snapshot is being
+  // pushed (or sitting in the queue), the per-snapshot Push to
+  // S3 / delete / create buttons are greyed out so the operator
+  // can't fire competing operations.
+  const { status: exportQueue, isBusy: exportQueueBusy } = useSnapshotExports();
+  // True when the queue currently has a running OR queued job
+  // touching `containerName`.  Used to disable create/delete
+  // affordances on the same container's snapshot list.
+  const isContainerBusyForExport = (containerName) => {
+    if (!containerName) return false;
+    if ((exportQueue?.running || []).some((j) => j.container_name === containerName)) return true;
+    if ((exportQueue?.queued || []).some((j) => j.container_name === containerName)) return true;
+    return false;
+  };
+  const exportBusyTooltip = 'Waiting for snapshot export to finish.';
 
   // Incus availability
   const [incusAvailable, setIncusAvailable] = useState(null);
@@ -3172,7 +3189,8 @@ export default function LxcContainers() {
                         size="sm"
                         className="h-8 shrink-0"
                         onClick={handleCreateSnapshot}
-                        disabled={snapshotLoading || !snapshotName.trim()}
+                        disabled={snapshotLoading || !snapshotName.trim() || isContainerBusyForExport(selectedContainer.name)}
+                        title={isContainerBusyForExport(selectedContainer.name) ? exportBusyTooltip : undefined}
                       >
                         {snapshotLoading ? (
                           <Loader2 className="h-3 w-3 animate-spin" />
@@ -3384,7 +3402,8 @@ export default function LxcContainers() {
                                           size="sm"
                                           className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
                                           onClick={() => openPushDialog(sName)}
-                                          title="Push this snapshot to one or more S3 destinations"
+                                          disabled={exportQueueBusy}
+                                          title={exportQueueBusy ? exportBusyTooltip : 'Push this snapshot to one or more S3 destinations'}
                                         >
                                           Push to S3
                                         </Button>
@@ -3434,8 +3453,12 @@ export default function LxcContainers() {
                                     size="sm"
                                     className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
                                     onClick={() => setConfirmDeleteSnap(sName)}
-                                    disabled={snapshotLoading}
-                                    title="Delete snapshot from EVERY location (local + every S3 destination)"
+                                    disabled={snapshotLoading || (selectedContainer && isContainerBusyForExport(selectedContainer.name))}
+                                    title={
+                                      (selectedContainer && isContainerBusyForExport(selectedContainer.name))
+                                        ? exportBusyTooltip
+                                        : 'Delete snapshot from EVERY location (local + every S3 destination)'
+                                    }
                                   >
                                     <Trash2 className="h-3 w-3" />
                                   </Button>

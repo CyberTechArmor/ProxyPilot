@@ -27,7 +27,72 @@ import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
 import { putObjectWithControl, deleteObject, buildKey, getObjectStream } from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
-import { spawnHostSync, hasHostBinary } from './host-exec.js';
+import { spawnHostSync, spawnHost, hasHostBinary } from './host-exec.js';
+
+// Async wrapper around spawnHost.  Drop-in replacement for
+// spawnHostSync that does NOT block the Node event loop — using
+// spawnSync to shell out to a multi-minute `incus copy` /
+// `incus export` froze the entire admin process on small VMs
+// (operator reported a ~60s UI lockup on a 2 vCPU Linode).  The
+// resulting object mirrors spawnSync's shape (status / stdout /
+// stderr / error / signal) so callers don't change.
+function runHost(bin, args = [], opts = {}) {
+  return new Promise((resolve) => {
+    const enc = opts.encoding;
+    const child = spawnHost(bin, args, {
+      ...opts,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: undefined,
+    });
+    const outChunks = [];
+    const errChunks = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let killed = false;
+    let timer;
+    if (opts.timeout) {
+      timer = setTimeout(() => {
+        killed = true;
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      }, opts.timeout);
+    }
+    if (child.stdout) {
+      child.stdout.on('data', (c) => { outChunks.push(c); outBytes += c.length; });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (c) => { errChunks.push(c); errBytes += c.length; });
+    }
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        status: null, signal: null, error: err,
+        stdout: enc === 'buffer'
+          ? Buffer.concat(outChunks, outBytes)
+          : Buffer.concat(outChunks, outBytes).toString(enc || 'utf-8'),
+        stderr: enc === 'buffer'
+          ? Buffer.concat(errChunks, errBytes)
+          : Buffer.concat(errChunks, errBytes).toString(enc || 'utf-8'),
+      });
+    });
+    child.on('close', (code, signal) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        status: killed ? null : code,
+        signal,
+        stdout: enc === 'buffer'
+          ? Buffer.concat(outChunks, outBytes)
+          : Buffer.concat(outChunks, outBytes).toString(enc || 'utf-8'),
+        stderr: enc === 'buffer'
+          ? Buffer.concat(errChunks, errBytes)
+          : Buffer.concat(errChunks, errBytes).toString(enc || 'utf-8'),
+      });
+    });
+    if (opts.input != null && child.stdin) {
+      try { child.stdin.write(opts.input); } catch { /* ignore */ }
+      try { child.stdin.end(); } catch { /* ignore */ }
+    }
+  });
+}
 
 // In-memory map of in-flight uploads so the cancel route can
 // abort them.  Keyed by export row id; value carries the Upload
@@ -74,7 +139,7 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // path must be host-side.  We write to /tmp on the host then
 // `cat` the bytes back into the dashboard container.  Same
 // dance backup-pack's exportIncusInstance uses.
-export function exportSnapshotToTmp({ incusName, snapshotName }) {
+export async function exportSnapshotToTmp({ incusName, snapshotName }) {
   if (!SAFE_NAME.test(incusName)) {
     return { ok: false, error: `unsafe instance name: ${incusName}` };
   }
@@ -97,15 +162,18 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
 
   let copyDone = false;
   try {
-    const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
+    const mkdir = await runHost('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
     if (mkdir.status !== 0) {
       throw new Error(
         `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`
       );
     }
 
-    // Step 1: copy snapshot → temp instance.
-    const cp = spawnHostSync('incus', [
+    // Step 1: copy snapshot → temp instance.  Wrapped in `nice`
+    // so the snapshot dance doesn't starve the dashboard / Caddy
+    // / other host processes on small VMs.
+    const cp = await runHost('nice', [
+      '-n', '19', 'incus',
       'copy', `${incusName}/${snapshotName}`, tempInstance,
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
     if (cp.status !== 0) {
@@ -116,7 +184,8 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
     copyDone = true;
 
     // Step 2: export the temp instance.
-    const ex = spawnHostSync('incus', [
+    const ex = await runHost('nice', [
+      '-n', '19', 'incus',
       'export', tempInstance, hostOut,
       '--instance-only', '--compression', 'gzip',
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
@@ -127,7 +196,7 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
     }
 
     // Step 3: pipe the host tarball into the container.
-    const cat = spawnHostSync('cat', [hostOut], {
+    const cat = await runHost('cat', [hostOut], {
       encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
     });
     if (cat.status !== 0) {
@@ -141,32 +210,21 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
   } finally {
-    // Cleanup runs regardless of outcome.  Capture stderr so a
-    // silent delete failure (e.g. incus daemon mid-stop, network
-    // hiccup talking to the daemon, instance left in a state
-    // --force doesn't recover from) is logged + visible to the
-    // sweeper that runs periodically.
+    // Cleanup runs regardless of outcome.  Synchronous because the
+    // whole function is now async; awaiting in finally is fine
+    // and the cleanup is short.
     if (copyDone) {
-      // First try: plain --force delete (handles a running
-      // temp in one shot).
-      const del = spawnHostSync('incus', ['delete', '--force', tempInstance], {
+      const del = await runHost('incus', ['delete', '--force', tempInstance], {
         encoding: 'utf-8', timeout: 60_000,
       });
       if (del.status !== 0) {
-        // Fallback: stop-then-delete in case the temp is in a
-        // state --force alone won't budge.  Some incus versions
-        // require an explicit stop before delete on certain
-        // storage backends.
-        spawnHostSync('incus', ['stop', '--force', tempInstance], {
+        await runHost('incus', ['stop', '--force', tempInstance], {
           encoding: 'utf-8', timeout: 30_000,
         });
-        const del2 = spawnHostSync('incus', ['delete', '--force', tempInstance], {
+        const del2 = await runHost('incus', ['delete', '--force', tempInstance], {
           encoding: 'utf-8', timeout: 60_000,
         });
         if (del2.status !== 0) {
-          // Log loudly — the sweeper will pick it up later, but
-          // an immediate hint in stderr lets the operator
-          // correlate with their dashboard activity.
           // eslint-disable-next-line no-console
           console.error(
             `[snapshot-s3-export] failed to delete temp instance ${tempInstance}: ` +
@@ -175,7 +233,7 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
         }
       }
     }
-    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
+    await runHost('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
   }
 }
 
@@ -358,17 +416,117 @@ function buildSnapshotKey(dest, incusName, snapshotName) {
   return buildKey(dest, objectName);
 }
 
+// In-process export queue.  Caps the number of `incus export`
+// dances running in parallel — the export step is CPU + IO heavy
+// and on small VMs (2 vCPU / 4 GB Linode-class) firing two at
+// once starves the dashboard process.  Default 1 (serialized);
+// configurable via PROXYPILOT_SNAPSHOT_EXPORT_CONCURRENCY for
+// beefier hosts where parallelism is worth it.
+//
+// Pending rows in lxc_snapshot_s3_exports are inserted up front
+// (so the UI shows 'pending' chips immediately even for queued
+// jobs); the worker just dequeues a runFn and awaits it.
+const QUEUE = {
+  maxConcurrency: (() => {
+    const raw = parseInt(process.env.PROXYPILOT_SNAPSHOT_EXPORT_CONCURRENCY || '1', 10);
+    return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+  })(),
+  running: new Map(), // jobId -> { containerName, snapshotName, startedAt }
+  queue: [], // [{ jobId, containerName, snapshotName, runFn, resolve }]
+};
+
+function tickSnapshotExportQueue() {
+  while (QUEUE.running.size < QUEUE.maxConcurrency && QUEUE.queue.length > 0) {
+    const job = QUEUE.queue.shift();
+    QUEUE.running.set(job.jobId, {
+      containerName: job.containerName,
+      snapshotName: job.snapshotName,
+      startedAt: Date.now(),
+    });
+    Promise.resolve()
+      .then(() => job.runFn())
+      .then((result) => {
+        QUEUE.running.delete(job.jobId);
+        try { job.resolve(result); } catch { /* ignore */ }
+        tickSnapshotExportQueue();
+      })
+      .catch((err) => {
+        QUEUE.running.delete(job.jobId);
+        try { job.resolve({ error: err?.message || String(err) }); } catch { /* ignore */ }
+        tickSnapshotExportQueue();
+      });
+  }
+}
+
+function enqueueSnapshotExportJob({ jobId, containerName, snapshotName, runFn }) {
+  return new Promise((resolve) => {
+    QUEUE.queue.push({ jobId, containerName, snapshotName, runFn, resolve });
+    tickSnapshotExportQueue();
+  });
+}
+
+// getSnapshotExportQueueStatus() — feed for the global 'export in
+// progress' banner.  Returns running + queued jobs + the
+// configured concurrency cap, plus live byte progress for each
+// running job (joined from lxc_snapshot_s3_exports so the banner
+// can render a percentage without a separate query).
+export function getSnapshotExportQueueStatus() {
+  const db = getDb();
+  const running = [];
+  for (const [jobId, entry] of QUEUE.running) {
+    let rows = [];
+    try {
+      rows = db.prepare(`
+        SELECT e.id, e.destination_id, d.name AS destination_name,
+               e.bytes_uploaded, e.bytes_total, e.cancel_requested, e.status
+        FROM lxc_snapshot_s3_exports e
+        LEFT JOIN backup_destinations d ON d.id = e.destination_id
+        WHERE e.container_name = ? AND e.snapshot_name = ?
+          AND e.status = 'pending'
+      `).all(entry.containerName, entry.snapshotName);
+    } catch { /* tolerated */ }
+    const totalBytes = rows.reduce((s, r) => s + (r.bytes_total || 0), 0);
+    const uploadedBytes = rows.reduce((s, r) => s + (r.bytes_uploaded || 0), 0);
+    running.push({
+      job_id: jobId,
+      container_name: entry.containerName,
+      snapshot_name: entry.snapshotName,
+      started_at: entry.startedAt,
+      bytes_uploaded: uploadedBytes,
+      bytes_total: totalBytes || null,
+      destinations: rows.map((r) => ({
+        export_id: r.id,
+        destination_id: r.destination_id,
+        destination_name: r.destination_name || null,
+        bytes_uploaded: r.bytes_uploaded || 0,
+        bytes_total: r.bytes_total || null,
+        cancel_requested: !!r.cancel_requested,
+      })),
+    });
+  }
+  return {
+    max_concurrency: QUEUE.maxConcurrency,
+    running,
+    queued: QUEUE.queue.map((j) => ({
+      job_id: j.jobId,
+      container_name: j.containerName,
+      snapshot_name: j.snapshotName,
+    })),
+    queue_depth: QUEUE.queue.length,
+  };
+}
+
 // fanOutSnapshotExport({ incusName, snapshotName, destinations,
-//                       audit }) → [exportRow, ...]
+//                       audit }) → { results, size_bytes }
 //
 // Drives the export-and-push.  Inserts a 'pending' row in
-// lxc_snapshot_s3_exports per destination up front so the UI can
-// render 'in flight'; flips to 'exported' or 'failed' as each
-// upload resolves.
+// lxc_snapshot_s3_exports per destination up front so the UI
+// renders 'in flight' immediately, then enqueues the actual
+// export-and-upload work onto the in-process queue (concurrency
+// capped — see QUEUE above).  Awaiting the returned promise
+// blocks until this snapshot's queued slot has run.
 //
-// Returns the per-destination outcome so the route layer can
-// surface them in the kickoff response.  Cleanup of the tmp dir
-// always runs via the finally block.
+// Cleanup of the tmp dir always runs via the worker's finally.
 export async function fanOutSnapshotExport({
   containerName, incusName, snapshotName, destinations, audit = {},
 }) {
@@ -377,10 +535,9 @@ export async function fanOutSnapshotExport({
   }
 
   const db = getDb();
-  const results = [];
 
   // Insert 'pending' rows immediately so the UI sees the export
-  // state without waiting for the shell-out to finish.
+  // state without waiting for the worker to pick the job up.
   const exportIds = new Map(); // destination_id -> exportRowId
   for (const dest of destinations) {
     const exportId = uuid();
@@ -396,9 +553,53 @@ export async function fanOutSnapshotExport({
     exportIds.set(dest.id, exportId);
   }
 
+  return enqueueSnapshotExportJob({
+    jobId: uuid(),
+    containerName,
+    snapshotName,
+    runFn: () => runSnapshotExport({
+      containerName, incusName, snapshotName, destinations, exportIds, audit,
+    }),
+  });
+}
+
+// runSnapshotExport — the actual incus-export-and-S3-upload work.
+// Called by the queue worker; never invoked directly by routes.
+async function runSnapshotExport({
+  containerName, incusName, snapshotName, destinations, exportIds, audit,
+}) {
+  const db = getDb();
+  const results = [];
+
+  // Early exit: an operator may have cancelled every destination
+  // while this job sat in the queue.  Bail before the expensive
+  // `incus copy/export` dance kicks off.
+  const checkCanceled = db.prepare(
+    `SELECT cancel_requested FROM lxc_snapshot_s3_exports WHERE id = ?`
+  );
+  const allCanceled = [...exportIds.values()].every((id) => {
+    const r = checkCanceled.get(id);
+    return r && r.cancel_requested;
+  });
+  if (allCanceled) {
+    for (const dest of destinations) {
+      db.prepare(`
+        UPDATE lxc_snapshot_s3_exports
+        SET status = 'failed', error = 'canceled by operator',
+            finished_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(exportIds.get(dest.id));
+      results.push({
+        destination_id: dest.id, destination_name: dest.name,
+        ok: false, error: 'canceled by operator', canceled: true,
+      });
+    }
+    return { results, skipped: 'all destinations canceled' };
+  }
+
   // One shared `incus export` for every destination — same
   // tarball pushed N times.
-  const exported = exportSnapshotToTmp({ incusName, snapshotName });
+  const exported = await exportSnapshotToTmp({ incusName, snapshotName });
   if (!exported.ok) {
     // Mark every pending row failed with the same export error.
     for (const dest of destinations) {

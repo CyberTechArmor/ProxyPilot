@@ -5,7 +5,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink, readdir, readFile, mkdir, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, basename, resolve } from 'path';
+import { join, basename, resolve, dirname } from 'path';
 import os from 'os';
 import * as OTPAuth from 'otpauth';
 import { getDb, logAudit, getAdminDomain } from '../db.js';
@@ -59,7 +59,16 @@ async function execOnHost(command, options = {}) {
 // Write Caddy site config file
 // Note: Since /etc/caddy/sites is a mounted volume in Docker,
 // regular writeFile works. Only shell commands (caddy reload, etc.) need execOnHost.
+//
+// Defensive mkdir of the parent: ensureCaddyStructure swallows
+// mkdir failures with .catch(() => {}) so a transient setup
+// error there leaves the dir absent and the next writeFile
+// surfaces as ENOENT to the operator ("Failed to add service:
+// no such file or directory").  Re-creating the parent here is
+// cheap (recursive: true is a no-op when the dir exists) and
+// turns the failure mode into "self-heal on every write".
 async function writeCaddyConfig(configPath, content) {
+  await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, content);
 }
 

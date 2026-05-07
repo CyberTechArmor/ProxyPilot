@@ -2083,6 +2083,11 @@ lxcRouter.post('/containers/:name/services', async (req, res) => {
       const tlsDirective = cert ? '' : '\n    tls internal';
       const healthMarker = cleanHealthPath ? `# proxypilot: healthpath=${cleanHealthPath}\n` : '';
       const caddyConfig = `${healthMarker}${cleanDomain} {${tlsDirective}\n    reverse_proxy ${ip}:${svcPort}\n    encode gzip zstd\n    log {\n        output file /var/log/caddy/${cleanDomain}.log\n    }\n}\n`;
+      // Defensive: ensureCaddyStructure swallows mkdir errors with
+      // .catch(() => {}) so a missing /etc/caddy/sites surfaces here
+      // as ENOENT instead of being self-healed.  Recursive mkdir is
+      // a no-op when the dir exists.
+      await mkdir(CADDY_SITES_DIR, { recursive: true });
       await writeFile(configPath, caddyConfig);
 
       let reloadWarning = null;

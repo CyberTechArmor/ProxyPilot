@@ -91,6 +91,76 @@ function formatDuration(ms) {
   return remM ? `${h}h ${remM}m` : `${h}h`;
 }
 
+// Renders the per-destination pending-export row beneath a
+// snapshot.  Two reasons this is its own component:
+//   1. It needs a 1Hz local timer so the elapsed reading ticks
+//      between the parent's polled refreshes (snapshotS3Exports
+//      refresh fires far less often than the operator wants the
+//      seconds counter to advance).
+//   2. Color-coding ('preparing' = amber, 'uploading' = sky)
+//      reads better as a single styled unit than as a chain of
+//      conditional class strings inline.
+function PendingSnapshotExportRow({
+  exportRow, onCancel, cancelDisabled, snapshotName,
+}) {
+  const e = exportRow;
+  const pct = (e.bytes_total && e.bytes_total > 0)
+    ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
+    : null;
+  // Phase inferred from byte counts: bytes_total set means
+  // putObject's first httpUploadProgress fired, i.e. we're
+  // actively uploading.  Until then we're in the prep phase
+  // (incus copy + export + read-into-buffer).
+  const phase = pct !== null ? 'uploading' : 'preparing';
+
+  // 1Hz tick so the displayed elapsed advances every second
+  // regardless of how often the parent re-fetches.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const startedAtMs = e.started_at ? Date.parse(e.started_at) : null;
+  const elapsedMs = startedAtMs ? Date.now() - startedAtMs : null;
+  const elapsedLabel = elapsedMs !== null && elapsedMs >= 0
+    ? formatDuration(elapsedMs) : null;
+
+  const colors = phase === 'uploading'
+    ? { bar: 'bg-sky-500', track: 'bg-sky-500/20', text: 'text-sky-600 dark:text-sky-400' }
+    : { bar: 'bg-amber-500', track: 'bg-amber-500/20', text: 'text-amber-600 dark:text-amber-400' };
+
+  return (
+    <div className="flex items-center gap-2 text-[10.5px]">
+      <span className="text-muted-foreground min-w-[5rem] truncate">
+        → {e.destination_name || e.destination_id}
+      </span>
+      <div className={`flex-1 max-w-md h-1 ${colors.track} rounded overflow-hidden`}>
+        <div
+          className={`h-full ${colors.bar} transition-[width] duration-700`}
+          style={{ width: pct !== null ? `${Math.max(2, pct)}%` : '5%' }}
+        />
+      </div>
+      <span className={`font-mono tabular-nums ${colors.text}`}>
+        {e.cancel_requested
+          ? 'cancelling…'
+          : pct !== null
+            ? `${pct}%${elapsedLabel ? ` · ${elapsedLabel}` : ''}`
+            : `preparing${elapsedLabel ? ` · ${elapsedLabel}` : '…'}`}
+      </span>
+      {!e.cancel_requested && (
+        <button
+          type="button"
+          onClick={() => onCancel(snapshotName, e.id)}
+          disabled={cancelDisabled}
+          className="text-[10px] px-1.5 py-0.5 rounded border border-border hover:bg-muted/40 disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  );
+}
+
 
 // LxcTerminalPanel wraps InteractiveTerminal for an LXC.
 // The legacy "Run install script" toolbar was removed once dedicated
@@ -3724,39 +3794,15 @@ export default function LxcContainers() {
                                   {(snapshotS3Exports[sName] || [])
                                     .filter((e) => e.status === 'pending' || e.status === 'failed')
                                     .map((e) => {
-                                      const pct = (e.bytes_total && e.bytes_total > 0)
-                                        ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
-                                        : null;
                                       if (e.status === 'pending') {
                                         return (
-                                          <div key={`status-${e.id}`} className="flex items-center gap-2 text-[10.5px]">
-                                            <span className="text-muted-foreground min-w-[5rem] truncate">
-                                              → {e.destination_name || e.destination_id}
-                                            </span>
-                                            <div className="flex-1 max-w-md h-1 bg-muted rounded overflow-hidden">
-                                              <div
-                                                className="h-full bg-amber-500 transition-[width] duration-700"
-                                                style={{ width: pct !== null ? `${Math.max(2, pct)}%` : '5%' }}
-                                              />
-                                            </div>
-                                            <span className="font-mono text-muted-foreground tabular-nums">
-                                              {e.cancel_requested
-                                                ? 'cancelling…'
-                                                : pct !== null
-                                                  ? `${pct}%`
-                                                  : 'preparing…'}
-                                            </span>
-                                            {!e.cancel_requested && (
-                                              <button
-                                                type="button"
-                                                onClick={() => cancelSnapshotExport(sName, e.id)}
-                                                disabled={cancelingExportIds.has(e.id)}
-                                                className="text-[10px] px-1.5 py-0.5 rounded border border-border hover:bg-muted/40 disabled:opacity-50"
-                                              >
-                                                Cancel
-                                              </button>
-                                            )}
-                                          </div>
+                                          <PendingSnapshotExportRow
+                                            key={`status-${e.id}`}
+                                            exportRow={e}
+                                            snapshotName={sName}
+                                            onCancel={cancelSnapshotExport}
+                                            cancelDisabled={cancelingExportIds.has(e.id)}
+                                          />
                                         );
                                       }
                                       // status === 'failed'

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSnapshotExports } from '@/context/SnapshotExportContext';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -56,11 +56,65 @@ export default function SnapshotExportBanner() {
   // read-into-buffer) we don't have a percentage yet, so render
   // elapsed + estimate when one is available.
   const phase = running?.phase || 'preparing';
-  const phaseElapsedMs = running?.phase_elapsed_ms || 0;
+  const serverPhaseElapsedMs = running?.phase_elapsed_ms || 0;
+
+  // Local seconds counter so the elapsed reading ticks every
+  // second regardless of the 2.5s poll cadence.  Re-baselines on
+  // every poll: when a new server snapshot lands we capture
+  // (its phase_elapsed_ms, the wall clock at receipt) and the
+  // displayed elapsed = server_value + (now - receivedAt).  Resets
+  // whenever the phase changes so a preparing→uploading flip
+  // restarts the visible timer.
+  const baselineRef = useRef({
+    phase, serverMs: serverPhaseElapsedMs, receivedAt: Date.now(),
+  });
+  useEffect(() => {
+    baselineRef.current = {
+      phase,
+      serverMs: serverPhaseElapsedMs,
+      receivedAt: Date.now(),
+    };
+  }, [phase, serverPhaseElapsedMs]);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!running) return undefined;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [running ? running.snapshot_name : null]);
+  // Reading `tick` keeps the linter happy and forces re-render.
+  void tick;
+  const phaseElapsedMs = running
+    ? baselineRef.current.serverMs + (Date.now() - baselineRef.current.receivedAt)
+    : 0;
+
   const prepEstimateMs = running?.prep_estimate_ms || null;
   const prepPctEstimate = prepEstimateMs
     ? Math.min(95, Math.round((phaseElapsedMs / prepEstimateMs) * 100))
     : null;
+
+  // Color palette per phase.  Amber while preparing matches the
+  // existing tone for "warming up"; sky/blue once uploading
+  // signals "actively pushing bytes" — the operator's mental
+  // model from the snapshot panel uses the same blue accent.
+  const palette = phase === 'uploading'
+    ? {
+      bg: 'bg-sky-500/15 supports-[backdrop-filter]:bg-sky-500/10',
+      border: 'border-sky-500/30',
+      icon: 'text-sky-600 dark:text-sky-400',
+      chip: 'bg-sky-500/20',
+      btn: 'border-sky-500/40 hover:bg-sky-500/20',
+      barTrack: 'bg-sky-500/20',
+      barFill: 'bg-sky-500',
+    }
+    : {
+      bg: 'bg-amber-500/15 supports-[backdrop-filter]:bg-amber-500/10',
+      border: 'border-amber-500/30',
+      icon: 'text-amber-600 dark:text-amber-400',
+      chip: 'bg-amber-500/20',
+      btn: 'border-amber-500/40 hover:bg-amber-500/20',
+      barTrack: 'bg-amber-500/20',
+      barFill: 'bg-amber-500',
+    };
 
   const handleCancelConfirm = async () => {
     if (!running) return;
@@ -92,16 +146,16 @@ export default function SnapshotExportBanner() {
     <>
       <div
         role="status"
-        className="sticky top-0 z-30 bg-amber-500/15 border-b border-amber-500/30 backdrop-blur supports-[backdrop-filter]:bg-amber-500/10 px-4 py-2 text-sm"
+        className={`sticky top-0 z-30 ${palette.bg} border-b ${palette.border} backdrop-blur px-4 py-2 text-sm transition-colors`}
       >
         <div className="flex items-center gap-3 max-w-screen-2xl mx-auto">
-          <Loader2 className="h-4 w-4 animate-spin text-amber-600 dark:text-amber-400 shrink-0" />
+          <Loader2 className={`h-4 w-4 animate-spin ${palette.icon} shrink-0`} />
           <div className="flex-1 min-w-0">
             {running ? (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-medium truncate">
                   Pushing snapshot{' '}
-                  <code className="font-mono text-xs bg-amber-500/20 px-1.5 py-0.5 rounded">
+                  <code className={`font-mono text-xs ${palette.chip} px-1.5 py-0.5 rounded`}>
                     {running.container_name}/{running.snapshot_name}
                   </code>{' '}
                   to S3
@@ -133,9 +187,9 @@ export default function SnapshotExportBanner() {
                   doesn't look 'done' before incus actually
                   finishes the copy / export). */}
             {((phase === 'uploading' && pct !== null) || (phase === 'preparing' && prepPctEstimate !== null)) && (
-              <div className="mt-1 h-1 w-full overflow-hidden rounded bg-amber-500/20">
+              <div className={`mt-1 h-1 w-full overflow-hidden rounded ${palette.barTrack}`}>
                 <div
-                  className="h-full bg-amber-500 transition-[width] duration-700"
+                  className={`h-full ${palette.barFill} transition-[width] duration-700`}
                   style={{
                     width: `${Math.max(2, phase === 'uploading' ? pct : prepPctEstimate)}%`,
                   }}
@@ -148,7 +202,7 @@ export default function SnapshotExportBanner() {
               type="button"
               onClick={() => setConfirmCancelOpen(true)}
               disabled={cancelling}
-              className="text-xs px-2 py-1 rounded border border-amber-500/40 hover:bg-amber-500/20 disabled:opacity-50 flex items-center gap-1 shrink-0"
+              className={`text-xs px-2 py-1 rounded border ${palette.btn} disabled:opacity-50 flex items-center gap-1 shrink-0`}
               title="Cancel the currently-running export"
             >
               <X className="h-3 w-3" />

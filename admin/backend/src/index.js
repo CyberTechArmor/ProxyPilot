@@ -267,6 +267,32 @@ try {
   console.error('[backups] missing-file sweep failed at boot:', err?.message || err);
 }
 
+// Sweep orphan 'pending' snapshot S3 export rows.  The export
+// flow inserts the row in 'pending' immediately, attaches the
+// in-flight Upload to ACTIVE_UPLOADS, then flips to 'exported'
+// or 'failed' on completion.  ACTIVE_UPLOADS is in-memory, so a
+// process restart leaves the row at 'pending' forever — the
+// snapshot panel keeps rendering "preparing…" with no banner
+// (because the in-memory queue is empty post-boot) and the
+// operator has no path forward except a manual SQL update.
+// Same shape of fix as the in_progress backup sweep above:
+// no pending row from before this boot can still be running.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE lxc_snapshot_s3_exports
+     SET status = 'failed',
+         finished_at = CURRENT_TIMESTAMP,
+         error = COALESCE(error, 'orphaned pending at admin restart')
+     WHERE status = 'pending'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[snapshot-s3-export] swept ${orphans.changes} orphan pending row(s) at boot`);
+  }
+} catch (err) {
+  console.error('[snapshot-s3-export] orphan sweep failed at boot:', err?.message || err);
+}
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), frontendPath: FRONTEND_PATH });

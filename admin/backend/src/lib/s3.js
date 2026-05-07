@@ -19,6 +19,7 @@
 import {
   S3Client,
   HeadBucketCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
@@ -208,6 +209,45 @@ export async function deleteObject(dest, key) {
   const client = clientForDestination(dest);
   try {
     await client.send(new DeleteObjectCommand({ Bucket: dest.bucket, Key: key }));
+  } finally {
+    try { client.destroy?.(); } catch { /* ignore */ }
+  }
+}
+
+// headObject(dest, key) → { found, content_length?, retention_mode?,
+//   retention_until?, legal_hold? } | { found: false }
+//
+// Used by the snapshot-S3-delete flow to surface object-lock info
+// before the operator confirms.  B2's web UI marks locked files
+// with a `*` glyph; our delete returns success but the bucket
+// silently holds the bytes until retention expires, leaving an
+// operator with stale 'deleted' rows in the dashboard while their
+// bucket bills keep climbing.  Calling HeadObject up front lets
+// us tell the operator "this object is locked until 2026-08-15"
+// instead of letting the delete silently no-op.
+export async function headObject(dest, key) {
+  const client = clientForDestination(dest);
+  try {
+    const res = await client.send(new HeadObjectCommand({
+      Bucket: dest.bucket, Key: key,
+    }));
+    return {
+      found: true,
+      content_length: res.ContentLength || null,
+      content_type: res.ContentType || null,
+      last_modified: res.LastModified || null,
+      retention_mode: res.ObjectLockMode || null,
+      retention_until: res.ObjectLockRetainUntilDate
+        ? new Date(res.ObjectLockRetainUntilDate).toISOString()
+        : null,
+      legal_hold: res.ObjectLockLegalHoldStatus === 'ON',
+    };
+  } catch (err) {
+    const code = err?.name || err?.Code || '';
+    if (/NotFound|404|NoSuchKey/i.test(code) || err?.$metadata?.httpStatusCode === 404) {
+      return { found: false };
+    }
+    throw err;
   } finally {
     try { client.destroy?.(); } catch { /* ignore */ }
   }

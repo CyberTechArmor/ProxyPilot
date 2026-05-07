@@ -702,6 +702,16 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  // HEAD-style metadata for a single S3 copy: object size,
+  // last-modified, plus retention/legal-hold info.  Used by the
+  // delete-confirm dialog to show 'retained until ...' before the
+  // operator commits.  Returns 404 / 502 via ApiError when the
+  // bucket is unreachable.
+  getLxcSnapshotS3ExportInfo: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/info`,
+    ),
+
   // Cancel an in-flight S3 export.  No-op when the row already
   // reached a terminal state (returns { alreadyFinished: true }).
   cancelLxcSnapshotS3Export: (name, snapshotName, exportId) =>
@@ -738,6 +748,13 @@ export const api = {
   restoreLxcSnapshotFromS3: (name, snapshotName, exportId) => request(
     `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/restore`,
     { method: 'POST' },
+  ),
+
+  // Polled by the Pull-from-S3 dialog while the long-running
+  // download/import dance runs.  { found, phase, label,
+  // bytes_loaded?, bytes_total?, error? }.
+  getLxcSnapshotS3ImportProgress: (name, snapshotName, exportId) => request(
+    `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/import-progress`,
   ),
 
   // Global snapshot-export queue status.  Returns running + queued

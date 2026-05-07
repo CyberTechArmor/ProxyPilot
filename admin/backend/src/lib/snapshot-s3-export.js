@@ -25,7 +25,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
-import { putObjectWithControl, deleteObject, buildKey, getObjectStream } from './s3.js';
+import {
+  putObjectWithControl, deleteObject, buildKey, getObjectStream, headObject,
+} from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
 import { spawnHostSync, spawnHost, hasHostBinary } from './host-exec.js';
 
@@ -237,22 +239,45 @@ export async function exportSnapshotToTmp({ incusName, snapshotName }) {
   }
 }
 
+// In-memory progress for in-flight S3→local pulls.  Keyed by the
+// export row id so the frontend's poll endpoint can scope to a
+// specific row.  Phases: downloading | writing-tarball |
+// importing | snapshotting-temp | landing-snapshot | cleanup |
+// done | error.  Each entry carries human-readable label + bytes
+// fields when downloading.
+const IMPORT_PROGRESS = new Map();
+
+function setImportProgress(exportId, fields) {
+  if (!exportId) return;
+  const prev = IMPORT_PROGRESS.get(exportId) || {};
+  IMPORT_PROGRESS.set(exportId, { ...prev, ...fields, updated_at: Date.now() });
+}
+
+export function getImportProgress({ exportId }) {
+  return IMPORT_PROGRESS.get(exportId) || null;
+}
+
 // importSnapshotFromS3({ destination, s3Key, incusName, snapshotName,
-//                        audit }) → { ok, error?, sizeBytes? }
+//                        exportId, audit }) → { ok, error?, sizeBytes? }
 //
-// The reverse of exportSnapshotToTmp + S3 upload: stream the
-// tarball from S3 into a host /tmp file, `incus import` it as a
-// throwaway temp instance, then `incus copy <temp> <orig>/<snap>`
-// to land it as a snapshot on the original container.  Caller is
-// responsible for verifying the orig instance exists.
+// The reverse of exportSnapshotToTmp + S3 upload.  Phase by phase:
 //
-// This intentionally uses spawnHostSync for the long-running
-// incus calls — the queue (lib/snapshot-export-queue) serialises
-// imports the same way it serialises exports, and the operator
-// expects a blocking response (mirror of the regular import
-// flow).
+//   1. Stream the tarball from S3 into a buffer; spawnHost('cat')
+//      pipes that buffer into a host /tmp file.
+//   2. `incus import <tarball> <temp-instance>` — fresh instance.
+//   3. `incus snapshot create <temp> <snapname>` — temp now owns
+//      a snapshot named like the source snapshot.
+//   4. `incus copy <temp>/<snapname> <orig>/<snapname>` — incus
+//      accepts the snapshot-to-snapshot form when both sides
+//      include a `/`; the bare `<temp> <orig>/<snap>` form fails
+//      with 'character / is reserved for snapshots' because Incus
+//      6.x parses the target as 'create instance named foo/bar'.
+//   5. `incus delete --force <temp>` — cleanup.
+//
+// Caller is responsible for verifying the orig instance exists
+// and that no local snapshot with the same name is in the way.
 export async function importSnapshotFromS3({
-  destination, s3Key, incusName, snapshotName, audit = {},
+  destination, s3Key, incusName, snapshotName, exportId = null, audit = {},
 }) {
   if (!SAFE_NAME.test(incusName)) {
     return { ok: false, error: `unsafe instance name: ${incusName}` };
@@ -271,28 +296,62 @@ export async function importSnapshotFromS3({
 
   let importDone = false;
   try {
-    const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
+    const mkdir = await runHost('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
     if (mkdir.status !== 0) {
       throw new Error(
         `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`
       );
     }
 
-    // Stream S3 object → buffer in the container, then pipe into
-    // a host file via `cat`.  Buffering matches exportSnapshotToTmp's
-    // approach; tarballs north of host RAM aren't realistic at the
-    // 'snapshot of a single LXC' scale this feature targets.
+    // Phase 1: stream S3 → buffer.  HEAD first so we can render a
+    // percentage; some S3-compatible endpoints don't return
+    // ContentLength on the streamed GET.
+    let bytesTotal = null;
+    try {
+      const meta = await headObject(destination, s3Key);
+      if (meta && meta.found && meta.content_length) bytesTotal = meta.content_length;
+    } catch { /* tolerated */ }
+    setImportProgress(exportId, {
+      phase: 'downloading',
+      label: 'Downloading tarball from S3',
+      bytes_loaded: 0,
+      bytes_total: bytesTotal,
+    });
+
     const obj = await getObjectStream(destination, s3Key);
+    if (!bytesTotal && obj.contentLength) bytesTotal = obj.contentLength;
     const chunks = [];
     let downloaded = 0;
     await new Promise((resolve, reject) => {
-      obj.stream.on('data', (c) => { chunks.push(c); downloaded += c.length; });
+      obj.stream.on('data', (c) => {
+        chunks.push(c);
+        downloaded += c.length;
+        // Throttle progress updates: per chunk on a fast link can
+        // be hundreds of events per second.  Updating every 250ms
+        // is plenty for a polling UI on a 1s cadence.
+        const now = Date.now();
+        const last = (IMPORT_PROGRESS.get(exportId) || {}).updated_at || 0;
+        if (now - last >= 250) {
+          setImportProgress(exportId, {
+            phase: 'downloading',
+            label: 'Downloading tarball from S3',
+            bytes_loaded: downloaded,
+            bytes_total: bytesTotal,
+          });
+        }
+      });
       obj.stream.on('end', resolve);
       obj.stream.on('error', reject);
     });
     const buffer = Buffer.concat(chunks, downloaded);
+    setImportProgress(exportId, {
+      phase: 'writing-tarball',
+      label: 'Writing tarball to host /tmp',
+      bytes_loaded: buffer.length,
+      bytes_total: buffer.length,
+    });
 
-    const cat = spawnHostSync('sh', ['-c', `cat > ${hostTarball}`], {
+    const cat = await runHost('sh', ['-c', `cat > ${hostTarball}`], {
       input: buffer, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
     });
     if (cat.status !== 0) {
@@ -301,10 +360,15 @@ export async function importSnapshotFromS3({
       );
     }
 
-    // Step 1: incus import <tarball> <temp-instance>.  Creates a
-    // new instance from the tarball.  Snapshot itself is not
-    // restored as a snapshot yet — that's step 2.
-    const imp = spawnHostSync('incus', [
+    // Phase 2: incus import → temp instance.
+    setImportProgress(exportId, {
+      phase: 'importing',
+      label: `incus import → temp instance ${tempInstance}`,
+      bytes_total: buffer.length,
+      bytes_loaded: buffer.length,
+    });
+    const imp = await runHost('nice', [
+      '-n', '19', 'incus',
       'import', hostTarball, tempInstance,
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
     if (imp.status !== 0) {
@@ -314,11 +378,34 @@ export async function importSnapshotFromS3({
     }
     importDone = true;
 
-    // Step 2: copy the temp instance AS a new snapshot of the
-    // target container.  Incus accepts `<source> <target>/<snap>`
-    // which lands the source's state as a snapshot on target.
-    const cp = spawnHostSync('incus', [
-      'copy', tempInstance, `${incusName}/${snapshotName}`,
+    // Phase 3: snapshot the temp so we have a snapshot reference
+    // to copy from.  Incus's snapshot-to-snapshot copy in step 4
+    // requires both source and target to be snapshot references
+    // (i.e. include a `/`), otherwise it tries to interpret the
+    // target as a new instance name and trips on the slash.
+    setImportProgress(exportId, {
+      phase: 'snapshotting-temp',
+      label: 'Creating staging snapshot on temp instance',
+    });
+    const snap = await runHost('incus', [
+      'snapshot', 'create', tempInstance, snapshotName,
+    ], { encoding: 'utf-8', timeout: 5 * 60_000 });
+    if (snap.status !== 0) {
+      throw new Error(
+        `incus snapshot create on temp failed: ${(snap.stderr || snap.stdout || 'unknown').trim()}`
+      );
+    }
+
+    // Phase 4: copy the temp's snapshot AS a snapshot of the
+    // target instance.  Incus accepts `incus copy <a>/<s> <b>/<s>`
+    // for snapshot-to-snapshot copies on the same host.
+    setImportProgress(exportId, {
+      phase: 'landing-snapshot',
+      label: `Landing snapshot on ${incusName}`,
+    });
+    const cp = await runHost('nice', [
+      '-n', '19', 'incus',
+      'copy', `${tempInstance}/${snapshotName}`, `${incusName}/${snapshotName}`,
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
     if (cp.status !== 0) {
       throw new Error(
@@ -326,6 +413,10 @@ export async function importSnapshotFromS3({
       );
     }
 
+    setImportProgress(exportId, {
+      phase: 'cleanup',
+      label: 'Cleaning up temp instance',
+    });
     try {
       logAudit(audit.user_id || null, 'LXC_SNAPSHOT_S3_RESTORE', 'lxc_snapshot',
         `${incusName}/${snapshotName}`, {
@@ -336,25 +427,42 @@ export async function importSnapshotFromS3({
 
     return { ok: true, sizeBytes: buffer.length };
   } catch (err) {
+    setImportProgress(exportId, {
+      phase: 'error',
+      label: 'Import failed',
+      error: (err?.message || String(err)).slice(0, 1024),
+    });
     return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
   } finally {
     // Always clean up the temp instance (whether copy succeeded
     // or not) — the snapshot is on the original container at this
     // point and the temp is just a staging area.
     if (importDone) {
-      const del = spawnHostSync('incus', ['delete', '--force', tempInstance], {
+      const del = await runHost('incus', ['delete', '--force', tempInstance], {
         encoding: 'utf-8', timeout: 60_000,
       });
       if (del.status !== 0) {
-        spawnHostSync('incus', ['stop', '--force', tempInstance], {
+        await runHost('incus', ['stop', '--force', tempInstance], {
           encoding: 'utf-8', timeout: 30_000,
         });
-        spawnHostSync('incus', ['delete', '--force', tempInstance], {
+        await runHost('incus', ['delete', '--force', tempInstance], {
           encoding: 'utf-8', timeout: 60_000,
         });
       }
     }
-    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
+    await runHost('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
+    // Mark progress 'done' so the polling UI can clear cleanly.
+    // 'error' phase is left in place from the catch block; an
+    // outright success overwrites that.
+    if (IMPORT_PROGRESS.has(exportId)) {
+      const cur = IMPORT_PROGRESS.get(exportId) || {};
+      if (cur.phase !== 'error') {
+        setImportProgress(exportId, { phase: 'done', label: 'Done' });
+      }
+      // Keep the entry around for ~30s so a slow poll still
+      // fetches the terminal state, then drop it.
+      setTimeout(() => IMPORT_PROGRESS.delete(exportId), 30_000);
+    }
   }
 }
 
@@ -435,16 +543,29 @@ const QUEUE = {
   queue: [], // [{ jobId, containerName, snapshotName, runFn, resolve }]
 };
 
+// Phases a running export job moves through.  'preparing' covers
+// the long incus copy / export / read-into-buffer dance; 'uploading'
+// covers the per-destination S3 upload with byte-level progress.
+function setRunningPhase(jobId, phase) {
+  const e = QUEUE.running.get(jobId);
+  if (!e) return;
+  e.phase = phase;
+  e.phaseStartedAt = Date.now();
+}
+
 function tickSnapshotExportQueue() {
   while (QUEUE.running.size < QUEUE.maxConcurrency && QUEUE.queue.length > 0) {
     const job = QUEUE.queue.shift();
+    const startedAt = Date.now();
     QUEUE.running.set(job.jobId, {
       containerName: job.containerName,
       snapshotName: job.snapshotName,
-      startedAt: Date.now(),
+      startedAt,
+      phase: 'preparing',
+      phaseStartedAt: startedAt,
     });
     Promise.resolve()
-      .then(() => job.runFn())
+      .then(() => job.runFn(job.jobId))
       .then((result) => {
         QUEUE.running.delete(job.jobId);
         try { job.resolve(result); } catch { /* ignore */ }
@@ -463,6 +584,30 @@ function enqueueSnapshotExportJob({ jobId, containerName, snapshotName, runFn })
     QUEUE.queue.push({ jobId, containerName, snapshotName, runFn, resolve });
     tickSnapshotExportQueue();
   });
+}
+
+// Estimate the prep phase (incus copy + export + read-to-buffer)
+// from the snapshot_durations table.  The 'snapshot create'
+// duration is similar in shape (same storage backend, same data
+// size) so we use it × 2.5 as a rough total-prep estimate.  Falls
+// back to null when no prior runs exist; the UI then shows
+// elapsed-only.
+function estimatePrepMsFor(containerName) {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT duration_ms FROM snapshot_durations
+      WHERE container_name = ?
+      ORDER BY created_at DESC
+      LIMIT 5
+    `).all(containerName);
+    if (!rows || rows.length === 0) return null;
+    const avg = rows.reduce((s, r) => s + (r.duration_ms || 0), 0) / rows.length;
+    if (avg <= 0) return null;
+    return Math.round(avg * 2.5);
+  } catch {
+    return null;
+  }
 }
 
 // getSnapshotExportQueueStatus() — feed for the global 'export in
@@ -487,11 +632,24 @@ export function getSnapshotExportQueueStatus() {
     } catch { /* tolerated */ }
     const totalBytes = rows.reduce((s, r) => s + (r.bytes_total || 0), 0);
     const uploadedBytes = rows.reduce((s, r) => s + (r.bytes_uploaded || 0), 0);
+    const phase = entry.phase || 'preparing';
+    const phaseStartedAt = entry.phaseStartedAt || entry.startedAt;
+    const phaseElapsedMs = Date.now() - phaseStartedAt;
+    // Only attach a prep estimate while we're still in the prep
+    // phase; once uploading kicks in, byte progress is the better
+    // signal and the prep estimate is irrelevant.
+    const prepEstimateMs = phase === 'preparing'
+      ? estimatePrepMsFor(entry.containerName)
+      : null;
     running.push({
       job_id: jobId,
       container_name: entry.containerName,
       snapshot_name: entry.snapshotName,
       started_at: entry.startedAt,
+      phase,
+      phase_started_at: phaseStartedAt,
+      phase_elapsed_ms: phaseElapsedMs,
+      prep_estimate_ms: prepEstimateMs,
       bytes_uploaded: uploadedBytes,
       bytes_total: totalBytes || null,
       destinations: rows.map((r) => ({
@@ -557,7 +715,8 @@ export async function fanOutSnapshotExport({
     jobId: uuid(),
     containerName,
     snapshotName,
-    runFn: () => runSnapshotExport({
+    runFn: (jobId) => runSnapshotExport({
+      jobId,
       containerName, incusName, snapshotName, destinations, exportIds, audit,
     }),
   });
@@ -566,7 +725,7 @@ export async function fanOutSnapshotExport({
 // runSnapshotExport — the actual incus-export-and-S3-upload work.
 // Called by the queue worker; never invoked directly by routes.
 async function runSnapshotExport({
-  containerName, incusName, snapshotName, destinations, exportIds, audit,
+  jobId, containerName, incusName, snapshotName, destinations, exportIds, audit,
 }) {
   const db = getDb();
   const results = [];
@@ -615,6 +774,11 @@ async function runSnapshotExport({
     }
     return { results };
   }
+
+  // Prep phase finished — flip the queue entry's phase so the
+  // status endpoint stops claiming 'preparing' and starts feeding
+  // the byte-progress percentage instead.
+  setRunningPhase(jobId, 'uploading');
 
   try {
     const buffer = fs.readFileSync(exported.path);
@@ -806,12 +970,64 @@ export function listSnapshotExports({ containerName, snapshotName = null }) {
   `).all(containerName);
 }
 
-// deleteSnapshotExport({ exportId, audit }) — operator-driven
-// removal.  Reads the row, deletes the S3 object, marks the
-// row deleted (status='deleted').  Tolerates already-gone
-// objects (NotFound / NoSuchKey) the same way the backup
-// fan-out delete does.
-export async function deleteSnapshotExport({ exportId, audit = {} }) {
+// inspectSnapshotS3Object({ exportId }) → { ok, found, retention_*,
+//   legal_hold } — used by the delete-confirmation dialog so the
+// operator sees object-lock state BEFORE clicking confirm.  B2's
+// File Lock + S3 versioning interact nastily: a DELETE call against
+// a retention-locked object returns 200 (creates a delete marker)
+// while the underlying bytes stay billed in the bucket.  Surfacing
+// the lock-until date up front prevents the silent 'looks deleted
+// but isn't' case the operator hit.
+export async function inspectSnapshotS3Object({ exportId }) {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT e.*, d.bucket AS destination_bucket
+    FROM lxc_snapshot_s3_exports e
+    LEFT JOIN backup_destinations d ON d.id = e.destination_id
+    WHERE e.id = ?
+  `).get(exportId);
+  if (!row) return { ok: false, error: 'export not found' };
+  if (row.status !== 'exported') {
+    return { ok: true, status: row.status, found: false };
+  }
+  const dest = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`)
+    .get(row.destination_id);
+  if (!dest) return { ok: false, error: 'destination missing' };
+
+  try {
+    const meta = await headObject(dest, row.s3_key);
+    const now = Date.now();
+    const retentionUntil = meta.retention_until
+      ? new Date(meta.retention_until).getTime()
+      : null;
+    const locked = meta.legal_hold || (retentionUntil && retentionUntil > now);
+    return {
+      ok: true,
+      status: row.status,
+      s3_key: row.s3_key,
+      destination_name: dest.name,
+      destination_bucket: dest.bucket,
+      ...meta,
+      locked: !!locked,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      status: row.status,
+    };
+  }
+}
+
+// deleteSnapshotExport({ exportId, audit, force }) — operator-driven
+// removal.  HEAD the object first to detect retention locks; if
+// locked we refuse to fire the DELETE (which on B2 + Object Lock
+// silently no-ops by creating a delete marker over the locked
+// version, leaving the operator with a 'deleted' row in the
+// dashboard while the bucket still bills the bytes).  When the
+// object is not locked, we delete and verify with a follow-up
+// HEAD so a deceptive 200-with-versioning case still surfaces.
+export async function deleteSnapshotExport({ exportId, audit = {}, force = false }) {
   const db = getDb();
   const row = db.prepare(`
     SELECT e.*, d.bucket
@@ -850,6 +1066,46 @@ export async function deleteSnapshotExport({ exportId, audit = {} }) {
     return { ok: false, error: 'destination missing' };
   }
 
+  // HEAD first.  If the object is gone (NotFound), treat as already
+  // deleted — flip the row to 'deleted' so the UI clears it without
+  // requiring a manual dismiss.  If it's retention-locked, refuse
+  // unless force=true (governance-mode bypass; not exposed yet).
+  let head;
+  try {
+    head = await headObject(dest, row.s3_key);
+  } catch (err) {
+    return { ok: false, error: `S3 HEAD failed: ${err?.message || err}` };
+  }
+  if (!head.found) {
+    db.prepare(`
+      UPDATE lxc_snapshot_s3_exports
+      SET status = 'deleted', finished_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(exportId);
+    return { ok: true, alreadyDeleted: true };
+  }
+  const now = Date.now();
+  const retentionUntil = head.retention_until
+    ? new Date(head.retention_until).getTime()
+    : null;
+  const locked = head.legal_hold || (retentionUntil && retentionUntil > now);
+  if (locked && !force) {
+    const reasons = [];
+    if (head.legal_hold) reasons.push('legal hold is ON');
+    if (retentionUntil && retentionUntil > now) {
+      const d = new Date(retentionUntil).toISOString().split('T')[0];
+      reasons.push(`retained until ${d} (mode: ${head.retention_mode || 'unknown'})`);
+    }
+    return {
+      ok: false,
+      error: `Object is locked: ${reasons.join('; ')}.`,
+      locked: true,
+      retention_until: head.retention_until,
+      retention_mode: head.retention_mode,
+      legal_hold: head.legal_hold,
+    };
+  }
+
   let error = null;
   try {
     await deleteObject(dest, row.s3_key);
@@ -862,6 +1118,34 @@ export async function deleteSnapshotExport({ exportId, audit = {} }) {
   if (error) {
     return { ok: false, error };
   }
+
+  // Verify the object is actually gone.  Versioning + Object Lock
+  // can return 200 on the DELETE while the underlying bytes stay
+  // (the call adds a delete marker on top of the protected
+  // version).  If HEAD still finds the object, surface the lock
+  // info so the operator knows what's wrong instead of seeing a
+  // misleading 'deleted' chip in the UI.
+  try {
+    const post = await headObject(dest, row.s3_key);
+    if (post.found) {
+      const reasons = [];
+      if (post.legal_hold) reasons.push('legal hold is ON');
+      if (post.retention_until && new Date(post.retention_until).getTime() > Date.now()) {
+        const d = new Date(post.retention_until).toISOString().split('T')[0];
+        reasons.push(`retained until ${d}`);
+      }
+      const why = reasons.length ? reasons.join('; ') : 'bucket versioning is keeping the protected version';
+      return {
+        ok: false,
+        error: `Bucket reported delete success but object is still present (${why}).`,
+        locked: true,
+        retention_until: post.retention_until,
+        retention_mode: post.retention_mode,
+        legal_hold: post.legal_hold,
+      };
+    }
+  } catch { /* HEAD post-check failed — proceed optimistically */ }
+
   db.prepare(`
     UPDATE lxc_snapshot_s3_exports
     SET status = 'deleted', finished_at = CURRENT_TIMESTAMP

@@ -17,7 +17,7 @@ import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
-  getSnapshotExportQueueStatus,
+  getSnapshotExportQueueStatus, inspectSnapshotS3Object, getImportProgress,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -3522,10 +3522,28 @@ lxcRouter.post('/containers/snapshot-exports/sweep', async (req, res) => {
   res.json({ success: true, deleted: r.deleted, failed: r.failed });
 });
 
+// GET /containers/:name/snapshot/:snapshotName/s3-export/:exportId/info
+// Surfaces object-lock + retention metadata for a single S3 copy
+// so the delete-confirm dialog can display 'retained until ...' /
+// 'legal hold' before the operator clicks confirm.  Implemented as
+// a HEAD round-trip to the bucket; cheap, no body transfer.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info', async (req, res) => {
+  const { exportId } = req.params;
+  const out = await inspectSnapshotS3Object({ exportId });
+  if (!out.ok) {
+    return res.status(out.error === 'export not found' ? 404 : 502).json({
+      success: false, error: out.error,
+    });
+  }
+  res.json({ success: true, ...out });
+});
+
 // DELETE /containers/:name/snapshot/:snapshotName/s3-export/:exportId
 // Removes a single S3 copy of a snapshot export.  The local
 // snapshot itself stays — the dashboard's standard
-// `incus snapshot delete` flow handles that.
+// `incus snapshot delete` flow handles that.  Returns 423 (Locked)
+// when the object has active retention or legal hold so the
+// caller can render the lock state instead of a generic 502.
 lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId', async (req, res) => {
   const { exportId } = req.params;
   const out = await deleteSnapshotExport({
@@ -3533,6 +3551,16 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId',
     audit: { user_id: req.user?.id || null, ip: req.ip },
   });
   if (!out.ok) {
+    if (out.locked) {
+      return res.status(423).json({
+        success: false,
+        error: out.error,
+        locked: true,
+        retention_until: out.retention_until || null,
+        retention_mode: out.retention_mode || null,
+        legal_hold: !!out.legal_hold,
+      });
+    }
     return res.status(out.error === 'export not found' ? 404 : 502).json({
       success: false, error: out.error,
     });
@@ -3804,6 +3832,7 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/res
 
   const out = await importSnapshotFromS3({
     destination, s3Key: row.s3_key, incusName, snapshotName,
+    exportId,
     audit: { user_id: req.user?.id || null, ip: req.ip },
   });
   if (!out.ok) {
@@ -3814,6 +3843,20 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/res
     message: `Snapshot '${snapshotName}' pulled from ${destination.name} into local pool.`,
     size_bytes: out.sizeBytes || null,
   });
+});
+
+// GET /containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress
+// Polled by the Pull-from-S3 dialog while the long-running
+// download/import dance runs.  Returns the current phase + bytes
+// counters so the UI can render a meaningful progress bar instead
+// of a bare spinner.  Cleared 30s after the import finishes.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress', (req, res) => {
+  const { exportId } = req.params;
+  const p = getImportProgress({ exportId });
+  if (!p) {
+    return res.json({ success: true, found: false });
+  }
+  res.json({ success: true, found: true, ...p });
 });
 
 // GET /containers/:name/snapshot/:snapshotName/notes - Get notes for a snapshot

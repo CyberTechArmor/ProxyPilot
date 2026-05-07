@@ -26,7 +26,7 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy, Sparkles
+  X, Shield, Copy, Sparkles, Pencil, MoveRight
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
@@ -382,6 +382,13 @@ export default function LxcContainers() {
   // into the local Incus pool as a snapshot.  Shape:
   // { snapshotName, exportRow, busy }.
   const [pendingPullFromS3, setPendingPullFromS3] = useState(null);
+  // Rename dialog state.  { busy, value } when open, null when
+  // closed.  The actual incus rename fires on confirm.
+  const [pendingRename, setPendingRename] = useState(null);
+  // Transfer-routes dialog state.  { fromName, toName, busy, services? }
+  // — `services` is populated after a dry-run query so the
+  // operator sees what's about to move before they commit.
+  const [pendingTransfer, setPendingTransfer] = useState(null);
   // Per-snapshot S3 export state, keyed by snapshot name → array
   // of { destination_id, destination_name, status, error?, ... }.
   const [snapshotS3Exports, setSnapshotS3Exports] = useState({});
@@ -1683,6 +1690,80 @@ export default function LxcContainers() {
     }
   };
 
+  // Rename the currently-selected container.  Incus requires the
+  // container to be stopped; the backend surfaces a 'stop first'
+  // hint when the operator forgets, which we relay verbatim.
+  const handleRenameContainer = async () => {
+    const p = pendingRename;
+    if (!p || !selectedContainer) return;
+    const trimmed = (p.value || '').trim();
+    if (!trimmed || trimmed === selectedContainer.name) {
+      setPendingRename(null);
+      return;
+    }
+    setPendingRename({ ...p, busy: true });
+    try {
+      const r = await api.renameLxcContainer(selectedContainer.name, trimmed);
+      toast({ title: 'Container renamed', description: `${selectedContainer.name} → ${r.name}.` });
+      setPendingRename(null);
+      // Re-fetch container list and re-select the renamed row.
+      try { await fetchContainers(); } catch { /* tolerated */ }
+      setSelectedContainer((c) => c ? { ...c, name: r.name } : c);
+    } catch (err) {
+      toast({
+        title: 'Rename failed',
+        description: err?.hint
+          ? `${err.message}  (${err.hint})`
+          : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+      setPendingRename({ ...p, busy: false });
+    }
+  };
+
+  // Transfer every service whose lxc_container_name = the
+  // currently-selected container to a different container.
+  // After the DB update, regenerate Caddy so the new routes go
+  // live (target_ip is cleared by the backend so the regen
+  // re-resolves it).
+  const handleTransferRoutes = async () => {
+    const p = pendingTransfer;
+    if (!p || !selectedContainer) return;
+    const target = (p.toName || '').trim();
+    if (!target || target === selectedContainer.name) return;
+    setPendingTransfer({ ...p, busy: true });
+    try {
+      const r = await api.transferLxcContainerRoutes(selectedContainer.name, target);
+      // Regenerate Caddy so the rules pointing at the new
+      // container actually take effect.  Best-effort: a regen
+      // failure surfaces in its own toast but doesn't undo the
+      // DB transfer.
+      try {
+        await api.regenerateAllConfigs();
+      } catch (regenErr) {
+        toast({
+          title: 'Caddy regen failed',
+          description: regenErr?.message || 'Routes moved but Caddy did not reload — click Regenerate Caddy manually.',
+          variant: 'destructive',
+        });
+      }
+      toast({
+        title: 'Routes transferred',
+        description: r.transferred === 0
+          ? `${selectedContainer.name} had no routes to move.`
+          : `Moved ${r.transferred} route${r.transferred === 1 ? '' : 's'} from ${selectedContainer.name} to ${target}.`,
+      });
+      setPendingTransfer(null);
+    } catch (err) {
+      toast({
+        title: 'Transfer failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+      setPendingTransfer({ ...p, busy: false });
+    }
+  };
+
   const handleDeleteSnapshot = async (snap) => {
     if (!selectedContainer) return;
     setSnapshotLoading(true);
@@ -1777,8 +1858,10 @@ export default function LxcContainers() {
         const r = await api.restoreLxcSnapshotFromS3(selectedContainer.name, p.snapshotName, exportId);
         const restoredAs = r?.restored_as || 'restored container';
         toast({
-          title: 'Snapshot restored as new container',
-          description: `${p.snapshotName} → ${restoredAs}.  See dashboard / Incus tab for the new container.`,
+          title: 'Container restored from S3',
+          description: r?.snapshot_created
+            ? `Created ${restoredAs} with snapshot ${p.snapshotName} preserved.`
+            : `Created ${restoredAs}.  Snapshot creation on the new container failed; see backend logs.`,
         });
         setPendingPullFromS3(null);
         // Refresh both snapshot list (in case anything changed)
@@ -2577,7 +2660,33 @@ export default function LxcContainers() {
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
-              {selectedContainer?.name}
+              <span className="truncate">{selectedContainer?.name}</span>
+              {selectedContainer && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs ml-2 text-muted-foreground hover:text-foreground"
+                    onClick={() => setPendingRename({ value: selectedContainer.name, busy: false })}
+                    title="Rename container (must be stopped)"
+                  >
+                    <Pencil className="h-3 w-3 mr-1" />
+                    Rename
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setPendingTransfer({
+                      fromName: selectedContainer.name, toName: '', busy: false,
+                    })}
+                    title="Move all HTTP routes from this container to another"
+                  >
+                    <MoveRight className="h-3 w-3 mr-1" />
+                    Transfer routes
+                  </Button>
+                </>
+              )}
             </DialogTitle>
             <DialogDescription>
               Container details and management
@@ -4415,31 +4524,24 @@ export default function LxcContainers() {
         open={!!pendingPullFromS3}
         onOpenChange={(o) => { if (!o && !pendingPullFromS3?.busy) setPendingPullFromS3(null); }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Pull snapshot from S3</DialogTitle>
-            <DialogDescription asChild>
-              <div className="space-y-2">
-                <p>
-                  Re-import{' '}
-                  <code className="font-mono text-xs text-foreground">{pendingPullFromS3?.snapshotName}</code>
-                  {' '}from{' '}
-                  <span className="font-medium text-foreground">
-                    {pendingPullFromS3?.exportRow?.destination_name || 'S3'}
-                  </span>
-                  {' '}as a new container on this host.
-                </p>
-                <p className="text-[11px]">
-                  Incus has no public way to land an external tarball as a
-                  snapshot of an existing container, so we restore it as a
-                  fresh sibling container named{' '}
-                  <code className="font-mono">
-                    {(selectedContainer?.name || '<container>').slice(0, 20)}-r-&lt;id&gt;
-                  </code>.
-                  You can use it directly, or copy it onto the original via
-                  {' '}<code className="font-mono">incus copy --refresh</code> — your call.
-                </p>
-              </div>
+            <DialogDescription>
+              Create a new container from{' '}
+              <code className="font-mono text-xs text-foreground">{pendingPullFromS3?.snapshotName}</code>
+              {' '}on{' '}
+              <span className="font-medium text-foreground">
+                {pendingPullFromS3?.exportRow?.destination_name || 'S3'}
+              </span>?
+              The new container will be named{' '}
+              <code className="font-mono text-xs text-foreground">
+                {selectedContainer?.name || '<container>'}-{pendingPullFromS3?.snapshotName}
+              </code>
+              {' '}(with{' '}
+              <code className="font-mono text-xs">-2</code>,{' '}
+              <code className="font-mono text-xs">-3</code>… on collision)
+              and the snapshot is preserved on the new container.
             </DialogDescription>
           </DialogHeader>
           {pendingPullFromS3?.busy && (() => {
@@ -4489,6 +4591,113 @@ export default function LxcContainers() {
             >
               {pendingPullFromS3?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
               Pull to local
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename container dialog. */}
+      <Dialog
+        open={!!pendingRename}
+        onOpenChange={(o) => { if (!o && !pendingRename?.busy) setPendingRename(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename container</DialogTitle>
+            <DialogDescription>
+              Rename{' '}
+              <code className="font-mono text-xs text-foreground">{selectedContainer?.name}</code>?
+              Incus requires the container to be stopped first; if it isn't,
+              the rename will fail with a clear error.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="rename-input">New name</Label>
+            <Input
+              id="rename-input"
+              autoFocus
+              value={pendingRename?.value || ''}
+              disabled={!!pendingRename?.busy}
+              onChange={(e) => setPendingRename((p) => p ? { ...p, value: e.target.value } : p)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !pendingRename?.busy) handleRenameContainer(); }}
+              placeholder="alphanumeric + hyphens only"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingRename(null)}
+              disabled={!!pendingRename?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleRenameContainer}
+              disabled={
+                !!pendingRename?.busy
+                || !pendingRename?.value
+                || !pendingRename.value.trim()
+                || pendingRename.value.trim() === selectedContainer?.name
+              }
+            >
+              {pendingRename?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer routes dialog.  Operator picks one of the other
+          existing containers as the target; on confirm, every
+          services row pointing at the source moves to the target
+          and Caddy is regenerated. */}
+      <Dialog
+        open={!!pendingTransfer}
+        onOpenChange={(o) => { if (!o && !pendingTransfer?.busy) setPendingTransfer(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Transfer routes</DialogTitle>
+            <DialogDescription>
+              Move every HTTP route currently pointing at{' '}
+              <code className="font-mono text-xs text-foreground">{pendingTransfer?.fromName}</code>
+              {' '}over to a different container.  This is a MOVE — the source
+              container will have no routes after.  Caddy is regenerated
+              automatically; the target container's IP is re-resolved on the
+              next regeneration.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="transfer-target">Target container</Label>
+            <select
+              id="transfer-target"
+              className="w-full border rounded px-2 py-1.5 bg-background text-sm"
+              value={pendingTransfer?.toName || ''}
+              disabled={!!pendingTransfer?.busy}
+              onChange={(e) => setPendingTransfer((p) => p ? { ...p, toName: e.target.value } : p)}
+            >
+              <option value="">— pick a container —</option>
+              {containers
+                .filter((c) => c.name !== pendingTransfer?.fromName)
+                .map((c) => (
+                  <option key={c.name} value={c.name}>{c.name}</option>
+                ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingTransfer(null)}
+              disabled={!!pendingTransfer?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleTransferRoutes}
+              disabled={!!pendingTransfer?.busy || !pendingTransfer?.toName}
+            >
+              {pendingTransfer?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Transfer routes
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -301,12 +301,41 @@ export async function importSnapshotFromS3({
   }
 
   const shortId = Math.random().toString(36).slice(2, 10);
-  // Build the target name and trim the source-instance prefix if
-  // we'd blow past the 63-char Incus instance-name limit.  The
-  // suffix `-r-<8chars>` is 11 chars, leaving 52 chars for the
-  // base name.
-  const baseName = incusName.length <= 52 ? incusName : incusName.slice(0, 52);
-  const restoredName = `${baseName}-r-${shortId}`;
+
+  // Name format: `<incusName>-<snapshotName>` (e.g. pp-MEET-test).
+  // If that name is already taken we append `-2`, `-3`, ... until
+  // we find a free slot, capped at 99.  Falling back to the older
+  // random `<base>-r-<8chars>` form when the listing fails so an
+  // unexpected `incus list` outage doesn't block the operator
+  // entirely (collision risk is then on them but extremely
+  // unlikely with an 8-char nonce).  Also cap at the 63-char
+  // Incus instance-name limit.
+  const TRUNCATE_AT = 63;
+  let restoredName = (() => {
+    const base = `${incusName}-${snapshotName}`;
+    return base.length <= TRUNCATE_AT ? base : base.slice(0, TRUNCATE_AT);
+  })();
+  try {
+    const list = await runHost('incus', ['list', '-c', 'n', '-f', 'csv'], {
+      encoding: 'utf-8', timeout: 30_000,
+    });
+    if (list.status === 0) {
+      const existing = new Set(
+        (list.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+      );
+      if (existing.has(restoredName)) {
+        let chosen = null;
+        for (let n = 2; n <= 99; n++) {
+          const suffix = `-${n}`;
+          const trimBase = restoredName.slice(0, TRUNCATE_AT - suffix.length);
+          const candidate = `${trimBase}${suffix}`;
+          if (!existing.has(candidate)) { chosen = candidate; break; }
+        }
+        restoredName = chosen || `${incusName.slice(0, 52)}-r-${shortId}`;
+      }
+    }
+  } catch { /* fall through with the un-deduped base */ }
+
   const hostTmpDir = `/tmp/pp-snap-import-${process.pid}-${Date.now()}-${shortId}`;
   const hostTarball = `${hostTmpDir}/import.tar.gz`;
 
@@ -397,6 +426,32 @@ export async function importSnapshotFromS3({
     }
     importDone = true;
 
+    // Auto-snapshot the restored container so the original
+    // snapshot's name is preserved as a snapshot of the new
+    // container.  An operator who pulled `MEET/test` ends up
+    // with a `MEET-test` container that has a `test` snapshot —
+    // the same shape they'd have if Incus supported direct
+    // snapshot-to-snapshot graft.  Best-effort: a failure here
+    // doesn't undo the import, just logs a warning and skips the
+    // snapshot creation.
+    let snapshotCreated = false;
+    setImportProgress(exportId, {
+      phase: 'snapshotting',
+      label: `Snapshotting ${restoredName} as ${snapshotName}`,
+    });
+    const snap = await runHost('incus', [
+      'snapshot', 'create', restoredName, snapshotName,
+    ], { encoding: 'utf-8', timeout: 5 * 60_000 });
+    if (snap.status === 0) {
+      snapshotCreated = true;
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[snapshot-s3-export] auto-snapshot of ${restoredName} failed: ` +
+        `${(snap.stderr || snap.stdout || 'unknown').trim()}`
+      );
+    }
+
     setImportProgress(exportId, {
       phase: 'cleanup',
       label: 'Cleaning up host /tmp',
@@ -406,10 +461,16 @@ export async function importSnapshotFromS3({
         `${incusName}/${snapshotName}`, {
           destination_id: destination?.id || null, s3_key: s3Key,
           size_bytes: buffer.length, restored_as: restoredName,
+          snapshot_created: snapshotCreated,
         }, audit.ip || null);
     } catch { /* tolerated */ }
 
-    return { ok: true, sizeBytes: buffer.length, restoredAs: restoredName };
+    return {
+      ok: true,
+      sizeBytes: buffer.length,
+      restoredAs: restoredName,
+      snapshotCreated,
+    };
   } catch (err) {
     setImportProgress(exportId, {
       phase: 'error',

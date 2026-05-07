@@ -603,6 +603,23 @@ export const api = {
     method: 'POST',
   }),
 
+  // Rename a container.  Incus requires the container to be
+  // stopped; the route surfaces a clear hint when the operator
+  // forgets.  Updates services.lxc_container_name on success.
+  renameLxcContainer: (name, newName) => request(`/lxc/containers/${name}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ newName }),
+  }),
+
+  // Transfer (clone) every service whose lxc_container_name points
+  // at `fromName` to a fresh row pointing at `toName`.  Used after
+  // a Pull-from-S3 to copy the routing rules onto the restored
+  // sibling without re-typing them.
+  transferLxcContainerRoutes: (fromName, toName) => request(`/lxc/containers/${fromName}/transfer-routes`, {
+    method: 'POST',
+    body: JSON.stringify({ toName }),
+  }),
+
   deleteLxcContainer: (name) => request(`/lxc/containers/${name}`, {
     method: 'DELETE',
   }),

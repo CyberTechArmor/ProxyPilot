@@ -1183,6 +1183,59 @@ export function initDatabase() {
     `);
   }, { disableFks: true });
 
+  // Loosen backups.destination_id to nullable.
+  //
+  // The 203 migration's comment promised this would be loosened
+  // 'in a future commit' so local-only backups could ship.  That
+  // future commit never landed; the route layer started inserting
+  // NULL for local-only backups and tripped 'NOT NULL constraint
+  // failed: backups.destination_id' (May 2026 review).
+  //
+  // SQLite doesn't support ALTER COLUMN to drop NOT NULL, so we
+  // recreate the table with the loosened constraint, copy rows
+  // through, drop, rename — same dance as 207.
+  runMigration(db, 208, 'backups_destination_id_nullable', (d) => {
+    d.exec(`
+      CREATE TABLE backups__new (
+        id              TEXT PRIMARY KEY,
+        destination_id  TEXT REFERENCES backup_destinations(id),
+        tier            TEXT NOT NULL,
+        scope           TEXT,
+        s3_key          TEXT NOT NULL,
+        size_bytes      INTEGER NOT NULL DEFAULT 0,
+        encrypted       INTEGER NOT NULL DEFAULT 1,
+        created_by      TEXT,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        manifest_json   TEXT NOT NULL DEFAULT '{}',
+        parent_backup   TEXT REFERENCES backups(id),
+        status          TEXT NOT NULL,
+        error           TEXT,
+        local_path      TEXT,
+        s3_uploaded     INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    d.exec(`
+      INSERT INTO backups__new
+        (id, destination_id, tier, scope, s3_key, size_bytes, encrypted,
+         created_by, created_at, manifest_json, parent_backup, status,
+         error, local_path, s3_uploaded)
+      SELECT id, destination_id, tier, scope, s3_key, size_bytes, encrypted,
+             created_by, created_at, manifest_json, parent_backup, status,
+             error, local_path, s3_uploaded
+      FROM backups
+    `);
+    d.exec(`DROP TABLE backups`);
+    d.exec(`ALTER TABLE backups__new RENAME TO backups`);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_destination
+        ON backups(destination_id)
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_backups_created
+        ON backups(created_at DESC)
+    `);
+  }, { disableFks: true });
+
   // Durable notifications.
   //
   // Pre-300: the bell + unread count in Layout.jsx were powered

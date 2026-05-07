@@ -718,9 +718,27 @@ export const api = {
     method: 'POST',
   }),
 
+  // Whole-snapshot delete: removes both the local copy AND every
+  // S3 copy.  Use deleteLxcSnapshotLocal to keep S3 copies, or
+  // deleteLxcSnapshotS3Export to drop a single S3 destination.
   deleteLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}`, {
     method: 'DELETE',
   }),
+
+  // Local-only delete: drops the snapshot from the host's Incus
+  // pool but leaves every S3 copy in place.
+  deleteLxcSnapshotLocal: (name, snapshotName) => request(
+    `/lxc/containers/${name}/snapshot/${snapshotName}/local`,
+    { method: 'DELETE' },
+  ),
+
+  // Pull a previously-exported S3 tarball back into the local
+  // Incus pool as a snapshot of the same name.  Fails with 409
+  // if a local snapshot of that name already exists.
+  restoreLxcSnapshotFromS3: (name, snapshotName, exportId) => request(
+    `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/restore`,
+    { method: 'POST' },
+  ),
 
   // Pre-flight estimate for downloading a previously-taken snapshot.
   getLxcSnapshotExportInfo: (name, snapshotName) =>

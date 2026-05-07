@@ -16,7 +16,7 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
-  cancelSnapshotExport, sweepOrphanTempInstances,
+  cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -439,7 +439,14 @@ lxcRouter.get('/containers/:name/state', async (req, res) => {
   }
 });
 
-// GET /containers/:name/snapshots - List snapshots for a container
+// GET /containers/:name/snapshots - List snapshots for a container.
+//
+// Merges incus's local snapshot list with `lxc_snapshot_s3_exports`
+// rows so a snapshot whose local copy was deleted but still lives
+// in S3 stays visible (operator can pull it back).  Each row
+// carries `has_local` (true when incus reports it on the pool)
+// plus an `s3_locations` array listing every destination the
+// snapshot is currently stored on.
 lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
   const { name } = req.params;
 
@@ -450,25 +457,30 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
     });
   }
 
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  let local = [];
+  let localFetchFailed = false;
+  let localFetchDetails = null;
   try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
     const result = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
-    const snapshots = JSON.parse(result.stdout || '[]');
+    local = JSON.parse(result.stdout || '[]');
+  } catch (error) {
+    if (error.stderr?.includes('No snapshots')) {
+      local = [];
+    } else {
+      localFetchFailed = true;
+      localFetchDetails = error.stderr || error.message;
+    }
+  }
 
-    // Best-effort enrichment: pull per-snapshot disk usage from the
-    // storage volume's /state endpoint. config.size is a configured
-    // quota — almost never set; the actual usage lives in
-    // .../volumes/<...>/snapshots/<snap>/state under usage.used.
-    // We resolve the instance's pool once, then call the state
-    // endpoint for each snapshot in parallel. Any failure (older
-    // incus, backend without per-snapshot accounting, network
-    // hiccup) leaves the size unset and the rest of the row usable.
+  // Best-effort per-snapshot disk usage enrichment.
+  if (local.length) {
     try {
       const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
       const instance = JSON.parse(infoResult.stdout || '{}');
       const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-      if (pool && snapshots.length) {
-        await Promise.all(snapshots.map(async (snap) => {
+      if (pool) {
+        await Promise.all(local.map(async (snap) => {
           const used = await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snap.name}`);
           if (used != null) snap.size = used;
         }));
@@ -476,19 +488,74 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
     } catch {
       // Couldn't even resolve the instance pool — skip enrichment.
     }
+  }
 
-    res.json({ success: true, snapshots });
-  } catch (error) {
-    // If no snapshots exist, incus may return an error or empty
-    if (error.stderr?.includes('No snapshots')) {
-      return res.json({ success: true, snapshots: [] });
-    }
-    res.status(500).json({
-      success: false,
-      error: 'Failed to list snapshots',
-      details: error.stderr || error.message,
+  // Pull every export row for this container and group by snapshot name.
+  let exportRows = [];
+  try {
+    exportRows = listSnapshotExports({ containerName: name });
+  } catch {
+    // Junction table missing or unreadable — UI degrades to local-only.
+  }
+  const exportsBySnap = new Map();
+  for (const r of exportRows) {
+    if (!exportsBySnap.has(r.snapshot_name)) exportsBySnap.set(r.snapshot_name, []);
+    exportsBySnap.get(r.snapshot_name).push(r);
+  }
+
+  const toS3Locations = (rows) => rows
+    // Hide rows that have no S3 presence (already deleted).  Pending
+    // and failed rows stay so the chip + retry / dismiss UI keeps
+    // working.
+    .filter((r) => r.status !== 'deleted')
+    .map((r) => ({
+      export_id: r.id,
+      destination_id: r.destination_id,
+      destination_name: r.destination_name || null,
+      destination_bucket: r.destination_bucket || null,
+      s3_key: r.s3_key,
+      status: r.status,
+      error: r.error || null,
+      bytes_uploaded: r.bytes_uploaded || 0,
+      bytes_total: r.bytes_total || null,
+      cancel_requested: !!r.cancel_requested,
+      started_at: r.started_at,
+      finished_at: r.finished_at || null,
+      size_bytes: r.size_bytes || null,
+    }));
+
+  const merged = local.map((snap) => ({
+    ...snap,
+    has_local: true,
+    s3_locations: toS3Locations(exportsBySnap.get(snap.name) || []),
+  }));
+  // Ghost snapshots: present in S3 but not on the local pool.
+  const localNames = new Set(local.map((s) => s.name));
+  for (const [snapName, rows] of exportsBySnap) {
+    if (localNames.has(snapName)) continue;
+    const s3 = toS3Locations(rows);
+    if (s3.length === 0) continue;
+    // Use the earliest export's started_at as a stand-in for
+    // 'created_at' so the UI's date column renders something sane.
+    const earliest = rows.reduce((acc, r) => (
+      !acc || (r.started_at && r.started_at < acc) ? r.started_at : acc
+    ), null);
+    merged.push({
+      name: snapName,
+      has_local: false,
+      created_at: earliest,
+      s3_locations: s3,
     });
   }
+
+  if (localFetchFailed && merged.length === 0) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to list snapshots',
+      details: localFetchDetails,
+    });
+  }
+  res.json({ success: true, snapshots: merged });
 });
 
 // POST /containers - Start async container creation
@@ -3541,7 +3608,37 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
   }
 });
 
-// DELETE /containers/:name/snapshot/:snapshotName - Delete a snapshot
+// DELETE /containers/:name/snapshot/:snapshotName/local - Drop the
+// local copy only; any S3-stored copies stay.  Used when an
+// operator wants to reclaim pool space but keep the S3 backups.
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', async (req, res) => {
+  const { name, snapshotName } = req.params;
+
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+
+  const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
+    res.json({
+      success: true,
+      message: `Local copy of '${snapshotName}' deleted; S3 copies untouched.`,
+    });
+  } catch (error) {
+    res.status(500).json(formatSnapshotError(
+      `Failed to delete local snapshot from container '${name}'`,
+      error, SNAPSHOT_TIMEOUT_MS,
+    ));
+  }
+});
+
+// DELETE /containers/:name/snapshot/:snapshotName - Delete a
+// snapshot from EVERY location: the local Incus pool plus every
+// S3 destination it was exported to.  The frontend's whole-snapshot
+// trash button drives this; per-location deletes use the
+// scoped /local and /s3-export/:exportId endpoints.
 lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) => {
   const { name, snapshotName } = req.params;
 
@@ -3562,22 +3659,147 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
   // Delete reclaims storage; on copy-on-write backends with many
   // overlapping snapshots this can take a while.
   const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const errors = [];
 
+  // 1. Drop the local snapshot.  Tolerated if it's already gone
+  // (operator may have dropped the local copy first via the
+  // /local endpoint).
   try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
-    // Clean up notes for deleted snapshot
-    try {
-      const db = getDb();
-      db.prepare('DELETE FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ?').run(name, snapshotName);
-    } catch {}
-    res.json({
-      success: true,
-      message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
-    });
   } catch (error) {
-    res.status(500).json(formatSnapshotError(`Failed to delete snapshot from container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
+    const msg = (error.stderr || error.message || '').toLowerCase();
+    if (!msg.includes('not found') && !msg.includes("doesn't exist") && !msg.includes('no such')) {
+      errors.push({ scope: 'local', error: (error.stderr || error.message || 'unknown').trim().slice(0, 512) });
+    }
   }
+
+  // 2. Drop every S3 copy (exported rows).  Pending uploads get
+  // cancel_requested set so the queue worker aborts them; failed
+  // / dismissed rows are removed outright.  All best-effort; we
+  // collect failures and keep going so a single dead bucket
+  // doesn't block the other deletions.
+  let exportRows = [];
+  try {
+    exportRows = listSnapshotExports({ containerName: name, snapshotName });
+  } catch { /* tolerated */ }
+
+  for (const row of exportRows) {
+    if (row.status === 'pending') {
+      try {
+        await cancelSnapshotExport({
+          exportId: row.id,
+          audit: { user_id: req.user?.id || null, ip: req.ip },
+        });
+      } catch (err) {
+        errors.push({
+          scope: row.destination_name || row.destination_id,
+          error: (err?.message || String(err)).slice(0, 512),
+        });
+      }
+      continue;
+    }
+    if (row.status === 'deleted') continue;
+    try {
+      const out = await deleteSnapshotExport({
+        exportId: row.id,
+        audit: { user_id: req.user?.id || null, ip: req.ip },
+      });
+      if (!out.ok) {
+        errors.push({
+          scope: row.destination_name || row.destination_id,
+          error: out.error || 'unknown',
+        });
+      }
+    } catch (err) {
+      errors.push({
+        scope: row.destination_name || row.destination_id,
+        error: (err?.message || String(err)).slice(0, 512),
+      });
+    }
+  }
+
+  // 3. Drop notes for the snapshot regardless of where it lived.
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ?').run(name, snapshotName);
+  } catch {}
+
+  if (errors.length > 0) {
+    return res.status(502).json({
+      success: false,
+      error: `Snapshot deletion partially failed for '${snapshotName}'.`,
+      details: errors,
+    });
+  }
+  res.json({
+    success: true,
+    message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
+  });
+});
+
+// POST /containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore
+// Pulls a previously-exported tarball from S3 back into the host's
+// Incus pool as a snapshot of `name` named `snapshotName`.  Use
+// case: operator dropped the local snapshot, kept the S3 copy,
+// and now needs the snapshot back without restoring the whole
+// container.
+//
+// Fails fast with 409 if a local snapshot of the same name
+// already exists — the caller is expected to drop it first.
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore', async (req, res) => {
+  const { name, snapshotName, exportId } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT e.*, d.bucket AS destination_bucket
+    FROM lxc_snapshot_s3_exports e
+    LEFT JOIN backup_destinations d ON d.id = e.destination_id
+    WHERE e.id = ? AND e.container_name = ? AND e.snapshot_name = ?
+  `).get(exportId, name, snapshotName);
+  if (!row) {
+    return res.status(404).json({ success: false, error: 'export not found' });
+  }
+  if (row.status !== 'exported') {
+    return res.status(409).json({
+      success: false,
+      error: `export is in status '${row.status}' — only 'exported' rows can be pulled to local.`,
+    });
+  }
+  const destination = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(row.destination_id);
+  if (!destination) {
+    return res.status(404).json({ success: false, error: 'destination missing' });
+  }
+
+  // Refuse to clobber an existing local snapshot.  Detection is
+  // best-effort: if the listing fails we still proceed (incus
+  // import → copy will fail loudly with the real error).
+  try {
+    const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
+    const existing = JSON.parse(r.stdout || '[]');
+    if (existing.some((s) => s.name === snapshotName)) {
+      return res.status(409).json({
+        success: false,
+        error: `Local snapshot '${snapshotName}' already exists. Delete the local copy before pulling from S3.`,
+      });
+    }
+  } catch { /* tolerated */ }
+
+  const out = await importSnapshotFromS3({
+    destination, s3Key: row.s3_key, incusName, snapshotName,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  });
+  if (!out.ok) {
+    return res.status(500).json({ success: false, error: out.error });
+  }
+  res.json({
+    success: true,
+    message: `Snapshot '${snapshotName}' pulled from ${destination.name} into local pool.`,
+    size_bytes: out.sizeBytes || null,
+  });
 });
 
 // GET /containers/:name/snapshot/:snapshotName/notes - Get notes for a snapshot

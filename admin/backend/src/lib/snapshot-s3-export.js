@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
-import { putObjectWithControl, deleteObject, buildKey } from './s3.js';
+import { putObjectWithControl, deleteObject, buildKey, getObjectStream } from './s3.js';
 import { postNotification, resolveNotification } from './notifications.js';
 import { spawnHostSync, hasHostBinary } from './host-exec.js';
 
@@ -179,6 +179,127 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
   }
 }
 
+// importSnapshotFromS3({ destination, s3Key, incusName, snapshotName,
+//                        audit }) → { ok, error?, sizeBytes? }
+//
+// The reverse of exportSnapshotToTmp + S3 upload: stream the
+// tarball from S3 into a host /tmp file, `incus import` it as a
+// throwaway temp instance, then `incus copy <temp> <orig>/<snap>`
+// to land it as a snapshot on the original container.  Caller is
+// responsible for verifying the orig instance exists.
+//
+// This intentionally uses spawnHostSync for the long-running
+// incus calls — the queue (lib/snapshot-export-queue) serialises
+// imports the same way it serialises exports, and the operator
+// expects a blocking response (mirror of the regular import
+// flow).
+export async function importSnapshotFromS3({
+  destination, s3Key, incusName, snapshotName, audit = {},
+}) {
+  if (!SAFE_NAME.test(incusName)) {
+    return { ok: false, error: `unsafe instance name: ${incusName}` };
+  }
+  if (!SAFE_NAME.test(snapshotName)) {
+    return { ok: false, error: `unsafe snapshot name: ${snapshotName}` };
+  }
+  if (!hasHostBinary('incus')) {
+    return { ok: false, error: 'incus binary not found on host' };
+  }
+
+  const shortId = Math.random().toString(36).slice(2, 10);
+  const tempInstance = `pp-snapxp-imp-${shortId}`;
+  const hostTmpDir = `/tmp/pp-snap-import-${process.pid}-${Date.now()}-${shortId}`;
+  const hostTarball = `${hostTmpDir}/import.tar.gz`;
+
+  let importDone = false;
+  try {
+    const mkdir = spawnHostSync('mkdir', ['-p', hostTmpDir], { encoding: 'utf-8' });
+    if (mkdir.status !== 0) {
+      throw new Error(
+        `mkdir on host failed: ${(mkdir.stderr || mkdir.error?.message || 'unknown').trim()}`
+      );
+    }
+
+    // Stream S3 object → buffer in the container, then pipe into
+    // a host file via `cat`.  Buffering matches exportSnapshotToTmp's
+    // approach; tarballs north of host RAM aren't realistic at the
+    // 'snapshot of a single LXC' scale this feature targets.
+    const obj = await getObjectStream(destination, s3Key);
+    const chunks = [];
+    let downloaded = 0;
+    await new Promise((resolve, reject) => {
+      obj.stream.on('data', (c) => { chunks.push(c); downloaded += c.length; });
+      obj.stream.on('end', resolve);
+      obj.stream.on('error', reject);
+    });
+    const buffer = Buffer.concat(chunks, downloaded);
+
+    const cat = spawnHostSync('sh', ['-c', `cat > ${hostTarball}`], {
+      input: buffer, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
+    });
+    if (cat.status !== 0) {
+      throw new Error(
+        `host cat failed: ${(cat.stderr?.toString?.() || 'unknown').trim()}`
+      );
+    }
+
+    // Step 1: incus import <tarball> <temp-instance>.  Creates a
+    // new instance from the tarball.  Snapshot itself is not
+    // restored as a snapshot yet — that's step 2.
+    const imp = spawnHostSync('incus', [
+      'import', hostTarball, tempInstance,
+    ], { encoding: 'utf-8', timeout: 60 * 60_000 });
+    if (imp.status !== 0) {
+      throw new Error(
+        `incus import failed: ${(imp.stderr || imp.stdout || 'unknown').trim()}`
+      );
+    }
+    importDone = true;
+
+    // Step 2: copy the temp instance AS a new snapshot of the
+    // target container.  Incus accepts `<source> <target>/<snap>`
+    // which lands the source's state as a snapshot on target.
+    const cp = spawnHostSync('incus', [
+      'copy', tempInstance, `${incusName}/${snapshotName}`,
+    ], { encoding: 'utf-8', timeout: 60 * 60_000 });
+    if (cp.status !== 0) {
+      throw new Error(
+        `incus copy → snapshot failed: ${(cp.stderr || cp.stdout || 'unknown').trim()}`
+      );
+    }
+
+    try {
+      logAudit(audit.user_id || null, 'LXC_SNAPSHOT_S3_RESTORE', 'lxc_snapshot',
+        `${incusName}/${snapshotName}`, {
+          destination_id: destination?.id || null, s3_key: s3Key,
+          size_bytes: buffer.length,
+        }, audit.ip || null);
+    } catch { /* tolerated */ }
+
+    return { ok: true, sizeBytes: buffer.length };
+  } catch (err) {
+    return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
+  } finally {
+    // Always clean up the temp instance (whether copy succeeded
+    // or not) — the snapshot is on the original container at this
+    // point and the temp is just a staging area.
+    if (importDone) {
+      const del = spawnHostSync('incus', ['delete', '--force', tempInstance], {
+        encoding: 'utf-8', timeout: 60_000,
+      });
+      if (del.status !== 0) {
+        spawnHostSync('incus', ['stop', '--force', tempInstance], {
+          encoding: 'utf-8', timeout: 30_000,
+        });
+        spawnHostSync('incus', ['delete', '--force', tempInstance], {
+          encoding: 'utf-8', timeout: 60_000,
+        });
+      }
+    }
+    spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
+  }
+}
+
 // Sweep orphaned pp-snapxp-* temp instances on the host.
 //
 // Even with the dual-attempt cleanup above, failure modes still
@@ -203,6 +324,8 @@ export function sweepOrphanTempInstances() {
   const names = (list.stdout || '')
     .split('\n')
     .map((s) => s.trim())
+    // Both export-time temps (pp-snapxp-<id>) and import-time
+    // temps (pp-snapxp-imp-<id>) share the same prefix.
     .filter((s) => s.startsWith('pp-snapxp-'));
 
   const deleted = [];

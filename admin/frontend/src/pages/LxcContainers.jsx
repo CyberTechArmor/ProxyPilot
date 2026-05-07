@@ -1288,6 +1288,19 @@ export default function LxcContainers() {
   // specially in deleteSnapshotExport: drops the DB row outright,
   // no S3 call.  No confirm dialog because the operation is
   // non-destructive — the row references nothing in any bucket.
+  // Refresh both the snapshot list AND the S3 export rows.  The
+  // backend's snapshot list now merges S3-only ghost rows; after
+  // a per-location delete that drops the last copy of a ghost,
+  // we need both fetches to converge so the row disappears.
+  const refreshSnapshotsAndExports = async () => {
+    if (!selectedContainer) return;
+    try {
+      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      setSnapshots(snapRes.snapshots || []);
+    } catch { /* tolerated */ }
+    await refreshSnapshotExports();
+  };
+
   const dismissSnapshotS3Export = async (snapshotName, exportId) => {
     if (!selectedContainer) return;
     try {
@@ -1295,7 +1308,7 @@ export default function LxcContainers() {
         selectedContainer.name, snapshotName, exportId,
       );
       toast({ title: 'Failed entry dismissed' });
-      await refreshSnapshotExports();
+      await refreshSnapshotsAndExports();
     } catch (err) {
       toast({
         title: 'Dismiss failed',
@@ -1307,13 +1320,13 @@ export default function LxcContainers() {
 
   const deleteSnapshotS3Copy = async (snapshotName, exportId, destinationName) => {
     if (!selectedContainer) return;
-    if (!window.confirm(`Remove the S3 copy of "${snapshotName}" from ${destinationName || 'this destination'}?  Local snapshot stays.`)) return;
+    if (!window.confirm(`Remove the S3 copy of "${snapshotName}" from ${destinationName || 'this destination'}?`)) return;
     try {
       await api.deleteLxcSnapshotS3Export(
         selectedContainer.name, snapshotName, exportId,
       );
       toast({ title: 'S3 copy removed', description: `${snapshotName} deleted from ${destinationName || 'destination'}.` });
-      await refreshSnapshotExports();
+      await refreshSnapshotsAndExports();
     } catch (err) {
       toast({
         title: 'Delete failed',
@@ -1576,11 +1589,64 @@ export default function LxcContainers() {
     setSnapshotLoading(true);
     try {
       await api.deleteLxcSnapshot(selectedContainer.name, snap);
-      toast({ title: 'Snapshot deleted', description: `Removed "${snap}".` });
+      toast({ title: 'Snapshot deleted', description: `Removed "${snap}" from every location.` });
+      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      setSnapshots(snapRes.snapshots || []);
+      await refreshSnapshotExports();
+    } catch (err) {
+      toast({ title: 'Delete failed', description: err.message, variant: 'destructive' });
+      // The snapshot may still be partially deleted; refresh so
+      // the UI reflects whatever did succeed (e.g. local gone but
+      // an S3 destination errored).
+      try {
+        const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+        setSnapshots(snapRes.snapshots || []);
+        await refreshSnapshotExports();
+      } catch { /* tolerated */ }
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  // Drop the local Incus copy only — every S3 copy stays.  Used
+  // when an operator wants to reclaim pool space but keep the
+  // off-host backups.
+  const handleDeleteSnapshotLocal = async (snap) => {
+    if (!selectedContainer) return;
+    if (!window.confirm(`Delete the local copy of "${snap}"?  Any S3 copies stay where they are.`)) return;
+    setSnapshotLoading(true);
+    try {
+      await api.deleteLxcSnapshotLocal(selectedContainer.name, snap);
+      toast({ title: 'Local copy removed', description: `${snap} dropped from the host's pool.` });
       const snapRes = await api.getLxcSnapshots(selectedContainer.name);
       setSnapshots(snapRes.snapshots || []);
     } catch (err) {
-      toast({ title: 'Delete failed', description: err.message, variant: 'destructive' });
+      toast({ title: 'Local delete failed', description: err?.message || 'unknown error', variant: 'destructive' });
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  // Re-import a previously-exported S3 copy into the local Incus
+  // pool as a snapshot of the same name.  Backend rejects with 409
+  // if a local snapshot of that name already exists; the operator
+  // is expected to drop the local copy first.
+  const handlePullFromS3 = async (snap, exportRow) => {
+    if (!selectedContainer) return;
+    const destName = exportRow.destination_name || 'destination';
+    if (!window.confirm(`Pull "${snap}" from ${destName} back into the local Incus pool?`)) return;
+    setSnapshotLoading(true);
+    try {
+      await api.restoreLxcSnapshotFromS3(selectedContainer.name, snap, exportRow.id);
+      toast({ title: 'Snapshot restored locally', description: `${snap} re-imported from ${destName}.` });
+      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      setSnapshots(snapRes.snapshots || []);
+    } catch (err) {
+      toast({
+        title: 'Pull from S3 failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
     } finally {
       setSnapshotLoading(false);
     }
@@ -3214,14 +3280,32 @@ export default function LxcContainers() {
                                       {notes.length}
                                     </span>
                                   )}
-                                  {/* S3 export chips: one per
-                                      destination this snapshot
-                                      was pushed to.  Tooltip
-                                      carries the destination
-                                      name + bucket so an
-                                      operator can disambiguate
-                                      'on-site' from 'off-site'
-                                      without expanding the row. */}
+                                  {/* Per-location chips.  A snapshot can
+                                      live on the local Incus pool, in any
+                                      number of S3 destinations, or any
+                                      combination — the row stays visible
+                                      as long as any copy exists.  Each
+                                      chip carries an inline 🗑 to drop
+                                      that location only; the trash icon
+                                      in the action column wipes ALL
+                                      locations after a confirm. */}
+                                  {snap.has_local !== false && (
+                                    <span
+                                      title="Stored on the host's Incus pool"
+                                      className="ml-1 inline-flex items-center gap-0.5 text-[10px] px-1 rounded border bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30"
+                                    >
+                                      ✓ Local
+                                      <button
+                                        type="button"
+                                        onClick={(ev) => { ev.stopPropagation(); handleDeleteSnapshotLocal(sName); }}
+                                        disabled={snapshotLoading}
+                                        className="ml-1 hover:text-red-500 opacity-60 disabled:opacity-30"
+                                        title="Drop the local copy only — keeps any S3 copies"
+                                      >
+                                        🗑
+                                      </button>
+                                    </span>
+                                  )}
                                   {(snapshotS3Exports[sName] || []).map((e) => {
                                     const pct = (e.bytes_total && e.bytes_total > 0)
                                       ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
@@ -3277,43 +3361,81 @@ export default function LxcContainers() {
                                   })}
                                 </div>
                                 <div className="flex gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
-                                    onClick={() => handleDownloadSnapshot(sName)}
-                                    disabled={snapshotLoading || exporting}
-                                    title="Download snapshot as .tar.gz"
-                                  >
-                                    <Download className="h-3 w-3" />
-                                  </Button>
-                                  {backupDestinations.length > 0 && (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
-                                      onClick={() => openPushDialog(sName)}
-                                      title="Push this snapshot to one or more S3 destinations"
-                                    >
-                                      Push to S3
-                                    </Button>
+                                  {/* Local-only actions: download tarball,
+                                      push to additional S3 destinations,
+                                      restore the container to this point.
+                                      Hidden for ghost rows (S3-only) — the
+                                      operator must Pull to local first. */}
+                                  {snap.has_local !== false && (
+                                    <>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
+                                        onClick={() => handleDownloadSnapshot(sName)}
+                                        disabled={snapshotLoading || exporting}
+                                        title="Download snapshot as .tar.gz"
+                                      >
+                                        <Download className="h-3 w-3" />
+                                      </Button>
+                                      {backupDestinations.length > 0 && (
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
+                                          onClick={() => openPushDialog(sName)}
+                                          title="Push this snapshot to one or more S3 destinations"
+                                        >
+                                          Push to S3
+                                        </Button>
+                                      )}
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
+                                        onClick={() => handleRestoreSnapshot(sName)}
+                                        disabled={snapshotLoading}
+                                      >
+                                        Restore
+                                      </Button>
+                                    </>
                                   )}
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
-                                    onClick={() => handleRestoreSnapshot(sName)}
-                                    disabled={snapshotLoading}
-                                  >
-                                    Restore
-                                  </Button>
+                                  {/* Pull to local: only meaningful when
+                                      no local copy exists.  When the
+                                      snapshot has multiple S3 copies the
+                                      operator picks which one to pull
+                                      from via the per-chip 'Pull' link
+                                      below; this top-level button uses
+                                      the first available exported row. */}
+                                  {snap.has_local === false && (() => {
+                                    const exported = (snapshotS3Exports[sName] || (snap.s3_locations || []))
+                                      .filter((e) => e.status === 'exported');
+                                    if (exported.length === 0) return null;
+                                    const first = exported[0];
+                                    return (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-xs text-emerald-500 hover:text-emerald-600"
+                                        onClick={() => handlePullFromS3(sName, {
+                                          id: first.id || first.export_id,
+                                          destination_name: first.destination_name,
+                                        })}
+                                        disabled={snapshotLoading}
+                                        title={`Re-import this snapshot from ${first.destination_name || 'S3'} into the local Incus pool`}
+                                      >
+                                        <Download className="h-3 w-3 mr-1" />
+                                        Pull to local
+                                      </Button>
+                                    );
+                                  })()}
                                   <Button
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
                                     onClick={() => setConfirmDeleteSnap(sName)}
                                     disabled={snapshotLoading}
-                                    title="Delete snapshot (confirms before removing)"
+                                    title="Delete snapshot from EVERY location (local + every S3 destination)"
                                   >
                                     <Trash2 className="h-3 w-3" />
                                   </Button>
@@ -3940,19 +4062,44 @@ export default function LxcContainers() {
           <DialogHeader>
             <DialogTitle>Delete snapshot</DialogTitle>
             <DialogDescription>
-              Permanently delete <code className="font-mono text-xs text-foreground">{confirmDeleteSnap}</code>?
-              The local snapshot is removed from the host's Incus storage.
-              {(snapshotS3Exports[confirmDeleteSnap] || []).some((e) => e.status === 'exported') && (
-                <>
-                  {' '}
-                  Any S3 copies you've pushed of this snapshot stay in their
-                  destinations — drop them separately via the chip 🗑 buttons
-                  if you want them gone too.
-                </>
-              )}
-              {' Cannot be undone.'}
+              Permanently delete <code className="font-mono text-xs text-foreground">{confirmDeleteSnap}</code>
+              {' '}from every location?
             </DialogDescription>
           </DialogHeader>
+          {(() => {
+            const snapRow = snapshots.find((s) => (s.name || s) === confirmDeleteSnap);
+            const hasLocal = snapRow ? snapRow.has_local !== false : true;
+            const exportedDests = (snapshotS3Exports[confirmDeleteSnap] || [])
+              .filter((e) => e.status === 'exported')
+              .map((e) => e.destination_name || e.destination_id);
+            const pendingDests = (snapshotS3Exports[confirmDeleteSnap] || [])
+              .filter((e) => e.status === 'pending')
+              .map((e) => e.destination_name || e.destination_id);
+            if (!hasLocal && exportedDests.length === 0 && pendingDests.length === 0) {
+              return (
+                <p className="text-sm text-muted-foreground">
+                  This snapshot has no copies left — the row will simply disappear.
+                </p>
+              );
+            }
+            return (
+              <div className="space-y-2 text-sm">
+                <p className="font-medium">This will remove:</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  {hasLocal && <li>the local copy on this host's Incus pool</li>}
+                  {exportedDests.length > 0 && (
+                    <li>S3 copies in: <span className="font-medium text-foreground">{exportedDests.join(', ')}</span></li>
+                  )}
+                  {pendingDests.length > 0 && (
+                    <li>cancel any in-flight upload to: <span className="font-medium text-foreground">{pendingDests.join(', ')}</span></li>
+                  )}
+                </ul>
+                <p className="text-xs text-muted-foreground">
+                  Use the chip 🗑 buttons instead to drop a single location only. Cannot be undone.
+                </p>
+              </div>
+            );
+          })()}
           <DialogFooter>
             <Button
               variant="ghost"

@@ -2920,13 +2920,18 @@ lxcRouter.post('/containers/:name/rename', async (req, res) => {
   } catch { /* not found is what we want */ }
 
   try {
-    await execOnHost(`incus rename ${oldIncusName} ${newIncusName} 2>&1`, { timeout: 60_000 });
+    await execOnHost(`incus rename ${oldIncusName} ${newIncusName}`, { timeout: 60_000 });
   } catch (error) {
-    const msg = (error.stderr || error.message || '').trim();
+    // execAsync's error.message is always 'Command failed: <cmd>',
+    // useless for diagnosis.  The real incus error lives in stderr
+    // (or stdout when the command was wrapped with 2>&1, which
+    // we no longer do).
+    const realErr = (error.stderr || error.stdout || '').trim();
+    const msg = realErr || error.message || 'unknown error';
     return res.status(500).json({
       success: false,
       error: `incus rename failed: ${msg}`,
-      hint: /running|stop/i.test(msg)
+      hint: /running|is\s+running|must\s+be\s+stopped|stop\s+the\s+instance/i.test(msg)
         ? 'Container must be stopped before renaming.'
         : null,
     });
@@ -2963,63 +2968,78 @@ lxcRouter.post('/containers/:name/rename', async (req, res) => {
 // /services/caddy/regenerate-all afterward so a stale rule
 // doesn't keep the old container reachable.
 lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
-  const { name } = req.params;
-  const toName = (req.body?.toName || '').trim();
-  if (!validateName(name) || !validateName(toName)) {
-    return res.status(400).json({ success: false, error: 'Invalid container name(s).' });
-  }
-  if (toName === name) {
-    return res.status(400).json({ success: false, error: 'Source and target are the same container.' });
-  }
-
-  const db = getDb();
-  // Verify the target container actually exists in services'
-  // record-keeping isn't enough — operators expect to transfer
-  // routes onto a container they already see in the LXC list.
-  const incusName = `${INSTANCE_PREFIX}${toName}`;
+  // Top-level guard: a synchronous throw inside the body (db
+  // contention, weird name, audit log issue) would otherwise
+  // leave the response hanging until Caddy's upstream timeout
+  // surfaces a misleading 502.  Mirrors the wrapper backups.js
+  // got after the May 2026 review.
   try {
-    await execOnHost(`incus info ${incusName} 2>/dev/null`, { timeout: 5000 });
-  } catch {
-    return res.status(404).json({
+    const { name } = req.params;
+    const toName = (req.body?.toName || '').trim();
+    if (!validateName(name) || !validateName(toName)) {
+      return res.status(400).json({ success: false, error: 'Invalid container name(s).' });
+    }
+    if (toName === name) {
+      return res.status(400).json({ success: false, error: 'Source and target are the same container.' });
+    }
+
+    const db = getDb();
+    const incusName = `${INSTANCE_PREFIX}${toName}`;
+    // Verify the target exists.  execOnHost throws on non-zero
+    // exit; tolerate the throw and return a clean 404.
+    let targetExists = false;
+    try {
+      await execOnHost(`incus info ${incusName} 2>/dev/null`, { timeout: 5000 });
+      targetExists = true;
+    } catch { /* falls through below */ }
+    if (!targetExists) {
+      return res.status(404).json({
+        success: false,
+        error: `Target container '${toName}' not found in Incus.`,
+      });
+    }
+
+    const rows = db.prepare(
+      `SELECT id, name, domain, path_prefix FROM services WHERE lxc_container_name = ?`
+    ).all(name);
+    if (rows.length === 0) {
+      return res.json({
+        success: true, transferred: 0, services: [],
+        message: `'${name}' had no routes to move.`,
+      });
+    }
+
+    const update = db.prepare(
+      `UPDATE services
+       SET lxc_container_name = ?, target_ip = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    );
+    const tx = db.transaction((targetName, ids) => {
+      for (const id of ids) update.run(targetName, id);
+    });
+    tx(toName, rows.map((r) => r.id));
+
+    try {
+      logAudit(req.user?.id || null, 'LXC_TRANSFER_ROUTES', 'lxc_container', name, {
+        from: name, to: toName, services: rows.map((r) => ({ id: r.id, name: r.name })),
+      }, req.ip);
+    } catch { /* audit failure shouldn't break the operation */ }
+
+    return res.json({
+      success: true,
+      transferred: rows.length,
+      services: rows.map((r) => ({ id: r.id, name: r.name, domain: r.domain, path_prefix: r.path_prefix })),
+      message: `Moved ${rows.length} route${rows.length === 1 ? '' : 's'} from '${name}' to '${toName}'.`,
+    });
+  } catch (err) {
+    if (res.headersSent) return;
+    console.error('[lxc transfer-routes] unhandled', err);
+    return res.status(500).json({
       success: false,
-      error: `Target container '${toName}' not found in Incus.`,
+      error: `Transfer failed: ${err?.message || String(err)}`,
     });
   }
-
-  const rows = db.prepare(
-    `SELECT id, name, domain, path_prefix FROM services WHERE lxc_container_name = ?`
-  ).all(name);
-  if (rows.length === 0) {
-    return res.json({ success: true, transferred: 0, services: [] });
-  }
-
-  // target_ip is cleared so the next Caddy regeneration re-resolves
-  // it against the new container's current address.  Caching the
-  // old container's IP would silently keep traffic flowing to the
-  // wrong place.
-  const update = db.prepare(
-    `UPDATE services
-     SET lxc_container_name = ?, target_ip = NULL,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`
-  );
-  const tx = db.transaction((targetName, ids) => {
-    for (const id of ids) update.run(targetName, id);
-  });
-  tx(toName, rows.map((r) => r.id));
-
-  try {
-    logAudit(req.user?.id || null, 'LXC_TRANSFER_ROUTES', 'lxc_container', name, {
-      from: name, to: toName, services: rows.map((r) => ({ id: r.id, name: r.name })),
-    }, req.ip);
-  } catch { /* tolerated */ }
-
-  res.json({
-    success: true,
-    transferred: rows.length,
-    services: rows.map((r) => ({ id: r.id, name: r.name, domain: r.domain, path_prefix: r.path_prefix })),
-    message: `Moved ${rows.length} route${rows.length === 1 ? '' : 's'} from '${name}' to '${toName}'. Click 'Regenerate Caddy' to apply.`,
-  });
 });
 
 lxcRouter.post('/containers/:name/restart', async (req, res) => {

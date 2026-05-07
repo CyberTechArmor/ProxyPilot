@@ -67,7 +67,7 @@ import {
   isValidCronExpr,
   computeNextRunMs,
 } from '../lib/backup-scheduler.js';
-import { runModeA, runModeC } from '../lib/restore.js';
+import { runModeA, runModeB, runModeC } from '../lib/restore.js';
 import { listHealthClasses } from '../lib/health-checks.js';
 import { runOnce as runS3Healthcheck } from '../lib/backup-s3-healthcheck.js';
 import { resolveScope, listScopeOptions } from '../lib/backup-scope.js';
@@ -1440,20 +1440,31 @@ backupsRouter.post('/:id/restore', requireAdmin, requireSudo, async (req, res) =
   try { body = restoreSchema.parse(req.body || {}); }
   catch (e) { return res.status(400).json({ error: e.message }); }
 
-  // PR 2 explicitly does NOT ship in_place restore — that's the
-  // operator-overhead-heavy Mode B from the spec.  Reject it with
-  // a clear hint pointing at sandbox / manifest_only.
-  if (body.target === 'in_place') {
+  // in_place (Mode B) is the production-restore path.  Currently
+  // limited to the config tier — see lib/restore.runModeB for
+  // the rationale.  Other tiers fail at the engine layer with a
+  // clear message; the route accepts the request either way so
+  // an operator gets a real run_id + step trail.
+  if (body.target === 'in_place' && backup.tier !== 'config') {
     return res.status(400).json({
-      error: 'in_place restore is out of scope for PR 2; pick target=sandbox or manifest_only',
+      error: `Production restore (in_place) is only supported for the config tier; this backup is ${backup.tier}.  Use target=sandbox to verify a non-config backup, or download + manually restore.`,
     });
   }
 
-  const destination = getDb().prepare(
-    `SELECT * FROM backup_destinations WHERE id = ?`
-  ).get(backup.destination_id);
-  if (!destination) {
-    return res.status(409).json({ error: 'destination row missing — backup is orphaned' });
+  // Resolve the destination — only required when the backup
+  // doesn't have a usable local copy (we'd need to re-fetch from
+  // S3).  Local-only backups (post-208 schema) carry NULL
+  // destination_id; the orphan check below would fire incorrectly
+  // and block restore even though everything we need lives on
+  // disk.
+  const destination = backup.destination_id
+    ? getDb().prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(backup.destination_id)
+    : null;
+  const hasLocal = !!backup.local_path;
+  if (!destination && !hasLocal) {
+    return res.status(409).json({
+      error: 'no copy available — local was pruned and no S3 destination on file',
+    });
   }
 
   const runId = uuid();
@@ -1478,6 +1489,16 @@ backupsRouter.post('/:id/restore', requireAdmin, requireSudo, async (req, res) =
     try {
       if (body.target === 'manifest_only') {
         await runModeC({ runId, backup, destination, passphrase: body.passphrase });
+      } else if (body.target === 'in_place') {
+        await runModeB({
+          runId,
+          backup,
+          destination,
+          passphrase: body.passphrase,
+          envPath: ENV_PATH,
+          cveInboxDir: CVE_INBOX_DIR,
+          packConfigTier,
+        });
       } else {
         await runModeA({
           runId,

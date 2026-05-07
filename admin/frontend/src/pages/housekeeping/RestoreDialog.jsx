@@ -1,7 +1,12 @@
-// Restore dialog — operator picks a target (sandbox vs manifest-
-// only), passphrase, and (when applicable) whether to re-import
-// Incus instances.  POST returns 202 + run_id; the caller switches
-// into a 'tail logs' panel that polls GET /restores/:id.
+// Restore dialog — operator picks one of two paths:
+//   * Dry run (sandbox extract + manifest verify, no production
+//     side effects).  This is target='sandbox' on the wire.
+//   * Restore production (in_place; config tier only).  Auto-
+//     creates a safety backup before any production write so
+//     the operator can roll back from disk if anything goes
+//     wrong.  This is target='in_place' on the wire.
+// POST returns 202 + run_id; the caller switches into a 'tail
+// logs' panel that polls GET /restores/:id.
 
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -11,21 +16,25 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { AlertTriangle, Loader2, Play, Sparkles } from 'lucide-react';
+import { AlertTriangle, Loader2, Play, Sparkles, Shield } from 'lucide-react';
 
-const TARGET_DESCRIPTIONS = {
-  manifest_only: {
-    label: 'Mode C — manifest only',
-    body:
-      'Decrypt the artifact + verify every file\'s sha256 against the manifest. ' +
-      'No disk side effects. Use this as a quick sanity check that a backup is structurally sound.',
-  },
+const MODES = {
   sandbox: {
-    label: 'Mode A — sandbox same host',
+    label: 'Dry run',
+    short: 'Dry run',
     body:
-      'Decrypt + extract every file under a per-run sandbox directory on the local host. ' +
-      'Optionally re-import any Incus instances under a -restore-<short-id> suffix on a private bridge ' +
-      '(no public ports). Production state is untouched.',
+      'Decrypt + extract every file under a per-run sandbox dir on this host. ' +
+      'Production state is untouched. Use this to verify the backup is structurally sound ' +
+      'or to inspect its contents before committing.',
+  },
+  in_place: {
+    label: 'Restore production',
+    short: 'Restore production',
+    body:
+      'Apply the backup to the live host: replace .env, the cve-inbox tree, and import ' +
+      'the SQLite DB from the dump.  ALWAYS takes a safety-fallback config backup of ' +
+      'the current state first; the safety file path is recorded in the run notes so ' +
+      'you can roll back manually if the restore goes sideways.',
   },
 };
 
@@ -52,15 +61,19 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
   const matchesId = confirmId.trim() === backup.id || confirmId.trim() === idShort;
   const passphraseOk = passphrase.length >= 8;
   const hasAnyCopy = !!backup?.has_local || !!backup?.s3_uploaded;
-  const canSubmit = !busy && matchesId && passphraseOk && !!target && hasAnyCopy;
+  const inPlaceAllowed = backup.tier === 'config';
+  const inPlaceBlocked = target === 'in_place' && !inPlaceAllowed;
+  const canSubmit = !busy && matchesId && passphraseOk && !!target && hasAnyCopy && !inPlaceBlocked;
 
   const submit = async () => {
     setBusy(true); setError(null);
     try {
-      // Imported lazily so this file stays focused on UI.
-      const { api, ApiError } = await import('@/lib/api');
+      const { api } = await import('@/lib/api');
       const out = await api.backupsRestore(backup.id, {
-        mode: 'dry_run',
+        // Server's restore mode is 'dry_run' for sandbox/manifest
+        // and would-be 'real' for in_place.  Server only enforces
+        // target; mode is informational.
+        mode: target === 'in_place' ? 'real' : 'dry_run',
         target,
         passphrase,
         import_incus: target === 'sandbox' ? !!importIncus : undefined,
@@ -75,13 +88,15 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
     }
   };
 
-  const desc = TARGET_DESCRIPTIONS[target];
+  const desc = MODES[target];
 
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Restore dry-run</DialogTitle>
+          <DialogTitle>
+            {target === 'in_place' ? 'Restore production' : 'Restore (dry run)'}
+          </DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
           <div className="text-xs text-muted-foreground border rounded px-3 py-2 space-y-0.5">
@@ -126,16 +141,51 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
           )}
 
           <div className="space-y-1">
-            <Label htmlFor="r-target">Target</Label>
-            <select id="r-target"
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={target} onChange={(e) => setTarget(e.target.value)}
-            >
-              <option value="sandbox">Sandbox same host (Mode A)</option>
-              <option value="manifest_only">Manifest only (Mode C)</option>
-            </select>
+            <Label>Mode</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setTarget('sandbox')}
+                className={`text-left rounded border px-3 py-2 transition-colors ${
+                  target === 'sandbox'
+                    ? 'border-primary bg-primary/10'
+                    : 'border-border hover:border-primary/50'
+                }`}
+              >
+                <div className="flex items-center gap-2 font-medium">
+                  <Sparkles className="h-3 w-3" /> Dry run
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Sandbox extract; production untouched.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTarget('in_place')}
+                disabled={!inPlaceAllowed}
+                className={`text-left rounded border px-3 py-2 transition-colors ${
+                  target === 'in_place'
+                    ? 'border-red-500 bg-red-500/10'
+                    : inPlaceAllowed
+                      ? 'border-border hover:border-red-500/50'
+                      : 'border-border opacity-50 cursor-not-allowed'
+                }`}
+                title={inPlaceAllowed
+                  ? 'Apply to production with safety fallback'
+                  : `In-place restore only supports the config tier (this backup is ${backup.tier}).`}
+              >
+                <div className="flex items-center gap-2 font-medium">
+                  <Shield className="h-3 w-3" /> Restore production
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {inPlaceAllowed
+                    ? 'Live restore; safety backup auto-taken first.'
+                    : `Config tier only (this is ${backup.tier}).`}
+                </p>
+              </button>
+            </div>
             {desc && (
-              <p className="text-[11px] text-muted-foreground border-l-2 pl-2">
+              <p className="text-[11px] text-muted-foreground border-l-2 pl-2 mt-1">
                 <strong className="font-semibold">{desc.label}.</strong> {desc.body}
               </p>
             )}
@@ -165,14 +215,28 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
               placeholder={idShort} />
           </div>
 
-          <div className="text-xs text-amber-700 dark:text-amber-400 border border-amber-500/30 bg-amber-500/10 rounded px-3 py-2 flex gap-2">
-            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-            <span>
-              <strong>Dry-run only.</strong> Production data on disk is not touched (Mode A extracts to a
-              throwaway sandbox dir; Mode C never touches disk at all). After the run completes, the
-              sandbox dir path lives in the restore-runs panel for your inspection.
-            </span>
-          </div>
+          {target === 'sandbox' ? (
+            <div className="text-xs text-amber-700 dark:text-amber-400 border border-amber-500/30 bg-amber-500/10 rounded px-3 py-2 flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>
+                <strong>Dry run.</strong> Production data on disk is not touched. After the run
+                completes, the sandbox dir path lives in the restore-runs panel for your
+                inspection.
+              </span>
+            </div>
+          ) : (
+            <div className="text-xs text-red-700 dark:text-red-400 border border-red-500/30 bg-red-500/10 rounded px-3 py-2 flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>
+                <strong>Production restore.</strong> A safety-fallback backup of the current
+                state will be written to{' '}
+                <code className="font-mono text-[10px]">/var/lib/proxypilot/backups/safety-pre-restore-&lt;id&gt;.ppbackup</code>
+                {' '}before anything is overwritten.  If the apply step fails, the live SQLite
+                transaction rolls back; .env / cve-inbox writes happen first and may need a
+                manual rollback from the safety file.
+              </span>
+            </div>
+          )}
 
           {error && (
             <div className="text-xs text-red-500 border border-red-500/30 bg-red-500/10 rounded px-3 py-2">
@@ -182,9 +246,15 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={!canSubmit}>
-            {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1.5" />}
-            Start dry-run
+          <Button
+            onClick={submit}
+            disabled={!canSubmit}
+            className={target === 'in_place' ? 'bg-red-600 hover:bg-red-700' : undefined}
+          >
+            {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              : target === 'in_place' ? <Shield className="h-4 w-4 mr-1.5" />
+              : <Sparkles className="h-4 w-4 mr-1.5" />}
+            {target === 'in_place' ? 'Restore production' : 'Start dry run'}
           </Button>
         </DialogFooter>
       </DialogContent>

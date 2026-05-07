@@ -1388,9 +1388,12 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Container not found.' });
     }
     const ip = extractIPv4(containers[0]);
-    if (!ip) {
-      return res.json({ success: true, services: [], ip: null });
-    }
+    // Don't short-circuit on null IP — a stopped container can
+    // still have DB-mapped routes that the operator needs to
+    // see (and edit) before they restart it.  The legacy
+    // Caddy-site-file scan further down still uses the IP, so
+    // it's fine to skip when null; we just keep going to the
+    // DB-routes block.
 
     // Two sources to merge:
     //   1. Legacy single-domain Caddy site files in CADDY_SITES_DIR.
@@ -3017,14 +3020,19 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       });
     }
 
-    // Pull route counts per service for the response so the
-    // operator sees how many HTTP routes followed each service
+    // Pull route + L4 counts per service for the response so the
+    // operator sees how many of each followed each service
     // without an extra round-trip.
     const routeCount = db.prepare(
       `SELECT COUNT(*) AS n FROM service_http_routes WHERE service_id = ?`
     );
+    const l4Count = db.prepare(
+      `SELECT COUNT(*) AS n FROM service_l4_forwards WHERE service_id = ?`
+    );
     const enriched = rows.map((r) => ({
-      ...r, routes: routeCount.get(r.id)?.n || 0,
+      ...r,
+      routes: routeCount.get(r.id)?.n || 0,
+      l4: l4Count.get(r.id)?.n || 0,
     }));
 
     const update = db.prepare(
@@ -3044,14 +3052,98 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       }, req.ip);
     } catch { /* audit failure shouldn't break the operation */ }
 
+    // L4 reconciliation: any service_l4_forwards row attached to
+    // a moved service is now associated with `toName` in the DB
+    // but its incus proxy device still lives on `name`'s
+    // container.  We fix that in two passes:
+    //
+    //   1. Yank every `ppl4-*` device off the SOURCE container
+    //      (it has no services left, so anything ppl4-prefixed
+    //      is now stale).  Best-effort: a stopped container
+    //      can't have devices removed, but it also doesn't
+    //      forward traffic, so leave-it-alone is fine.
+    //   2. Re-create the devices on the TARGET container by
+    //      calling reconcileServiceL4Forwards once per moved
+    //      service.  Reconcile reads service_l4_forwards by
+    //      service_id, sees zero live ppl4-* on the target,
+    //      and creates them.
+    //
+    // Both passes are best-effort with their failures collected
+    // into `l4_outcomes` so the operator can re-run reconcile
+    // manually for any stragglers without blocking the transfer.
+    const l4Outcomes = { source_removed: [], source_errors: [], target: [] };
+    try {
+      const srcDevices = await execOnHost(
+        `incus config device list ${INSTANCE_PREFIX}${name} 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const srcLines = (srcDevices.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      for (const dev of srcLines) {
+        if (!dev.startsWith('ppl4-')) continue;
+        try {
+          await execOnHost(
+            `incus config device remove ${INSTANCE_PREFIX}${name} ${dev}`,
+            { timeout: 5000 },
+          );
+          l4Outcomes.source_removed.push(dev);
+        } catch (err) {
+          l4Outcomes.source_errors.push({
+            device: dev, error: err?.stderr || err?.message || 'unknown',
+          });
+        }
+      }
+    } catch { /* source unreachable; skip */ }
+
+    // Resolve target IP for the reconcile.  Stopped containers
+    // have no IP — reconcile will fail to add a proxy device
+    // without one, so we skip the target pass and tell the
+    // operator to start the container + retry.
+    let targetIp = null;
+    try {
+      const r = await execOnHost(
+        `incus list ${INSTANCE_PREFIX}${toName} --format json 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const list = JSON.parse(r.stdout || '[]');
+      if (list[0]) targetIp = extractIPv4(list[0]);
+    } catch { /* tolerated */ }
+
+    if (targetIp) {
+      for (const r of enriched) {
+        if (r.l4 === 0) continue;
+        try {
+          const reconciled = await reconcileServiceL4Forwards({
+            db, serviceId: r.id, lxcName: toName, bridgeIp: targetIp,
+            serviceTag: r.name || null,
+          });
+          l4Outcomes.target.push({
+            service_id: r.id, service_name: r.name,
+            applied: reconciled?.applied || [],
+          });
+        } catch (err) {
+          l4Outcomes.target.push({
+            service_id: r.id, service_name: r.name,
+            error: err?.message || String(err),
+          });
+        }
+      }
+    }
+
     const totalRoutes = enriched.reduce((s, r) => s + r.routes, 0);
+    const totalL4 = enriched.reduce((s, r) => s + r.l4, 0);
+    const targetSkippedReason = !targetIp && totalL4 > 0
+      ? ` Target has no IP yet — start it and run reconcile to attach the ${totalL4} L4 forward${totalL4 === 1 ? '' : 's'}.`
+      : '';
     return res.json({
       success: true,
       transferred: rows.length,
       total_routes: totalRoutes,
+      total_l4: totalL4,
       services: enriched,
+      l4: l4Outcomes,
       message: `Moved ${rows.length} service${rows.length === 1 ? '' : 's'}` +
-        ` (${totalRoutes} HTTP route${totalRoutes === 1 ? '' : 's'}) from '${name}' to '${toName}'.`,
+        ` (${totalRoutes} HTTP route${totalRoutes === 1 ? '' : 's'}, ${totalL4} L4 forward${totalL4 === 1 ? '' : 's'})` +
+        ` from '${name}' to '${toName}'.${targetSkippedReason}`,
     });
   } catch (err) {
     if (res.headersSent) return;

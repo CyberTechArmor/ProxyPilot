@@ -37,6 +37,52 @@ import { getDb, logAudit } from '../db.js';
 import { getObjectStream } from './s3.js';
 import { decrypt, readTar, verifyManifest, parseHeader } from './backup-unpack.js';
 import { safeExtractName } from './restore-paths.js';
+import { spawnHostSync } from './host-exec.js';
+import { shellSingleQuote } from './shell-quote.js';
+
+// hostWriteFile / hostMkdirP / hostWipeContents — production
+// in-place restore writes target paths on the HOST filesystem
+// (e.g. /opt/proxypilot/.env, /etc/caddy/...).  The admin
+// container does not bind-mount every restore target — readEnv
+// silently returns a placeholder when /opt/proxypilot is
+// missing in the container, but writes there throw ENOENT.
+// Routing the writes through nsenter via lib/host-exec makes
+// the path resolution happen in the host's mount namespace
+// regardless of bind-mount layout.
+function hostMkdirP(dir) {
+  const r = spawnHostSync('mkdir', ['-p', dir], { encoding: 'utf-8' });
+  if (r.status !== 0) {
+    throw new Error(
+      `mkdir on host failed for ${dir}: ${(r.stderr || r.error?.message || 'unknown').trim()}`
+    );
+  }
+}
+
+function hostWriteFile(dest, buf, { mode = null } = {}) {
+  hostMkdirP(path.dirname(dest));
+  const cmd = `cat > ${shellSingleQuote(dest)}`;
+  const r = spawnHostSync('sh', ['-c', cmd], {
+    input: buf, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
+  });
+  if (r.status !== 0) {
+    throw new Error(
+      `host write to ${dest} failed: ${(r.stderr?.toString?.() || 'unknown').trim()}`
+    );
+  }
+  if (mode !== null) {
+    spawnHostSync('chmod', [mode.toString(8), dest], { encoding: 'utf-8' });
+  }
+}
+
+// Wipe the *contents* of a host directory (not the dir itself —
+// that's typically a bind-mount inode the operator wants to
+// preserve).  No-op when the dir doesn't exist.
+function hostWipeContents(dir) {
+  spawnHostSync('sh', ['-c',
+    `if [ -d ${shellSingleQuote(dir)} ]; then ` +
+    `find ${shellSingleQuote(dir)} -mindepth 1 -delete; fi`,
+  ], { encoding: 'utf-8' });
+}
 
 // ── small helpers ───────────────────────────────────────────────────
 
@@ -370,11 +416,13 @@ export async function runModeB({
   const envBuf = entries['.env'];
   const cveNames = Object.keys(entries).filter((n) => n.startsWith('cve-inbox/'));
 
-  // 3a: .env
+  // 3a: .env (written via spawnHost so we hit the host's mount
+  // namespace; the admin container doesn't bind-mount
+  // /opt/proxypilot in most layouts).
   if (envBuf) {
     appendStep(runId, { stage: 'apply-env', status: 'started', target: envPath });
     try {
-      fs.writeFileSync(envPath, envBuf, { mode: 0o600 });
+      hostWriteFile(envPath, envBuf, { mode: 0o600 });
       appendStep(runId, { stage: 'apply-env', status: 'ok' });
     } catch (err) {
       appendStep(runId, { stage: 'apply-env', status: 'failed', error: err?.message || String(err) });
@@ -390,16 +438,12 @@ export async function runModeB({
   if (cveNames.length > 0) {
     appendStep(runId, { stage: 'apply-cve-inbox', status: 'started', target: cveInboxDir });
     try {
-      fs.mkdirSync(cveInboxDir, { recursive: true });
-      for (const f of fs.readdirSync(cveInboxDir)) {
-        try { fs.rmSync(path.join(cveInboxDir, f), { recursive: true, force: true }); }
-        catch { /* tolerated */ }
-      }
+      hostMkdirP(cveInboxDir);
+      hostWipeContents(cveInboxDir);
       for (const name of cveNames) {
         const safeName = name.replace(/^cve-inbox\//, '');
         const dest = path.join(cveInboxDir, safeName);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, entries[name]);
+        hostWriteFile(dest, entries[name]);
       }
       appendStep(runId, { stage: 'apply-cve-inbox', status: 'ok', files: cveNames.length });
     } catch (err) {
@@ -487,17 +531,13 @@ export async function runModeB({
       if (matches.length === 0) continue; // tier captured nothing here
       appendStep(runId, { stage: `apply-${label}`, status: 'started', target, files: matches.length });
       try {
-        fs.mkdirSync(target, { recursive: true });
-        for (const f of fs.readdirSync(target)) {
-          try { fs.rmSync(path.join(target, f), { recursive: true, force: true }); }
-          catch { /* tolerated */ }
-        }
+        hostMkdirP(target);
+        hostWipeContents(target);
         for (const name of matches) {
           const rel = name.slice(archive.length);
           if (!rel) continue;
           const dest = path.join(target, rel);
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, entries[name]);
+          hostWriteFile(dest, entries[name]);
         }
         appendStep(runId, { stage: `apply-${label}`, status: 'ok' });
       } catch (err) {

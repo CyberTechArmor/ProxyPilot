@@ -44,27 +44,27 @@ export default function SnapshotExportBanner() {
   const [cancelling, setCancelling] = useState(false);
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
 
-  if (status.running.length === 0 && status.queue_depth === 0) {
-    return null;
-  }
-
-  const running = status.running[0];
-  const pct = running ? formatPct(running.bytes_uploaded, running.bytes_total) : null;
-  const queuedExtra = status.queue_depth;
-
-  // Phase-aware label.  During 'preparing' (incus copy + export +
-  // read-into-buffer) we don't have a percentage yet, so render
-  // elapsed + estimate when one is available.
+  // All hooks must run on every render — extracting the
+  // running-job fields up front (defaulting to safe values when
+  // the queue is empty) lets the early-return below sit AFTER
+  // the hooks instead of before.  Calling hooks conditionally
+  // crashed the whole tree the moment a job appeared (the
+  // operator-visible "frontend doesn't show while preparing/
+  // pushing" symptom): React saw N hooks one render and N+M
+  // the next, threw "Rendered more hooks than during the
+  // previous render", and unmounted everything.
+  const running = status.running[0] || null;
   const phase = running?.phase || 'preparing';
   const serverPhaseElapsedMs = running?.phase_elapsed_ms || 0;
+  const runningKey = running ? running.snapshot_name : null;
 
   // Local seconds counter so the elapsed reading ticks every
   // second regardless of the 2.5s poll cadence.  Re-baselines on
   // every poll: when a new server snapshot lands we capture
   // (its phase_elapsed_ms, the wall clock at receipt) and the
-  // displayed elapsed = server_value + (now - receivedAt).  Resets
-  // whenever the phase changes so a preparing→uploading flip
-  // restarts the visible timer.
+  // displayed elapsed = server_value + (now - receivedAt).
+  // Resets whenever the phase changes so a preparing→uploading
+  // flip restarts the visible timer.
   const baselineRef = useRef({
     phase, serverMs: serverPhaseElapsedMs, receivedAt: Date.now(),
   });
@@ -75,14 +75,19 @@ export default function SnapshotExportBanner() {
       receivedAt: Date.now(),
     };
   }, [phase, serverPhaseElapsedMs]);
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
   useEffect(() => {
-    if (!running) return undefined;
+    if (!runningKey) return undefined;
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [running ? running.snapshot_name : null]);
-  // Reading `tick` keeps the linter happy and forces re-render.
-  void tick;
+  }, [runningKey]);
+
+  if (status.running.length === 0 && status.queue_depth === 0) {
+    return null;
+  }
+
+  const pct = running ? formatPct(running.bytes_uploaded, running.bytes_total) : null;
+  const queuedExtra = status.queue_depth;
   const phaseElapsedMs = running
     ? baselineRef.current.serverMs + (Date.now() - baselineRef.current.receivedAt)
     : 0;

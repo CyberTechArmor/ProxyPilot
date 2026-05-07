@@ -278,12 +278,27 @@ export async function runModeA({
 export async function runModeB({
   runId, backup, destination, passphrase,
   envPath, cveInboxDir, packConfigTier,
+  // For config_plus_data restores the safety backup uses the
+  // matching pack helper so a rollback restores the operator's
+  // caddy / wireguard / services dirs too.  Optional; falls
+  // back to packConfigTier when not provided.
+  packConfigPlusDataTier = null,
+  installDir = null,
+  // config_plus_data tier adds these dirs.  All are bind-mounted
+  // into the admin container on a normal install (the backup
+  // pack reads from the same paths) so plain fs.writeFileSync
+  // reaches the host's actual files.
+  caddyDir = process.env.CADDY_DIR || '/etc/caddy',
+  wireguardDir = process.env.PROXYPILOT_WG_DIR || '/etc/wireguard',
+  caddyAcmeDir = process.env.CADDY_ACME_DIR || '/var/lib/caddy/.local/share/caddy',
+  servicesDir = process.env.PROXYPILOT_SERVICES_DIR || '/opt/proxypilot/data/services',
 }) {
   appendStep(runId, { stage: 'preflight', status: 'started', tier: backup.tier });
-  if (backup.tier !== 'config') {
+  const supportedTiers = ['config', 'config_plus_data'];
+  if (!supportedTiers.includes(backup.tier)) {
     appendStep(runId, {
       stage: 'preflight', status: 'failed',
-      error: `Production restore is only supported for the config tier; this backup is ${backup.tier}.`,
+      error: `Production restore is only supported for ${supportedTiers.join(' / ')} tiers; this backup is ${backup.tier}.`,
     });
     finalize(runId, 'failed', `tier ${backup.tier} not supported for in-place restore`);
     return { ok: false, error: 'tier not supported' };
@@ -303,10 +318,24 @@ export async function runModeB({
   const db = getDb();
   let safety;
   try {
-    safety = await packConfigTier({
-      db, passphrase, envPath, cveInboxDir,
-      meta: { scope: 'all', backup_id: 'safety-' + runId, restore_run_id: runId },
-    });
+    // Use the matching pack helper so the safety backup captures
+    // exactly what's at risk.  config_plus_data falls back to
+    // packConfigTier if the caller didn't supply the larger
+    // helper — that's still useful (DB + env + cve-inbox) just
+    // not a full rollback.
+    if (backup.tier === 'config_plus_data' && packConfigPlusDataTier) {
+      safety = await packConfigPlusDataTier({
+        db, passphrase, envPath, cveInboxDir, installDir,
+        caddyDir, wireguardDir, caddyAcmeDir, servicesDir,
+        scopeFilter: { all: true },
+        meta: { scope: 'all', backup_id: 'safety-' + runId, restore_run_id: runId },
+      });
+    } else {
+      safety = await packConfigTier({
+        db, passphrase, envPath, cveInboxDir,
+        meta: { scope: 'all', backup_id: 'safety-' + runId, restore_run_id: runId },
+      });
+    }
   } catch (err) {
     appendStep(runId, { stage: 'safety-backup', status: 'failed', error: err?.message || String(err) });
     finalize(runId, 'failed', 'safety backup failed — refusing to apply restore without a fallback');
@@ -440,10 +469,61 @@ export async function runModeB({
     }
   }
 
-  finalize(runId, 'ok',
-    `In-place restore applied. Safety fallback at ${safetyPath} — re-run with target=in_place against that file if anything looks wrong.`
-  );
-  return { ok: true, safetyPath };
+  // 3d (config_plus_data only): restore the host-wide config dirs.
+  // Each block is best-effort: a write failure logs into the run
+  // notes but doesn't undo the DB changes — operator's safety
+  // backup covers a full rollback.  We use a directory-mirror
+  // strategy (wipe + repopulate) so dropped entries actually
+  // disappear; rsync semantics would leak ghosts.
+  if (backup.tier === 'config_plus_data') {
+    const dirRestores = [
+      { archive: 'caddy/', target: caddyDir, label: 'caddy' },
+      { archive: 'wireguard/', target: wireguardDir, label: 'wireguard' },
+      { archive: 'caddy-acme/', target: caddyAcmeDir, label: 'caddy-acme' },
+      { archive: 'services/', target: servicesDir, label: 'services' },
+    ];
+    for (const { archive, target, label } of dirRestores) {
+      const matches = Object.keys(entries).filter((n) => n.startsWith(archive));
+      if (matches.length === 0) continue; // tier captured nothing here
+      appendStep(runId, { stage: `apply-${label}`, status: 'started', target, files: matches.length });
+      try {
+        fs.mkdirSync(target, { recursive: true });
+        for (const f of fs.readdirSync(target)) {
+          try { fs.rmSync(path.join(target, f), { recursive: true, force: true }); }
+          catch { /* tolerated */ }
+        }
+        for (const name of matches) {
+          const rel = name.slice(archive.length);
+          if (!rel) continue;
+          const dest = path.join(target, rel);
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          fs.writeFileSync(dest, entries[name]);
+        }
+        appendStep(runId, { stage: `apply-${label}`, status: 'ok' });
+      } catch (err) {
+        appendStep(runId, {
+          stage: `apply-${label}`, status: 'failed',
+          error: err?.message || String(err),
+        });
+        // Don't bail — keep going so the operator at least sees
+        // which dirs landed and which didn't.  The restore_run
+        // ends in 'partial' below.
+      }
+    }
+  }
+
+  // Determine final status: if any apply-* step failed (after the
+  // safety backup is intact), mark the run 'partial' so the
+  // operator sees that some pieces need attention.
+  const stepsRow = getDb().prepare(`SELECT steps_json FROM restore_runs WHERE id = ?`).get(runId);
+  const steps = stepsRow?.steps_json ? JSON.parse(stepsRow.steps_json) : [];
+  const failedApply = steps.some((s) => s.stage?.startsWith('apply-') && s.status === 'failed');
+  const finalStatus = failedApply ? 'partial' : 'ok';
+  const note = failedApply
+    ? `In-place restore partially applied — see step trail. Safety fallback at ${safetyPath}.`
+    : `In-place restore applied. After: docker compose restart admin (DB+env), reload caddy, restart wireguard. Safety at ${safetyPath}.`;
+  finalize(runId, finalStatus, note);
+  return { ok: !failedApply, safetyPath, partial: failedApply };
 }
 
 // runModeCInner — same pipeline as runModeC but returns the parsed

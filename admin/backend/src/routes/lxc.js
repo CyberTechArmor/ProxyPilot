@@ -2999,15 +2999,33 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       });
     }
 
+    // domain + path_prefix moved to service_http_routes in
+    // Phase 2b D.14; transferring routes is really 'rebind every
+    // services row + its child routes via FK'.  We pull the
+    // services rows here for the response payload + the UPDATE
+    // below; the routes themselves follow automatically since
+    // service_http_routes references services(id) ON DELETE
+    // CASCADE — they don't need a separate update because they
+    // travel with the parent service row.
     const rows = db.prepare(
-      `SELECT id, name, domain, path_prefix FROM services WHERE lxc_container_name = ?`
+      `SELECT id, name FROM services WHERE lxc_container_name = ?`
     ).all(name);
     if (rows.length === 0) {
       return res.json({
         success: true, transferred: 0, services: [],
-        message: `'${name}' had no routes to move.`,
+        message: `'${name}' had no services to move.`,
       });
     }
+
+    // Pull route counts per service for the response so the
+    // operator sees how many HTTP routes followed each service
+    // without an extra round-trip.
+    const routeCount = db.prepare(
+      `SELECT COUNT(*) AS n FROM service_http_routes WHERE service_id = ?`
+    );
+    const enriched = rows.map((r) => ({
+      ...r, routes: routeCount.get(r.id)?.n || 0,
+    }));
 
     const update = db.prepare(
       `UPDATE services
@@ -3026,11 +3044,14 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       }, req.ip);
     } catch { /* audit failure shouldn't break the operation */ }
 
+    const totalRoutes = enriched.reduce((s, r) => s + r.routes, 0);
     return res.json({
       success: true,
       transferred: rows.length,
-      services: rows.map((r) => ({ id: r.id, name: r.name, domain: r.domain, path_prefix: r.path_prefix })),
-      message: `Moved ${rows.length} route${rows.length === 1 ? '' : 's'} from '${name}' to '${toName}'.`,
+      total_routes: totalRoutes,
+      services: enriched,
+      message: `Moved ${rows.length} service${rows.length === 1 ? '' : 's'}` +
+        ` (${totalRoutes} HTTP route${totalRoutes === 1 ? '' : 's'}) from '${name}' to '${toName}'.`,
     });
   } catch (err) {
     if (res.headersSent) return;

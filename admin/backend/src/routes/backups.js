@@ -1445,9 +1445,9 @@ backupsRouter.post('/:id/restore', requireAdmin, requireSudo, async (req, res) =
   // the rationale.  Other tiers fail at the engine layer with a
   // clear message; the route accepts the request either way so
   // an operator gets a real run_id + step trail.
-  if (body.target === 'in_place' && backup.tier !== 'config') {
+  if (body.target === 'in_place' && !['config', 'config_plus_data'].includes(backup.tier)) {
     return res.status(400).json({
-      error: `Production restore (in_place) is only supported for the config tier; this backup is ${backup.tier}.  Use target=sandbox to verify a non-config backup, or download + manually restore.`,
+      error: `Production restore (in_place) is only supported for config / config_plus_data tiers; this backup is ${backup.tier}.  Use target=sandbox to verify, or download + manually restore.`,
     });
   }
 
@@ -1497,7 +1497,9 @@ backupsRouter.post('/:id/restore', requireAdmin, requireSudo, async (req, res) =
           passphrase: body.passphrase,
           envPath: ENV_PATH,
           cveInboxDir: CVE_INBOX_DIR,
+          installDir: INSTALL_DIR,
           packConfigTier,
+          packConfigPlusDataTier,
         });
       } else {
         await runModeA({

@@ -61,7 +61,7 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
   const matchesId = confirmId.trim() === backup.id || confirmId.trim() === idShort;
   const passphraseOk = passphrase.length >= 8;
   const hasAnyCopy = !!backup?.has_local || !!backup?.s3_uploaded;
-  const inPlaceAllowed = backup.tier === 'config';
+  const inPlaceAllowed = backup.tier === 'config' || backup.tier === 'config_plus_data';
   const inPlaceBlocked = target === 'in_place' && !inPlaceAllowed;
   const canSubmit = !busy && matchesId && passphraseOk && !!target && hasAnyCopy && !inPlaceBlocked;
 
@@ -70,10 +70,10 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
     try {
       const { api } = await import('@/lib/api');
       const out = await api.backupsRestore(backup.id, {
-        // Server's restore mode is 'dry_run' for sandbox/manifest
-        // and would-be 'real' for in_place.  Server only enforces
-        // target; mode is informational.
-        mode: target === 'in_place' ? 'real' : 'dry_run',
+        // Server's restore mode enum is 'dry_run' | 'apply'.
+        // target='in_place' actually writes; everything else is a
+        // dry-run regardless of the mode field.
+        mode: target === 'in_place' ? 'apply' : 'dry_run',
         target,
         passphrase,
         import_incus: target === 'sandbox' ? !!importIncus : undefined,
@@ -172,7 +172,7 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
                 }`}
                 title={inPlaceAllowed
                   ? 'Apply to production with safety fallback'
-                  : `In-place restore only supports the config tier (this backup is ${backup.tier}).`}
+                  : `In-place restore supports config / config_plus_data tiers only (this backup is ${backup.tier}).`}
               >
                 <div className="flex items-center gap-2 font-medium">
                   <Shield className="h-3 w-3" /> Restore production
@@ -180,7 +180,7 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
                 <p className="text-[11px] text-muted-foreground mt-1">
                   {inPlaceAllowed
                     ? 'Live restore; safety backup auto-taken first.'
-                    : `Config tier only (this is ${backup.tier}).`}
+                    : `Config / config+data only (this is ${backup.tier}).`}
                 </p>
               </button>
             </div>
@@ -231,9 +231,12 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
                 <strong>Production restore.</strong> A safety-fallback backup of the current
                 state will be written to{' '}
                 <code className="font-mono text-[10px]">/var/lib/proxypilot/backups/safety-pre-restore-&lt;id&gt;.ppbackup</code>
-                {' '}before anything is overwritten.  If the apply step fails, the live SQLite
-                transaction rolls back; .env / cve-inbox writes happen first and may need a
-                manual rollback from the safety file.
+                {' '}before anything is overwritten.
+                {' '}{backup.tier === 'config_plus_data'
+                  ? 'Replaces .env, cve-inbox, /etc/caddy, /etc/wireguard, caddy ACME state, and /opt/proxypilot/data/services, then imports the SQLite DB from the dump.  Run `docker compose restart admin` and reload Caddy + wg afterward.'
+                  : 'Replaces .env and cve-inbox, then imports the SQLite DB from the dump.  Run `docker compose restart admin` afterward.'}
+                {' '}If a step fails, the live SQLite transaction rolls back; earlier file
+                writes may need a manual rollback from the safety file.
               </span>
             </div>
           )}

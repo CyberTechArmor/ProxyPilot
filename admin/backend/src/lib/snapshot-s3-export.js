@@ -141,15 +141,90 @@ export function exportSnapshotToTmp({ incusName, snapshotName }) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
   } finally {
-    // Cleanup runs regardless of outcome.  --force handles
-    // running state in case `incus copy` started the temp.
+    // Cleanup runs regardless of outcome.  Capture stderr so a
+    // silent delete failure (e.g. incus daemon mid-stop, network
+    // hiccup talking to the daemon, instance left in a state
+    // --force doesn't recover from) is logged + visible to the
+    // sweeper that runs periodically.
     if (copyDone) {
-      spawnHostSync('incus', ['delete', '--force', tempInstance], {
+      // First try: plain --force delete (handles a running
+      // temp in one shot).
+      const del = spawnHostSync('incus', ['delete', '--force', tempInstance], {
         encoding: 'utf-8', timeout: 60_000,
       });
+      if (del.status !== 0) {
+        // Fallback: stop-then-delete in case the temp is in a
+        // state --force alone won't budge.  Some incus versions
+        // require an explicit stop before delete on certain
+        // storage backends.
+        spawnHostSync('incus', ['stop', '--force', tempInstance], {
+          encoding: 'utf-8', timeout: 30_000,
+        });
+        const del2 = spawnHostSync('incus', ['delete', '--force', tempInstance], {
+          encoding: 'utf-8', timeout: 60_000,
+        });
+        if (del2.status !== 0) {
+          // Log loudly — the sweeper will pick it up later, but
+          // an immediate hint in stderr lets the operator
+          // correlate with their dashboard activity.
+          // eslint-disable-next-line no-console
+          console.error(
+            `[snapshot-s3-export] failed to delete temp instance ${tempInstance}: ` +
+            `${(del2.stderr || del2.stdout || del.stderr || 'unknown').trim()}`
+          );
+        }
+      }
     }
     spawnHostSync('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
   }
+}
+
+// Sweep orphaned pp-snapxp-* temp instances on the host.
+//
+// Even with the dual-attempt cleanup above, failure modes still
+// exist — process killed mid-export, daemon restart, host reboot.
+// This sweeper finds any pp-snapxp-* instance and deletes it
+// regardless of how it got stuck.  Conservative: only fires
+// against the prefix we own; other operator-created instances
+// are untouched.
+//
+// Called from the in-process scheduler (lib/backup-scheduler
+// hydrate path) every 30 minutes.  Synchronous host calls are
+// fine for this scale (<100 instances on any reasonable
+// deployment).
+export function sweepOrphanTempInstances() {
+  if (!hasHostBinary('incus')) return { ok: false, error: 'incus unavailable' };
+  const list = spawnHostSync('incus', ['list', '-c', 'n', '-f', 'csv'], {
+    encoding: 'utf-8', timeout: 30_000,
+  });
+  if (list.status !== 0) {
+    return { ok: false, error: (list.stderr || 'incus list failed').trim() };
+  }
+  const names = (list.stdout || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith('pp-snapxp-'));
+
+  const deleted = [];
+  const failed = [];
+  for (const name of names) {
+    spawnHostSync('incus', ['stop', '--force', name], {
+      encoding: 'utf-8', timeout: 30_000,
+    });
+    const del = spawnHostSync('incus', ['delete', '--force', name], {
+      encoding: 'utf-8', timeout: 60_000,
+    });
+    if (del.status === 0) {
+      deleted.push(name);
+    } else {
+      failed.push({ name, error: (del.stderr || del.stdout || 'unknown').trim() });
+    }
+  }
+  if (deleted.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[snapshot-s3-export] swept ${deleted.length} orphan temp instance(s): ${deleted.join(', ')}`);
+  }
+  return { ok: true, deleted, failed };
 }
 
 function buildSnapshotKey(dest, incusName, snapshotName) {
@@ -423,6 +498,28 @@ export async function deleteSnapshotExport({ exportId, audit = {} }) {
   if (!row) return { ok: false, error: 'export not found' };
   if (row.status === 'deleted') return { ok: true, alreadyDeleted: true };
 
+  // 'failed' rows have no S3 object to delete — the upload never
+  // succeeded.  Operator action here is 'dismiss the row from
+  // the UI'; we drop the DB row outright.  Same path for
+  // 'pending' rows that the operator wants to drop after a
+  // cancel finished (the cancel itself flips them to 'failed'
+  // first; this branch covers stale pending rows from a
+  // previous process / clean-shutdown gap).
+  if (row.status === 'failed' || row.status === 'pending') {
+    db.prepare(`DELETE FROM lxc_snapshot_s3_exports WHERE id = ?`).run(exportId);
+    try {
+      logAudit(audit.user_id || null, 'LXC_SNAPSHOT_S3_EXPORT_DISMISS', 'lxc_snapshot',
+        `${row.container_name}/${row.snapshot_name}`, {
+          destination_id: row.destination_id, status_before: row.status,
+          error: row.error || null,
+        }, audit.ip || null);
+    } catch { /* tolerated */ }
+    return { ok: true, dismissed: true, status_before: row.status };
+  }
+
+  // 'exported' rows have a real S3 object — actually call the
+  // delete endpoint and only drop the row when the bucket
+  // confirms.
   const dest = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`)
     .get(row.destination_id);
   if (!dest) {

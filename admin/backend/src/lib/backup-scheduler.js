@@ -36,6 +36,7 @@ import {
 } from './backup-cron.js';
 import { resolveScope } from './backup-scope.js';
 import { fanOutUpload, resolveScheduleDestinations } from './backup-fanout.js';
+import { sweepOrphanTempInstances } from './snapshot-s3-export.js';
 
 // Re-export the pure helpers for the route layer + tests so
 // callers don't have to know they live in a sibling module.
@@ -100,6 +101,29 @@ export function unregister(id) {
 // doesn't exist yet (i.e. an install that hasn't run migration
 // 202 — which can't happen on the same release cycle, but the
 // defensive check costs nothing).
+// Periodic sweeper for orphaned snapshot-export temp instances.
+// Runs every 30 minutes — long enough that an actual in-flight
+// export's temp won't be swept (exports complete in seconds for
+// CoW backends; minutes for dir backend), short enough that an
+// orphan from a process crash / cancel-mid-export doesn't sit
+// for hours.
+let sweeperTask = null;
+function registerOrphanSweeper() {
+  if (sweeperTask) return;
+  sweeperTask = cron.schedule('*/30 * * * *', () => {
+    try {
+      const r = sweepOrphanTempInstances();
+      if (r.ok && (r.deleted?.length || r.failed?.length)) {
+        logger(`temp-instance sweep: ${r.deleted.length} deleted, ${r.failed.length} failed`);
+      } else if (!r.ok) {
+        errLogger('temp-instance sweep error', { error: r.error });
+      }
+    } catch (err) {
+      errLogger('temp-instance sweep threw', { error: err?.message });
+    }
+  }, { scheduled: true, timezone: process.env.TZ || 'UTC' });
+}
+
 export function hydrate() {
   try {
     const rows = getDb()
@@ -109,6 +133,26 @@ export function hydrate() {
     logger(`hydrated ${rows.length} schedule(s)`);
   } catch (err) {
     errLogger('hydrate failed', { error: err?.message });
+  }
+  // Boot the orphan sweeper alongside schedule hydration.  Same
+  // PROXYPILOT_DISABLE_CRONS env gate so test runs don't trigger
+  // it.
+  if (process.env.PROXYPILOT_DISABLE_CRONS !== '1') {
+    try {
+      registerOrphanSweeper();
+      // Kick off an immediate pass on boot so any orphan from a
+      // pre-restart crash gets cleaned up without waiting 30m.
+      setImmediate(() => {
+        try {
+          const r = sweepOrphanTempInstances();
+          if (r.ok && r.deleted?.length) {
+            logger(`boot temp-instance sweep cleared ${r.deleted.length}`);
+          }
+        } catch { /* tolerated */ }
+      });
+    } catch (err) {
+      errLogger('orphan sweeper register failed', { error: err?.message });
+    }
   }
 }
 

@@ -352,6 +352,9 @@ export default function LxcContainers() {
   // Set of export-row IDs currently being canceled (prevents
   // double-clicks while the cancel round-trip is in flight).
   const [cancelingExportIds, setCancelingExportIds] = useState(new Set());
+  // Snapshot whose deletion is pending operator confirmation.
+  // null = no pending confirm.  Holds the snapshot name string.
+  const [confirmDeleteSnap, setConfirmDeleteSnap] = useState(null);
   // Per-snapshot S3 export state, keyed by snapshot name → array
   // of { destination_id, destination_name, status, error?, ... }.
   const [snapshotS3Exports, setSnapshotS3Exports] = useState({});
@@ -1280,6 +1283,28 @@ export default function LxcContainers() {
         const next = new Set(prev);
         next.delete(exportId);
         return next;
+      });
+    }
+  };
+
+  // dismissSnapshotS3Export — operator-driven cleanup of a
+  // 'failed' export row.  Backend treats failed/pending status
+  // specially in deleteSnapshotExport: drops the DB row outright,
+  // no S3 call.  No confirm dialog because the operation is
+  // non-destructive — the row references nothing in any bucket.
+  const dismissSnapshotS3Export = async (snapshotName, exportId) => {
+    if (!selectedContainer) return;
+    try {
+      await api.deleteLxcSnapshotS3Export(
+        selectedContainer.name, snapshotName, exportId,
+      );
+      toast({ title: 'Failed entry dismissed' });
+      await refreshSnapshotExports();
+    } catch (err) {
+      toast({
+        title: 'Dismiss failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
       });
     }
   };
@@ -3362,8 +3387,9 @@ export default function LxcContainers() {
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
-                                    onClick={() => handleDeleteSnapshot(sName)}
+                                    onClick={() => setConfirmDeleteSnap(sName)}
                                     disabled={snapshotLoading}
+                                    title="Delete snapshot (confirms before removing)"
                                   >
                                     <Trash2 className="h-3 w-3" />
                                   </Button>
@@ -3441,6 +3467,14 @@ export default function LxcContainers() {
                                             title="Retry this upload"
                                           >
                                             Retry
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => dismissSnapshotS3Export(sName, e.id)}
+                                            className="text-[10px] px-1.5 py-0.5 rounded border border-border hover:bg-muted/40 text-muted-foreground shrink-0"
+                                            title="Clear this failed entry from the dashboard. The S3 bucket isn't touched (the upload never finished)."
+                                          >
+                                            Dismiss
                                           </button>
                                         </div>
                                       );
@@ -3964,6 +3998,56 @@ export default function LxcContainers() {
             >
               {pushBusy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
               Push to {pushDestinationIds.length === 0 ? 'S3' : `${pushDestinationIds.length} destination${pushDestinationIds.length === 1 ? '' : 's'}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Snapshot delete confirm.  Pre-this commit the trash icon
+          fired the delete immediately — easy to mis-click on a
+          snapshot row that has many other small icons.  Confirm
+          dialog now mediates; existing handleDeleteSnapshot is
+          unchanged. */}
+      <Dialog
+        open={!!confirmDeleteSnap}
+        onOpenChange={(o) => { if (!o && !snapshotLoading) setConfirmDeleteSnap(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete snapshot</DialogTitle>
+            <DialogDescription>
+              Permanently delete <code className="font-mono text-xs text-foreground">{confirmDeleteSnap}</code>?
+              The local snapshot is removed from the host's Incus storage.
+              {(snapshotS3Exports[confirmDeleteSnap] || []).some((e) => e.status === 'exported') && (
+                <>
+                  {' '}
+                  Any S3 copies you've pushed of this snapshot stay in their
+                  destinations — drop them separately via the chip 🗑 buttons
+                  if you want them gone too.
+                </>
+              )}
+              {' Cannot be undone.'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setConfirmDeleteSnap(null)}
+              disabled={snapshotLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                const name = confirmDeleteSnap;
+                setConfirmDeleteSnap(null);
+                await handleDeleteSnapshot(name);
+              }}
+              disabled={snapshotLoading}
+            >
+              {snapshotLoading ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Delete snapshot
             </Button>
           </DialogFooter>
         </DialogContent>

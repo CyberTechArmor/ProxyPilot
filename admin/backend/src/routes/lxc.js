@@ -16,7 +16,7 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
-  cancelSnapshotExport,
+  cancelSnapshotExport, sweepOrphanTempInstances,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -3479,6 +3479,19 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req,
     queued: destinations.length,
     destination_ids: destinations.map((d) => d.id),
   });
+});
+
+// POST /containers/snapshot-exports/sweep — manually trigger the
+// orphan-temp-instance sweeper.  Same code path as the
+// every-30-minute cron in lib/backup-scheduler; exposed here so
+// an operator who just cancelled a stuck push doesn't have to
+// wait the full interval to clear the dangling pp-snapxp-* temp.
+lxcRouter.post('/containers/snapshot-exports/sweep', async (req, res) => {
+  const r = sweepOrphanTempInstances();
+  if (!r.ok) {
+    return res.status(502).json({ success: false, error: r.error });
+  }
+  res.json({ success: true, deleted: r.deleted, failed: r.failed });
 });
 
 // DELETE /containers/:name/snapshot/:snapshotName/s3-export/:exportId

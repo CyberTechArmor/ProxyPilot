@@ -372,6 +372,23 @@ export function deriveImageSupports(img) {
   return Array.from(claimed);
 }
 
+// GET /containers/snapshot-export-queue — global view of every
+// snapshot export currently running OR queued.  Drives the
+// admin-wide banner so an operator on any page sees the in-flight
+// upload (with a progress percentage) instead of needing to
+// navigate back to the LXC tab.  Registered BEFORE
+// /containers/:name so Express's first-match-wins ordering
+// doesn't route 'snapshot-export-queue' into the per-container
+// info handler (which would 404 on incus info — the bug an
+// operator reported in the May 2026 review pass).
+lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
+  try {
+    res.json({ success: true, ...getSnapshotExportQueueStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || 'queue status failed' });
+  }
+});
+
 // GET /containers/:name - Get detailed info for a container
 lxcRouter.get('/containers/:name', async (req, res) => {
   const { name } = req.params;
@@ -3497,19 +3514,6 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export', async (req,
 });
 
 // POST /containers/snapshot-exports/sweep — manually trigger the
-// GET /containers/snapshot-export-queue — global view of every
-// snapshot export currently running OR queued.  Drives the
-// admin-wide banner so an operator on any page sees the in-flight
-// upload (with a progress percentage) instead of needing to
-// navigate back to the LXC tab.
-lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
-  try {
-    res.json({ success: true, ...getSnapshotExportQueueStatus() });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err?.message || 'queue status failed' });
-  }
-});
-
 // orphan-temp-instance sweeper.  Same code path as the
 // every-30-minute cron in lib/backup-scheduler; exposed here so
 // an operator who just cancelled a stuck push doesn't have to
@@ -3816,20 +3820,11 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/res
     return res.status(404).json({ success: false, error: 'destination missing' });
   }
 
-  // Refuse to clobber an existing local snapshot.  Detection is
-  // best-effort: if the listing fails we still proceed (incus
-  // import → copy will fail loudly with the real error).
-  try {
-    const r = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
-    const existing = JSON.parse(r.stdout || '[]');
-    if (existing.some((s) => s.name === snapshotName)) {
-      return res.status(409).json({
-        success: false,
-        error: `Local snapshot '${snapshotName}' already exists. Delete the local copy before pulling from S3.`,
-      });
-    }
-  } catch { /* tolerated */ }
-
+  // Pull lands the snapshot as a NEW container (incus has no
+  // snapshot-to-snapshot graft on an existing instance).  The
+  // helper picks a unique <orig>-r-<8chars> name; collision is
+  // extremely unlikely but the import call would surface it
+  // loudly if it ever happens.
   const out = await importSnapshotFromS3({
     destination, s3Key: row.s3_key, incusName, snapshotName,
     exportId,
@@ -3840,7 +3835,8 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/res
   }
   res.json({
     success: true,
-    message: `Snapshot '${snapshotName}' pulled from ${destination.name} into local pool.`,
+    restored_as: out.restoredAs,
+    message: `Snapshot '${snapshotName}' restored from ${destination.name} as new container '${out.restoredAs}'.`,
     size_bytes: out.sizeBytes || null,
   });
 });

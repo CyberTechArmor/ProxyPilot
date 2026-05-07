@@ -1774,9 +1774,17 @@ export default function LxcContainers() {
       };
       pollId = setInterval(poll, 1000);
       try {
-        await api.restoreLxcSnapshotFromS3(selectedContainer.name, p.snapshotName, exportId);
-        toast({ title: 'Snapshot restored locally', description: `${p.snapshotName} re-imported from ${destName}.` });
+        const r = await api.restoreLxcSnapshotFromS3(selectedContainer.name, p.snapshotName, exportId);
+        const restoredAs = r?.restored_as || 'restored container';
+        toast({
+          title: 'Snapshot restored as new container',
+          description: `${p.snapshotName} → ${restoredAs}.  See dashboard / Incus tab for the new container.`,
+        });
         setPendingPullFromS3(null);
+        // Refresh both snapshot list (in case anything changed)
+        // AND the container list (the new restored container
+        // should now appear).
+        try { await fetchContainers(); } catch { /* tolerated */ }
         const snapRes = await api.getLxcSnapshots(selectedContainer.name);
         setSnapshots(snapRes.snapshots || []);
       } finally {
@@ -4407,17 +4415,31 @@ export default function LxcContainers() {
         open={!!pendingPullFromS3}
         onOpenChange={(o) => { if (!o && !pendingPullFromS3?.busy) setPendingPullFromS3(null); }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Pull snapshot from S3</DialogTitle>
-            <DialogDescription>
-              Re-import{' '}
-              <code className="font-mono text-xs text-foreground">{pendingPullFromS3?.snapshotName}</code>
-              {' '}from{' '}
-              <span className="font-medium text-foreground">
-                {pendingPullFromS3?.exportRow?.destination_name || 'S3'}
-              </span>
-              {' '}into this host's local Incus pool?
+            <DialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  Re-import{' '}
+                  <code className="font-mono text-xs text-foreground">{pendingPullFromS3?.snapshotName}</code>
+                  {' '}from{' '}
+                  <span className="font-medium text-foreground">
+                    {pendingPullFromS3?.exportRow?.destination_name || 'S3'}
+                  </span>
+                  {' '}as a new container on this host.
+                </p>
+                <p className="text-[11px]">
+                  Incus has no public way to land an external tarball as a
+                  snapshot of an existing container, so we restore it as a
+                  fresh sibling container named{' '}
+                  <code className="font-mono">
+                    {(selectedContainer?.name || '<container>').slice(0, 20)}-r-&lt;id&gt;
+                  </code>.
+                  You can use it directly, or copy it onto the original via
+                  {' '}<code className="font-mono">incus copy --refresh</code> — your call.
+                </p>
+              </div>
             </DialogDescription>
           </DialogHeader>
           {pendingPullFromS3?.busy && (() => {

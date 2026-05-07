@@ -258,24 +258,35 @@ export function getImportProgress({ exportId }) {
 }
 
 // importSnapshotFromS3({ destination, s3Key, incusName, snapshotName,
-//                        exportId, audit }) → { ok, error?, sizeBytes? }
+//                        exportId, audit }) → { ok, error?, restoredAs?,
+//                        sizeBytes? }
 //
-// The reverse of exportSnapshotToTmp + S3 upload.  Phase by phase:
+// Stream the tarball from S3 → host /tmp → `incus import` as a
+// FRESH instance.  Phase by phase:
 //
-//   1. Stream the tarball from S3 into a buffer; spawnHost('cat')
-//      pipes that buffer into a host /tmp file.
-//   2. `incus import <tarball> <temp-instance>` — fresh instance.
-//   3. `incus snapshot create <temp> <snapname>` — temp now owns
-//      a snapshot named like the source snapshot.
-//   4. `incus copy <temp>/<snapname> <orig>/<snapname>` — incus
-//      accepts the snapshot-to-snapshot form when both sides
-//      include a `/`; the bare `<temp> <orig>/<snap>` form fails
-//      with 'character / is reserved for snapshots' because Incus
-//      6.x parses the target as 'create instance named foo/bar'.
-//   5. `incus delete --force <temp>` — cleanup.
+//   1. Stream S3 → buffer in the dashboard container.
+//   2. spawnHost('cat') pipes the buffer into a host /tmp file.
+//   3. `incus import <tarball> <restored-name>` — fresh instance.
 //
-// Caller is responsible for verifying the orig instance exists
-// and that no local snapshot with the same name is in the way.
+// Why not 'land it as a snapshot of the original': Incus 6.x does
+// NOT support copying an external instance state INTO a snapshot
+// of an existing container.  The form `incus copy <a> <b>/<s>`
+// fails with 'character "/" is reserved for snapshots' (Incus
+// validates the target as a new instance name); the alternate
+// `incus copy <a>/<s> <b>/<s>` form ALSO fails because Incus
+// rejects the target the same way.  There is no public CLI / REST
+// API path that grafts external state onto an existing instance's
+// snapshot list without overwriting the instance itself
+// (destructive).  Rather than do something destructive silently,
+// we land the tarball as a clearly-named NEW container the
+// operator can use directly or copy onto the original via
+// `incus copy --refresh` themselves.
+//
+// Naming: <containerName-truncated>-r-<short8>.  Capped at the
+// 63-char Incus instance limit; the snapshot name doesn't appear
+// in the new container name (operators see it in the toast +
+// audit log, and trying to fit `<container>-<snap>-<id>` blows
+// past 63 chars on long names).
 export async function importSnapshotFromS3({
   destination, s3Key, incusName, snapshotName, exportId = null, audit = {},
 }) {
@@ -290,7 +301,12 @@ export async function importSnapshotFromS3({
   }
 
   const shortId = Math.random().toString(36).slice(2, 10);
-  const tempInstance = `pp-snapxp-imp-${shortId}`;
+  // Build the target name and trim the source-instance prefix if
+  // we'd blow past the 63-char Incus instance-name limit.  The
+  // suffix `-r-<8chars>` is 11 chars, leaving 52 chars for the
+  // base name.
+  const baseName = incusName.length <= 52 ? incusName : incusName.slice(0, 52);
+  const restoredName = `${baseName}-r-${shortId}`;
   const hostTmpDir = `/tmp/pp-snap-import-${process.pid}-${Date.now()}-${shortId}`;
   const hostTarball = `${hostTmpDir}/import.tar.gz`;
 
@@ -360,16 +376,19 @@ export async function importSnapshotFromS3({
       );
     }
 
-    // Phase 2: incus import → temp instance.
+    // Phase 2: incus import → restored container.  We KEEP this
+    // container after success — that's the deliverable.  The
+    // operator can `incus copy --refresh` it onto the original
+    // (destructive) or use it as a fresh sibling.
     setImportProgress(exportId, {
       phase: 'importing',
-      label: `incus import → temp instance ${tempInstance}`,
+      label: `incus import → ${restoredName}`,
       bytes_total: buffer.length,
       bytes_loaded: buffer.length,
     });
     const imp = await runHost('nice', [
       '-n', '19', 'incus',
-      'import', hostTarball, tempInstance,
+      'import', hostTarball, restoredName,
     ], { encoding: 'utf-8', timeout: 60 * 60_000 });
     if (imp.status !== 0) {
       throw new Error(
@@ -378,54 +397,19 @@ export async function importSnapshotFromS3({
     }
     importDone = true;
 
-    // Phase 3: snapshot the temp so we have a snapshot reference
-    // to copy from.  Incus's snapshot-to-snapshot copy in step 4
-    // requires both source and target to be snapshot references
-    // (i.e. include a `/`), otherwise it tries to interpret the
-    // target as a new instance name and trips on the slash.
-    setImportProgress(exportId, {
-      phase: 'snapshotting-temp',
-      label: 'Creating staging snapshot on temp instance',
-    });
-    const snap = await runHost('incus', [
-      'snapshot', 'create', tempInstance, snapshotName,
-    ], { encoding: 'utf-8', timeout: 5 * 60_000 });
-    if (snap.status !== 0) {
-      throw new Error(
-        `incus snapshot create on temp failed: ${(snap.stderr || snap.stdout || 'unknown').trim()}`
-      );
-    }
-
-    // Phase 4: copy the temp's snapshot AS a snapshot of the
-    // target instance.  Incus accepts `incus copy <a>/<s> <b>/<s>`
-    // for snapshot-to-snapshot copies on the same host.
-    setImportProgress(exportId, {
-      phase: 'landing-snapshot',
-      label: `Landing snapshot on ${incusName}`,
-    });
-    const cp = await runHost('nice', [
-      '-n', '19', 'incus',
-      'copy', `${tempInstance}/${snapshotName}`, `${incusName}/${snapshotName}`,
-    ], { encoding: 'utf-8', timeout: 60 * 60_000 });
-    if (cp.status !== 0) {
-      throw new Error(
-        `incus copy → snapshot failed: ${(cp.stderr || cp.stdout || 'unknown').trim()}`
-      );
-    }
-
     setImportProgress(exportId, {
       phase: 'cleanup',
-      label: 'Cleaning up temp instance',
+      label: 'Cleaning up host /tmp',
     });
     try {
       logAudit(audit.user_id || null, 'LXC_SNAPSHOT_S3_RESTORE', 'lxc_snapshot',
         `${incusName}/${snapshotName}`, {
           destination_id: destination?.id || null, s3_key: s3Key,
-          size_bytes: buffer.length,
+          size_bytes: buffer.length, restored_as: restoredName,
         }, audit.ip || null);
     } catch { /* tolerated */ }
 
-    return { ok: true, sizeBytes: buffer.length };
+    return { ok: true, sizeBytes: buffer.length, restoredAs: restoredName };
   } catch (err) {
     setImportProgress(exportId, {
       phase: 'error',
@@ -434,22 +418,14 @@ export async function importSnapshotFromS3({
     });
     return { ok: false, error: (err?.message || String(err)).slice(0, 1024) };
   } finally {
-    // Always clean up the temp instance (whether copy succeeded
-    // or not) — the snapshot is on the original container at this
-    // point and the temp is just a staging area.
-    if (importDone) {
-      const del = await runHost('incus', ['delete', '--force', tempInstance], {
-        encoding: 'utf-8', timeout: 60_000,
-      });
-      if (del.status !== 0) {
-        await runHost('incus', ['stop', '--force', tempInstance], {
-          encoding: 'utf-8', timeout: 30_000,
-        });
-        await runHost('incus', ['delete', '--force', tempInstance], {
-          encoding: 'utf-8', timeout: 60_000,
-        });
-      }
-    }
+    // Tarball cleanup only.  The restored instance STAYS — that's
+    // the whole point of the operation.  If `incus import` failed
+    // before the instance landed (importDone=false) there's
+    // nothing to clean up on the incus side; if it failed AFTER
+    // (importDone=true) we still keep the restored container
+    // because partial state is more useful to the operator than
+    // silently destroying it.  An operator who wants it gone runs
+    // `incus delete --force <name>` themselves.
     await runHost('rm', ['-rf', hostTmpDir], { encoding: 'utf-8' });
     // Mark progress 'done' so the polling UI can clear cleanly.
     // 'error' phase is left in place from the catch block; an

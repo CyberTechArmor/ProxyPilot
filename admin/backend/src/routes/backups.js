@@ -601,6 +601,24 @@ function getBackupHandler(req, res) {
 // persisted anywhere in our state (not in the audit log, not in the
 // row, not in the manifest).
 backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
+  // Top-level guard: the original handler had try/catches around
+  // each stage but no outer wrapper, so any synchronous throw
+  // outside those (logAudit blow-up, malformed manifest JSON,
+  // etc.) would leave the response hanging until Caddy's upstream
+  // timeout kicked in and surfaced a misleading 502 to the
+  // operator (May 2026 review: a local-only backup tripped this).
+  try {
+    return await createBackupHandler(req, res);
+  } catch (err) {
+    if (res.headersSent) return;
+    console.error('[backups POST] unhandled', err);
+    res.status(500).json({
+      error: `backup create failed: ${err?.message || String(err)}`,
+    });
+  }
+});
+
+async function createBackupHandler(req, res) {
   let body;
   try {
     body = createBackupSchema.parse(req.body || {});
@@ -786,7 +804,7 @@ backupsRouter.post('/', requireAdmin, requireSudo, async (req, res) => {
     fanout: fanOutResults.results,
     s3_error: fanOutFailures.length > 0 ? summaryError : null,
   });
-});
+}
 
 // GET /api/backups/:id/download — stream the encrypted artifact to
 // the operator's browser.  Local-first: if local_path exists on

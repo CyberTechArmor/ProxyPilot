@@ -40,7 +40,31 @@ export { buildKey };
 // itself anywhere (it carries the credentials).
 export function clientForDestination(dest) {
   if (!dest) throw new Error('clientForDestination: destination is required');
-  const secret = decryptSecret(dest.secret_key_enc);
+  let secret;
+  try {
+    secret = decryptSecret(dest.secret_key_enc);
+  } catch (err) {
+    // The raw AES-GCM failure is "Unsupported state or unable to
+    // authenticate data" — accurate but unactionable for an
+    // operator looking at the row in the UI.  Translate it into
+    // something self-diagnosing.  This shape of failure shows up
+    // most often after an in-place restore writes the DB but
+    // doesn't bring along (or matches) the .env's
+    // TOTP_ENCRYPTION_KEY: every encrypted secret in the restored
+    // DB is then unrecoverable until the key is reconciled.
+    const raw = err?.message || String(err);
+    if (/unsupported state|unable to authenticate|cipher.+state/i.test(raw)) {
+      throw new Error(
+        `destination "${dest.name}" credential decrypt failed (TOTP_ENCRYPTION_KEY ` +
+        `mismatch — common after an in-place restore that didn't replace .env). ` +
+        `Re-enter the destination's secret key in Housekeeping → Storage, or restore ` +
+        `the matching .env onto the host. Original error: ${raw}`
+      );
+    }
+    throw new Error(
+      `destination "${dest.name}" credential decrypt failed: ${raw}`
+    );
+  }
   if (!secret) {
     throw new Error(`destination "${dest.name}" has empty secret_key after decryption`);
   }

@@ -28,6 +28,8 @@ import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
+import { decryptSecret } from './lib/secrets.js';
+import { postNotification } from './lib/notifications.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -265,6 +267,52 @@ try {
   }
 } catch (err) {
   console.error('[backups] missing-file sweep failed at boot:', err?.message || err);
+}
+
+// Probe every backup_destinations row for credential decryption.
+// AES-GCM auth fails (raw message: "Unsupported state or unable
+// to authenticate data") when the secret was encrypted under a
+// different TOTP_ENCRYPTION_KEY than the one currently on disk.
+// Most common cause: in-place restore wrote the DB but didn't
+// match the .env's at-rest key, leaving every destination's
+// secret unrecoverable.  Surface this at boot in the admin log
+// + via a notification so the operator sees it before the next
+// upload (snapshot push, scheduled backup) fails with a cryptic
+// crypto error.
+try {
+  const db = getDb();
+  const dests = db.prepare(
+    `SELECT id, name, secret_key_enc FROM backup_destinations`
+  ).all();
+  const broken = [];
+  for (const d of dests) {
+    if (!d.secret_key_enc) continue;
+    try { decryptSecret(d.secret_key_enc); }
+    catch (err) {
+      broken.push({ name: d.name, error: err?.message || String(err) });
+    }
+  }
+  if (broken.length > 0) {
+    console.error(
+      `[secrets] ${broken.length} backup destination(s) failed credential decrypt at boot — ` +
+      `TOTP_ENCRYPTION_KEY likely doesn't match the one used at encrypt time. ` +
+      `Affected: ${broken.map((b) => b.name).join(', ')}. ` +
+      `Re-enter the secret key in Housekeeping → Storage for each, or restore the matching .env.`
+    );
+    try {
+      postNotification({
+        level: 'error',
+        title: `${broken.length} backup destination${broken.length === 1 ? '' : 's'} have unreadable credentials`,
+        body: `TOTP_ENCRYPTION_KEY mismatch (common after in-place restore). ` +
+          `Affected: ${broken.map((b) => b.name).join(', ')}. ` +
+          `Re-enter the secret key in Housekeeping → Storage, or restore the matching .env.`,
+        source: 'secrets-boot-probe',
+        dedupe_key: 'secrets-boot-probe',
+      });
+    } catch { /* notification post may fail before init; non-fatal */ }
+  }
+} catch (err) {
+  console.error('[secrets] boot decrypt probe failed:', err?.message || err);
 }
 
 // Sweep orphan 'pending' snapshot S3 export rows.  The export

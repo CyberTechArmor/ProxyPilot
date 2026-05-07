@@ -671,18 +671,12 @@ export const api = {
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
-  // Optional s3DestinationIds: when supplied, the backend kicks
-  // off an `incus export` after the snapshot completes locally
-  // and pushes the tarball to each destination.  Empty/undef =
-  // local-only (legacy behaviour).
-  createLxcSnapshot: (name, snapshotName, note, s3DestinationIds) =>
+  // Snapshots are always created local-only.  Promotion to S3
+  // happens via exportLxcSnapshotToS3 (per-row Push to S3 dialog).
+  createLxcSnapshot: (name, snapshotName, note) =>
     request(`/lxc/containers/${name}/snapshot`, {
       method: 'POST',
-      body: JSON.stringify({
-        snapshotName,
-        note,
-        s3_destination_ids: Array.isArray(s3DestinationIds) ? s3DestinationIds : [],
-      }),
+      body: JSON.stringify({ snapshotName, note }),
     }),
 
   // Per-snapshot S3 export rows (one per destination).  Used by

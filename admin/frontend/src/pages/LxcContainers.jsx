@@ -333,14 +333,10 @@ export default function LxcContainers() {
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
-  // Optional S3 fan-out for the snapshot.  Empty array = local-
-  // only (the legacy behaviour, default).  Populated only when
-  // the operator picks one or more destinations in the snapshot
-  // dialog.
-  const [snapshotS3DestinationIds, setSnapshotS3DestinationIds] = useState([]);
-  // Backup destinations available for the multi-select; loaded
-  // lazily when the snapshot dialog mounts so we don't pay the
-  // network round-trip on every container detail render.
+  // Backup destinations gating the per-snapshot 'Push to S3' button
+  // and feeding the destination-picker dialog.  Snapshot creation
+  // itself is always local-only — operators promote to S3 via the
+  // per-row push dialog after the fact.
   const [backupDestinations, setBackupDestinations] = useState([]);
   // Retroactive 'Push to S3' picker: when set, opens a small
   // dialog scoped to one snapshot row.  Operator picks one or
@@ -1502,7 +1498,7 @@ export default function LxcContainers() {
     });
     try {
       const start = await api.createLxcSnapshot(
-        ctName, sName, snapshotNote.trim(), snapshotS3DestinationIds,
+        ctName, sName, snapshotNote.trim(),
       );
       const jobId = start?.jobId;
       if (!jobId) {
@@ -1532,28 +1528,8 @@ export default function LxcContainers() {
       }
       setSnapshotName('');
       setSnapshotNote('');
-      setSnapshotS3DestinationIds([]);
       const snapRes = await api.getLxcSnapshots(ctName);
       setSnapshots(snapRes.snapshots || []);
-      // Refresh S3 export rows so the snapshots list shows the
-      // 'pending' / 'exported' chips for the just-fired fan-out.
-      // The backend fan-out runs detached and inserts the rows
-      // a moment after the snapshot itself completes, so we
-      // refresh once immediately + once again after 1.5s to
-      // catch the inserts.  After that, the polling effect
-      // (driven by snapshotS3Exports state) takes over.
-      try {
-        const exp = await api.getLxcSnapshotExports(ctName);
-        const grouped = {};
-        for (const r of exp.exports || []) {
-          (grouped[r.snapshot_name] ||= []).push(r);
-        }
-        setSnapshotS3Exports(grouped);
-      } catch { /* tolerated */ }
-      if (snapshotS3DestinationIds.length > 0) {
-        // Detached delayed refresh — race-window catch.
-        setTimeout(() => { refreshSnapshotExports(); }, 1500);
-      }
     } catch (err) {
       toast({ title: 'Snapshot failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -3139,58 +3115,6 @@ export default function LxcContainers() {
                         )}
                       </Button>
                     </div>
-                    {/* S3 fan-out picker: snapshots default to local-
-                        only (just `incus snapshot create`).  When the
-                        operator checks one or more destinations, the
-                        backend ALSO runs `incus export` after the
-                        snapshot completes and pushes the tarball to
-                        each picked destination. */}
-                    {backupDestinations.length > 0 && (
-                      <details className="border rounded text-xs">
-                        <summary className="cursor-pointer px-2 py-1.5 select-none flex items-center justify-between gap-2">
-                          <span className="text-muted-foreground">
-                            Also push to S3
-                            {snapshotS3DestinationIds.length > 0 && (
-                              <span className="ml-1 text-foreground font-medium">
-                                ({snapshotS3DestinationIds.length} selected)
-                              </span>
-                            )}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            optional
-                          </span>
-                        </summary>
-                        <div className="border-t p-2 space-y-1 max-h-32 overflow-y-auto">
-                          {backupDestinations.map((d) => (
-                            <label
-                              key={d.id}
-                              className="flex items-center gap-2 cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={snapshotS3DestinationIds.includes(d.id)}
-                                onChange={() => setSnapshotS3DestinationIds((prev) =>
-                                  prev.includes(d.id)
-                                    ? prev.filter((x) => x !== d.id)
-                                    : [...prev, d.id]
-                                )}
-                              />
-                              <span className="font-medium truncate flex-1">
-                                {d.name}{d.is_default ? ' (default)' : ''}
-                              </span>
-                              <span className="text-muted-foreground font-mono text-[10px] truncate">
-                                {d.bucket}
-                              </span>
-                            </label>
-                          ))}
-                          <p className="text-[10px] text-muted-foreground pt-1 border-t">
-                            Snapshot lives on this host's Incus pool either way. Picking
-                            destinations runs <code>incus export</code> after the snapshot
-                            and uploads the tarball to each.
-                          </p>
-                        </div>
-                      </details>
-                    )}
                     {/* In-flight snapshot progress: elapsed timer plus a
                         remaining-time hint when the backend has prior
                         durations to estimate from. Stays scoped to the

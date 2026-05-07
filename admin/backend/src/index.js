@@ -201,6 +201,30 @@ app.use('/api/', csrfProtection);
 // Initialize database
 initDatabase();
 
+// Sweep orphan in_progress backup rows.  The create-backup
+// route inserts a row in 'in_progress' immediately, then packs +
+// fans out + flips it to 'ok' / 'failed'.  If the process dies
+// mid-pack (operator restarts the container, Caddy upstream
+// times out, etc.) the row sticks at 'in_progress' forever and
+// shows up in the dashboard as a never-ending spinner.  Since
+// no in_progress row from before this boot can be valid (the
+// pack was running in this very process), mark them all failed
+// at startup.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE backups
+     SET status = 'failed',
+         error = COALESCE(error, 'orphaned in_progress at admin restart')
+     WHERE status = 'in_progress'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[backups] swept ${orphans.changes} orphan in_progress row(s) at boot`);
+  }
+} catch (err) {
+  console.error('[backups] orphan sweep failed at boot:', err?.message || err);
+}
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), frontendPath: FRONTEND_PATH });

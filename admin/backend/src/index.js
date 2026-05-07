@@ -7,7 +7,7 @@ import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { initDatabase, getDb } from './db.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
@@ -200,6 +200,72 @@ app.use('/api/', csrfProtection);
 
 // Initialize database
 initDatabase();
+
+// Sweep orphan in_progress backup rows.  The create-backup
+// route inserts a row in 'in_progress' immediately, then packs +
+// fans out + flips it to 'ok' / 'failed'.  If the process dies
+// mid-pack (operator restarts the container, Caddy upstream
+// times out, etc.) the row sticks at 'in_progress' forever and
+// shows up in the dashboard as a never-ending spinner.  Since
+// no in_progress row from before this boot can be valid (the
+// pack was running in this very process), mark them all failed
+// at startup.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE backups
+     SET status = 'failed',
+         error = COALESCE(error, 'orphaned in_progress at admin restart')
+     WHERE status = 'in_progress'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[backups] swept ${orphans.changes} orphan in_progress row(s) at boot`);
+  }
+} catch (err) {
+  console.error('[backups] orphan sweep failed at boot:', err?.message || err);
+}
+
+// Detect 'ok' backups whose local file is missing AND that have
+// no S3 copy — these are unrestorable orphans, typically caused
+// by /var/lib/proxypilot not being bind-mounted into the admin
+// container so a docker compose rebuild wiped the ephemeral
+// storage out from under the DB rows.  Surface them by flipping
+// the status to 'failed' with a clear note; the operator can
+// dismiss them via the trash button.  We don't auto-delete the
+// row because the operator might still want to see what was
+// captured (manifest, audit history) before clearing it.
+try {
+  const db = getDb();
+  const candidates = db.prepare(
+    `SELECT id, local_path FROM backups
+     WHERE status = 'ok'
+       AND local_path IS NOT NULL
+       AND s3_uploaded = 0`
+  ).all();
+  let flagged = 0;
+  const update = db.prepare(
+    `UPDATE backups
+     SET status = 'failed',
+         error = 'local file missing — wiped on container rebuild (check that /var/lib/proxypilot is bind-mounted)'
+     WHERE id = ?`
+  );
+  for (const row of candidates) {
+    if (!row.local_path) continue;
+    try {
+      statSync(row.local_path);
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        update.run(row.id);
+        flagged += 1;
+      }
+    }
+  }
+  if (flagged > 0) {
+    console.log(`[backups] flagged ${flagged} backup(s) with missing local file at boot`);
+  }
+} catch (err) {
+  console.error('[backups] missing-file sweep failed at boot:', err?.message || err);
+}
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

@@ -54,6 +54,23 @@ function fmtAge(iso) {
   return `${Math.round(ms / 86_400_000)}d ago`;
 }
 
+// Absolute timestamp — used as the secondary line under fmtAge so
+// 'just now' / '5m ago' rows still show the actual wall-clock
+// time the operator ran the backup.  Reads better than just the
+// relative form when reviewing a long list.
+function fmtAbs(iso) {
+  if (!iso) return '';
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return '';
+  const sameDay = dt.toDateString() === new Date().toDateString();
+  return sameDay
+    ? dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    : dt.toLocaleString(undefined, {
+        month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+}
+
 function StatusBadge({ status }) {
   if (status === 'ok') {
     return (
@@ -528,6 +545,9 @@ export default function BackupsTab() {
                             <span title={new Date(b.created_at).toLocaleString()}>
                               {fmtAge(b.created_at)}
                             </span>
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {fmtAbs(b.created_at)}
                           </div>
                           <div className="text-[11px] text-muted-foreground font-mono">
                             {b.id.slice(0, 8)}…

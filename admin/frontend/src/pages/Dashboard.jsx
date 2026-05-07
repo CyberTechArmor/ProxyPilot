@@ -503,9 +503,12 @@ export default function Dashboard() {
   const [dragOverFolder, setDragOverFolder] = useState(null);
   const [folderDropPosition, setFolderDropPosition] = useState(null); // { folderPath, position: 'before' | 'after' }
 
-  // Dashboard view state - tabs for Resources, Services, Compose
+  // Dashboard view state — Compose tab is hidden; if the operator's
+  // saved default is 'compose' (from before the hide), fall back to
+  // resources so they don't land on an empty tab bar.
   const [dashboardTab, setDashboardTab] = useState(() => {
-    return localStorage.getItem('dashboardDefaultTab') || 'resources';
+    const saved = localStorage.getItem('dashboardDefaultTab') || 'resources';
+    return saved === 'compose' ? 'resources' : saved;
   });
 
   // System stats state for resource utilization
@@ -3874,21 +3877,16 @@ volumes:
                       </CardDescription>
                     </CardContent>
                   </Card>
-                  <Card
-                    data-testid="wizard-tile-compose"
-                    className="cursor-pointer hover:border-primary transition-colors"
-                    onClick={() => handleStep0Tile('compose')}
-                  >
-                    <CardHeader className="text-center pb-2">
-                      <Boxes className="h-12 w-12 mx-auto text-primary" />
-                      <CardTitle className="text-lg">Docker Compose</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <CardDescription className="text-center">
-                        Manage compose stacks in the Compose tab. Click to jump there.
-                      </CardDescription>
-                    </CardContent>
-                  </Card>
+                  {/* Docker Compose tile intentionally removed.
+                      ProxyPilot now recommends running Docker
+                      inside an LXC ('docker-in-LXC') and exposing
+                      services via the Docker Container or LXC
+                      Container tile above instead of running a
+                      compose stack on the host directly.  Existing
+                      compose stacks are still discoverable via
+                      api.discoverDockerCompose so an operator can
+                      pick up a service from a running stack
+                      without re-creating it here. */}
                 </div>
               ) : (
                 <form onSubmit={handleAddService} className="space-y-4">
@@ -4284,7 +4282,15 @@ volumes:
         </div>
       </div>
 
-      {/* Dashboard Tabs */}
+      {/* Dashboard Tabs.
+          Compose tab intentionally hidden: ProxyPilot is steering
+          operators toward the docker-in-LXC pattern (run a Docker
+          daemon inside an LXC, manage HTTP routes via the standard
+          Add Service wizard).  The discovery / 'pick up an
+          already-running compose service' path stays in the API
+          (api.discoverDockerCompose) so existing stacks can still
+          surface as services, but creating new compose stacks
+          from this dashboard is no longer encouraged. */}
       <div className="flex flex-col gap-2 border-b pb-2 sm:flex-row sm:items-center">
         <div className="flex gap-1 p-1 bg-muted rounded-lg flex-nowrap overflow-x-auto max-w-full">
           <Button
@@ -4304,15 +4310,6 @@ volumes:
           >
             <LayoutGrid className="h-4 w-4" />
             Services
-          </Button>
-          <Button
-            variant={dashboardTab === 'compose' ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => setDashboardTab('compose')}
-            className="gap-2 shrink-0"
-          >
-            <Container className="h-4 w-4" />
-            Compose
           </Button>
           <Button
             variant={dashboardTab === 'lxc' ? 'default' : 'ghost'}
@@ -4336,7 +4333,6 @@ volumes:
           >
             <option value="resources">Resources</option>
             <option value="services">Services</option>
-            <option value="compose">Compose</option>
             <option value="lxc">LXC</option>
           </select>
         </div>

@@ -26,10 +26,11 @@ import {
   Cpu, MemoryStick, HardDrive, Globe, Camera, Loader2,
   Box, AlertCircle, Check, Download, Settings, Wifi,
   Terminal, FolderOpen, File, Upload, ChevronRight, ChevronDown, ArrowLeft, FolderUp, MessageSquare, StickyNote,
-  X, Shield, Copy, Sparkles
+  X, Shield, Copy, Sparkles, Pencil, MoveRight
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
+import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
 const STATUS_COLORS = {
   Running: 'bg-green-500',
@@ -303,6 +304,22 @@ function ContainerFiles({ containerName, onOpenTerminal }) {
 
 export default function LxcContainers() {
   const { toast } = useToast();
+  // Global snapshot-export queue state.  Drives the per-button
+  // disabled gating: while this container's snapshot is being
+  // pushed (or sitting in the queue), the per-snapshot Push to
+  // S3 / delete / create buttons are greyed out so the operator
+  // can't fire competing operations.
+  const { status: exportQueue, isBusy: exportQueueBusy } = useSnapshotExports();
+  // True when the queue currently has a running OR queued job
+  // touching `containerName`.  Used to disable create/delete
+  // affordances on the same container's snapshot list.
+  const isContainerBusyForExport = (containerName) => {
+    if (!containerName) return false;
+    if ((exportQueue?.running || []).some((j) => j.container_name === containerName)) return true;
+    if ((exportQueue?.queued || []).some((j) => j.container_name === containerName)) return true;
+    return false;
+  };
+  const exportBusyTooltip = 'Waiting for snapshot export to finish.';
 
   // Incus availability
   const [incusAvailable, setIncusAvailable] = useState(null);
@@ -333,14 +350,10 @@ export default function LxcContainers() {
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotName, setSnapshotName] = useState('');
   const [snapshotNote, setSnapshotNote] = useState('');
-  // Optional S3 fan-out for the snapshot.  Empty array = local-
-  // only (the legacy behaviour, default).  Populated only when
-  // the operator picks one or more destinations in the snapshot
-  // dialog.
-  const [snapshotS3DestinationIds, setSnapshotS3DestinationIds] = useState([]);
-  // Backup destinations available for the multi-select; loaded
-  // lazily when the snapshot dialog mounts so we don't pay the
-  // network round-trip on every container detail render.
+  // Backup destinations gating the per-snapshot 'Push to S3' button
+  // and feeding the destination-picker dialog.  Snapshot creation
+  // itself is always local-only — operators promote to S3 via the
+  // per-row push dialog after the fact.
   const [backupDestinations, setBackupDestinations] = useState([]);
   // Retroactive 'Push to S3' picker: when set, opens a small
   // dialog scoped to one snapshot row.  Operator picks one or
@@ -355,6 +368,27 @@ export default function LxcContainers() {
   // Snapshot whose deletion is pending operator confirmation.
   // null = no pending confirm.  Holds the snapshot name string.
   const [confirmDeleteSnap, setConfirmDeleteSnap] = useState(null);
+  // Per-S3-destination delete confirm state.  When set, opens a
+  // dialog scoped to a single export row (one snapshot × one
+  // destination); the dialog also fires a HEAD round-trip on
+  // mount to surface object-lock / retention info before the
+  // operator commits.  Shape: { snapshotName, exportId,
+  // destinationName, info?, infoLoading, busy }.
+  const [pendingS3Delete, setPendingS3Delete] = useState(null);
+  // Local-only delete confirm: drops the local Incus copy but
+  // keeps every S3 copy.  Shape: { snapshotName, busy }.
+  const [pendingLocalDelete, setPendingLocalDelete] = useState(null);
+  // Pull-from-S3 confirm: re-imports an exported tarball back
+  // into the local Incus pool as a snapshot.  Shape:
+  // { snapshotName, exportRow, busy }.
+  const [pendingPullFromS3, setPendingPullFromS3] = useState(null);
+  // Rename dialog state.  { busy, value } when open, null when
+  // closed.  The actual incus rename fires on confirm.
+  const [pendingRename, setPendingRename] = useState(null);
+  // Transfer-routes dialog state.  { fromName, toName, busy, services? }
+  // — `services` is populated after a dry-run query so the
+  // operator sees what's about to move before they commit.
+  const [pendingTransfer, setPendingTransfer] = useState(null);
   // Per-snapshot S3 export state, keyed by snapshot name → array
   // of { destination_id, destination_name, status, error?, ... }.
   const [snapshotS3Exports, setSnapshotS3Exports] = useState({});
@@ -1292,6 +1326,19 @@ export default function LxcContainers() {
   // specially in deleteSnapshotExport: drops the DB row outright,
   // no S3 call.  No confirm dialog because the operation is
   // non-destructive — the row references nothing in any bucket.
+  // Refresh both the snapshot list AND the S3 export rows.  The
+  // backend's snapshot list now merges S3-only ghost rows; after
+  // a per-location delete that drops the last copy of a ghost,
+  // we need both fetches to converge so the row disappears.
+  const refreshSnapshotsAndExports = async () => {
+    if (!selectedContainer) return;
+    try {
+      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      setSnapshots(snapRes.snapshots || []);
+    } catch { /* tolerated */ }
+    await refreshSnapshotExports();
+  };
+
   const dismissSnapshotS3Export = async (snapshotName, exportId) => {
     if (!selectedContainer) return;
     try {
@@ -1299,7 +1346,7 @@ export default function LxcContainers() {
         selectedContainer.name, snapshotName, exportId,
       );
       toast({ title: 'Failed entry dismissed' });
-      await refreshSnapshotExports();
+      await refreshSnapshotsAndExports();
     } catch (err) {
       toast({
         title: 'Dismiss failed',
@@ -1309,23 +1356,91 @@ export default function LxcContainers() {
     }
   };
 
-  const deleteSnapshotS3Copy = async (snapshotName, exportId, destinationName) => {
+  // Open the per-S3-destination delete confirm dialog.  The actual
+  // delete fires from confirmS3DeleteFromDialog once the operator
+  // clicks Confirm; that's where the lock-aware error handling
+  // lives.
+  const deleteSnapshotS3Copy = (snapshotName, exportId, destinationName) => {
     if (!selectedContainer) return;
-    if (!window.confirm(`Remove the S3 copy of "${snapshotName}" from ${destinationName || 'this destination'}?  Local snapshot stays.`)) return;
+    setPendingS3Delete({
+      snapshotName, exportId, destinationName,
+      info: null, infoLoading: true, busy: false,
+    });
+  };
+
+  const confirmS3DeleteFromDialog = async () => {
+    const p = pendingS3Delete;
+    if (!p || !selectedContainer) return;
+    setPendingS3Delete({ ...p, busy: true });
     try {
       await api.deleteLxcSnapshotS3Export(
-        selectedContainer.name, snapshotName, exportId,
+        selectedContainer.name, p.snapshotName, p.exportId,
       );
-      toast({ title: 'S3 copy removed', description: `${snapshotName} deleted from ${destinationName || 'destination'}.` });
-      await refreshSnapshotExports();
+      toast({
+        title: 'S3 copy removed',
+        description: `${p.snapshotName} deleted from ${p.destinationName || 'destination'}.`,
+      });
+      setPendingS3Delete(null);
+      await refreshSnapshotsAndExports();
     } catch (err) {
+      // 423 Locked: server detected retention or legal hold.  Keep
+      // the dialog open and replace its body with the lock state
+      // so the operator sees why the delete didn't go through.
+      if (err?.locked) {
+        setPendingS3Delete({
+          ...p,
+          busy: false,
+          info: {
+            found: true,
+            locked: true,
+            retention_until: err.retention_until || null,
+            retention_mode: err.retention_mode || null,
+            legal_hold: !!err.legal_hold,
+          },
+        });
+        toast({
+          title: 'S3 object is locked',
+          description: err?.message || 'Bucket has Object Lock enabled.',
+          variant: 'destructive',
+        });
+        return;
+      }
       toast({
         title: 'Delete failed',
         description: err?.message || 'unknown error',
         variant: 'destructive',
       });
+      setPendingS3Delete({ ...p, busy: false });
     }
   };
+
+  // Fire a HEAD round-trip when the S3 delete dialog opens so the
+  // body can render the object's retention state before the
+  // operator confirms.  Re-runs whenever a different export id
+  // is set as pending.
+  useEffect(() => {
+    if (!pendingS3Delete || !selectedContainer) return;
+    if (pendingS3Delete.info && !pendingS3Delete.infoLoading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.getLxcSnapshotS3ExportInfo(
+          selectedContainer.name, pendingS3Delete.snapshotName, pendingS3Delete.exportId,
+        );
+        if (cancelled) return;
+        setPendingS3Delete((p) => p && p.exportId === pendingS3Delete.exportId
+          ? { ...p, info: r, infoLoading: false }
+          : p);
+      } catch (err) {
+        if (cancelled) return;
+        setPendingS3Delete((p) => p && p.exportId === pendingS3Delete.exportId
+          ? { ...p, info: { error: err?.message || 'inspect failed' }, infoLoading: false }
+          : p);
+      }
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [pendingS3Delete?.exportId]);
 
   // Download a previously-taken snapshot as a tarball. incus's export
   // accepts <container>/<snapshot>, so the backend just streams that
@@ -1502,7 +1617,7 @@ export default function LxcContainers() {
     });
     try {
       const start = await api.createLxcSnapshot(
-        ctName, sName, snapshotNote.trim(), snapshotS3DestinationIds,
+        ctName, sName, snapshotNote.trim(),
       );
       const jobId = start?.jobId;
       if (!jobId) {
@@ -1532,28 +1647,8 @@ export default function LxcContainers() {
       }
       setSnapshotName('');
       setSnapshotNote('');
-      setSnapshotS3DestinationIds([]);
       const snapRes = await api.getLxcSnapshots(ctName);
       setSnapshots(snapRes.snapshots || []);
-      // Refresh S3 export rows so the snapshots list shows the
-      // 'pending' / 'exported' chips for the just-fired fan-out.
-      // The backend fan-out runs detached and inserts the rows
-      // a moment after the snapshot itself completes, so we
-      // refresh once immediately + once again after 1.5s to
-      // catch the inserts.  After that, the polling effect
-      // (driven by snapshotS3Exports state) takes over.
-      try {
-        const exp = await api.getLxcSnapshotExports(ctName);
-        const grouped = {};
-        for (const r of exp.exports || []) {
-          (grouped[r.snapshot_name] ||= []).push(r);
-        }
-        setSnapshotS3Exports(grouped);
-      } catch { /* tolerated */ }
-      if (snapshotS3DestinationIds.length > 0) {
-        // Detached delayed refresh — race-window catch.
-        setTimeout(() => { refreshSnapshotExports(); }, 1500);
-      }
     } catch (err) {
       toast({ title: 'Snapshot failed', description: err.message, variant: 'destructive' });
     } finally {
@@ -1595,16 +1690,196 @@ export default function LxcContainers() {
     }
   };
 
+  // Rename the currently-selected container.  Incus requires the
+  // container to be stopped; the backend surfaces a 'stop first'
+  // hint when the operator forgets, which we relay verbatim.
+  const handleRenameContainer = async () => {
+    const p = pendingRename;
+    if (!p || !selectedContainer) return;
+    const trimmed = (p.value || '').trim();
+    if (!trimmed || trimmed === selectedContainer.name) {
+      setPendingRename(null);
+      return;
+    }
+    setPendingRename({ ...p, busy: true });
+    try {
+      const r = await api.renameLxcContainer(selectedContainer.name, trimmed);
+      toast({ title: 'Container renamed', description: `${selectedContainer.name} → ${r.name}.` });
+      setPendingRename(null);
+      // Re-fetch container list and re-select the renamed row.
+      try { await fetchContainers(); } catch { /* tolerated */ }
+      setSelectedContainer((c) => c ? { ...c, name: r.name } : c);
+    } catch (err) {
+      toast({
+        title: 'Rename failed',
+        description: err?.hint
+          ? `${err.message}  (${err.hint})`
+          : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+      setPendingRename({ ...p, busy: false });
+    }
+  };
+
+  // Transfer every service whose lxc_container_name = the
+  // currently-selected container to a different container.
+  // After the DB update, regenerate Caddy so the new routes go
+  // live (target_ip is cleared by the backend so the regen
+  // re-resolves it).
+  const handleTransferRoutes = async () => {
+    const p = pendingTransfer;
+    if (!p || !selectedContainer) return;
+    const target = (p.toName || '').trim();
+    if (!target || target === selectedContainer.name) return;
+    setPendingTransfer({ ...p, busy: true });
+    try {
+      const r = await api.transferLxcContainerRoutes(selectedContainer.name, target);
+      // Regenerate Caddy so the rules pointing at the new
+      // container actually take effect.  Best-effort: a regen
+      // failure surfaces in its own toast but doesn't undo the
+      // DB transfer.
+      try {
+        await api.regenerateAllConfigs();
+      } catch (regenErr) {
+        toast({
+          title: 'Caddy regen failed',
+          description: regenErr?.message || 'Routes moved but Caddy did not reload — click Regenerate Caddy manually.',
+          variant: 'destructive',
+        });
+      }
+      toast({
+        title: 'Routes transferred',
+        description: r.transferred === 0
+          ? `${selectedContainer.name} had no routes to move.`
+          : `Moved ${r.transferred} route${r.transferred === 1 ? '' : 's'} from ${selectedContainer.name} to ${target}.`,
+      });
+      setPendingTransfer(null);
+    } catch (err) {
+      toast({
+        title: 'Transfer failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+      setPendingTransfer({ ...p, busy: false });
+    }
+  };
+
   const handleDeleteSnapshot = async (snap) => {
     if (!selectedContainer) return;
     setSnapshotLoading(true);
     try {
       await api.deleteLxcSnapshot(selectedContainer.name, snap);
-      toast({ title: 'Snapshot deleted', description: `Removed "${snap}".` });
+      toast({ title: 'Snapshot deleted', description: `Removed "${snap}" from every location.` });
       const snapRes = await api.getLxcSnapshots(selectedContainer.name);
       setSnapshots(snapRes.snapshots || []);
+      await refreshSnapshotExports();
     } catch (err) {
       toast({ title: 'Delete failed', description: err.message, variant: 'destructive' });
+      // The snapshot may still be partially deleted; refresh so
+      // the UI reflects whatever did succeed (e.g. local gone but
+      // an S3 destination errored).
+      try {
+        const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+        setSnapshots(snapRes.snapshots || []);
+        await refreshSnapshotExports();
+      } catch { /* tolerated */ }
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  // Drop the local Incus copy only — every S3 copy stays.  Used
+  // when an operator wants to reclaim pool space but keep the
+  // off-host backups.  Opens a confirm dialog; the real delete
+  // fires from confirmLocalDeleteFromDialog.
+  const handleDeleteSnapshotLocal = (snap) => {
+    if (!selectedContainer) return;
+    setPendingLocalDelete({ snapshotName: snap, busy: false });
+  };
+
+  const confirmLocalDeleteFromDialog = async () => {
+    const p = pendingLocalDelete;
+    if (!p || !selectedContainer) return;
+    setPendingLocalDelete({ ...p, busy: true });
+    setSnapshotLoading(true);
+    try {
+      await api.deleteLxcSnapshotLocal(selectedContainer.name, p.snapshotName);
+      toast({ title: 'Local copy removed', description: `${p.snapshotName} dropped from the host's pool.` });
+      const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+      setSnapshots(snapRes.snapshots || []);
+      setPendingLocalDelete(null);
+    } catch (err) {
+      toast({ title: 'Local delete failed', description: err?.message || 'unknown error', variant: 'destructive' });
+      setPendingLocalDelete({ ...p, busy: false });
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  // Re-import a previously-exported S3 copy into the local Incus
+  // pool as a snapshot of the same name.  Backend rejects with 409
+  // if a local snapshot of that name already exists; the operator
+  // is expected to drop the local copy first.  Opens a confirm
+  // dialog and tracks per-phase progress (download / import /
+  // copy-as-snapshot / cleanup) once the request fires.
+  const handlePullFromS3 = (snap, exportRow) => {
+    if (!selectedContainer) return;
+    setPendingPullFromS3({ snapshotName: snap, exportRow, busy: false, progress: null });
+  };
+
+  const confirmPullFromS3FromDialog = async () => {
+    const p = pendingPullFromS3;
+    if (!p || !selectedContainer) return;
+    const destName = p.exportRow.destination_name || 'destination';
+    setPendingPullFromS3({ ...p, busy: true, progress: { phase: 'starting', label: 'Starting…' } });
+    setSnapshotLoading(true);
+    try {
+      // Drive a side-channel poll of the import progress while the
+      // long-running request is in flight.  The backend writes
+      // {phase, bytes_loaded, bytes_total} to a small in-memory map
+      // keyed by export id; if that endpoint isn't present we just
+      // show a spinner.
+      const exportId = p.exportRow.id || p.exportRow.export_id;
+      let pollId;
+      const poll = async () => {
+        try {
+          const r = await api.getLxcSnapshotS3ImportProgress(
+            selectedContainer.name, p.snapshotName, exportId,
+          );
+          if (r && r.phase) {
+            setPendingPullFromS3((cur) => cur && cur.exportRow && (cur.exportRow.id || cur.exportRow.export_id) === exportId
+              ? { ...cur, progress: r }
+              : cur);
+          }
+        } catch { /* tolerated */ }
+      };
+      pollId = setInterval(poll, 1000);
+      try {
+        const r = await api.restoreLxcSnapshotFromS3(selectedContainer.name, p.snapshotName, exportId);
+        const restoredAs = r?.restored_as || 'restored container';
+        toast({
+          title: 'Container restored from S3',
+          description: r?.snapshot_created
+            ? `Created ${restoredAs} with snapshot ${p.snapshotName} preserved.`
+            : `Created ${restoredAs}.  Snapshot creation on the new container failed; see backend logs.`,
+        });
+        setPendingPullFromS3(null);
+        // Refresh both snapshot list (in case anything changed)
+        // AND the container list (the new restored container
+        // should now appear).
+        try { await fetchContainers(); } catch { /* tolerated */ }
+        const snapRes = await api.getLxcSnapshots(selectedContainer.name);
+        setSnapshots(snapRes.snapshots || []);
+      } finally {
+        if (pollId) clearInterval(pollId);
+      }
+    } catch (err) {
+      toast({
+        title: 'Pull from S3 failed',
+        description: err?.message || 'unknown error',
+        variant: 'destructive',
+      });
+      setPendingPullFromS3({ ...p, busy: false, progress: null });
     } finally {
       setSnapshotLoading(false);
     }
@@ -2385,7 +2660,33 @@ export default function LxcContainers() {
           <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <Info className="h-5 w-5 text-cyan-500" />
-              {selectedContainer?.name}
+              <span className="truncate">{selectedContainer?.name}</span>
+              {selectedContainer && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs ml-2 text-muted-foreground hover:text-foreground"
+                    onClick={() => setPendingRename({ value: selectedContainer.name, busy: false })}
+                    title="Rename container (must be stopped)"
+                  >
+                    <Pencil className="h-3 w-3 mr-1" />
+                    Rename
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setPendingTransfer({
+                      fromName: selectedContainer.name, toName: '', busy: false,
+                    })}
+                    title="Move all HTTP routes from this container to another"
+                  >
+                    <MoveRight className="h-3 w-3 mr-1" />
+                    Transfer routes
+                  </Button>
+                </>
+              )}
             </DialogTitle>
             <DialogDescription>
               Container details and management
@@ -3130,7 +3431,8 @@ export default function LxcContainers() {
                         size="sm"
                         className="h-8 shrink-0"
                         onClick={handleCreateSnapshot}
-                        disabled={snapshotLoading || !snapshotName.trim()}
+                        disabled={snapshotLoading || !snapshotName.trim() || isContainerBusyForExport(selectedContainer.name)}
+                        title={isContainerBusyForExport(selectedContainer.name) ? exportBusyTooltip : undefined}
                       >
                         {snapshotLoading ? (
                           <Loader2 className="h-3 w-3 animate-spin" />
@@ -3139,58 +3441,6 @@ export default function LxcContainers() {
                         )}
                       </Button>
                     </div>
-                    {/* S3 fan-out picker: snapshots default to local-
-                        only (just `incus snapshot create`).  When the
-                        operator checks one or more destinations, the
-                        backend ALSO runs `incus export` after the
-                        snapshot completes and pushes the tarball to
-                        each picked destination. */}
-                    {backupDestinations.length > 0 && (
-                      <details className="border rounded text-xs">
-                        <summary className="cursor-pointer px-2 py-1.5 select-none flex items-center justify-between gap-2">
-                          <span className="text-muted-foreground">
-                            Also push to S3
-                            {snapshotS3DestinationIds.length > 0 && (
-                              <span className="ml-1 text-foreground font-medium">
-                                ({snapshotS3DestinationIds.length} selected)
-                              </span>
-                            )}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            optional
-                          </span>
-                        </summary>
-                        <div className="border-t p-2 space-y-1 max-h-32 overflow-y-auto">
-                          {backupDestinations.map((d) => (
-                            <label
-                              key={d.id}
-                              className="flex items-center gap-2 cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={snapshotS3DestinationIds.includes(d.id)}
-                                onChange={() => setSnapshotS3DestinationIds((prev) =>
-                                  prev.includes(d.id)
-                                    ? prev.filter((x) => x !== d.id)
-                                    : [...prev, d.id]
-                                )}
-                              />
-                              <span className="font-medium truncate flex-1">
-                                {d.name}{d.is_default ? ' (default)' : ''}
-                              </span>
-                              <span className="text-muted-foreground font-mono text-[10px] truncate">
-                                {d.bucket}
-                              </span>
-                            </label>
-                          ))}
-                          <p className="text-[10px] text-muted-foreground pt-1 border-t">
-                            Snapshot lives on this host's Incus pool either way. Picking
-                            destinations runs <code>incus export</code> after the snapshot
-                            and uploads the tarball to each.
-                          </p>
-                        </div>
-                      </details>
-                    )}
                     {/* In-flight snapshot progress: elapsed timer plus a
                         remaining-time hint when the backend has prior
                         durations to estimate from. Stays scoped to the
@@ -3290,14 +3540,32 @@ export default function LxcContainers() {
                                       {notes.length}
                                     </span>
                                   )}
-                                  {/* S3 export chips: one per
-                                      destination this snapshot
-                                      was pushed to.  Tooltip
-                                      carries the destination
-                                      name + bucket so an
-                                      operator can disambiguate
-                                      'on-site' from 'off-site'
-                                      without expanding the row. */}
+                                  {/* Per-location chips.  A snapshot can
+                                      live on the local Incus pool, in any
+                                      number of S3 destinations, or any
+                                      combination — the row stays visible
+                                      as long as any copy exists.  Each
+                                      chip carries an inline 🗑 to drop
+                                      that location only; the trash icon
+                                      in the action column wipes ALL
+                                      locations after a confirm. */}
+                                  {snap.has_local !== false && (
+                                    <span
+                                      title="Stored on the host's Incus pool"
+                                      className="ml-1 inline-flex items-center gap-0.5 text-[10px] px-1 rounded border bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30"
+                                    >
+                                      ✓ Local
+                                      <button
+                                        type="button"
+                                        onClick={(ev) => { ev.stopPropagation(); handleDeleteSnapshotLocal(sName); }}
+                                        disabled={snapshotLoading}
+                                        className="ml-1 hover:text-red-500 opacity-60 disabled:opacity-30"
+                                        title="Drop the local copy only — keeps any S3 copies"
+                                      >
+                                        🗑
+                                      </button>
+                                    </span>
+                                  )}
                                   {(snapshotS3Exports[sName] || []).map((e) => {
                                     const pct = (e.bytes_total && e.bytes_total > 0)
                                       ? Math.min(99, Math.round((e.bytes_uploaded / e.bytes_total) * 100))
@@ -3353,43 +3621,86 @@ export default function LxcContainers() {
                                   })}
                                 </div>
                                 <div className="flex gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
-                                    onClick={() => handleDownloadSnapshot(sName)}
-                                    disabled={snapshotLoading || exporting}
-                                    title="Download snapshot as .tar.gz"
-                                  >
-                                    <Download className="h-3 w-3" />
-                                  </Button>
-                                  {backupDestinations.length > 0 && (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
-                                      onClick={() => openPushDialog(sName)}
-                                      title="Push this snapshot to one or more S3 destinations"
-                                    >
-                                      Push to S3
-                                    </Button>
+                                  {/* Local-only actions: download tarball,
+                                      push to additional S3 destinations,
+                                      restore the container to this point.
+                                      Hidden for ghost rows (S3-only) — the
+                                      operator must Pull to local first. */}
+                                  {snap.has_local !== false && (
+                                    <>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 w-6 p-0 text-muted-foreground hover:text-cyan-500"
+                                        onClick={() => handleDownloadSnapshot(sName)}
+                                        disabled={snapshotLoading || exporting}
+                                        title="Download snapshot as .tar.gz"
+                                      >
+                                        <Download className="h-3 w-3" />
+                                      </Button>
+                                      {backupDestinations.length > 0 && (
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="h-6 px-2 text-xs text-sky-500 hover:text-sky-600"
+                                          onClick={() => openPushDialog(sName)}
+                                          disabled={exportQueueBusy}
+                                          title={exportQueueBusy ? exportBusyTooltip : 'Push this snapshot to one or more S3 destinations'}
+                                        >
+                                          Push to S3
+                                        </Button>
+                                      )}
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
+                                        onClick={() => handleRestoreSnapshot(sName)}
+                                        disabled={snapshotLoading}
+                                      >
+                                        Restore
+                                      </Button>
+                                    </>
                                   )}
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-xs text-blue-500 hover:text-blue-600"
-                                    onClick={() => handleRestoreSnapshot(sName)}
-                                    disabled={snapshotLoading}
-                                  >
-                                    Restore
-                                  </Button>
+                                  {/* Pull to local: only meaningful when
+                                      no local copy exists.  When the
+                                      snapshot has multiple S3 copies the
+                                      operator picks which one to pull
+                                      from via the per-chip 'Pull' link
+                                      below; this top-level button uses
+                                      the first available exported row. */}
+                                  {snap.has_local === false && (() => {
+                                    const exported = (snapshotS3Exports[sName] || (snap.s3_locations || []))
+                                      .filter((e) => e.status === 'exported');
+                                    if (exported.length === 0) return null;
+                                    const first = exported[0];
+                                    return (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-xs text-emerald-500 hover:text-emerald-600"
+                                        onClick={() => handlePullFromS3(sName, {
+                                          id: first.id || first.export_id,
+                                          destination_name: first.destination_name,
+                                        })}
+                                        disabled={snapshotLoading}
+                                        title={`Re-import this snapshot from ${first.destination_name || 'S3'} into the local Incus pool`}
+                                      >
+                                        <Download className="h-3 w-3 mr-1" />
+                                        Pull to local
+                                      </Button>
+                                    );
+                                  })()}
                                   <Button
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2 text-xs text-red-500 hover:text-red-600"
                                     onClick={() => setConfirmDeleteSnap(sName)}
-                                    disabled={snapshotLoading}
-                                    title="Delete snapshot (confirms before removing)"
+                                    disabled={snapshotLoading || (selectedContainer && isContainerBusyForExport(selectedContainer.name))}
+                                    title={
+                                      (selectedContainer && isContainerBusyForExport(selectedContainer.name))
+                                        ? exportBusyTooltip
+                                        : 'Delete snapshot from EVERY location (local + every S3 destination)'
+                                    }
                                   >
                                     <Trash2 className="h-3 w-3" />
                                   </Button>
@@ -4016,19 +4327,44 @@ export default function LxcContainers() {
           <DialogHeader>
             <DialogTitle>Delete snapshot</DialogTitle>
             <DialogDescription>
-              Permanently delete <code className="font-mono text-xs text-foreground">{confirmDeleteSnap}</code>?
-              The local snapshot is removed from the host's Incus storage.
-              {(snapshotS3Exports[confirmDeleteSnap] || []).some((e) => e.status === 'exported') && (
-                <>
-                  {' '}
-                  Any S3 copies you've pushed of this snapshot stay in their
-                  destinations — drop them separately via the chip 🗑 buttons
-                  if you want them gone too.
-                </>
-              )}
-              {' Cannot be undone.'}
+              Permanently delete <code className="font-mono text-xs text-foreground">{confirmDeleteSnap}</code>
+              {' '}from every location?
             </DialogDescription>
           </DialogHeader>
+          {(() => {
+            const snapRow = snapshots.find((s) => (s.name || s) === confirmDeleteSnap);
+            const hasLocal = snapRow ? snapRow.has_local !== false : true;
+            const exportedDests = (snapshotS3Exports[confirmDeleteSnap] || [])
+              .filter((e) => e.status === 'exported')
+              .map((e) => e.destination_name || e.destination_id);
+            const pendingDests = (snapshotS3Exports[confirmDeleteSnap] || [])
+              .filter((e) => e.status === 'pending')
+              .map((e) => e.destination_name || e.destination_id);
+            if (!hasLocal && exportedDests.length === 0 && pendingDests.length === 0) {
+              return (
+                <p className="text-sm text-muted-foreground">
+                  This snapshot has no copies left — the row will simply disappear.
+                </p>
+              );
+            }
+            return (
+              <div className="space-y-2 text-sm">
+                <p className="font-medium">This will remove:</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  {hasLocal && <li>the local copy on this host's Incus pool</li>}
+                  {exportedDests.length > 0 && (
+                    <li>S3 copies in: <span className="font-medium text-foreground">{exportedDests.join(', ')}</span></li>
+                  )}
+                  {pendingDests.length > 0 && (
+                    <li>cancel any in-flight upload to: <span className="font-medium text-foreground">{pendingDests.join(', ')}</span></li>
+                  )}
+                </ul>
+                <p className="text-xs text-muted-foreground">
+                  Use the chip 🗑 buttons instead to drop a single location only. Cannot be undone.
+                </p>
+              </div>
+            );
+          })()}
           <DialogFooter>
             <Button
               variant="ghost"
@@ -4048,6 +4384,320 @@ export default function LxcContainers() {
             >
               {snapshotLoading ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
               Delete snapshot
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Per-S3-destination delete confirm dialog.  Replaces the
+          old window.confirm (which an operator on the LXC tab
+          described as 'lxc.fractionate.ai says...' — jarring on a
+          modern admin UI).  Also shows object-lock / retention
+          info from a HEAD round-trip so 'looks deleted but the
+          bucket secretly retained it' can't happen silently. */}
+      <Dialog
+        open={!!pendingS3Delete}
+        onOpenChange={(o) => { if (!o && !pendingS3Delete?.busy) setPendingS3Delete(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete S3 copy</DialogTitle>
+            <DialogDescription>
+              Remove the S3 copy of{' '}
+              <code className="font-mono text-xs text-foreground">{pendingS3Delete?.snapshotName}</code>
+              {' '}from{' '}
+              <span className="font-medium text-foreground">{pendingS3Delete?.destinationName || 'this destination'}</span>?
+              The local snapshot stays.
+            </DialogDescription>
+          </DialogHeader>
+          {pendingS3Delete?.infoLoading && (
+            <p className="text-xs text-muted-foreground flex items-center gap-2">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Checking object lock state…
+            </p>
+          )}
+          {pendingS3Delete?.info?.error && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              Could not verify lock state: {pendingS3Delete.info.error}.
+              Delete will be attempted; an explicit lock error will surface in this dialog.
+            </p>
+          )}
+          {pendingS3Delete?.info && pendingS3Delete.info.found === false && (
+            <p className="text-xs text-muted-foreground">
+              Object is already gone from the bucket — this will just
+              clear the dashboard row.
+            </p>
+          )}
+          {pendingS3Delete?.info?.locked && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs space-y-1">
+              <p className="font-medium text-amber-700 dark:text-amber-300">
+                This object is locked and cannot be deleted.
+              </p>
+              {pendingS3Delete.info.legal_hold && (
+                <p>• Legal hold is <span className="font-medium">ON</span>.</p>
+              )}
+              {pendingS3Delete.info.retention_until && (
+                <p>
+                  • Retained until{' '}
+                  <span className="font-mono">
+                    {new Date(pendingS3Delete.info.retention_until).toISOString().split('T')[0]}
+                  </span>
+                  {pendingS3Delete.info.retention_mode && (
+                    <> (mode: <span className="font-mono">{pendingS3Delete.info.retention_mode}</span>)</>
+                  )}.
+                </p>
+              )}
+              <p className="text-muted-foreground">
+                Lift the bucket's Object Lock or wait for retention to expire,
+                then try again.
+              </p>
+            </div>
+          )}
+          {pendingS3Delete?.info && pendingS3Delete.info.found && !pendingS3Delete.info.locked && (
+            <p className="text-xs text-muted-foreground">
+              Object is unlocked — delete will fire on confirm.
+              {pendingS3Delete.info.content_length
+                ? ` (${(pendingS3Delete.info.content_length / 1024 / 1024).toFixed(1)} MB)`
+                : ''}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingS3Delete(null)}
+              disabled={!!pendingS3Delete?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmS3DeleteFromDialog}
+              disabled={!!pendingS3Delete?.busy || !!pendingS3Delete?.info?.locked}
+            >
+              {pendingS3Delete?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              {pendingS3Delete?.info?.locked ? 'Locked' : 'Delete S3 copy'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Local-only delete confirm. */}
+      <Dialog
+        open={!!pendingLocalDelete}
+        onOpenChange={(o) => { if (!o && !pendingLocalDelete?.busy) setPendingLocalDelete(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete local copy</DialogTitle>
+            <DialogDescription>
+              Drop the local Incus copy of{' '}
+              <code className="font-mono text-xs text-foreground">{pendingLocalDelete?.snapshotName}</code>?
+              Any S3 copies stay where they are — use a chip's 🗑 to drop those individually.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingLocalDelete(null)}
+              disabled={!!pendingLocalDelete?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmLocalDeleteFromDialog}
+              disabled={!!pendingLocalDelete?.busy}
+            >
+              {pendingLocalDelete?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Delete local copy
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pull-from-S3 confirm + progress.  The actual import dance
+          can take minutes (download tarball + incus import + copy
+          to snapshot), so we keep the dialog open while it runs
+          and poll the backend's import-progress endpoint to drive
+          a phase + percentage indicator. */}
+      <Dialog
+        open={!!pendingPullFromS3}
+        onOpenChange={(o) => { if (!o && !pendingPullFromS3?.busy) setPendingPullFromS3(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Pull snapshot from S3</DialogTitle>
+            <DialogDescription>
+              Create a new container from{' '}
+              <code className="font-mono text-xs text-foreground">{pendingPullFromS3?.snapshotName}</code>
+              {' '}on{' '}
+              <span className="font-medium text-foreground">
+                {pendingPullFromS3?.exportRow?.destination_name || 'S3'}
+              </span>?
+              The new container will be named{' '}
+              <code className="font-mono text-xs text-foreground">
+                {selectedContainer?.name || '<container>'}-{pendingPullFromS3?.snapshotName}
+              </code>
+              {' '}(with{' '}
+              <code className="font-mono text-xs">-2</code>,{' '}
+              <code className="font-mono text-xs">-3</code>… on collision)
+              and the snapshot is preserved on the new container.
+            </DialogDescription>
+          </DialogHeader>
+          {pendingPullFromS3?.busy && (() => {
+            const p = pendingPullFromS3.progress || {};
+            const total = p.bytes_total;
+            const loaded = p.bytes_loaded || 0;
+            const pct = (total && total > 0) ? Math.min(99, Math.round((loaded / total) * 100)) : null;
+            return (
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span>{p.label || 'Working…'}</span>
+                  {pct !== null && <span className="font-mono ml-auto">{pct}%</span>}
+                </div>
+                {pct !== null && (
+                  <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                    <div
+                      className="h-full bg-emerald-500 transition-[width] duration-700"
+                      style={{ width: `${Math.max(2, pct)}%` }}
+                    />
+                  </div>
+                )}
+                {p.phase && p.phase !== 'downloading' && (
+                  <p className="text-[10.5px] text-muted-foreground">
+                    Phase: <span className="font-mono">{p.phase}</span>
+                    {p.phase === 'importing' || p.phase === 'snapshotting-temp' || p.phase === 'landing-snapshot'
+                      ? ' — incus is staging the snapshot; no client-side progress is exposed for this step.'
+                      : ''}
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingPullFromS3(null)}
+              disabled={!!pendingPullFromS3?.busy}
+            >
+              {pendingPullFromS3?.busy ? 'Running…' : 'Cancel'}
+            </Button>
+            <Button
+              variant="default"
+              className="bg-emerald-600 hover:bg-emerald-700"
+              onClick={confirmPullFromS3FromDialog}
+              disabled={!!pendingPullFromS3?.busy}
+            >
+              {pendingPullFromS3?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Pull to local
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename container dialog. */}
+      <Dialog
+        open={!!pendingRename}
+        onOpenChange={(o) => { if (!o && !pendingRename?.busy) setPendingRename(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename container</DialogTitle>
+            <DialogDescription>
+              Rename{' '}
+              <code className="font-mono text-xs text-foreground">{selectedContainer?.name}</code>?
+              Incus requires the container to be stopped first; if it isn't,
+              the rename will fail with a clear error.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="rename-input">New name</Label>
+            <Input
+              id="rename-input"
+              autoFocus
+              value={pendingRename?.value || ''}
+              disabled={!!pendingRename?.busy}
+              onChange={(e) => setPendingRename((p) => p ? { ...p, value: e.target.value } : p)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !pendingRename?.busy) handleRenameContainer(); }}
+              placeholder="alphanumeric + hyphens only"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingRename(null)}
+              disabled={!!pendingRename?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleRenameContainer}
+              disabled={
+                !!pendingRename?.busy
+                || !pendingRename?.value
+                || !pendingRename.value.trim()
+                || pendingRename.value.trim() === selectedContainer?.name
+              }
+            >
+              {pendingRename?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer routes dialog.  Operator picks one of the other
+          existing containers as the target; on confirm, every
+          services row pointing at the source moves to the target
+          and Caddy is regenerated. */}
+      <Dialog
+        open={!!pendingTransfer}
+        onOpenChange={(o) => { if (!o && !pendingTransfer?.busy) setPendingTransfer(null); }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Transfer routes</DialogTitle>
+            <DialogDescription>
+              Move every HTTP route currently pointing at{' '}
+              <code className="font-mono text-xs text-foreground">{pendingTransfer?.fromName}</code>
+              {' '}over to a different container.  This is a MOVE — the source
+              container will have no routes after.  Caddy is regenerated
+              automatically; the target container's IP is re-resolved on the
+              next regeneration.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="transfer-target">Target container</Label>
+            <select
+              id="transfer-target"
+              className="w-full border rounded px-2 py-1.5 bg-background text-sm"
+              value={pendingTransfer?.toName || ''}
+              disabled={!!pendingTransfer?.busy}
+              onChange={(e) => setPendingTransfer((p) => p ? { ...p, toName: e.target.value } : p)}
+            >
+              <option value="">— pick a container —</option>
+              {containers
+                .filter((c) => c.name !== pendingTransfer?.fromName)
+                .map((c) => (
+                  <option key={c.name} value={c.name}>{c.name}</option>
+                ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setPendingTransfer(null)}
+              disabled={!!pendingTransfer?.busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleTransferRoutes}
+              disabled={!!pendingTransfer?.busy || !pendingTransfer?.toName}
+            >
+              {pendingTransfer?.busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+              Transfer routes
             </Button>
           </DialogFooter>
         </DialogContent>

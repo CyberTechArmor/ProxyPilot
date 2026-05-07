@@ -37,6 +37,87 @@ import { getDb, logAudit } from '../db.js';
 import { getObjectStream } from './s3.js';
 import { decrypt, readTar, verifyManifest, parseHeader } from './backup-unpack.js';
 import { safeExtractName } from './restore-paths.js';
+import { spawnHostSync } from './host-exec.js';
+import { shellSingleQuote } from './shell-quote.js';
+
+// hostWriteFile / hostMkdirP / hostWipeContents — production
+// in-place restore writes target paths on the HOST filesystem
+// (e.g. /opt/proxypilot/.env, /etc/caddy/...).  The admin
+// container does not bind-mount every restore target — readEnv
+// silently returns a placeholder when /opt/proxypilot is
+// missing in the container, but writes there throw ENOENT.
+// Routing the writes through nsenter via lib/host-exec makes
+// the path resolution happen in the host's mount namespace
+// regardless of bind-mount layout.
+function hostMkdirP(dir) {
+  const r = spawnHostSync('mkdir', ['-p', dir], { encoding: 'utf-8' });
+  if (r.status !== 0) {
+    throw new Error(
+      `mkdir on host failed for ${dir}: ${(r.stderr || r.error?.message || 'unknown').trim()}`
+    );
+  }
+}
+
+function hostWriteFile(dest, buf, { mode = null } = {}) {
+  hostMkdirP(path.dirname(dest));
+  const cmd = `cat > ${shellSingleQuote(dest)}`;
+  const r = spawnHostSync('sh', ['-c', cmd], {
+    input: buf, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 * 1024,
+  });
+  if (r.status !== 0) {
+    throw new Error(
+      `host write to ${dest} failed: ${(r.stderr?.toString?.() || 'unknown').trim()}`
+    );
+  }
+  if (mode !== null) {
+    spawnHostSync('chmod', [mode.toString(8), dest], { encoding: 'utf-8' });
+  }
+}
+
+// coerceForBind — turn a JSON-round-tripped DB value back into a
+// type that better-sqlite3 can bind.  The supported set is:
+// number, string, bigint, Buffer, null.  We hit four cases:
+//
+//   undefined            → null (column absent in the dumped row)
+//   boolean              → 0 / 1 (sqlite stores booleans as INTEGER,
+//                          but JSON.parse returns true/false; bind
+//                          rejects bare booleans)
+//   { type:'Buffer', data:[...] }
+//                        → Buffer (BLOB columns serialize this way
+//                          via JSON.stringify; not a wire-format
+//                          choice we control)
+//   any other object/array
+//                        → JSON.stringify (best effort; original
+//                          column was probably TEXT carrying a JSON
+//                          string and the parse one level deeper
+//                          turned it into an object)
+//
+// Without this the apply-db step trips with 'SQLite3 can only
+// bind numbers, strings, bigints, buffers, and null' the moment
+// it hits any of the above.
+function coerceForBind(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'bigint') return v;
+  if (Buffer.isBuffer(v)) return v;
+  if (v && typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+    return Buffer.from(v.data);
+  }
+  // Last resort: re-serialize.  Original column likely held a
+  // JSON string that got auto-parsed during the dump round-trip.
+  try { return JSON.stringify(v); }
+  catch { return null; }
+}
+
+// Wipe the *contents* of a host directory (not the dir itself —
+// that's typically a bind-mount inode the operator wants to
+// preserve).  No-op when the dir doesn't exist.
+function hostWipeContents(dir) {
+  spawnHostSync('sh', ['-c',
+    `if [ -d ${shellSingleQuote(dir)} ]; then ` +
+    `find ${shellSingleQuote(dir)} -mindepth 1 -delete; fi`,
+  ], { encoding: 'utf-8' });
+}
 
 // ── small helpers ───────────────────────────────────────────────────
 
@@ -79,19 +160,77 @@ async function downloadBackup(destRow, s3Key) {
   return streamToBuffer(obj.stream);
 }
 
+// loadBackupBuffer — local-first read.  Tries backup.local_path
+// before falling back to S3.  Local-only backups (no
+// destination_id) succeed via the local path and never touch the
+// network.  Used by Mode C / Mode A so they don't need to know
+// where the artifact came from.
+//
+// Two flavours of local read: fs first (the common case where
+// /var/lib/proxypilot/backups is bind-mounted), then a
+// spawnHost('cat') fallback so an install whose bind mount went
+// stale or got dropped during a docker-compose edit can still
+// recover the bytes from the host's namespace.  If both fail we
+// fall through to S3 if a destination row is on file.
+async function loadBackupBuffer({ backup, destination }) {
+  if (backup.local_path) {
+    try {
+      return fs.readFileSync(backup.local_path);
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        // permission / IO problem rather than a missing file —
+        // surface it directly; the host-cat fallback wouldn't
+        // help with permissions either.
+        if (!destination) throw err;
+      } else {
+        // ENOENT in the container's view.  Try the host's
+        // namespace via spawnHost('cat') in case the bind mount
+        // is mis-configured but the file is sitting on the host
+        // filesystem.
+        try {
+          const r = spawnHostSync('cat', [backup.local_path], {
+            encoding: 'buffer',
+            maxBuffer: 16 * 1024 * 1024 * 1024,
+          });
+          if (r.status === 0 && Buffer.isBuffer(r.stdout) && r.stdout.length > 0) {
+            return r.stdout;
+          }
+          // host cat failed too — fall through to S3.  If neither
+          // path works we throw a clearer error than ENOENT.
+          if (!destination) {
+            throw new Error(
+              `local backup file not found in container namespace OR on host (${backup.local_path}).` +
+              `  This usually means /var/lib/proxypilot is not bind-mounted into the admin container ` +
+              `and the file was wiped on a docker compose rebuild.  Re-run update.sh to add the bind ` +
+              `mount, or restore from an S3 copy.`
+            );
+          }
+        } catch (e2) {
+          if (!destination) throw e2;
+        }
+      }
+    }
+  }
+  if (!destination) {
+    throw new Error('backup has no local copy and no destination on file');
+  }
+  return downloadBackup(destination, backup.s3_key);
+}
+
 // ── Mode C ──────────────────────────────────────────────────────────
 
 export async function runModeC({ runId, backup, destination, passphrase }) {
-  appendStep(runId, { stage: 'download', status: 'started', s3_key: backup.s3_key });
+  const source = backup.local_path ? 'local' : 's3';
+  appendStep(runId, { stage: 'download', status: 'started', s3_key: backup.s3_key, source });
   let buf;
   try {
-    buf = await downloadBackup(destination, backup.s3_key);
+    buf = await loadBackupBuffer({ backup, destination });
   } catch (err) {
     appendStep(runId, { stage: 'download', status: 'failed', error: err?.message || String(err) });
     finalize(runId, 'failed', 'download failed');
     return { ok: false, error: err?.message || String(err) };
   }
-  appendStep(runId, { stage: 'download', status: 'ok', size_bytes: buf.length });
+  appendStep(runId, { stage: 'download', status: 'ok', size_bytes: buf.length, source });
 
   appendStep(runId, { stage: 'header', status: 'started' });
   let header;
@@ -224,19 +363,293 @@ export async function runModeA({
   return { ok: true, sandboxDir, entries_count: written };
 }
 
+// ── Mode B — in-place production restore ────────────────────────────
+//
+// CONFIG TIER ONLY.  Applies the backup's content to the live
+// host paths (.env, cve-inbox/) and re-imports the SQLite DB
+// from the JSON dump captured at backup time.  Other tiers are
+// rejected with a clear message — the blast radius for
+// config_plus_data / full is too large for a one-shot in-process
+// restore (Docker volumes, Incus instances, ACME certs need
+// orchestrated stop/start cycles).
+//
+// Safety fallback: a fresh `config` backup of the CURRENT state
+// is created BEFORE any production write.  Its id + local path
+// land in the restore_run notes; if anything goes wrong on the
+// real restore the operator can re-run with that backup id to
+// roll back.
+//
+// Sequencing:
+//   1. preflight: tier check, backup load, manifest verify
+//   2. safety-backup: pack the current state, write to disk
+//   3. apply: .env + cve-inbox + DB JSON import (in a tx)
+//
+// The DB import runs inside a transaction with FKs disabled so
+// the row order doesn't matter; on any insert error the
+// transaction rolls back and the live DB stays exactly as it
+// was.  The .env / cve-inbox copies happen BEFORE the DB tx so
+// a worst-case 'tx commit failed' leaves only the file-system
+// state ahead of the DB — the safety backup recovers either
+// half if needed.
+export async function runModeB({
+  runId, backup, destination, passphrase,
+  envPath, cveInboxDir, packConfigTier,
+  // For config_plus_data restores the safety backup uses the
+  // matching pack helper so a rollback restores the operator's
+  // caddy / wireguard / services dirs too.  Optional; falls
+  // back to packConfigTier when not provided.
+  packConfigPlusDataTier = null,
+  installDir = null,
+  // config_plus_data tier adds these dirs.  All are bind-mounted
+  // into the admin container on a normal install (the backup
+  // pack reads from the same paths) so plain fs.writeFileSync
+  // reaches the host's actual files.
+  caddyDir = process.env.CADDY_DIR || '/etc/caddy',
+  wireguardDir = process.env.PROXYPILOT_WG_DIR || '/etc/wireguard',
+  caddyAcmeDir = process.env.CADDY_ACME_DIR || '/var/lib/caddy/.local/share/caddy',
+  servicesDir = process.env.PROXYPILOT_SERVICES_DIR || '/opt/proxypilot/data/services',
+}) {
+  appendStep(runId, { stage: 'preflight', status: 'started', tier: backup.tier });
+  const supportedTiers = ['config', 'config_plus_data'];
+  if (!supportedTiers.includes(backup.tier)) {
+    appendStep(runId, {
+      stage: 'preflight', status: 'failed',
+      error: `Production restore is only supported for ${supportedTiers.join(' / ')} tiers; this backup is ${backup.tier}.`,
+    });
+    finalize(runId, 'failed', `tier ${backup.tier} not supported for in-place restore`);
+    return { ok: false, error: 'tier not supported' };
+  }
+  appendStep(runId, { stage: 'preflight', status: 'ok' });
+
+  // Step 1: load + verify the target backup BEFORE we touch
+  // anything.  Mirrors Mode A's verify-first ordering.
+  const inner = await runModeCInner({ runId, backup, destination, passphrase });
+  if (!inner.ok) return inner; // already finalized
+
+  // Step 2: safety backup.  Pack the CURRENT state with the
+  // same passphrase so the operator already knows the secret.
+  // We don't fan-out to S3 — local-only is enough for a fallback,
+  // and avoids a slow upload before the actual restore can run.
+  appendStep(runId, { stage: 'safety-backup', status: 'started' });
+  const db = getDb();
+  let safety;
+  try {
+    // Use the matching pack helper so the safety backup captures
+    // exactly what's at risk.  config_plus_data falls back to
+    // packConfigTier if the caller didn't supply the larger
+    // helper — that's still useful (DB + env + cve-inbox) just
+    // not a full rollback.
+    if (backup.tier === 'config_plus_data' && packConfigPlusDataTier) {
+      safety = await packConfigPlusDataTier({
+        db, passphrase, envPath, cveInboxDir, installDir,
+        caddyDir, wireguardDir, caddyAcmeDir, servicesDir,
+        scopeFilter: { all: true },
+        meta: { scope: 'all', backup_id: 'safety-' + runId, restore_run_id: runId },
+      });
+    } else {
+      safety = await packConfigTier({
+        db, passphrase, envPath, cveInboxDir,
+        meta: { scope: 'all', backup_id: 'safety-' + runId, restore_run_id: runId },
+      });
+    }
+  } catch (err) {
+    appendStep(runId, { stage: 'safety-backup', status: 'failed', error: err?.message || String(err) });
+    finalize(runId, 'failed', 'safety backup failed — refusing to apply restore without a fallback');
+    return { ok: false, error: err?.message || String(err) };
+  }
+  // Write the safety backup to a known on-disk location alongside
+  // the regular backups dir.  We don't insert a row in the
+  // backups table because that table assumes the row was
+  // created via the create-backup route flow (audit log,
+  // junctions, etc.); a flat file with the runId in the
+  // filename is enough for a manual rollback.
+  const safetyDir = process.env.PROXYPILOT_BACKUPS_LOCAL_DIR || '/var/lib/proxypilot/backups';
+  let safetyPath;
+  try {
+    fs.mkdirSync(safetyDir, { recursive: true });
+    safetyPath = path.join(safetyDir, `safety-pre-restore-${runId}.ppbackup`);
+    fs.writeFileSync(safetyPath, safety.buffer);
+  } catch (err) {
+    appendStep(runId, { stage: 'safety-backup', status: 'failed', error: err?.message || String(err) });
+    finalize(runId, 'failed', 'safety backup write failed');
+    return { ok: false, error: err?.message || String(err) };
+  }
+  appendStep(runId, {
+    stage: 'safety-backup', status: 'ok',
+    safety_path: safetyPath, size_bytes: safety.buffer.length,
+  });
+
+  // Step 3: apply.  readTar returns a name→Buffer map; pull the
+  // entries we already decrypted + verified in runModeCInner.
+  const entries = inner.entries || {};
+  const dbDumpBuf = entries['proxypilot.db.json'];
+  const envBuf = entries['.env'];
+  const cveNames = Object.keys(entries).filter((n) => n.startsWith('cve-inbox/'));
+
+  // 3a: .env (written via spawnHost so we hit the host's mount
+  // namespace; the admin container doesn't bind-mount
+  // /opt/proxypilot in most layouts).
+  if (envBuf) {
+    appendStep(runId, { stage: 'apply-env', status: 'started', target: envPath });
+    try {
+      hostWriteFile(envPath, envBuf, { mode: 0o600 });
+      appendStep(runId, { stage: 'apply-env', status: 'ok' });
+    } catch (err) {
+      appendStep(runId, { stage: 'apply-env', status: 'failed', error: err?.message || String(err) });
+      finalize(runId, 'failed', `env write failed; safety at ${safetyPath}`);
+      return { ok: false, error: err?.message || String(err), safetyPath };
+    }
+  }
+
+  // 3b: cve-inbox/.  Recreate the dir from scratch so dropped
+  // entries actually disappear; rsync semantics would leak
+  // ghosts.  Only delete the contents, not the dir itself, so
+  // the bind-mount inode survives a docker compose restart.
+  if (cveNames.length > 0) {
+    appendStep(runId, { stage: 'apply-cve-inbox', status: 'started', target: cveInboxDir });
+    try {
+      hostMkdirP(cveInboxDir);
+      hostWipeContents(cveInboxDir);
+      for (const name of cveNames) {
+        const safeName = name.replace(/^cve-inbox\//, '');
+        const dest = path.join(cveInboxDir, safeName);
+        hostWriteFile(dest, entries[name]);
+      }
+      appendStep(runId, { stage: 'apply-cve-inbox', status: 'ok', files: cveNames.length });
+    } catch (err) {
+      appendStep(runId, { stage: 'apply-cve-inbox', status: 'failed', error: err?.message || String(err) });
+      finalize(runId, 'failed', `cve-inbox write failed; safety at ${safetyPath}`);
+      return { ok: false, error: err?.message || String(err), safetyPath };
+    }
+  }
+
+  // 3c: SQLite DB import from the JSON dump.  Wrapped in a
+  // transaction with FKs disabled so we can wipe + repopulate
+  // every table without insert-order grief.  On any error the
+  // transaction rolls back and the live DB stays exactly where
+  // it was — only the .env + cve-inbox writes are then
+  // ahead-of-DB, which the operator recovers from with the
+  // safety backup if needed.
+  if (dbDumpBuf) {
+    appendStep(runId, { stage: 'apply-db', status: 'started' });
+    let dump;
+    try {
+      dump = JSON.parse(dbDumpBuf.toString('utf-8'));
+    } catch (err) {
+      appendStep(runId, { stage: 'apply-db', status: 'failed', error: `parse: ${err?.message || err}` });
+      finalize(runId, 'failed', `db dump parse failed; safety at ${safetyPath}`);
+      return { ok: false, error: err?.message || String(err), safetyPath };
+    }
+    if (!dump || !dump.tables) {
+      appendStep(runId, { stage: 'apply-db', status: 'failed', error: 'malformed dump (no tables)' });
+      finalize(runId, 'failed', `db dump malformed; safety at ${safetyPath}`);
+      return { ok: false, error: 'malformed dump', safetyPath };
+    }
+    try {
+      db.exec('PRAGMA foreign_keys = OFF');
+      const tx = db.transaction(() => {
+        for (const [tableName, rows] of Object.entries(dump.tables)) {
+          if (!Array.isArray(rows)) continue; // skip { error: ... } entries
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) continue;
+          // Skip schema_migrations — replacing it would orphan the
+          // running process from its migration state.  The dump's
+          // version is informational only.
+          if (tableName === 'schema_migrations') continue;
+          db.prepare(`DELETE FROM "${tableName}"`).run();
+          if (rows.length === 0) continue;
+          const cols = Object.keys(rows[0]);
+          if (cols.length === 0) continue;
+          const placeholders = cols.map(() => '?').join(',');
+          const insert = db.prepare(
+            `INSERT INTO "${tableName}" (${cols.map((c) => `"${c}"`).join(',')}) VALUES (${placeholders})`
+          );
+          for (const row of rows) {
+            insert.run(cols.map((c) => coerceForBind(row[c])));
+          }
+        }
+      });
+      tx();
+      appendStep(runId, {
+        stage: 'apply-db', status: 'ok',
+        tables: Object.keys(dump.tables).length,
+        schema_version: dump.schema_version,
+      });
+    } catch (err) {
+      appendStep(runId, { stage: 'apply-db', status: 'failed', error: err?.message || String(err) });
+      finalize(runId, 'failed', `db import failed; safety at ${safetyPath}`);
+      return { ok: false, error: err?.message || String(err), safetyPath };
+    } finally {
+      try { db.exec('PRAGMA foreign_keys = ON'); } catch { /* tolerated */ }
+    }
+  }
+
+  // 3d (config_plus_data only): restore the host-wide config dirs.
+  // Each block is best-effort: a write failure logs into the run
+  // notes but doesn't undo the DB changes — operator's safety
+  // backup covers a full rollback.  We use a directory-mirror
+  // strategy (wipe + repopulate) so dropped entries actually
+  // disappear; rsync semantics would leak ghosts.
+  if (backup.tier === 'config_plus_data') {
+    const dirRestores = [
+      { archive: 'caddy/', target: caddyDir, label: 'caddy' },
+      { archive: 'wireguard/', target: wireguardDir, label: 'wireguard' },
+      { archive: 'caddy-acme/', target: caddyAcmeDir, label: 'caddy-acme' },
+      { archive: 'services/', target: servicesDir, label: 'services' },
+    ];
+    for (const { archive, target, label } of dirRestores) {
+      const matches = Object.keys(entries).filter((n) => n.startsWith(archive));
+      if (matches.length === 0) continue; // tier captured nothing here
+      appendStep(runId, { stage: `apply-${label}`, status: 'started', target, files: matches.length });
+      try {
+        hostMkdirP(target);
+        hostWipeContents(target);
+        for (const name of matches) {
+          const rel = name.slice(archive.length);
+          if (!rel) continue;
+          const dest = path.join(target, rel);
+          hostWriteFile(dest, entries[name]);
+        }
+        appendStep(runId, { stage: `apply-${label}`, status: 'ok' });
+      } catch (err) {
+        appendStep(runId, {
+          stage: `apply-${label}`, status: 'failed',
+          error: err?.message || String(err),
+        });
+        // Don't bail — keep going so the operator at least sees
+        // which dirs landed and which didn't.  The restore_run
+        // ends in 'partial' below.
+      }
+    }
+  }
+
+  // Determine final status: if any apply-* step failed (after the
+  // safety backup is intact), mark the run 'partial' so the
+  // operator sees that some pieces need attention.
+  const stepsRow = getDb().prepare(`SELECT steps_json FROM restore_runs WHERE id = ?`).get(runId);
+  const steps = stepsRow?.steps_json ? JSON.parse(stepsRow.steps_json) : [];
+  const failedApply = steps.some((s) => s.stage?.startsWith('apply-') && s.status === 'failed');
+  const finalStatus = failedApply ? 'partial' : 'ok';
+  const note = failedApply
+    ? `In-place restore partially applied — see step trail. Safety fallback at ${safetyPath}.`
+    : `In-place restore applied. After: docker compose restart admin (DB+env), reload caddy, restart wireguard. Safety at ${safetyPath}.`;
+  finalize(runId, finalStatus, note);
+  return { ok: !failedApply, safetyPath, partial: failedApply };
+}
+
 // runModeCInner — same pipeline as runModeC but returns the parsed
 // entries so runModeA can share the work.  Internal helper; not
 // exported.
 async function runModeCInner({ runId, backup, destination, passphrase }) {
-  appendStep(runId, { stage: 'download', status: 'started', s3_key: backup.s3_key });
+  const source = backup.local_path ? 'local' : 's3';
+  appendStep(runId, { stage: 'download', status: 'started', s3_key: backup.s3_key, source });
   let buf;
-  try { buf = await downloadBackup(destination, backup.s3_key); }
+  try { buf = await loadBackupBuffer({ backup, destination }); }
   catch (err) {
     appendStep(runId, { stage: 'download', status: 'failed', error: err?.message || String(err) });
     finalize(runId, 'failed', 'download failed');
     return { ok: false, error: err?.message || String(err) };
   }
-  appendStep(runId, { stage: 'download', status: 'ok', size_bytes: buf.length });
+  appendStep(runId, { stage: 'download', status: 'ok', size_bytes: buf.length, source });
 
   let header;
   try { header = parseHeader(buf).header; }

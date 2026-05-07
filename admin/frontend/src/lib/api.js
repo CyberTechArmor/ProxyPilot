@@ -603,6 +603,23 @@ export const api = {
     method: 'POST',
   }),
 
+  // Rename a container.  Incus requires the container to be
+  // stopped; the route surfaces a clear hint when the operator
+  // forgets.  Updates services.lxc_container_name on success.
+  renameLxcContainer: (name, newName) => request(`/lxc/containers/${name}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ newName }),
+  }),
+
+  // Transfer (clone) every service whose lxc_container_name points
+  // at `fromName` to a fresh row pointing at `toName`.  Used after
+  // a Pull-from-S3 to copy the routing rules onto the restored
+  // sibling without re-typing them.
+  transferLxcContainerRoutes: (fromName, toName) => request(`/lxc/containers/${fromName}/transfer-routes`, {
+    method: 'POST',
+    body: JSON.stringify({ toName }),
+  }),
+
   deleteLxcContainer: (name) => request(`/lxc/containers/${name}`, {
     method: 'DELETE',
   }),
@@ -671,18 +688,12 @@ export const api = {
 
   getLxcSnapshots: (name) => request(`/lxc/containers/${name}/snapshots`),
 
-  // Optional s3DestinationIds: when supplied, the backend kicks
-  // off an `incus export` after the snapshot completes locally
-  // and pushes the tarball to each destination.  Empty/undef =
-  // local-only (legacy behaviour).
-  createLxcSnapshot: (name, snapshotName, note, s3DestinationIds) =>
+  // Snapshots are always created local-only.  Promotion to S3
+  // happens via exportLxcSnapshotToS3 (per-row Push to S3 dialog).
+  createLxcSnapshot: (name, snapshotName, note) =>
     request(`/lxc/containers/${name}/snapshot`, {
       method: 'POST',
-      body: JSON.stringify({
-        snapshotName,
-        note,
-        s3_destination_ids: Array.isArray(s3DestinationIds) ? s3DestinationIds : [],
-      }),
+      body: JSON.stringify({ snapshotName, note }),
     }),
 
   // Per-snapshot S3 export rows (one per destination).  Used by
@@ -708,6 +719,16 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  // HEAD-style metadata for a single S3 copy: object size,
+  // last-modified, plus retention/legal-hold info.  Used by the
+  // delete-confirm dialog to show 'retained until ...' before the
+  // operator commits.  Returns 404 / 502 via ApiError when the
+  // bucket is unreachable.
+  getLxcSnapshotS3ExportInfo: (name, snapshotName, exportId) =>
+    request(
+      `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/info`,
+    ),
+
   // Cancel an in-flight S3 export.  No-op when the row already
   // reached a terminal state (returns { alreadyFinished: true }).
   cancelLxcSnapshotS3Export: (name, snapshotName, exportId) =>
@@ -724,9 +745,38 @@ export const api = {
     method: 'POST',
   }),
 
+  // Whole-snapshot delete: removes both the local copy AND every
+  // S3 copy.  Use deleteLxcSnapshotLocal to keep S3 copies, or
+  // deleteLxcSnapshotS3Export to drop a single S3 destination.
   deleteLxcSnapshot: (name, snapshotName) => request(`/lxc/containers/${name}/snapshot/${snapshotName}`, {
     method: 'DELETE',
   }),
+
+  // Local-only delete: drops the snapshot from the host's Incus
+  // pool but leaves every S3 copy in place.
+  deleteLxcSnapshotLocal: (name, snapshotName) => request(
+    `/lxc/containers/${name}/snapshot/${snapshotName}/local`,
+    { method: 'DELETE' },
+  ),
+
+  // Pull a previously-exported S3 tarball back into the local
+  // Incus pool as a snapshot of the same name.  Fails with 409
+  // if a local snapshot of that name already exists.
+  restoreLxcSnapshotFromS3: (name, snapshotName, exportId) => request(
+    `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/restore`,
+    { method: 'POST' },
+  ),
+
+  // Polled by the Pull-from-S3 dialog while the long-running
+  // download/import dance runs.  { found, phase, label,
+  // bytes_loaded?, bytes_total?, error? }.
+  getLxcSnapshotS3ImportProgress: (name, snapshotName, exportId) => request(
+    `/lxc/containers/${encodeURIComponent(name)}/snapshot/${encodeURIComponent(snapshotName)}/s3-export/${encodeURIComponent(exportId)}/import-progress`,
+  ),
+
+  // Global snapshot-export queue status.  Returns running + queued
+  // jobs across all containers.  Drives the admin-wide banner.
+  getSnapshotExportQueue: () => request('/lxc/containers/snapshot-export-queue'),
 
   // Pre-flight estimate for downloading a previously-taken snapshot.
   getLxcSnapshotExportInfo: (name, snapshotName) =>

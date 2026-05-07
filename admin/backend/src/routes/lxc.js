@@ -9,14 +9,15 @@ import http from 'http';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { getDb } from '../db.js';
+import { getDb, logAudit } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
-  cancelSnapshotExport, sweepOrphanTempInstances,
+  cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
+  getSnapshotExportQueueStatus, inspectSnapshotS3Object, getImportProgress,
 } from '../lib/snapshot-s3-export.js';
 
 const execAsync = promisify(exec);
@@ -371,6 +372,23 @@ export function deriveImageSupports(img) {
   return Array.from(claimed);
 }
 
+// GET /containers/snapshot-export-queue — global view of every
+// snapshot export currently running OR queued.  Drives the
+// admin-wide banner so an operator on any page sees the in-flight
+// upload (with a progress percentage) instead of needing to
+// navigate back to the LXC tab.  Registered BEFORE
+// /containers/:name so Express's first-match-wins ordering
+// doesn't route 'snapshot-export-queue' into the per-container
+// info handler (which would 404 on incus info — the bug an
+// operator reported in the May 2026 review pass).
+lxcRouter.get('/containers/snapshot-export-queue', (req, res) => {
+  try {
+    res.json({ success: true, ...getSnapshotExportQueueStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || 'queue status failed' });
+  }
+});
+
 // GET /containers/:name - Get detailed info for a container
 lxcRouter.get('/containers/:name', async (req, res) => {
   const { name } = req.params;
@@ -439,7 +457,14 @@ lxcRouter.get('/containers/:name/state', async (req, res) => {
   }
 });
 
-// GET /containers/:name/snapshots - List snapshots for a container
+// GET /containers/:name/snapshots - List snapshots for a container.
+//
+// Merges incus's local snapshot list with `lxc_snapshot_s3_exports`
+// rows so a snapshot whose local copy was deleted but still lives
+// in S3 stays visible (operator can pull it back).  Each row
+// carries `has_local` (true when incus reports it on the pool)
+// plus an `s3_locations` array listing every destination the
+// snapshot is currently stored on.
 lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
   const { name } = req.params;
 
@@ -450,25 +475,30 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
     });
   }
 
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  let local = [];
+  let localFetchFailed = false;
+  let localFetchDetails = null;
   try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
     const result = await execOnHost(`incus snapshot list ${incusName} --format json 2>/dev/null`);
-    const snapshots = JSON.parse(result.stdout || '[]');
+    local = JSON.parse(result.stdout || '[]');
+  } catch (error) {
+    if (error.stderr?.includes('No snapshots')) {
+      local = [];
+    } else {
+      localFetchFailed = true;
+      localFetchDetails = error.stderr || error.message;
+    }
+  }
 
-    // Best-effort enrichment: pull per-snapshot disk usage from the
-    // storage volume's /state endpoint. config.size is a configured
-    // quota — almost never set; the actual usage lives in
-    // .../volumes/<...>/snapshots/<snap>/state under usage.used.
-    // We resolve the instance's pool once, then call the state
-    // endpoint for each snapshot in parallel. Any failure (older
-    // incus, backend without per-snapshot accounting, network
-    // hiccup) leaves the size unset and the rest of the row usable.
+  // Best-effort per-snapshot disk usage enrichment.
+  if (local.length) {
     try {
       const infoResult = await execOnHost(`incus query /1.0/instances/${incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
       const instance = JSON.parse(infoResult.stdout || '{}');
       const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-      if (pool && snapshots.length) {
-        await Promise.all(snapshots.map(async (snap) => {
+      if (pool) {
+        await Promise.all(local.map(async (snap) => {
           const used = await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snap.name}`);
           if (used != null) snap.size = used;
         }));
@@ -476,19 +506,74 @@ lxcRouter.get('/containers/:name/snapshots', async (req, res) => {
     } catch {
       // Couldn't even resolve the instance pool — skip enrichment.
     }
+  }
 
-    res.json({ success: true, snapshots });
-  } catch (error) {
-    // If no snapshots exist, incus may return an error or empty
-    if (error.stderr?.includes('No snapshots')) {
-      return res.json({ success: true, snapshots: [] });
-    }
-    res.status(500).json({
-      success: false,
-      error: 'Failed to list snapshots',
-      details: error.stderr || error.message,
+  // Pull every export row for this container and group by snapshot name.
+  let exportRows = [];
+  try {
+    exportRows = listSnapshotExports({ containerName: name });
+  } catch {
+    // Junction table missing or unreadable — UI degrades to local-only.
+  }
+  const exportsBySnap = new Map();
+  for (const r of exportRows) {
+    if (!exportsBySnap.has(r.snapshot_name)) exportsBySnap.set(r.snapshot_name, []);
+    exportsBySnap.get(r.snapshot_name).push(r);
+  }
+
+  const toS3Locations = (rows) => rows
+    // Hide rows that have no S3 presence (already deleted).  Pending
+    // and failed rows stay so the chip + retry / dismiss UI keeps
+    // working.
+    .filter((r) => r.status !== 'deleted')
+    .map((r) => ({
+      export_id: r.id,
+      destination_id: r.destination_id,
+      destination_name: r.destination_name || null,
+      destination_bucket: r.destination_bucket || null,
+      s3_key: r.s3_key,
+      status: r.status,
+      error: r.error || null,
+      bytes_uploaded: r.bytes_uploaded || 0,
+      bytes_total: r.bytes_total || null,
+      cancel_requested: !!r.cancel_requested,
+      started_at: r.started_at,
+      finished_at: r.finished_at || null,
+      size_bytes: r.size_bytes || null,
+    }));
+
+  const merged = local.map((snap) => ({
+    ...snap,
+    has_local: true,
+    s3_locations: toS3Locations(exportsBySnap.get(snap.name) || []),
+  }));
+  // Ghost snapshots: present in S3 but not on the local pool.
+  const localNames = new Set(local.map((s) => s.name));
+  for (const [snapName, rows] of exportsBySnap) {
+    if (localNames.has(snapName)) continue;
+    const s3 = toS3Locations(rows);
+    if (s3.length === 0) continue;
+    // Use the earliest export's started_at as a stand-in for
+    // 'created_at' so the UI's date column renders something sane.
+    const earliest = rows.reduce((acc, r) => (
+      !acc || (r.started_at && r.started_at < acc) ? r.started_at : acc
+    ), null);
+    merged.push({
+      name: snapName,
+      has_local: false,
+      created_at: earliest,
+      s3_locations: s3,
     });
   }
+
+  if (localFetchFailed && merged.length === 0) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to list snapshots',
+      details: localFetchDetails,
+    });
+  }
+  res.json({ success: true, snapshots: merged });
 });
 
 // POST /containers - Start async container creation
@@ -1303,9 +1388,12 @@ lxcRouter.get('/containers/:name/services', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Container not found.' });
     }
     const ip = extractIPv4(containers[0]);
-    if (!ip) {
-      return res.json({ success: true, services: [], ip: null });
-    }
+    // Don't short-circuit on null IP — a stopped container can
+    // still have DB-mapped routes that the operator needs to
+    // see (and edit) before they restart it.  The legacy
+    // Caddy-site-file scan further down still uses the IP, so
+    // it's fine to skip when null; we just keep going to the
+    // DB-routes block.
 
     // Two sources to merge:
     //   1. Legacy single-domain Caddy site files in CADDY_SITES_DIR.
@@ -2792,6 +2880,287 @@ lxcRouter.post('/containers/:name/stop', async (req, res) => {
 });
 
 // POST /containers/:name/restart - Restart a container
+// POST /containers/:name/rename — rename a container.  Incus's
+// `rename` only works on stopped instances and requires the new
+// name to be unique; we surface the relevant errors verbatim
+// rather than swallowing them so the operator knows whether to
+// retry with the container stopped vs. pick a different name.
+//
+// Side effect: any `services.lxc_container_name` rows pointing at
+// the old name are updated to the new one so route configs +
+// container-services discovery stay consistent.
+lxcRouter.post('/containers/:name/rename', async (req, res) => {
+  const { name } = req.params;
+  const newName = (req.body?.newName || '').trim();
+
+  if (!validateName(name)) {
+    return res.status(400).json({ success: false, error: 'Invalid current container name.' });
+  }
+  if (!validateName(newName)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid new name. Only alphanumeric characters and hyphens are allowed.',
+    });
+  }
+  if (newName === name) {
+    return res.status(400).json({ success: false, error: 'New name is identical to current.' });
+  }
+
+  const oldIncusName = `${INSTANCE_PREFIX}${name}`;
+  const newIncusName = `${INSTANCE_PREFIX}${newName}`;
+
+  // Reject up front if a target with the new name already exists;
+  // Incus's own error is fine but checking here gives a faster +
+  // clearer 409 without a long shell-out.
+  try {
+    const r = await execOnHost(`incus info ${newIncusName} 2>/dev/null`, { timeout: 5000 });
+    if (r.stdout) {
+      return res.status(409).json({
+        success: false,
+        error: `A container named '${newName}' already exists.`,
+      });
+    }
+  } catch { /* not found is what we want */ }
+
+  try {
+    await execOnHost(`incus rename ${oldIncusName} ${newIncusName}`, { timeout: 60_000 });
+  } catch (error) {
+    // execAsync's error.message is always 'Command failed: <cmd>',
+    // useless for diagnosis.  The real incus error lives in stderr
+    // (or stdout when the command was wrapped with 2>&1, which
+    // we no longer do).
+    const realErr = (error.stderr || error.stdout || '').trim();
+    const msg = realErr || error.message || 'unknown error';
+    return res.status(500).json({
+      success: false,
+      error: `incus rename failed: ${msg}`,
+      hint: /running|is\s+running|must\s+be\s+stopped|stop\s+the\s+instance/i.test(msg)
+        ? 'Container must be stopped before renaming.'
+        : null,
+    });
+  }
+
+  try {
+    const db = getDb();
+    db.prepare(
+      `UPDATE services SET lxc_container_name = ? WHERE lxc_container_name = ?`
+    ).run(newName, name);
+  } catch (err) {
+    // Don't fail the rename — the incus side is already done.
+    // Log for the operator to follow up.
+    console.error('[lxc] rename succeeded but failed to update services rows:', err?.message);
+  }
+
+  res.json({
+    success: true,
+    name: newName,
+    message: `Container '${name}' renamed to '${newName}'.`,
+  });
+});
+
+// POST /containers/:name/transfer-routes — move every services
+// row whose lxc_container_name = :name over to a different
+// container (typically a freshly Pull-from-S3'd sibling).
+//
+// Move semantics, not copy: routes are bound to a (domain,
+// path_prefix) pair which is UNIQUE in the DB, so duplicating
+// would trip the UNIQUE constraint.  After this call the source
+// container has no service rows pointing at it; the operator can
+// then delete the source via the standard delete flow.  Caddy is
+// not regenerated by this route — the frontend triggers
+// /services/caddy/regenerate-all afterward so a stale rule
+// doesn't keep the old container reachable.
+lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
+  // Top-level guard: a synchronous throw inside the body (db
+  // contention, weird name, audit log issue) would otherwise
+  // leave the response hanging until Caddy's upstream timeout
+  // surfaces a misleading 502.  Mirrors the wrapper backups.js
+  // got after the May 2026 review.
+  try {
+    const { name } = req.params;
+    const toName = (req.body?.toName || '').trim();
+    if (!validateName(name) || !validateName(toName)) {
+      return res.status(400).json({ success: false, error: 'Invalid container name(s).' });
+    }
+    if (toName === name) {
+      return res.status(400).json({ success: false, error: 'Source and target are the same container.' });
+    }
+
+    const db = getDb();
+    const incusName = `${INSTANCE_PREFIX}${toName}`;
+    // Verify the target exists.  execOnHost throws on non-zero
+    // exit; tolerate the throw and return a clean 404.
+    let targetExists = false;
+    try {
+      await execOnHost(`incus info ${incusName} 2>/dev/null`, { timeout: 5000 });
+      targetExists = true;
+    } catch { /* falls through below */ }
+    if (!targetExists) {
+      return res.status(404).json({
+        success: false,
+        error: `Target container '${toName}' not found in Incus.`,
+      });
+    }
+
+    // domain + path_prefix moved to service_http_routes in
+    // Phase 2b D.14; transferring routes is really 'rebind every
+    // services row + its child routes via FK'.  We pull the
+    // services rows here for the response payload + the UPDATE
+    // below; the routes themselves follow automatically since
+    // service_http_routes references services(id) ON DELETE
+    // CASCADE — they don't need a separate update because they
+    // travel with the parent service row.
+    const rows = db.prepare(
+      `SELECT id, name FROM services WHERE lxc_container_name = ?`
+    ).all(name);
+    if (rows.length === 0) {
+      return res.json({
+        success: true, transferred: 0, services: [],
+        message: `'${name}' had no services to move.`,
+      });
+    }
+
+    // Pull route + L4 counts per service for the response so the
+    // operator sees how many of each followed each service
+    // without an extra round-trip.
+    const routeCount = db.prepare(
+      `SELECT COUNT(*) AS n FROM service_http_routes WHERE service_id = ?`
+    );
+    const l4Count = db.prepare(
+      `SELECT COUNT(*) AS n FROM service_l4_forwards WHERE service_id = ?`
+    );
+    const enriched = rows.map((r) => ({
+      ...r,
+      routes: routeCount.get(r.id)?.n || 0,
+      l4: l4Count.get(r.id)?.n || 0,
+    }));
+
+    // Resolve target IP up front so the UPDATE can stamp the
+    // new lxc_container_name + target_ip in a single shot.
+    // Caddy regen reads target_ip from the row directly; without
+    // a value here the renamed routes would land on Caddy with
+    // an empty upstream until something else triggers a fresh
+    // discovery pass (operator quick-add or a manual rescan).
+    let targetIp = null;
+    try {
+      const r = await execOnHost(
+        `incus list ${INSTANCE_PREFIX}${toName} --format json 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const list = JSON.parse(r.stdout || '[]');
+      if (list[0]) targetIp = extractIPv4(list[0]);
+    } catch { /* tolerated */ }
+
+    const update = db.prepare(
+      `UPDATE services
+       SET lxc_container_name = ?, target_ip = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    );
+    const tx = db.transaction((targetName, targetIpVal, ids) => {
+      for (const id of ids) update.run(targetName, targetIpVal, id);
+    });
+    tx(toName, targetIp, rows.map((r) => r.id));
+
+    try {
+      logAudit(req.user?.id || null, 'LXC_TRANSFER_ROUTES', 'lxc_container', name, {
+        from: name, to: toName, services: rows.map((r) => ({ id: r.id, name: r.name })),
+      }, req.ip);
+    } catch { /* audit failure shouldn't break the operation */ }
+
+    // L4 reconciliation: any service_l4_forwards row attached to
+    // a moved service is now associated with `toName` in the DB
+    // but its incus proxy device still lives on `name`'s
+    // container.  We fix that in two passes:
+    //
+    //   1. Yank every `ppl4-*` device off the SOURCE container
+    //      (it has no services left, so anything ppl4-prefixed
+    //      is now stale).  Best-effort: a stopped container
+    //      can't have devices removed, but it also doesn't
+    //      forward traffic, so leave-it-alone is fine.
+    //   2. Re-create the devices on the TARGET container by
+    //      calling reconcileServiceL4Forwards once per moved
+    //      service.  Reconcile reads service_l4_forwards by
+    //      service_id, sees zero live ppl4-* on the target,
+    //      and creates them.
+    //
+    // Both passes are best-effort with their failures collected
+    // into `l4_outcomes` so the operator can re-run reconcile
+    // manually for any stragglers without blocking the transfer.
+    const l4Outcomes = { source_removed: [], source_errors: [], target: [] };
+    try {
+      const srcDevices = await execOnHost(
+        `incus config device list ${INSTANCE_PREFIX}${name} 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const srcLines = (srcDevices.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      for (const dev of srcLines) {
+        if (!dev.startsWith('ppl4-')) continue;
+        try {
+          await execOnHost(
+            `incus config device remove ${INSTANCE_PREFIX}${name} ${dev}`,
+            { timeout: 5000 },
+          );
+          l4Outcomes.source_removed.push(dev);
+        } catch (err) {
+          l4Outcomes.source_errors.push({
+            device: dev, error: err?.stderr || err?.message || 'unknown',
+          });
+        }
+      }
+    } catch { /* source unreachable; skip */ }
+
+    // The reconcile pass below needs the target's bridge IP.
+    // We already resolved it above for the UPDATE; reuse here.
+    // Stopped target = no IP = no L4 reconcile (the UPDATE
+    // already stamped target_ip=null on the services rows).
+    if (targetIp) {
+      for (const r of enriched) {
+        if (r.l4 === 0) continue;
+        try {
+          const reconciled = await reconcileServiceL4Forwards({
+            db, serviceId: r.id, lxcName: toName, bridgeIp: targetIp,
+            serviceTag: r.name || null,
+          });
+          l4Outcomes.target.push({
+            service_id: r.id, service_name: r.name,
+            applied: reconciled?.applied || [],
+          });
+        } catch (err) {
+          l4Outcomes.target.push({
+            service_id: r.id, service_name: r.name,
+            error: err?.message || String(err),
+          });
+        }
+      }
+    }
+
+    const totalRoutes = enriched.reduce((s, r) => s + r.routes, 0);
+    const totalL4 = enriched.reduce((s, r) => s + r.l4, 0);
+    const targetSkippedReason = !targetIp && totalL4 > 0
+      ? ` Target has no IP yet — start it and run reconcile to attach the ${totalL4} L4 forward${totalL4 === 1 ? '' : 's'}.`
+      : '';
+    return res.json({
+      success: true,
+      transferred: rows.length,
+      total_routes: totalRoutes,
+      total_l4: totalL4,
+      services: enriched,
+      l4: l4Outcomes,
+      message: `Moved ${rows.length} service${rows.length === 1 ? '' : 's'}` +
+        ` (${totalRoutes} HTTP route${totalRoutes === 1 ? '' : 's'}, ${totalL4} L4 forward${totalL4 === 1 ? '' : 's'})` +
+        ` from '${name}' to '${toName}'.${targetSkippedReason}`,
+    });
+  } catch (err) {
+    if (res.headersSent) return;
+    console.error('[lxc transfer-routes] unhandled', err);
+    return res.status(500).json({
+      success: false,
+      error: `Transfer failed: ${err?.message || String(err)}`,
+    });
+  }
+});
+
 lxcRouter.post('/containers/:name/restart', async (req, res) => {
   const { name } = req.params;
 
@@ -3247,16 +3616,6 @@ function pruneSnapshotJobs() {
 lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
   const { name } = req.params;
   const { snapshotName, note } = req.body;
-  // Optional S3 fan-out: when the operator picked one or more
-  // destinations in the snapshot dialog, the body carries a
-  // s3_destination_ids array.  After the snapshot itself
-  // completes successfully we kick off
-  // fanOutSnapshotExport() in the background — the kickoff
-  // response returns immediately with the snapshot jobId so the
-  // existing UI polling logic stays unchanged.
-  const s3DestinationIds = Array.isArray(req.body?.s3_destination_ids)
-    ? req.body.s3_destination_ids.filter((s) => typeof s === 'string')
-    : [];
 
   if (!validateName(name)) {
     return res.status(400).json({
@@ -3270,22 +3629,6 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
       success: false,
       error: 'Invalid snapshot name. Only alphanumeric characters and hyphens are allowed.',
     });
-  }
-
-  // Resolve destinations up front so an operator typo 4xx's
-  // before the snapshot starts.  Also keeps the rows we'll
-  // pass to fanOutSnapshotExport stable across the long-running
-  // shell-out below.
-  const s3Destinations = [];
-  for (const did of s3DestinationIds) {
-    const dest = getDb().prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(did);
-    if (!dest) {
-      return res.status(404).json({
-        success: false,
-        error: `S3 destination not found: ${did}`,
-      });
-    }
-    s3Destinations.push(dest);
   }
 
   pruneSnapshotJobs();
@@ -3357,29 +3700,6 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
       } catch (err) {
         console.error('[LXC] failed to record snapshot duration:', err.message);
       }
-
-      // S3 fan-out: only fires when the operator picked one or
-      // more destinations.  Runs in the background so the UI's
-      // existing snapshot-job polling sees status='done' as
-      // soon as the local snapshot completes; per-destination
-      // export state is queryable via GET
-      // /containers/:name/snapshot-exports.
-      if (s3Destinations.length > 0) {
-        job.s3DestinationCount = s3Destinations.length;
-        job.s3DestinationIds = s3Destinations.map((d) => d.id);
-        // Detached promise — failures are recorded in the
-        // lxc_snapshot_s3_exports table + bell notifications,
-        // not on the snapshot job itself.
-        fanOutSnapshotExport({
-          containerName: name,
-          incusName,
-          snapshotName,
-          destinations: s3Destinations,
-          audit: { user_id: req.user?.id || null, ip: req.ip },
-        }).catch((err) => {
-          console.error('[LXC] snapshot S3 fan-out threw:', err?.message || err);
-        });
-      }
     } else {
       job.status = 'error';
       const out = (stderr || stdout || '').trim();
@@ -3394,11 +3714,7 @@ lxcRouter.post('/containers/:name/snapshot', async (req, res) => {
     success: true,
     jobId,
     estimateMs,
-    s3_destination_count: s3Destinations.length,
-    s3_destination_ids: s3Destinations.map((d) => d.id),
-    message: s3Destinations.length === 0
-      ? `Snapshot '${snapshotName}' creation started for container '${name}'.`
-      : `Snapshot '${snapshotName}' creation started for container '${name}'; will fan out to ${s3Destinations.length} S3 destination(s) on success.`,
+    message: `Snapshot '${snapshotName}' creation started for container '${name}'.`,
   });
 });
 
@@ -3494,10 +3810,28 @@ lxcRouter.post('/containers/snapshot-exports/sweep', async (req, res) => {
   res.json({ success: true, deleted: r.deleted, failed: r.failed });
 });
 
+// GET /containers/:name/snapshot/:snapshotName/s3-export/:exportId/info
+// Surfaces object-lock + retention metadata for a single S3 copy
+// so the delete-confirm dialog can display 'retained until ...' /
+// 'legal hold' before the operator clicks confirm.  Implemented as
+// a HEAD round-trip to the bucket; cheap, no body transfer.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/info', async (req, res) => {
+  const { exportId } = req.params;
+  const out = await inspectSnapshotS3Object({ exportId });
+  if (!out.ok) {
+    return res.status(out.error === 'export not found' ? 404 : 502).json({
+      success: false, error: out.error,
+    });
+  }
+  res.json({ success: true, ...out });
+});
+
 // DELETE /containers/:name/snapshot/:snapshotName/s3-export/:exportId
 // Removes a single S3 copy of a snapshot export.  The local
 // snapshot itself stays — the dashboard's standard
-// `incus snapshot delete` flow handles that.
+// `incus snapshot delete` flow handles that.  Returns 423 (Locked)
+// when the object has active retention or legal hold so the
+// caller can render the lock state instead of a generic 502.
 lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId', async (req, res) => {
   const { exportId } = req.params;
   const out = await deleteSnapshotExport({
@@ -3505,6 +3839,16 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName/s3-export/:exportId',
     audit: { user_id: req.user?.id || null, ip: req.ip },
   });
   if (!out.ok) {
+    if (out.locked) {
+      return res.status(423).json({
+        success: false,
+        error: out.error,
+        locked: true,
+        retention_until: out.retention_until || null,
+        retention_mode: out.retention_mode || null,
+        legal_hold: !!out.legal_hold,
+      });
+    }
     return res.status(out.error === 'export not found' ? 404 : 502).json({
       success: false, error: out.error,
     });
@@ -3594,7 +3938,37 @@ lxcRouter.post('/containers/:name/snapshot/:snapshotName/restore', async (req, r
   }
 });
 
-// DELETE /containers/:name/snapshot/:snapshotName - Delete a snapshot
+// DELETE /containers/:name/snapshot/:snapshotName/local - Drop the
+// local copy only; any S3-stored copies stay.  Used when an
+// operator wants to reclaim pool space but keep the S3 backups.
+lxcRouter.delete('/containers/:name/snapshot/:snapshotName/local', async (req, res) => {
+  const { name, snapshotName } = req.params;
+
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+
+  const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
+  try {
+    const incusName = `${INSTANCE_PREFIX}${name}`;
+    await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
+    res.json({
+      success: true,
+      message: `Local copy of '${snapshotName}' deleted; S3 copies untouched.`,
+    });
+  } catch (error) {
+    res.status(500).json(formatSnapshotError(
+      `Failed to delete local snapshot from container '${name}'`,
+      error, SNAPSHOT_TIMEOUT_MS,
+    ));
+  }
+});
+
+// DELETE /containers/:name/snapshot/:snapshotName - Delete a
+// snapshot from EVERY location: the local Incus pool plus every
+// S3 destination it was exported to.  The frontend's whole-snapshot
+// trash button drives this; per-location deletes use the
+// scoped /local and /s3-export/:exportId endpoints.
 lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) => {
   const { name, snapshotName } = req.params;
 
@@ -3615,22 +3989,157 @@ lxcRouter.delete('/containers/:name/snapshot/:snapshotName', async (req, res) =>
   // Delete reclaims storage; on copy-on-write backends with many
   // overlapping snapshots this can take a while.
   const SNAPSHOT_TIMEOUT_MS = 2 * 60 * 1000;
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const errors = [];
 
+  // 1. Drop the local snapshot.  Tolerated if it's already gone
+  // (operator may have dropped the local copy first via the
+  // /local endpoint).
   try {
-    const incusName = `${INSTANCE_PREFIX}${name}`;
     await execOnHost(`incus snapshot delete ${incusName} ${snapshotName}`, { timeout: SNAPSHOT_TIMEOUT_MS });
-    // Clean up notes for deleted snapshot
-    try {
-      const db = getDb();
-      db.prepare('DELETE FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ?').run(name, snapshotName);
-    } catch {}
-    res.json({
-      success: true,
-      message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
-    });
   } catch (error) {
-    res.status(500).json(formatSnapshotError(`Failed to delete snapshot from container '${name}'`, error, SNAPSHOT_TIMEOUT_MS));
+    const msg = (error.stderr || error.message || '').toLowerCase();
+    if (!msg.includes('not found') && !msg.includes("doesn't exist") && !msg.includes('no such')) {
+      errors.push({ scope: 'local', error: (error.stderr || error.message || 'unknown').trim().slice(0, 512) });
+    }
   }
+
+  // 2. Drop every S3 copy (exported rows).  Pending uploads get
+  // cancel_requested set so the queue worker aborts them; failed
+  // / dismissed rows are removed outright.  All best-effort; we
+  // collect failures and keep going so a single dead bucket
+  // doesn't block the other deletions.
+  let exportRows = [];
+  try {
+    exportRows = listSnapshotExports({ containerName: name, snapshotName });
+  } catch { /* tolerated */ }
+
+  for (const row of exportRows) {
+    if (row.status === 'pending') {
+      try {
+        await cancelSnapshotExport({
+          exportId: row.id,
+          audit: { user_id: req.user?.id || null, ip: req.ip },
+        });
+      } catch (err) {
+        errors.push({
+          scope: row.destination_name || row.destination_id,
+          error: (err?.message || String(err)).slice(0, 512),
+        });
+      }
+      continue;
+    }
+    if (row.status === 'deleted') continue;
+    try {
+      const out = await deleteSnapshotExport({
+        exportId: row.id,
+        audit: { user_id: req.user?.id || null, ip: req.ip },
+      });
+      if (!out.ok) {
+        errors.push({
+          scope: row.destination_name || row.destination_id,
+          error: out.error || 'unknown',
+        });
+      }
+    } catch (err) {
+      errors.push({
+        scope: row.destination_name || row.destination_id,
+        error: (err?.message || String(err)).slice(0, 512),
+      });
+    }
+  }
+
+  // 3. Drop notes for the snapshot regardless of where it lived.
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM snapshot_notes WHERE container_name = ? AND snapshot_name = ?').run(name, snapshotName);
+  } catch {}
+
+  if (errors.length > 0) {
+    return res.status(502).json({
+      success: false,
+      error: `Snapshot deletion partially failed for '${snapshotName}'.`,
+      details: errors,
+    });
+  }
+  res.json({
+    success: true,
+    message: `Snapshot '${snapshotName}' deleted from container '${name}'.`,
+  });
+});
+
+// POST /containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore
+// Pulls a previously-exported tarball from S3 back into the host's
+// Incus pool as a snapshot of `name` named `snapshotName`.  Use
+// case: operator dropped the local snapshot, kept the S3 copy,
+// and now needs the snapshot back without restoring the whole
+// container.
+//
+// Fails fast with 409 if a local snapshot of the same name
+// already exists — the caller is expected to drop it first.
+lxcRouter.post('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/restore', async (req, res) => {
+  const { name, snapshotName, exportId } = req.params;
+  if (!validateName(name) || !validateName(snapshotName)) {
+    return res.status(400).json({ success: false, error: 'Invalid name.' });
+  }
+  const incusName = `${INSTANCE_PREFIX}${name}`;
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT e.*, d.bucket AS destination_bucket
+    FROM lxc_snapshot_s3_exports e
+    LEFT JOIN backup_destinations d ON d.id = e.destination_id
+    WHERE e.id = ? AND e.container_name = ? AND e.snapshot_name = ?
+  `).get(exportId, name, snapshotName);
+  if (!row) {
+    return res.status(404).json({ success: false, error: 'export not found' });
+  }
+  if (row.status !== 'exported') {
+    return res.status(409).json({
+      success: false,
+      error: `export is in status '${row.status}' — only 'exported' rows can be pulled to local.`,
+    });
+  }
+  const destination = db.prepare(`SELECT * FROM backup_destinations WHERE id = ?`).get(row.destination_id);
+  if (!destination) {
+    return res.status(404).json({ success: false, error: 'destination missing' });
+  }
+
+  // Pull lands the snapshot as a NEW container (incus has no
+  // snapshot-to-snapshot graft on an existing instance).  The
+  // helper picks a unique <orig>-r-<8chars> name; collision is
+  // extremely unlikely but the import call would surface it
+  // loudly if it ever happens.
+  const out = await importSnapshotFromS3({
+    destination, s3Key: row.s3_key, incusName, snapshotName,
+    exportId,
+    audit: { user_id: req.user?.id || null, ip: req.ip },
+  });
+  if (!out.ok) {
+    return res.status(500).json({ success: false, error: out.error });
+  }
+  res.json({
+    success: true,
+    restored_as: out.restoredAs,
+    snapshot_created: !!out.snapshotCreated,
+    message: out.snapshotCreated
+      ? `Snapshot '${snapshotName}' restored from ${destination.name} as new container '${out.restoredAs}' with snapshot '${snapshotName}' preserved.`
+      : `Snapshot '${snapshotName}' restored from ${destination.name} as new container '${out.restoredAs}'. (Auto-snapshot failed — see backend logs.)`,
+    size_bytes: out.sizeBytes || null,
+  });
+});
+
+// GET /containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress
+// Polled by the Pull-from-S3 dialog while the long-running
+// download/import dance runs.  Returns the current phase + bytes
+// counters so the UI can render a meaningful progress bar instead
+// of a bare spinner.  Cleared 30s after the import finishes.
+lxcRouter.get('/containers/:name/snapshot/:snapshotName/s3-export/:exportId/import-progress', (req, res) => {
+  const { exportId } = req.params;
+  const p = getImportProgress({ exportId });
+  if (!p) {
+    return res.json({ success: true, found: false });
+  }
+  res.json({ success: true, found: true, ...p });
 });
 
 // GET /containers/:name/snapshot/:snapshotName/notes - Get notes for a snapshot

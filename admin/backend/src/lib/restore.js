@@ -74,6 +74,41 @@ function hostWriteFile(dest, buf, { mode = null } = {}) {
   }
 }
 
+// coerceForBind — turn a JSON-round-tripped DB value back into a
+// type that better-sqlite3 can bind.  The supported set is:
+// number, string, bigint, Buffer, null.  We hit four cases:
+//
+//   undefined            → null (column absent in the dumped row)
+//   boolean              → 0 / 1 (sqlite stores booleans as INTEGER,
+//                          but JSON.parse returns true/false; bind
+//                          rejects bare booleans)
+//   { type:'Buffer', data:[...] }
+//                        → Buffer (BLOB columns serialize this way
+//                          via JSON.stringify; not a wire-format
+//                          choice we control)
+//   any other object/array
+//                        → JSON.stringify (best effort; original
+//                          column was probably TEXT carrying a JSON
+//                          string and the parse one level deeper
+//                          turned it into an object)
+//
+// Without this the apply-db step trips with 'SQLite3 can only
+// bind numbers, strings, bigints, buffers, and null' the moment
+// it hits any of the above.
+function coerceForBind(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'bigint') return v;
+  if (Buffer.isBuffer(v)) return v;
+  if (v && typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+    return Buffer.from(v.data);
+  }
+  // Last resort: re-serialize.  Original column likely held a
+  // JSON string that got auto-parsed during the dump round-trip.
+  try { return JSON.stringify(v); }
+  catch { return null; }
+}
+
 // Wipe the *contents* of a host directory (not the dir itself —
 // that's typically a bind-mount inode the operator wants to
 // preserve).  No-op when the dir doesn't exist.
@@ -494,7 +529,7 @@ export async function runModeB({
             `INSERT INTO "${tableName}" (${cols.map((c) => `"${c}"`).join(',')}) VALUES (${placeholders})`
           );
           for (const row of rows) {
-            insert.run(cols.map((c) => row[c] ?? null));
+            insert.run(cols.map((c) => coerceForBind(row[c])));
           }
         }
       });

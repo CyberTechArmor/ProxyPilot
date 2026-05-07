@@ -38,6 +38,31 @@ const MODES = {
   },
 };
 
+// What each tier captures (and therefore what gets restored
+// when target=in_place).  Surfaced verbatim in the production-
+// restore callout so the operator knows exactly which files are
+// about to be overwritten.
+const TIER_CONTENTS = {
+  config: [
+    'SQLite DB (proxypilot.db) — services, routes, L4 forwards, users, schedules, audit log, etc.',
+    '.env — encryption key, admin domain, and any other env-driven config',
+    '/var/lib/proxypilot/cve-inbox — security inbox state',
+  ],
+  config_plus_data: [
+    'Everything in the config tier (DB + .env + cve-inbox), PLUS:',
+    '/etc/caddy — Caddyfile + per-site fragments',
+    '/etc/wireguard — wg-quick configs',
+    '/var/lib/caddy/.local/share/caddy — Caddy ACME state (issued certs + private keys)',
+    '/opt/proxypilot/data/services — per-service data directories',
+  ],
+  full: [
+    'Everything in config_plus_data, PLUS:',
+    'Per-volume Docker volume tarballs',
+    'Per-instance Incus exports',
+    '(In-place restore not yet supported for this tier — use Dry run + manual restore.)',
+  ],
+};
+
 export default function RestoreDialog({ open, onOpenChange, backup, onStarted }) {
   const [target, setTarget] = useState('sandbox');
   const [passphrase, setPassphrase] = useState('');
@@ -225,19 +250,35 @@ export default function RestoreDialog({ open, onOpenChange, backup, onStarted })
               </span>
             </div>
           ) : (
-            <div className="text-xs text-red-700 dark:text-red-400 border border-red-500/30 bg-red-500/10 rounded px-3 py-2 flex gap-2">
-              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>
-                <strong>Production restore.</strong> A safety-fallback backup of the current
-                state will be written to{' '}
-                <code className="font-mono text-[10px]">/var/lib/proxypilot/backups/safety-pre-restore-&lt;id&gt;.ppbackup</code>
-                {' '}before anything is overwritten.
-                {' '}{backup.tier === 'config_plus_data'
-                  ? 'Replaces .env, cve-inbox, /etc/caddy, /etc/wireguard, caddy ACME state, and /opt/proxypilot/data/services, then imports the SQLite DB from the dump.  Run `docker compose restart admin` and reload Caddy + wg afterward.'
-                  : 'Replaces .env and cve-inbox, then imports the SQLite DB from the dump.  Run `docker compose restart admin` afterward.'}
-                {' '}If a step fails, the live SQLite transaction rolls back; earlier file
-                writes may need a manual rollback from the safety file.
-              </span>
+            <div className="text-xs text-red-700 dark:text-red-400 border border-red-500/30 bg-red-500/10 rounded px-3 py-2 space-y-2">
+              <div className="flex gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Production restore.</strong> A safety-fallback backup of the
+                  current state lands at{' '}
+                  <code className="font-mono text-[10px]">/var/lib/proxypilot/backups/safety-pre-restore-&lt;id&gt;.ppbackup</code>
+                  {' '}before anything is overwritten.  If a write fails, the SQLite
+                  transaction rolls back automatically; file-system writes that
+                  already landed need a manual rollback from the safety file.
+                </span>
+              </div>
+              {TIER_CONTENTS[backup.tier] && (
+                <div className="border-t border-red-500/30 pt-2">
+                  <p className="font-medium mb-1">This will overwrite:</p>
+                  <ul className="list-disc pl-5 space-y-0.5">
+                    {TIER_CONTENTS[backup.tier].map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-300/90">
+                    After: run <code className="font-mono">docker compose restart admin</code>
+                    {' '}so the new .env / DB take effect
+                    {backup.tier === 'config_plus_data'
+                      ? '; reload Caddy and restart WireGuard if you changed those configs.'
+                      : '.'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

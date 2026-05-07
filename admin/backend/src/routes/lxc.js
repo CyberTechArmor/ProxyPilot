@@ -3035,16 +3035,32 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       l4: l4Count.get(r.id)?.n || 0,
     }));
 
+    // Resolve target IP up front so the UPDATE can stamp the
+    // new lxc_container_name + target_ip in a single shot.
+    // Caddy regen reads target_ip from the row directly; without
+    // a value here the renamed routes would land on Caddy with
+    // an empty upstream until something else triggers a fresh
+    // discovery pass (operator quick-add or a manual rescan).
+    let targetIp = null;
+    try {
+      const r = await execOnHost(
+        `incus list ${INSTANCE_PREFIX}${toName} --format json 2>/dev/null`,
+        { timeout: 5000 },
+      );
+      const list = JSON.parse(r.stdout || '[]');
+      if (list[0]) targetIp = extractIPv4(list[0]);
+    } catch { /* tolerated */ }
+
     const update = db.prepare(
       `UPDATE services
-       SET lxc_container_name = ?, target_ip = NULL,
+       SET lxc_container_name = ?, target_ip = ?,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     );
-    const tx = db.transaction((targetName, ids) => {
-      for (const id of ids) update.run(targetName, id);
+    const tx = db.transaction((targetName, targetIpVal, ids) => {
+      for (const id of ids) update.run(targetName, targetIpVal, id);
     });
-    tx(toName, rows.map((r) => r.id));
+    tx(toName, targetIp, rows.map((r) => r.id));
 
     try {
       logAudit(req.user?.id || null, 'LXC_TRANSFER_ROUTES', 'lxc_container', name, {
@@ -3094,20 +3110,10 @@ lxcRouter.post('/containers/:name/transfer-routes', async (req, res) => {
       }
     } catch { /* source unreachable; skip */ }
 
-    // Resolve target IP for the reconcile.  Stopped containers
-    // have no IP — reconcile will fail to add a proxy device
-    // without one, so we skip the target pass and tell the
-    // operator to start the container + retry.
-    let targetIp = null;
-    try {
-      const r = await execOnHost(
-        `incus list ${INSTANCE_PREFIX}${toName} --format json 2>/dev/null`,
-        { timeout: 5000 },
-      );
-      const list = JSON.parse(r.stdout || '[]');
-      if (list[0]) targetIp = extractIPv4(list[0]);
-    } catch { /* tolerated */ }
-
+    // The reconcile pass below needs the target's bridge IP.
+    // We already resolved it above for the UPDATE; reuse here.
+    // Stopped target = no IP = no L4 reconcile (the UPDATE
+    // already stamped target_ip=null on the services rows).
     if (targetIp) {
       for (const r of enriched) {
         if (r.l4 === 0) continue;

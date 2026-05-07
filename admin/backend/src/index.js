@@ -7,7 +7,7 @@ import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { initDatabase, getDb } from './db.js';
 import { authRouter } from './routes/auth.js';
 import { servicesRouter } from './routes/services.js';
@@ -223,6 +223,48 @@ try {
   }
 } catch (err) {
   console.error('[backups] orphan sweep failed at boot:', err?.message || err);
+}
+
+// Detect 'ok' backups whose local file is missing AND that have
+// no S3 copy — these are unrestorable orphans, typically caused
+// by /var/lib/proxypilot not being bind-mounted into the admin
+// container so a docker compose rebuild wiped the ephemeral
+// storage out from under the DB rows.  Surface them by flipping
+// the status to 'failed' with a clear note; the operator can
+// dismiss them via the trash button.  We don't auto-delete the
+// row because the operator might still want to see what was
+// captured (manifest, audit history) before clearing it.
+try {
+  const db = getDb();
+  const candidates = db.prepare(
+    `SELECT id, local_path FROM backups
+     WHERE status = 'ok'
+       AND local_path IS NOT NULL
+       AND s3_uploaded = 0`
+  ).all();
+  let flagged = 0;
+  const update = db.prepare(
+    `UPDATE backups
+     SET status = 'failed',
+         error = 'local file missing — wiped on container rebuild (check that /var/lib/proxypilot is bind-mounted)'
+     WHERE id = ?`
+  );
+  for (const row of candidates) {
+    if (!row.local_path) continue;
+    try {
+      statSync(row.local_path);
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        update.run(row.id);
+        flagged += 1;
+      }
+    }
+  }
+  if (flagged > 0) {
+    console.log(`[backups] flagged ${flagged} backup(s) with missing local file at boot`);
+  }
+} catch (err) {
+  console.error('[backups] missing-file sweep failed at boot:', err?.message || err);
 }
 
 // Health check endpoint

@@ -165,15 +165,50 @@ async function downloadBackup(destRow, s3Key) {
 // destination_id) succeed via the local path and never touch the
 // network.  Used by Mode C / Mode A so they don't need to know
 // where the artifact came from.
+//
+// Two flavours of local read: fs first (the common case where
+// /var/lib/proxypilot/backups is bind-mounted), then a
+// spawnHost('cat') fallback so an install whose bind mount went
+// stale or got dropped during a docker-compose edit can still
+// recover the bytes from the host's namespace.  If both fail we
+// fall through to S3 if a destination row is on file.
 async function loadBackupBuffer({ backup, destination }) {
   if (backup.local_path) {
     try {
       return fs.readFileSync(backup.local_path);
     } catch (err) {
-      // Local file gone — fall through to S3 if a destination
-      // exists.  Without a destination the caller already
-      // returned 409 from the route so we shouldn't get here.
-      if (!destination) throw err;
+      if (err && err.code !== 'ENOENT') {
+        // permission / IO problem rather than a missing file —
+        // surface it directly; the host-cat fallback wouldn't
+        // help with permissions either.
+        if (!destination) throw err;
+      } else {
+        // ENOENT in the container's view.  Try the host's
+        // namespace via spawnHost('cat') in case the bind mount
+        // is mis-configured but the file is sitting on the host
+        // filesystem.
+        try {
+          const r = spawnHostSync('cat', [backup.local_path], {
+            encoding: 'buffer',
+            maxBuffer: 16 * 1024 * 1024 * 1024,
+          });
+          if (r.status === 0 && Buffer.isBuffer(r.stdout) && r.stdout.length > 0) {
+            return r.stdout;
+          }
+          // host cat failed too — fall through to S3.  If neither
+          // path works we throw a clearer error than ENOENT.
+          if (!destination) {
+            throw new Error(
+              `local backup file not found in container namespace OR on host (${backup.local_path}).` +
+              `  This usually means /var/lib/proxypilot is not bind-mounted into the admin container ` +
+              `and the file was wiped on a docker compose rebuild.  Re-run update.sh to add the bind ` +
+              `mount, or restore from an S3 copy.`
+            );
+          }
+        } catch (e2) {
+          if (!destination) throw e2;
+        }
+      }
     }
   }
   if (!destination) {

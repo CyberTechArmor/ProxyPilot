@@ -30,6 +30,7 @@ import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
 import { postNotification } from './lib/notifications.js';
+import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -313,6 +314,40 @@ try {
   }
 } catch (err) {
   console.error('[secrets] boot decrypt probe failed:', err?.message || err);
+}
+
+// Probe that the local-backup root is writable.  When admin
+// runs in a container without /var/lib/proxypilot bind-mounted
+// (or with a host-side ownership mismatch), every backup
+// create lands in the writable layer — invisible to host-side
+// tooling, lost on rebuild — or fails outright.  Writing a
+// throwaway sentinel at boot surfaces the breakage before the
+// operator's first backup attempt does.
+try {
+  ensureRoot();
+  const probePath = `${backupRoot()}/.proxypilot-write-probe`;
+  await import('node:fs').then((fs) => {
+    fs.writeFileSync(probePath, '');
+    fs.unlinkSync(probePath);
+  });
+} catch (err) {
+  const code = err?.code || 'unknown';
+  console.error(
+    `[backups] backup root ${backupRoot()} is not writable at boot (${code}): ${err?.message || err}. ` +
+    `New backups will fail with "local write failed". ` +
+    `Likely cause: /var/lib/proxypilot not bind-mounted into the admin container, ` +
+    `or host-side ownership mismatch.`
+  );
+  try {
+    postNotification({
+      level: 'error',
+      title: 'Backup root is not writable',
+      body: `${backupRoot()} (${code}). New backups will fail with "local write failed". ` +
+        `Check the bind mount + host-side ownership.`,
+      source: 'backup-root-probe',
+      dedupe_key: 'backup-root-probe',
+    });
+  } catch { /* tolerated */ }
 }
 
 // Sweep orphan 'pending' snapshot S3 export rows.  The export

@@ -1664,6 +1664,23 @@ const MEET_PRESET = {
   l4Forwards: [
     { proto: 'tcp', listenPort: 7881, listenPortEnd: null,  connectPort: 7881, connectPortEnd: null,  description: 'LiveKit RTC TCP fallback' },
     { proto: 'udp', listenPort: 50000, listenPortEnd: 60000, connectPort: 50000, connectPortEnd: 60000, description: 'WebRTC media' },
+    // TURN-over-TLS. Without this, clients on cellular networks (where
+    // CGNAT + carrier UDP filtering force ICE onto the TURN relay path)
+    // can't establish a peer connection — symptom is "could not
+    // establish pc connection" on a phone but not on the same room from
+    // wifi. coturn ships listening on 5349/tcp via MEET's
+    // turnserver.conf.template (TURN_TLS_PORT=5349 in
+    // deploy/external-proxy/.env.example).
+    { proto: 'tcp', listenPort: 5349, listenPortEnd: null,  connectPort: 5349, connectPortEnd: null,  description: 'coturn TURN-over-TLS (cellular fallback)' },
+    // Plain TURN/STUN bind. Optional but recommended — clients try UDP
+    // first before TLS fallback, so opening it cuts a TLS handshake out
+    // of the common path on networks that allow UDP/3478.
+    { proto: 'udp', listenPort: 3478, listenPortEnd: null,  connectPort: 3478, connectPortEnd: null,  description: 'coturn TURN/STUN (UDP)' },
+    // TURN relay range. The ports coturn uses to source relayed media
+    // back to the peer. MEET's turnserver.conf pins this to 30000-32000;
+    // without it relayed media works on the first packet but
+    // long-lived sessions can pick a port outside the range and fail.
+    { proto: 'udp', listenPort: 30000, listenPortEnd: 32000, connectPort: 30000, connectPortEnd: 32000, description: 'coturn TURN relay range' },
   ],
   // The TCP ports we expect to see listening before we'll accept
   // the preset. UDP isn't checked — LiveKit allocates the WebRTC

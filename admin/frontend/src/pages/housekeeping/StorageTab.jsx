@@ -112,8 +112,17 @@ function TestStatusBadge({ status, ts }) {
 
 function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault, onBrowse }) {
   const busy = busyId === dest.id;
+  // secret_decryptable=false means decryptSecret threw at the
+  // server when shaping this row — the stored secret can't be
+  // unwrapped under the current TOTP_ENCRYPTION_KEY.  Every
+  // operation against the destination (test, snapshot push,
+  // scheduled backup) is going to fail with the same GCM-auth
+  // error until the operator re-enters the secret.  Inline
+  // banner + a one-click "Re-enter credentials" CTA prefilled
+  // to edit mode so the broken state is unmissable.
+  const credentialsBroken = dest.secret_decryptable === false;
   return (
-    <Card className={dest.is_default ? 'ring-1 ring-amber-500/40' : undefined}>
+    <Card className={`${dest.is_default ? 'ring-1 ring-amber-500/40' : ''} ${credentialsBroken ? 'border-red-500/50' : ''}`}>
       <CardHeader>
         <div className="flex items-start gap-3">
           <Cloud className="h-5 w-5 mt-0.5 text-muted-foreground" />
@@ -125,6 +134,14 @@ function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault,
                   <Star className="h-3 w-3" /> default
                 </span>
               )}
+              {credentialsBroken && (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/40"
+                  title="Stored secret can't be decrypted under the current TOTP_ENCRYPTION_KEY"
+                >
+                  <AlertTriangle className="h-3 w-3" /> credentials broken
+                </span>
+              )}
             </div>
             <CardDescription className="text-xs font-mono break-all">
               {dest.bucket}{dest.path_prefix ? `/${dest.path_prefix}` : ''} @ {dest.endpoint_url}
@@ -133,6 +150,29 @@ function DestinationCard({ dest, busyId, onTest, onEdit, onDelete, onSetDefault,
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {credentialsBroken && (
+          <div className="text-[12px] rounded border border-red-500/40 bg-red-500/10 p-2 space-y-1.5">
+            <div className="flex items-start gap-1.5 text-red-600 dark:text-red-400">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span className="leading-snug">
+                Stored secret can&apos;t be decrypted with the current
+                {' '}<code className="font-mono">TOTP_ENCRYPTION_KEY</code>.
+                Common after an in-place restore that didn&apos;t replace
+                {' '}<code className="font-mono">.env</code>. Snapshot pushes and scheduled
+                backups will fail until this is fixed.
+              </span>
+            </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => onEdit(dest)}
+              disabled={busy}
+              className="h-7 px-2 text-xs"
+            >
+              <Pencil className="h-3 w-3 mr-1.5" /> Re-enter credentials
+            </Button>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
           <div className="flex justify-between">
             <span className="text-muted-foreground">Region</span>

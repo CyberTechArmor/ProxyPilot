@@ -49,7 +49,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { getDb, logAudit } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
-import { encryptSecret } from '../lib/secrets.js';
+import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import {
   testConnection, putObject, getObjectStream, deleteObject, buildKey, listObjects,
 } from '../lib/s3.js';
@@ -87,6 +87,21 @@ export const backupsRouter = Router();
 // are exposed as plain booleans (the DB stores 0/1 INTEGERs).
 function publicShape(row) {
   if (!row) return null;
+  // Probe whether the stored secret is decryptable under the
+  // current TOTP_ENCRYPTION_KEY.  When this is false, every
+  // operation against the destination fails with the same
+  // GCM-auth error (snapshot push, scheduled backup, manual
+  // test).  Surfacing the flag on the row lets the Storage
+  // tab render an inline "credentials need re-entry" call to
+  // action without an extra round-trip.  Wrapped in try/catch
+  // because decryptSecret throws on mismatch — that's the
+  // signal we're after.
+  let secretDecryptable = true;
+  try {
+    if (row.secret_key_enc) decryptSecret(row.secret_key_enc);
+  } catch {
+    secretDecryptable = false;
+  }
   return {
     id: row.id,
     name: row.name,
@@ -102,6 +117,7 @@ function publicShape(row) {
     test_status: row.test_status || null,
     test_at: row.test_at || null,
     created_at: row.created_at,
+    secret_decryptable: secretDecryptable,
   };
 }
 

@@ -28,6 +28,9 @@ import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer } from './routes/terminal-ws.js';
+import { decryptSecret } from './lib/secrets.js';
+import { postNotification } from './lib/notifications.js';
+import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -265,6 +268,139 @@ try {
   }
 } catch (err) {
   console.error('[backups] missing-file sweep failed at boot:', err?.message || err);
+}
+
+// Probe every backup_destinations row for credential decryption.
+// AES-GCM auth fails (raw message: "Unsupported state or unable
+// to authenticate data") when the secret was encrypted under a
+// different TOTP_ENCRYPTION_KEY than the one currently on disk.
+// Most common cause: in-place restore wrote the DB but didn't
+// match the .env's at-rest key, leaving every destination's
+// secret unrecoverable.  Surface this at boot in the admin log
+// + via a notification so the operator sees it before the next
+// upload (snapshot push, scheduled backup) fails with a cryptic
+// crypto error.
+try {
+  const db = getDb();
+  const dests = db.prepare(
+    `SELECT id, name, secret_key_enc FROM backup_destinations`
+  ).all();
+  const broken = [];
+  for (const d of dests) {
+    if (!d.secret_key_enc) continue;
+    try { decryptSecret(d.secret_key_enc); }
+    catch (err) {
+      broken.push({ name: d.name, error: err?.message || String(err) });
+    }
+  }
+  if (broken.length > 0) {
+    console.error(
+      `[secrets] ${broken.length} backup destination(s) failed credential decrypt at boot — ` +
+      `TOTP_ENCRYPTION_KEY likely doesn't match the one used at encrypt time. ` +
+      `Affected: ${broken.map((b) => b.name).join(', ')}. ` +
+      `Re-enter the secret key in Housekeeping → Storage for each, or restore the matching .env.`
+    );
+    try {
+      postNotification({
+        level: 'error',
+        title: `${broken.length} backup destination${broken.length === 1 ? '' : 's'} have unreadable credentials`,
+        body: `TOTP_ENCRYPTION_KEY mismatch (common after in-place restore). ` +
+          `Affected: ${broken.map((b) => b.name).join(', ')}. ` +
+          `Re-enter the secret key in Housekeeping → Storage, or restore the matching .env.`,
+        source: 'secrets-boot-probe',
+        dedupe_key: 'secrets-boot-probe',
+      });
+    } catch { /* notification post may fail before init; non-fatal */ }
+  }
+} catch (err) {
+  console.error('[secrets] boot decrypt probe failed:', err?.message || err);
+}
+
+// Probe that the local-backup root is writable.  When admin
+// runs in a container without /var/lib/proxypilot bind-mounted
+// (or with a host-side ownership mismatch), every backup
+// create lands in the writable layer — invisible to host-side
+// tooling, lost on rebuild — or fails outright.  Writing a
+// throwaway sentinel at boot surfaces the breakage before the
+// operator's first backup attempt does.
+try {
+  ensureRoot();
+  const probePath = `${backupRoot()}/.proxypilot-write-probe`;
+  await import('node:fs').then((fs) => {
+    fs.writeFileSync(probePath, '');
+    fs.unlinkSync(probePath);
+  });
+} catch (err) {
+  const code = err?.code || 'unknown';
+  console.error(
+    `[backups] backup root ${backupRoot()} is not writable at boot (${code}): ${err?.message || err}. ` +
+    `New backups will fail with "local write failed". ` +
+    `Likely cause: /var/lib/proxypilot not bind-mounted into the admin container, ` +
+    `or host-side ownership mismatch.`
+  );
+  try {
+    postNotification({
+      level: 'error',
+      title: 'Backup root is not writable',
+      body: `${backupRoot()} (${code}). New backups will fail with "local write failed". ` +
+        `Check the bind mount + host-side ownership.`,
+      source: 'backup-root-probe',
+      dedupe_key: 'backup-root-probe',
+    });
+  } catch { /* tolerated */ }
+}
+
+// Sweep orphan 'running' restore_runs.  runModeA/B/C all live
+// inside the admin process — their progress sits in the
+// restore_runs row's steps_json + status columns.  A process
+// restart mid-run (operator restart, OOM, crash mid-pack) leaves
+// the row at status='running' indefinitely; the dry-runs panel
+// then polls forever and the operator sees a stuck "running"
+// pill with no way to clear it short of SQL.  Same shape of fix
+// as the in_progress backup sweep above: nothing was actually
+// running across the boot boundary, so flip every 'running' row
+// to 'failed' with a clear note, finalising the timestamp so
+// the panel auto-stops polling on the next refresh.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE restore_runs
+     SET status = 'failed',
+         finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+         notes = COALESCE(notes, 'orphaned running at admin restart')
+     WHERE status = 'running'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[restore] swept ${orphans.changes} orphan running run(s) at boot`);
+  }
+} catch (err) {
+  console.error('[restore] orphan sweep failed at boot:', err?.message || err);
+}
+
+// Sweep orphan 'pending' snapshot S3 export rows.  The export
+// flow inserts the row in 'pending' immediately, attaches the
+// in-flight Upload to ACTIVE_UPLOADS, then flips to 'exported'
+// or 'failed' on completion.  ACTIVE_UPLOADS is in-memory, so a
+// process restart leaves the row at 'pending' forever — the
+// snapshot panel keeps rendering "preparing…" with no banner
+// (because the in-memory queue is empty post-boot) and the
+// operator has no path forward except a manual SQL update.
+// Same shape of fix as the in_progress backup sweep above:
+// no pending row from before this boot can still be running.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE lxc_snapshot_s3_exports
+     SET status = 'failed',
+         finished_at = CURRENT_TIMESTAMP,
+         error = COALESCE(error, 'orphaned pending at admin restart')
+     WHERE status = 'pending'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[snapshot-s3-export] swept ${orphans.changes} orphan pending row(s) at boot`);
+  }
+} catch (err) {
+  console.error('[snapshot-s3-export] orphan sweep failed at boot:', err?.message || err);
 }
 
 // Health check endpoint

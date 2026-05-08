@@ -389,6 +389,22 @@ export default function BackupsTab() {
   };
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, []);
 
+  // Auto-refresh while any backup is in_progress so the row flips
+  // to ok / failed without the operator having to hit Refresh.
+  // The create-backup endpoint is synchronous (pack + writeLocal +
+  // fan-out all happen in-band before the HTTP response returns),
+  // but on slow installs the response can take long enough that
+  // the operator is staring at a "packing…" row by the time the
+  // POST resolves.  3s cadence is cheap (single SQL aggregate,
+  // local-only) and stops the moment every row is terminal.
+  useEffect(() => {
+    const anyInFlight = items.some((b) => b.status === 'in_progress');
+    if (!anyInFlight) return undefined;
+    const id = setInterval(refresh, 3000);
+    return () => clearInterval(id);
+    /* eslint-disable-next-line */
+  }, [items]);
+
   const onCreate = async (body) => {
     setCreating(true);
     try {
@@ -564,12 +580,42 @@ export default function BackupsTab() {
                                 {dest.bucket}
                               </div>
                             </>
+                          ) : b.destination_id ? (
+                            // destination_id set but no live row
+                            // matches → the destination was deleted
+                            // after this backup ran.  This case
+                            // genuinely is unknown.
+                            <span
+                              className="italic"
+                              title="Destination row was deleted after this backup ran."
+                            >
+                              unknown
+                            </span>
                           ) : (
-                            <span className="italic">unknown</span>
+                            // Null destination_id → local-only by
+                            // design.  Don't scare the operator with
+                            // "unknown" when the row is fine — the
+                            // local copy is canonical.
+                            <span
+                              className="italic text-emerald-600 dark:text-emerald-400"
+                              title="No S3 destination was selected when this backup was taken; the local copy is canonical."
+                            >
+                              Local only
+                            </span>
                           )}
                         </td>
                         <td className="px-3 py-2 align-top font-mono">
-                          {fmtBytes(b.size_bytes)}
+                          {/* During in_progress the row carries
+                              size_bytes=0 until pack + writeLocal
+                              finish and the local-path UPDATE
+                              fires.  Rendering "0 B" reads as
+                              "this backup is empty" — misleading.
+                              Show a dash; the StatusBadge in the
+                              next column already says it's still
+                              running. */}
+                          {b.status === 'in_progress' && !b.size_bytes
+                            ? <span className="text-muted-foreground">—</span>
+                            : fmtBytes(b.size_bytes)}
                         </td>
                         <td className="px-3 py-2 align-top">
                           <StatusBadge status={b.status} />
@@ -590,7 +636,21 @@ export default function BackupsTab() {
                                 S3
                               </span>
                             )}
-                            {!b.has_local && !b.s3_uploaded && (
+                            {/* "no copy" is only meaningful in a
+                                terminal state.  An in-progress row
+                                hasn't reached writeLocal yet, so
+                                rendering "no copy" reads as failure
+                                during normal operation.  Show a
+                                neutral "packing…" hint instead. */}
+                            {!b.has_local && !b.s3_uploaded && b.status === 'in_progress' && (
+                              <span
+                                className="text-[10px] text-amber-600 dark:text-amber-400"
+                                title="Pack + local write are still in flight; the row will flip to local once writeLocal finishes."
+                              >
+                                packing…
+                              </span>
+                            )}
+                            {!b.has_local && !b.s3_uploaded && b.status !== 'in_progress' && (
                               <span className="text-[10px] text-amber-600">no copy</span>
                             )}
                           </div>

@@ -119,6 +119,43 @@ function hostWipeContents(dir) {
   ], { encoding: 'utf-8' });
 }
 
+// Bind-mount-aware variant: wipe contents of `dir`, but for any
+// `preservedChildren` subdir/file (relative to `dir`) keep the
+// inode and only wipe its contents in place.  The admin container
+// bind-mounts /etc/caddy/sites, /etc/caddy/custom, and
+// /etc/caddy/Caddyfile as separate mount points; rm-ing them on
+// the host would orphan the container's mounts and leave admin
+// writing to a dir that doesn't exist (the operator-visible
+// "Failed to add service: ENOENT" symptom on the next manual
+// route create).  Wiping in place keeps the host inode the
+// container's mount points at, so writes from inside the
+// container continue to land on the same on-host file.
+function hostWipeContentsPreserving(dir, preservedChildren = []) {
+  if (preservedChildren.length === 0) return hostWipeContents(dir);
+  const qDir = shellSingleQuote(dir);
+  // Build a single sh script:
+  //   1. For each preserved child, wipe its contents (dir) or
+  //      truncate it (file) without removing the inode.
+  //   2. For the parent dir, delete every depth-1 entry that
+  //      isn't one of the preserved paths.
+  const preservedFull = preservedChildren.map((c) => path.join(dir, c));
+  const wipeChildren = preservedFull.map((p) => {
+    const q = shellSingleQuote(p);
+    return (
+      `if [ -d ${q} ]; then find ${q} -mindepth 1 -delete; ` +
+      `elif [ -f ${q} ]; then : > ${q}; fi`
+    );
+  }).join('; ');
+  const pruneArgs = preservedFull
+    .map((p) => `! -path ${shellSingleQuote(p)}`)
+    .join(' ');
+  const wipeRest =
+    `find ${qDir} -mindepth 1 -maxdepth 1 ${pruneArgs} -exec rm -rf {} +`;
+  spawnHostSync('sh', ['-c',
+    `if [ ! -d ${qDir} ]; then exit 0; fi; ${wipeChildren}; ${wipeRest}`,
+  ], { encoding: 'utf-8' });
+}
+
 // ── small helpers ───────────────────────────────────────────────────
 
 function appendStep(runId, step) {
@@ -602,7 +639,17 @@ export async function runModeB({
       appendStep(runId, { stage: `apply-${label}`, status: 'started', target, files: matches.length });
       try {
         hostMkdirP(target);
-        hostWipeContents(target);
+        // Caddy's three child mount points (sites/, custom/,
+        // Caddyfile) are bind-mounted into the admin container as
+        // independent mounts.  Removing them on the host orphans
+        // the container's bind mounts — admin then writes into a
+        // phantom inode and the operator sees ENOENT on the next
+        // route create.  Wipe in place to keep the inodes intact.
+        if (label === 'caddy') {
+          hostWipeContentsPreserving(target, ['sites', 'custom', 'Caddyfile']);
+        } else {
+          hostWipeContents(target);
+        }
         for (const name of matches) {
           const rel = name.slice(archive.length);
           if (!rel) continue;

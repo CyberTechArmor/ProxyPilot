@@ -59,16 +59,50 @@ export function localPathFor(id) {
 // Atomic write: write to a tmp sibling + rename.  The renameSync
 // is atomic within a single filesystem; readers never see a
 // half-written file.
+//
+// Wraps the syscall errors with the path being attempted + the
+// errno code so a "local write failed" row in the dashboard tells
+// the operator exactly which mount is missing or unwritable —
+// the raw fs error otherwise loses that context once it's
+// stringified into the backups.error column.  Common shapes:
+//   ENOENT  → backupRoot()'s parent isn't a real path in this
+//             container's namespace (bind-mount missing)
+//   EACCES  → dir exists but the admin process can't write to it
+//             (host UID:GID vs container user mismatch)
+//   EROFS   → mount went read-only (rare, but happens after disk
+//             pressure on some setups)
 export function writeLocal(id, buffer) {
-  ensureRoot();
-  const finalPath = localPathFor(id);
-  const tmp = `${finalPath}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, buffer, { mode: 0o600, flag: 'wx' });
-  // writeFileSync's mode arg respects umask on create; chmod
-  // explicitly so we get exactly 0600 on every host.
-  try { fs.chmodSync(tmp, 0o600); } catch { /* ignore */ }
-  fs.renameSync(tmp, finalPath);
-  return finalPath;
+  let finalPath, tmp;
+  try {
+    ensureRoot();
+    finalPath = localPathFor(id);
+    tmp = `${finalPath}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmp, buffer, { mode: 0o600, flag: 'wx' });
+    // writeFileSync's mode arg respects umask on create; chmod
+    // explicitly so we get exactly 0600 on every host.
+    try { fs.chmodSync(tmp, 0o600); } catch { /* ignore */ }
+    fs.renameSync(tmp, finalPath);
+    return finalPath;
+  } catch (err) {
+    const code = err?.code || 'unknown';
+    const target = finalPath || backupRoot();
+    const hint = code === 'ENOENT'
+      ? ` (parent directory missing — check that ${backupRoot()} is bind-mounted into the admin container)`
+      : code === 'EACCES'
+        ? ` (permission denied — admin's UID can't write to ${backupRoot()}; fix host-side ownership)`
+        : code === 'EROFS'
+          ? ` (filesystem read-only — investigate the host mount)`
+          : '';
+    // Best-effort cleanup of the .tmp if it was created before
+    // the rename failed; otherwise it lingers and trips 'wx' on
+    // the next attempt with the same id.
+    if (tmp) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    }
+    throw new Error(
+      `writeLocal(${id}): ${code} writing to ${target}${hint}: ${err?.message || err}`
+    );
+  }
 }
 
 // Best-effort delete.  Returns true if the file was present and

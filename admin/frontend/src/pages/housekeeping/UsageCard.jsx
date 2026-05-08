@@ -51,11 +51,20 @@ export default function UsageCard({ usage, loading }) {
         <CardContent>
           <div className="space-y-2">
             {perDest.map((d) => (
-              <div key={d.destination_id || 'unknown'} className="border rounded p-2">
+              <div key={d.destination_id || 'local-only'} className="border rounded p-2">
                 <div className="flex items-baseline justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-1.5">
                     <Database className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="font-medium text-sm">{d.destination_name || 'unknown destination'}</span>
+                    {/* Null destination_id means the operator took
+                        a local-only backup (no S3 fan-out).  Label
+                        accordingly — "unknown destination" reads
+                        as "broken row" when it actually means
+                        "intentionally not pushed off-host". */}
+                    <span className="font-medium text-sm">
+                      {d.destination_id
+                        ? (d.destination_name || 'unknown destination')
+                        : 'Local only'}
+                    </span>
                   </div>
                   <div className="text-sm font-mono">{fmtBytes(d.bytes)}</div>
                 </div>

@@ -81,29 +81,63 @@ function StepLine({ step }) {
 function RestoreDetail({ runId, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  // notFound is sticky: once the run is genuinely gone (404),
+  // there's no point continuing to poll — the row was either
+  // deleted (cascade from a backup delete) or never existed.
+  // Without this gate the bare `catch {}` below kept the 2s
+  // interval running forever and filled the network panel
+  // with "restore run not found" responses.
+  const [notFound, setNotFound] = useState(false);
   const pollRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
 
   const refresh = async () => {
     try {
       const r = await api.backupsGetRestore(runId);
       setData(r.restore);
       // Stop polling once we hit a terminal state.
-      if (r.restore?.status !== 'running' && pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+      if (r.restore?.status !== 'running') stopPolling();
+    } catch (err) {
+      // 404 = run genuinely gone; stop the poll so we don't
+      // hammer the API.  Other errors (network blip, 5xx) are
+      // tolerated — the next tick retries.
+      const status = err instanceof ApiError ? err.status : null;
+      if (status === 404) {
+        setNotFound(true);
+        stopPolling();
       }
-    } catch {
-      // tolerate transient — next tick will retry
     } finally {
       setLoading(false);
     }
   };
   useEffect(() => {
+    setNotFound(false); // re-arm if the operator clicks a different run
     refresh();
     pollRef.current = setInterval(refresh, 2000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => stopPolling();
     /* eslint-disable-next-line */
   }, [runId]);
+
+  if (notFound) {
+    return (
+      <Card>
+        <CardContent className="py-4 text-sm text-muted-foreground flex items-center justify-between gap-3">
+          <span>
+            Restore run <code className="font-mono">{runId.slice(0, 8)}…</code> no
+            longer exists.  It was likely cleaned up alongside its backup; nothing
+            more to show.
+          </span>
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (!data) {
     return (

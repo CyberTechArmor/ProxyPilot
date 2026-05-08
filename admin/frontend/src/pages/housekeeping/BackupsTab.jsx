@@ -564,8 +564,28 @@ export default function BackupsTab() {
                                 {dest.bucket}
                               </div>
                             </>
+                          ) : b.destination_id ? (
+                            // destination_id set but no live row
+                            // matches → the destination was deleted
+                            // after this backup ran.  This case
+                            // genuinely is unknown.
+                            <span
+                              className="italic"
+                              title="Destination row was deleted after this backup ran."
+                            >
+                              unknown
+                            </span>
                           ) : (
-                            <span className="italic">unknown</span>
+                            // Null destination_id → local-only by
+                            // design.  Don't scare the operator with
+                            // "unknown" when the row is fine — the
+                            // local copy is canonical.
+                            <span
+                              className="italic text-emerald-600 dark:text-emerald-400"
+                              title="No S3 destination was selected when this backup was taken; the local copy is canonical."
+                            >
+                              Local only
+                            </span>
                           )}
                         </td>
                         <td className="px-3 py-2 align-top font-mono">

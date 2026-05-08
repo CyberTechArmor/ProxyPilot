@@ -4,6 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import LxcContainers from './LxcContainers';
 import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
 import ServiceL4AndPorts from '@/components/ServiceL4AndPorts';
+import ServiceCertMounts from '@/components/ServiceCertMounts';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -6813,6 +6814,13 @@ volumes:
                   </div>
                 ))}
               </div>
+            )}
+            {settingsService && (
+              <ServiceCertMounts
+                service={settingsService}
+                api={api}
+                toast={toast}
+              />
             )}
             {settingsService?.lxcContainerName && (
               <ServiceL4AndPorts

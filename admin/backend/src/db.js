@@ -80,6 +80,8 @@ export function getDb() {
 //                                 cancel_requested for live progress
 //   207 Backups — restore_runs.backup_id ON DELETE CASCADE
 //   300 Notifications — durable backend-posted notifications
+//   400 Cert mounts — service_cert_mounts (TLS cert bind-mount intent
+//                     into sibling LXCs; consumed by lib/cert-mount-reconciler)
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1288,6 +1290,56 @@ export function initDatabase() {
       ON notifications(source, source_id)`);
     d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe
       ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`);
+  });
+
+  // Cert mounts — TLS cert bind-mount intent. ProxyPilot stores intent
+  // only; Incus owns the live device. Same source-of-truth split as
+  // service_l4_forwards: lib/cert-mount-reconciler reads this table on
+  // boot + on operator action and emits `incus config device add ...
+  // disk source=<host-cert-dir> path=<target> readonly=true` calls so
+  // the consumer LXC sees the same inode Caddy is rotating, no copy
+  // and no admin-API dependency.
+  //
+  // Field notes:
+  //   hostname        snapshotted from services.domain at create time —
+  //                   a later rename of the parent service must not
+  //                   silently repoint the live mount at a different
+  //                   cert directory.
+  //   cert_dir        absolute host path resolved via lib/caddy-cert
+  //                   resolveCertDir() (CADDY_ACME_DIR + issuer +
+  //                   hostname). Stored verbatim so reconcile can match
+  //                   the live device's `source=` without re-resolving
+  //                   (which could pick a different issuer dir
+  //                   mid-rotation).
+  //   container_name  operator-facing, no `pp-` prefix imposed by
+  //                   ProxyPilot — any container `incus list` returns
+  //                   is a valid target so the same workflow covers
+  //                   sibling LXCs that ProxyPilot didn't create.
+  //   device_name     operator-friendly (default 'meet-tls' to match
+  //                   the MEET helper's published spec). UNIQUE
+  //                   (container_name, device_name) prevents this
+  //                   table from issuing two `device add` calls that
+  //                   collide on the live container.
+  runMigration(db, 400, 'cert_mounts_service_cert_mounts', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS service_cert_mounts (
+        id              TEXT PRIMARY KEY,
+        service_id      TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+        hostname        TEXT NOT NULL,
+        cert_dir        TEXT NOT NULL,
+        container_name  TEXT NOT NULL,
+        device_name     TEXT NOT NULL,
+        target_path     TEXT NOT NULL,
+        readonly        INTEGER NOT NULL DEFAULT 1,
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_by      TEXT,
+        UNIQUE (container_name, device_name)
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cert_mounts_service
+        ON service_cert_mounts(service_id)
+    `);
   });
 
   // Create file versions table for version control

@@ -273,6 +273,32 @@ export const api = {
       method: 'POST',
     }),
 
+  // TLS cert bind-mount: surface the Caddy cert directory for a
+  // service and let the operator attach it as a read-only `disk`
+  // device on a sibling LXC. Intent lives in service_cert_mounts;
+  // the live device is owned by Incus. See
+  // backend/src/lib/cert-mount-reconciler.js for the auto-heal /
+  // drift policy.
+  getServiceCertMounts: (serviceId) =>
+    request(`/services/${serviceId}/cert-mounts`),
+  createServiceCertMount: (serviceId, payload) =>
+    request(`/services/${serviceId}/cert-mounts`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteServiceCertMount: (serviceId, mountId) =>
+    request(`/services/${serviceId}/cert-mounts/${mountId}`, {
+      method: 'DELETE',
+    }),
+  reconcileServiceCertMount: (serviceId, mountId) =>
+    request(`/services/${serviceId}/cert-mounts/${mountId}/reconcile`, {
+      method: 'POST',
+    }),
+  // Cert-mount target picker uses the unfiltered LXC listing — the
+  // consumer container (e.g. coturn) is typically NOT a `pp-`
+  // container, so the regular getLxcContainers() endpoint won't show it.
+  getAllLxcContainers: () => request('/lxc/all-containers'),
+
   // Phase 2c: detected-ports cache + rescan trigger. The cache read
   // is cheap; rescan walks /proc/net inside the LXC, optionally
   // gating on `docker compose ps healthy` first.

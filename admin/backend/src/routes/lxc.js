@@ -285,6 +285,32 @@ lxcRouter.get('/containers', async (req, res) => {
   }
 });
 
+// GET /all-containers — every LXC `incus list` returns, no `pp-`
+// filter. The cert-mount target picker (TLS bind-mount feature) needs
+// to see sibling containers ProxyPilot did not create — typically the
+// coturn LXC paired with a MEET service. Filtering out non-pp
+// containers in the regular /containers endpoint would be a behaviour
+// change for the LXC management page; cleaner to expose a separate
+// listing here.
+lxcRouter.get('/all-containers', async (req, res) => {
+  try {
+    const result = await execOnHost('incus list --format json');
+    const all = JSON.parse(result.stdout || '[]');
+    const containers = all.map((c) => ({
+      name: c.name,
+      status: (c.status || '').toLowerCase(),
+      type: c.type || 'container',
+      ipv4: extractIPv4(c),
+    }));
+    res.json({ containers });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to list containers',
+      details: error.stderr || error.message,
+    });
+  }
+});
+
 // Phase 2b E.1: GET /containers/with-ip — compact listing used by the
 // Add Service wizard's LXC dropdown. Returns `{containers: [{name,
 // status, type, ipv4, ipv6}]}` with the `pp-` instance prefix

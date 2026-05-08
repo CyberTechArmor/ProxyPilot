@@ -20,6 +20,12 @@ import {
 } from '../lib/l4-reconciler.js';
 import { diagnoseServiceL4Forwards } from '../lib/l4-diagnose.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
+import { resolveCertDir } from '../lib/caddy-cert.js';
+import {
+  reconcileServiceCertMounts,
+  inspectIncusDevice,
+  detachCertMount,
+} from '../lib/cert-mount-reconciler.js';
 
 const execAsync = promisify(exec);
 
@@ -1250,6 +1256,30 @@ servicesRouter.get('/:id', (req, res) => {
     const topWs = s.websocket_enabled ?? (primary ? (primary.websocketEnabled ? 1 : 0) : 0);
     const topMax = s.max_upload_size ?? primary?.maxUploadSize ?? '1G';
 
+    // Cert metadata for the TLS-cert section. Stat-only filesystem
+    // walk via lib/caddy-cert; returns null on HTTP-only services or
+    // when ACME is still pending. The bytes of the cert NEVER leave
+    // the host — only the directory path + mtime are surfaced.
+    let cert = { available: false };
+    try {
+      const found = topDomain ? resolveCertDir(topDomain) : null;
+      if (found) {
+        cert = {
+          available: true,
+          hostname: topDomain,
+          directory: found.dir,
+          issuer: found.issuer,
+          certFilename: found.certFilename,
+          keyFilename: found.keyFilename,
+          lastRotatedAt: found.mtime ? found.mtime.toISOString() : null,
+        };
+      }
+    } catch (err) {
+      // Stat failures are not fatal — surface "no cert yet" rather
+      // than blocking the whole service GET on an ACME data hiccup.
+      console.warn(`[cert] resolveCertDir failed for ${topDomain}: ${err.message || err}`);
+    }
+
     res.json({
       service: {
         id: s.id,
@@ -1279,6 +1309,10 @@ servicesRouter.get('/:id', (req, res) => {
         sslCertificateExists: !!topSsl,
         // Phase 2b nested routes
         routes,
+        // TLS cert metadata (stat-only). Always present; check
+        // cert.available to decide whether the bind-mount UI
+        // should render.
+        cert,
       },
     });
   } catch (error) {
@@ -6898,6 +6932,352 @@ servicesRouter.get('/:id/detected-ports', (req, res) => {
     res.status(500).json({ error: 'Failed to read detected ports' });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Cert-mount routes — TLS bind-mount of a Caddy-issued cert directory
+// into a sibling LXC. Intent lives in service_cert_mounts; the live
+// device on the consumer LXC is owned by Incus. See
+// lib/cert-mount-reconciler for the auto-heal / drift policy.
+//
+// Auth: requireAdmin on read, requireSudo on every mutation. Same
+// shape as the /:id DELETE gate above — bind-mounting a directory
+// into a container is a privileged operation regardless of which
+// directory it is, so we keep the bar at the elevated session.
+// ---------------------------------------------------------------------------
+
+const certMountCreateSchema = z.object({
+  containerName: z.string().min(1).max(63).regex(/^[A-Za-z0-9._-]+$/),
+  deviceName: z.string().min(1).max(63).regex(/^[A-Za-z0-9._-]+$/).optional(),
+  targetPath: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^\/[A-Za-z0-9._\-/]+$/, 'target path must be absolute')
+    .optional(),
+  readonly: z.boolean().optional(),
+});
+
+function loadCertMountRow(db, mountId, serviceId) {
+  return db
+    .prepare(
+      `SELECT * FROM service_cert_mounts WHERE id = ? AND service_id = ?`
+    )
+    .get(mountId, serviceId);
+}
+
+// GET /:id/cert-mounts — list rows for a service plus per-row Incus
+// state. The state-check fans out via Promise.all so a service with
+// half a dozen mounts still settles in one round-trip-ish.
+servicesRouter.get('/:id/cert-mounts', requireAdmin, async (req, res) => {
+  try {
+    const db = getDb();
+    const svc = db
+      .prepare(`SELECT id FROM services WHERE id = ?`)
+      .get(req.params.id);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const rows = db
+      .prepare(
+        `SELECT id, container_name, device_name, target_path, readonly,
+                cert_dir, hostname, created_at, created_by
+           FROM service_cert_mounts
+          WHERE service_id = ?
+          ORDER BY created_at ASC`
+      )
+      .all(req.params.id);
+
+    const enriched = await Promise.all(rows.map(async (r) => {
+      let live = false;
+      let drift = null;
+      try {
+        const dev = await inspectIncusDevice(r.container_name, r.device_name);
+        if (dev.containerMissing) {
+          drift = { kind: 'container_missing' };
+        } else if (!dev.exists) {
+          drift = { kind: 'missing' };
+        } else if (dev.source !== r.cert_dir) {
+          drift = { kind: 'wrong_source', incus_source: dev.source };
+          live = true;
+        } else {
+          live = true;
+        }
+      } catch (e) {
+        drift = { kind: 'inspect_error', error: e.message };
+      }
+      return {
+        id: r.id,
+        containerName: r.container_name,
+        deviceName: r.device_name,
+        targetPath: r.target_path,
+        readonly: !!r.readonly,
+        certDir: r.cert_dir,
+        hostname: r.hostname,
+        createdAt: r.created_at,
+        createdBy: r.created_by,
+        live,
+        drift,
+      };
+    }));
+
+    res.json({ mounts: enriched });
+  } catch (e) {
+    console.error('Error listing cert mounts:', e);
+    res.status(500).json({ error: 'Failed to list cert mounts' });
+  }
+});
+
+// POST /:id/cert-mounts — create + reconcile (which actually attaches
+// the device on the target LXC).
+servicesRouter.post('/:id/cert-mounts', requireSudo, async (req, res) => {
+  let data;
+  try {
+    data = certMountCreateSchema.parse(req.body || {});
+  } catch (e) {
+    if (e instanceof z.ZodError) return res.status(400).json({ error: e.errors[0].message });
+    throw e;
+  }
+  const deviceName = data.deviceName || 'meet-tls';
+  const targetPath = data.targetPath || '/var/meet-tls';
+  const readonly = data.readonly === false ? 0 : 1;
+
+  try {
+    const db = getDb();
+    const svc = db
+      .prepare(`SELECT * FROM services WHERE id = ?`)
+      .get(req.params.id);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Resolve hostname from the service's primary route (top-level
+    // domain). We snapshot it onto the row so a later domain rename
+    // doesn't silently repoint the live mount.
+    const primary = db
+      .prepare(
+        `SELECT domain FROM service_http_routes WHERE service_id = ?
+          ORDER BY created_at ASC, id ASC LIMIT 1`
+      )
+      .get(req.params.id);
+    const hostname = svc.domain || primary?.domain || null;
+    if (!hostname) {
+      return res.status(400).json({
+        error: 'Service has no domain — cannot resolve a Caddy cert',
+      });
+    }
+
+    const certInfo = resolveCertDir(hostname);
+    if (!certInfo) {
+      return res.status(409).json({
+        error: `No Caddy-issued cert found for ${hostname}. Visit the domain over HTTPS once so Caddy obtains one, then retry.`,
+      });
+    }
+    const certDir = certInfo.dir;
+
+    // Pre-flight: the target container must exist on Incus. Without
+    // this an `incus config device add` against a stale hostname
+    // succeeds silently in some Incus builds (queues against a
+    // future container by that name) and we'd end up with a phantom
+    // DB row whose target never materialises.
+    try {
+      await execOnHostLocal(
+        `incus info ${shellSingleQuote(data.containerName)}`,
+        { timeout: 5_000 }
+      );
+    } catch (e) {
+      const stderr = ((e && (e.stderr || e.message)) || '').toString();
+      if (/not found|doesn't exist|does not exist/i.test(stderr)) {
+        return res.status(404).json({
+          error: `LXC container "${data.containerName}" not found`,
+        });
+      }
+      // Other failures (e.g. incus daemon down) — surface them
+      // verbatim so the operator can see the underlying cause.
+      return res.status(500).json({
+        error: `incus info failed: ${stderr.trim() || e.message}`,
+      });
+    }
+
+    // Idempotency: same (container, device, cert_dir) → 200 + the
+    // existing row. Same (container, device) but different cert_dir
+    // → 409 because clobbering a foreign device with a different
+    // source is the wrong default.
+    const existing = db
+      .prepare(
+        `SELECT * FROM service_cert_mounts
+          WHERE container_name = ? AND device_name = ?`
+      )
+      .get(data.containerName, deviceName);
+    if (existing) {
+      if (existing.cert_dir === certDir && existing.service_id === req.params.id) {
+        return res.json({
+          ok: true,
+          idempotent: true,
+          mount: rowToMountResponse(existing),
+        });
+      }
+      return res.status(409).json({
+        error:
+          `Device "${deviceName}" already attached on "${data.containerName}" pointing at a different source — refusing to clobber. Remove the existing mount first.`,
+      });
+    }
+
+    // Same (container, device) check against live Incus state. The
+    // operator may have a hand-rolled mount that ProxyPilot doesn't
+    // have a row for; refuse to overwrite it.
+    try {
+      const live = await inspectIncusDevice(data.containerName, deviceName);
+      if (live.exists) {
+        return res.status(409).json({
+          error:
+            `Container "${data.containerName}" already has a "${deviceName}" device (source=${live.source || '?'}) that ProxyPilot did not create. Remove it via "incus config device remove" first or pick a different device name.`,
+        });
+      }
+    } catch (e) {
+      return res.status(500).json({
+        error: `incus inspect failed: ${e.message}`,
+      });
+    }
+
+    const id = uuidv4();
+    try {
+      db.prepare(
+        `INSERT INTO service_cert_mounts
+           (id, service_id, hostname, cert_dir, container_name, device_name,
+            target_path, readonly, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        req.params.id,
+        hostname,
+        certDir,
+        data.containerName,
+        deviceName,
+        targetPath,
+        readonly,
+        req.user?.id || null
+      );
+    } catch (e) {
+      if (e.message && /UNIQUE constraint/i.test(e.message)) {
+        // Lost a race — re-read and respond as idempotent if it
+        // matches, conflict otherwise.
+        const r = db
+          .prepare(
+            `SELECT * FROM service_cert_mounts WHERE container_name = ? AND device_name = ?`
+          )
+          .get(data.containerName, deviceName);
+        if (r && r.cert_dir === certDir) {
+          return res.json({ ok: true, idempotent: true, mount: rowToMountResponse(r) });
+        }
+        return res.status(409).json({
+          error: `Device "${deviceName}" on "${data.containerName}" was just claimed by another request.`,
+        });
+      }
+      throw e;
+    }
+
+    // Now attach via reconcile so the live device exists before we
+    // 201 back. If the attach itself fails roll back the DB row so
+    // operators don't see an orphan.
+    let result;
+    try {
+      result = await reconcileServiceCertMounts({ db, mountId: id });
+    } catch (e) {
+      db.prepare(`DELETE FROM service_cert_mounts WHERE id = ?`).run(id);
+      return res.status(500).json({ error: `Cert-mount reconcile failed: ${e.message}` });
+    }
+    const outcome = result.results.find((o) => o.id === id);
+    if (outcome && outcome.action === 'error') {
+      db.prepare(`DELETE FROM service_cert_mounts WHERE id = ?`).run(id);
+      return res.status(500).json({ error: `Cert-mount attach failed: ${outcome.error}` });
+    }
+
+    const row = db
+      .prepare(`SELECT * FROM service_cert_mounts WHERE id = ?`)
+      .get(id);
+    logAudit(req.user.id, 'CERT_MOUNT_CREATED', 'cert_mount', id, {
+      service_id: req.params.id,
+      container: data.containerName,
+      device: deviceName,
+      hostname,
+    }, req.ip);
+    res.status(201).json({
+      ok: true,
+      mount: rowToMountResponse(row, outcome),
+      reconcile: result,
+    });
+  } catch (e) {
+    console.error('Error creating cert mount:', e);
+    res.status(500).json({ error: `Failed to create cert mount: ${e.message}` });
+  }
+});
+
+// DELETE /:id/cert-mounts/:mountId — remove the Incus device first,
+// then drop the DB row. Tolerates "device not found" (drift case)
+// so the DB row removal still proceeds.
+servicesRouter.delete('/:id/cert-mounts/:mountId', requireSudo, async (req, res) => {
+  try {
+    const db = getDb();
+    const row = loadCertMountRow(db, req.params.mountId, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Cert mount not found' });
+
+    try {
+      await detachCertMount(row);
+    } catch (e) {
+      // detachCertMount tolerates "not found" itself; anything else
+      // surfaces as an error. Don't drop the DB row on a real
+      // failure — the operator should see and fix it.
+      return res.status(500).json({ error: `incus device remove failed: ${e.message}` });
+    }
+
+    db.prepare(`DELETE FROM service_cert_mounts WHERE id = ?`).run(req.params.mountId);
+    logAudit(req.user.id, 'CERT_MOUNT_DELETED', 'cert_mount', req.params.mountId, {
+      service_id: req.params.id,
+      container: row.container_name,
+      device: row.device_name,
+    }, req.ip);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Error deleting cert mount:', e);
+    res.status(500).json({ error: 'Failed to delete cert mount' });
+  }
+});
+
+// POST /:id/cert-mounts/:mountId/reconcile — single-row reconcile.
+// UI hook for the drift badge's Reconcile button. Re-runs the
+// inspect→attach decision for one row only so a wide sweep isn't
+// required just because one device went missing.
+servicesRouter.post('/:id/cert-mounts/:mountId/reconcile', requireSudo, async (req, res) => {
+  try {
+    const db = getDb();
+    const row = loadCertMountRow(db, req.params.mountId, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Cert mount not found' });
+    const result = await reconcileServiceCertMounts({ db, mountId: req.params.mountId });
+    const outcome = result.results.find((o) => o.id === req.params.mountId) || null;
+    logAudit(req.user.id, 'CERT_MOUNT_RECONCILED', 'cert_mount', req.params.mountId, {
+      service_id: req.params.id,
+      action: outcome?.action || 'unknown',
+    }, req.ip);
+    res.json({ ok: true, outcome, reconcile: result });
+  } catch (e) {
+    console.error('Error reconciling cert mount:', e);
+    res.status(500).json({ error: `Cert-mount reconcile failed: ${e.message}` });
+  }
+});
+
+function rowToMountResponse(row, outcome) {
+  return {
+    id: row.id,
+    serviceId: row.service_id,
+    hostname: row.hostname,
+    certDir: row.cert_dir,
+    containerName: row.container_name,
+    deviceName: row.device_name,
+    targetPath: row.target_path,
+    readonly: !!row.readonly,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+    live: outcome ? (outcome.action === 'created' || outcome.action === 'matched') : null,
+    drift: outcome?.drift || null,
+  };
+}
 
 // Named exports for the Phase 2 Caddy helpers. These are kept internal to
 // this module at the call-site level but exported so integration tests and

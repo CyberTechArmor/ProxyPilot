@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import LxcCertMounts from '@/components/LxcCertMounts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -3395,6 +3396,19 @@ export default function LxcContainers() {
                     </Button>
                   </div>
                 </div>
+
+                {/* TLS cert bind-mounts. Lets the operator attach the
+                    Caddy-issued cert directory for this LXC's
+                    service(s) as a read-only `disk` device on the LXC,
+                    so consumers (coturn, custom apps) can read the
+                    same inode the host's Caddy is rotating. Renders
+                    nothing useful when the LXC has no service bound,
+                    so it's safe to keep visible by default. */}
+                <LxcCertMounts
+                  container={selectedContainer}
+                  api={api}
+                  toast={toast}
+                />
 
                 {/* Export / Backup */}
                 <div>

@@ -503,6 +503,29 @@ server.listen(PORT, '0.0.0.0', () => {
     } catch (err) {
       console.error('[L4-startup] failed:', err.message || err);
     }
+    // Cert-mount boot reconcile. Walks every service_cert_mounts row
+    // and re-attaches devices that vanished while the admin was down
+    // (host reboot, manual incus restart, etc.). Drift cases — device
+    // present but pointing at a different source — are surfaced
+    // through the API but NOT silently overwritten here, matching the
+    // architecture decision that operator edits beat ProxyPilot
+    // intent at boot.
+    try {
+      const { reconcileServiceCertMounts } = await import('./lib/cert-mount-reconciler.js');
+      const result = await reconcileServiceCertMounts({ db: getDb() });
+      const counts = { created: 0, matched: 0, drifted: 0, missing: 0, error: 0 };
+      for (const r of result.results) {
+        counts[r.action] = (counts[r.action] || 0) + 1;
+      }
+      const total = result.results.length;
+      if (total > 0) {
+        console.log(
+          `[cert-mount] reconciled ${total} row(s) at boot — created=${counts.created}, matched=${counts.matched}, drifted=${counts.drifted}, missing=${counts.missing}, error=${counts.error}`
+        );
+      }
+    } catch (err) {
+      console.error('[cert-mount] boot reconcile failed:', err.message || err);
+    }
     try {
       // Hydrate the backup-schedule cron worker.  Each enabled
       // row in backup_schedules registers a node-cron task; the

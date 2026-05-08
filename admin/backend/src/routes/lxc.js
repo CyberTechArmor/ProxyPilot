@@ -14,6 +14,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
+import { resolveCertDir } from '../lib/caddy-cert.js';
+import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
@@ -282,6 +284,156 @@ lxcRouter.get('/containers', async (req, res) => {
       error: 'Failed to list containers',
       details: error.stderr || error.message,
     });
+  }
+});
+
+// GET /all-containers — every LXC `incus list` returns, no `pp-`
+// filter. The cert-mount target picker (TLS bind-mount feature) needs
+// to see sibling containers ProxyPilot did not create — typically the
+// coturn LXC paired with a MEET service. Filtering out non-pp
+// containers in the regular /containers endpoint would be a behaviour
+// change for the LXC management page; cleaner to expose a separate
+// listing here.
+lxcRouter.get('/all-containers', async (req, res) => {
+  try {
+    const result = await execOnHost('incus list --format json');
+    const all = JSON.parse(result.stdout || '[]');
+    const containers = all.map((c) => ({
+      name: c.name,
+      status: (c.status || '').toLowerCase(),
+      type: c.type || 'container',
+      ipv4: extractIPv4(c),
+    }));
+    res.json({ containers });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to list containers',
+      details: error.stderr || error.message,
+    });
+  }
+});
+
+// GET /containers/:name/cert-mounts — single fetch for the TLS-cert
+// section on the LXC details panel. Returns:
+//   - mounts: every service_cert_mounts row whose container_name
+//             matches this LXC, with live Incus state and drift info.
+//   - eligibleServices: services bound to this LXC plus their cert
+//             availability (resolved via lib/caddy-cert). The UI uses
+//             this to render "Bind <domain>'s cert into this LXC"
+//             options without a second round trip per service.
+//
+// `name` is accepted both with and without the `pp-` prefix so the
+// UI can pass whatever it has on hand.
+lxcRouter.get('/containers/:name/cert-mounts', requireAdmin, async (req, res) => {
+  try {
+    const db = getDb();
+    const incusName = req.params.name.startsWith(INSTANCE_PREFIX)
+      ? req.params.name
+      : `${INSTANCE_PREFIX}${req.params.name}`;
+    const bareName = incusName.replace(new RegExp(`^${INSTANCE_PREFIX}`), '');
+
+    // Existing mounts. Operators may have created the row under either
+    // form (the dropdown shows the full incus name with `pp-`, but
+    // operator scripts sometimes write the bare name) — match both so
+    // an entry isn't invisible just because of prefix drift.
+    const mountRows = db
+      .prepare(
+        `SELECT m.*, s.name AS service_name
+           FROM service_cert_mounts m
+      LEFT JOIN services s ON s.id = m.service_id
+          WHERE m.container_name IN (?, ?)
+          ORDER BY m.created_at ASC`
+      )
+      .all(incusName, bareName);
+
+    const mounts = await Promise.all(mountRows.map(async (r) => {
+      let live = false;
+      let drift = null;
+      try {
+        const dev = await inspectIncusDevice(r.container_name, r.device_name);
+        if (dev.containerMissing) {
+          drift = { kind: 'container_missing' };
+        } else if (!dev.exists) {
+          drift = { kind: 'missing' };
+        } else if (dev.source !== r.cert_dir) {
+          drift = { kind: 'wrong_source', incus_source: dev.source };
+          live = true;
+        } else {
+          live = true;
+        }
+      } catch (e) {
+        drift = { kind: 'inspect_error', error: e.message };
+      }
+      return {
+        id: r.id,
+        serviceId: r.service_id,
+        serviceName: r.service_name,
+        hostname: r.hostname,
+        certDir: r.cert_dir,
+        containerName: r.container_name,
+        deviceName: r.device_name,
+        targetPath: r.target_path,
+        readonly: !!r.readonly,
+        createdAt: r.created_at,
+        live,
+        drift,
+      };
+    }));
+
+    // Eligible services: those bound to this LXC. We look up each
+    // primary domain's cert via resolveCertDir so the UI can disable
+    // the bind button when ACME hasn't issued yet. Cheap — one stat
+    // call per service, and an LXC typically owns 1-2 services.
+    const services = db
+      .prepare(
+        `SELECT id, name, lxc_container_name, target_ip
+           FROM services
+          WHERE lxc_container_name = ? OR lxc_container_name = ?
+          ORDER BY created_at ASC`
+      )
+      .all(incusName, bareName);
+
+    const eligibleServices = services.map((svc) => {
+      const primary = db
+        .prepare(
+          `SELECT domain FROM service_http_routes WHERE service_id = ?
+            ORDER BY created_at ASC, id ASC LIMIT 1`
+        )
+        .get(svc.id);
+      const domain = primary?.domain || null;
+      let cert = { available: false };
+      if (domain) {
+        try {
+          const found = resolveCertDir(domain);
+          if (found) {
+            cert = {
+              available: true,
+              hostname: domain,
+              directory: found.dir,
+              issuer: found.issuer,
+              certFilename: found.certFilename,
+              keyFilename: found.keyFilename,
+              lastRotatedAt: found.mtime ? found.mtime.toISOString() : null,
+            };
+          }
+        } catch (err) {
+          // Don't fail the whole list on one bad stat; downgrade to
+          // "no cert yet" so the UI shows the right empty state.
+          cert = { available: false, error: err.message };
+        }
+      }
+      return {
+        id: svc.id,
+        name: svc.name,
+        domain,
+        cert,
+      };
+    });
+
+    res.json({ mounts, eligibleServices, containerName: incusName });
+  } catch (e) {
+    console.error('Error listing cert mounts for container:', e);
+    res.status(500).json({ error: 'Failed to list cert mounts' });
   }
 });
 
@@ -1638,6 +1790,23 @@ const MEET_PRESET = {
   l4Forwards: [
     { proto: 'tcp', listenPort: 7881, listenPortEnd: null,  connectPort: 7881, connectPortEnd: null,  description: 'LiveKit RTC TCP fallback' },
     { proto: 'udp', listenPort: 50000, listenPortEnd: 60000, connectPort: 50000, connectPortEnd: 60000, description: 'WebRTC media' },
+    // TURN-over-TLS. Without this, clients on cellular networks (where
+    // CGNAT + carrier UDP filtering force ICE onto the TURN relay path)
+    // can't establish a peer connection — symptom is "could not
+    // establish pc connection" on a phone but not on the same room from
+    // wifi. coturn ships listening on 5349/tcp via MEET's
+    // turnserver.conf.template (TURN_TLS_PORT=5349 in
+    // deploy/external-proxy/.env.example).
+    { proto: 'tcp', listenPort: 5349, listenPortEnd: null,  connectPort: 5349, connectPortEnd: null,  description: 'coturn TURN-over-TLS (cellular fallback)' },
+    // Plain TURN/STUN bind. Optional but recommended — clients try UDP
+    // first before TLS fallback, so opening it cuts a TLS handshake out
+    // of the common path on networks that allow UDP/3478.
+    { proto: 'udp', listenPort: 3478, listenPortEnd: null,  connectPort: 3478, connectPortEnd: null,  description: 'coturn TURN/STUN (UDP)' },
+    // TURN relay range. The ports coturn uses to source relayed media
+    // back to the peer. MEET's turnserver.conf pins this to 30000-32000;
+    // without it relayed media works on the first packet but
+    // long-lived sessions can pick a port outside the range and fail.
+    { proto: 'udp', listenPort: 30000, listenPortEnd: 32000, connectPort: 30000, connectPortEnd: 32000, description: 'coturn TURN relay range' },
   ],
   // The TCP ports we expect to see listening before we'll accept
   // the preset. UDP isn't checked — LiveKit allocates the WebRTC

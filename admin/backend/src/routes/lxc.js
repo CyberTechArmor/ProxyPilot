@@ -14,6 +14,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
 import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
+import { resolveCertDir } from '../lib/caddy-cert.js';
+import { inspectIncusDevice } from '../lib/cert-mount-reconciler.js';
 import {
   fanOutSnapshotExport, listSnapshotExports, deleteSnapshotExport,
   cancelSnapshotExport, sweepOrphanTempInstances, importSnapshotFromS3,
@@ -308,6 +310,130 @@ lxcRouter.get('/all-containers', async (req, res) => {
       error: 'Failed to list containers',
       details: error.stderr || error.message,
     });
+  }
+});
+
+// GET /containers/:name/cert-mounts — single fetch for the TLS-cert
+// section on the LXC details panel. Returns:
+//   - mounts: every service_cert_mounts row whose container_name
+//             matches this LXC, with live Incus state and drift info.
+//   - eligibleServices: services bound to this LXC plus their cert
+//             availability (resolved via lib/caddy-cert). The UI uses
+//             this to render "Bind <domain>'s cert into this LXC"
+//             options without a second round trip per service.
+//
+// `name` is accepted both with and without the `pp-` prefix so the
+// UI can pass whatever it has on hand.
+lxcRouter.get('/containers/:name/cert-mounts', requireAdmin, async (req, res) => {
+  try {
+    const db = getDb();
+    const incusName = req.params.name.startsWith(INSTANCE_PREFIX)
+      ? req.params.name
+      : `${INSTANCE_PREFIX}${req.params.name}`;
+    const bareName = incusName.replace(new RegExp(`^${INSTANCE_PREFIX}`), '');
+
+    // Existing mounts. Operators may have created the row under either
+    // form (the dropdown shows the full incus name with `pp-`, but
+    // operator scripts sometimes write the bare name) — match both so
+    // an entry isn't invisible just because of prefix drift.
+    const mountRows = db
+      .prepare(
+        `SELECT m.*, s.name AS service_name
+           FROM service_cert_mounts m
+      LEFT JOIN services s ON s.id = m.service_id
+          WHERE m.container_name IN (?, ?)
+          ORDER BY m.created_at ASC`
+      )
+      .all(incusName, bareName);
+
+    const mounts = await Promise.all(mountRows.map(async (r) => {
+      let live = false;
+      let drift = null;
+      try {
+        const dev = await inspectIncusDevice(r.container_name, r.device_name);
+        if (dev.containerMissing) {
+          drift = { kind: 'container_missing' };
+        } else if (!dev.exists) {
+          drift = { kind: 'missing' };
+        } else if (dev.source !== r.cert_dir) {
+          drift = { kind: 'wrong_source', incus_source: dev.source };
+          live = true;
+        } else {
+          live = true;
+        }
+      } catch (e) {
+        drift = { kind: 'inspect_error', error: e.message };
+      }
+      return {
+        id: r.id,
+        serviceId: r.service_id,
+        serviceName: r.service_name,
+        hostname: r.hostname,
+        certDir: r.cert_dir,
+        containerName: r.container_name,
+        deviceName: r.device_name,
+        targetPath: r.target_path,
+        readonly: !!r.readonly,
+        createdAt: r.created_at,
+        live,
+        drift,
+      };
+    }));
+
+    // Eligible services: those bound to this LXC. We look up each
+    // primary domain's cert via resolveCertDir so the UI can disable
+    // the bind button when ACME hasn't issued yet. Cheap — one stat
+    // call per service, and an LXC typically owns 1-2 services.
+    const services = db
+      .prepare(
+        `SELECT id, name, lxc_container_name, target_ip
+           FROM services
+          WHERE lxc_container_name = ? OR lxc_container_name = ?
+          ORDER BY created_at ASC`
+      )
+      .all(incusName, bareName);
+
+    const eligibleServices = services.map((svc) => {
+      const primary = db
+        .prepare(
+          `SELECT domain FROM service_http_routes WHERE service_id = ?
+            ORDER BY created_at ASC, id ASC LIMIT 1`
+        )
+        .get(svc.id);
+      const domain = primary?.domain || null;
+      let cert = { available: false };
+      if (domain) {
+        try {
+          const found = resolveCertDir(domain);
+          if (found) {
+            cert = {
+              available: true,
+              hostname: domain,
+              directory: found.dir,
+              issuer: found.issuer,
+              certFilename: found.certFilename,
+              keyFilename: found.keyFilename,
+              lastRotatedAt: found.mtime ? found.mtime.toISOString() : null,
+            };
+          }
+        } catch (err) {
+          // Don't fail the whole list on one bad stat; downgrade to
+          // "no cert yet" so the UI shows the right empty state.
+          cert = { available: false, error: err.message };
+        }
+      }
+      return {
+        id: svc.id,
+        name: svc.name,
+        domain,
+        cert,
+      };
+    });
+
+    res.json({ mounts, eligibleServices, containerName: incusName });
+  } catch (e) {
+    console.error('Error listing cert mounts for container:', e);
+    res.status(500).json({ error: 'Failed to list cert mounts' });
   }
 });
 

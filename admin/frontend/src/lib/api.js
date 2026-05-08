@@ -298,6 +298,12 @@ export const api = {
   // consumer container (e.g. coturn) is typically NOT a `pp-`
   // container, so the regular getLxcContainers() endpoint won't show it.
   getAllLxcContainers: () => request('/lxc/all-containers'),
+  // LXC-detail view of cert mounts: returns mounts targeting this
+  // container plus the services bound to this LXC with their cert
+  // availability so the panel can render a "Bind <domain>'s cert" CTA
+  // without a second round trip per service.
+  getLxcContainerCertMounts: (name) =>
+    request(`/lxc/containers/${encodeURIComponent(name)}/cert-mounts`),
 
   // Phase 2c: detected-ports cache + rescan trigger. The cache read
   // is cheap; rescan walks /proc/net inside the LXC, optionally

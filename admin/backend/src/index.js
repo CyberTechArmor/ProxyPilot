@@ -350,6 +350,33 @@ try {
   } catch { /* tolerated */ }
 }
 
+// Sweep orphan 'running' restore_runs.  runModeA/B/C all live
+// inside the admin process — their progress sits in the
+// restore_runs row's steps_json + status columns.  A process
+// restart mid-run (operator restart, OOM, crash mid-pack) leaves
+// the row at status='running' indefinitely; the dry-runs panel
+// then polls forever and the operator sees a stuck "running"
+// pill with no way to clear it short of SQL.  Same shape of fix
+// as the in_progress backup sweep above: nothing was actually
+// running across the boot boundary, so flip every 'running' row
+// to 'failed' with a clear note, finalising the timestamp so
+// the panel auto-stops polling on the next refresh.
+try {
+  const db = getDb();
+  const orphans = db.prepare(
+    `UPDATE restore_runs
+     SET status = 'failed',
+         finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+         notes = COALESCE(notes, 'orphaned running at admin restart')
+     WHERE status = 'running'`
+  ).run();
+  if (orphans.changes > 0) {
+    console.log(`[restore] swept ${orphans.changes} orphan running run(s) at boot`);
+  }
+} catch (err) {
+  console.error('[restore] orphan sweep failed at boot:', err?.message || err);
+}
+
 // Sweep orphan 'pending' snapshot S3 export rows.  The export
 // flow inserts the row in 'pending' immediately, attaches the
 // in-flight Upload to ACTIVE_UPLOADS, then flips to 'exported'

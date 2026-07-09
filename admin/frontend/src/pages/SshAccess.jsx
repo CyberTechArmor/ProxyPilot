@@ -16,7 +16,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, KeyRound, Copy, Check, Trash2, RefreshCw, ShieldOff, TerminalSquare } from 'lucide-react';
+import { Loader2, KeyRound, Copy, Check, Trash2, RefreshCw, ShieldOff, TerminalSquare, ChevronRight, ChevronDown } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
 const TYPED_PHRASE = 'i have another way into this account';
@@ -72,7 +72,13 @@ export default function SshAccess() {
 
   const [connectRow, setConnectRow] = useState(null);
   const [connectServer, setConnectServer] = useState('');
-  const [connectCopied, setConnectCopied] = useState(null); // 'bash' | 'powershell' | null
+  const [connectCopied, setConnectCopied] = useState(null); // 'bash' | 'powershell' | 'hostkey' | null
+  // Collapsed "Reset the host key" helper inside the connect modal.
+  // Fingerprints are lazy-loaded the first time the section is expanded
+  // so the normal connect flow never pays for the host-key read.
+  const [hostKeyOpen, setHostKeyOpen] = useState(false);
+  const [hostKeys, setHostKeys] = useState(null); // { keys: [...] } | { error } | null
+  const [hostKeysLoading, setHostKeysLoading] = useState(false);
   // VPN snapshot used to pick the right default SSH host. If base-ssh
   // is scope=vpn-only the public hostname times out from outside the
   // tunnel, so we default to the WG-internal server IP (10.100.0.1
@@ -327,6 +333,34 @@ export default function SshAccess() {
     const fallback = window.location.hostname;
     setConnectServer(vpnHint?.wgServerIp || fallback);
     setConnectCopied(null);
+    setHostKeyOpen(false);
+    setHostKeys(null);
+  }
+
+  // Lazy-load the host's current SSH host key fingerprints the first time
+  // the "Reset the host key" section is expanded. Read-only; the backend
+  // caches briefly so re-opening the section is cheap.
+  async function toggleHostKeys() {
+    const next = !hostKeyOpen;
+    setHostKeyOpen(next);
+    if (next && !hostKeys && !hostKeysLoading) {
+      setHostKeysLoading(true);
+      try {
+        const r = await api.getSshHostKeys();
+        setHostKeys({ keys: r.keys || [] });
+      } catch (e) {
+        setHostKeys({ error: e.message });
+      } finally {
+        setHostKeysLoading(false);
+      }
+    }
+  }
+
+  // `ssh-keygen -R` is identical on bash and PowerShell, so a single
+  // command block covers both. The hostname mirrors whatever the operator
+  // typed into the "server hostname" field above.
+  function hostKeyResetCommand(server) {
+    return `ssh-keygen -R ${server}`;
   }
 
   // The bootstrap script writes the private key to
@@ -401,6 +435,10 @@ export default function SshAccess() {
               Per-device authorized_keys ledger. Add a device, copy the bootstrap script,
               run it on the device, then paste the resulting <code>proxypilot ssh access add</code>
               heredoc back into a server shell. The private key never leaves the device.
+              If a client reports that the remote host identification has changed, that's the
+              server's SSH host keys being regenerated — a separate failure mode from a device's
+              key registration. Open <span className="whitespace-nowrap">Connect → “Reset the host key”</span> to
+              compare fingerprints and clear the stale entry.
             </CardDescription>
           </div>
           <div className="flex gap-2">
@@ -798,6 +836,78 @@ export default function SshAccess() {
                 <pre className="bg-muted p-2 rounded text-xs whitespace-pre-wrap break-all">
                   {powershellConnectCommand(connectRow, connectServer)}
                 </pre>
+              </div>
+
+              {/* Collapsed host-key reset helper. Stays closed by default
+                  so it doesn't compete with the normal connect flow. Copies
+                  a command the operator runs on their own machine — the
+                  dashboard has no access to client known_hosts. */}
+              <div className="rounded border">
+                <button
+                  type="button"
+                  onClick={toggleHostKeys}
+                  className="flex w-full items-center gap-2 p-3 text-left text-sm min-h-[44px]"
+                  aria-expanded={hostKeyOpen}
+                >
+                  {hostKeyOpen
+                    ? <ChevronDown className="h-4 w-4 shrink-0" />
+                    : <ChevronRight className="h-4 w-4 shrink-0" />}
+                  Connection failing? Reset the host key
+                </button>
+                {hostKeyOpen && (
+                  <div className="space-y-3 border-t p-3">
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium">This server's current SSH host keys</p>
+                      {hostKeysLoading ? (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading host keys…
+                        </div>
+                      ) : hostKeys?.error ? (
+                        <p className="text-xs text-red-500">Failed to read host keys: {hostKeys.error}</p>
+                      ) : hostKeys?.keys?.length ? (
+                        <ul className="space-y-2">
+                          {hostKeys.keys.map(k => (
+                            <li key={k.file || k.fingerprint} className="text-xs">
+                              <div className="font-mono break-all">
+                                {k.type || 'key'}{k.bits ? ` ${k.bits}` : ''} · {k.fingerprint}
+                              </div>
+                              <div className="text-muted-foreground" title={k.mtime || ''}>
+                                host key last changed {fmtRelative(k.mtime)}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No host keys found.</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs">clear the stale host key (bash or PowerShell)</Label>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => copyConnect('hostkey', hostKeyResetCommand(connectServer))}
+                        >
+                          {connectCopied === 'hostkey'
+                            ? <Check className="h-3.5 w-3.5 mr-1" />
+                            : <Copy className="h-3.5 w-3.5 mr-1" />}
+                          {connectCopied === 'hostkey' ? 'Copied' : 'Copy'}
+                        </Button>
+                      </div>
+                      <pre className="bg-muted p-2 rounded text-xs whitespace-pre-wrap break-all">
+                        {hostKeyResetCommand(connectServer)}
+                      </pre>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground">
+                      The fingerprint SSH warns about should match one listed above. If it
+                      does not, do not run the command; the host may be impersonated. If it
+                      does match, run the command and reconnect.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}

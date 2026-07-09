@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
+import { checkSuperadminProtection } from '../lib/superadmin.js';
 import {
   generateAuthenticationOptions,
   putChallenge,
@@ -188,7 +189,7 @@ userRouter.get('/profile', (req, res) => {
   try {
     const db = getDb();
     const user = db.prepare(`
-      SELECT id, username, display_name, role, totp_enabled, created_at, updated_at
+      SELECT id, username, display_name, role, is_superadmin, totp_enabled, created_at, updated_at
       FROM users WHERE id = ?
     `).get(req.user.id);
 
@@ -202,6 +203,7 @@ userRouter.get('/profile', (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        isSuperadmin: user.is_superadmin === 1,
         totpEnabled: !!user.totp_enabled,
         hasPasskey: userHasPasskey(user.id),
         createdAt: user.created_at,
@@ -667,7 +669,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
   try {
     const db = getDb();
     const users = db.prepare(`
-      SELECT id, username, display_name, role, totp_enabled, password_change_required, created_at, updated_at
+      SELECT id, username, display_name, role, is_superadmin, totp_enabled, password_change_required, created_at, updated_at
       FROM users
       ORDER BY created_at DESC
     `).all();
@@ -678,6 +680,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
         username: u.username,
         displayName: u.display_name,
         role: u.role || 'admin',
+        isSuperadmin: u.is_superadmin === 1,
         totpEnabled: !!u.totp_enabled,
         passwordChangeRequired: !!u.password_change_required,
         createdAt: u.created_at,
@@ -761,6 +764,21 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Superadmin protection (ADR-007): a non-superadmin cannot demote a
+    // superadmin (role admin -> user). Actor's flag is read from the DB —
+    // the JWT does not carry is_superadmin.
+    if (role === 'user' && user.role === 'admin') {
+      const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+      const guard = checkSuperadminProtection({
+        actorIsSuperadmin: actor?.is_superadmin === 1,
+        targetIsSuperadmin: user.is_superadmin === 1,
+        action: 'demote',
+      });
+      if (!guard.allowed) {
+        return res.status(403).json({ error: guard.error });
+      }
+    }
+
     // Prevent demoting the last admin
     if (role === 'user' && user.role === 'admin') {
       const adminCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?').get('admin').count;
@@ -832,6 +850,20 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
     // Prevent deleting yourself
     if (id === req.user.id) {
       return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+
+    // Superadmin protection (ADR-007): a non-superadmin cannot deactivate
+    // (delete) a superadmin account.
+    {
+      const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+      const guard = checkSuperadminProtection({
+        actorIsSuperadmin: actor?.is_superadmin === 1,
+        targetIsSuperadmin: user.is_superadmin === 1,
+        action: 'deactivate',
+      });
+      if (!guard.allowed) {
+        return res.status(403).json({ error: guard.error });
+      }
     }
 
     // Prevent deleting the last admin

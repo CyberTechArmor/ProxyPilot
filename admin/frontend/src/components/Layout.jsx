@@ -21,6 +21,7 @@ import {
   BugPlay,
   LifeBuoy,
   HardDrive,
+  FolderGit2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
@@ -140,6 +141,12 @@ export default function Layout() {
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
+  // Mock2 nav visibility. The entry appears only when the backend reports
+  // the module enabled (GET /api/mock2/status → 200). On a disabled or
+  // production-pinned host the route 404s (ADR-001) and the entry stays
+  // hidden — the frontend must reveal nothing a disabled host doesn't have.
+  const [mock2Enabled, setMock2Enabled] = useState(false);
+
   useEffect(() => {
     api.getVersion()
       .then(v => setVersion(v.version))
@@ -168,6 +175,17 @@ export default function Layout() {
     return () => { cancelled = true; clearInterval(id); };
   }, [isAdmin]);
 
+  // Probe Mock2 presence once on mount (admins only — the route is
+  // admin-gated). A 404 (disabled/pinned host) leaves the entry hidden.
+  useEffect(() => {
+    if (!isAdmin) { setMock2Enabled(false); return undefined; }
+    let cancelled = false;
+    api.mock2Status()
+      .then(() => { if (!cancelled) setMock2Enabled(true); })
+      .catch(() => { if (!cancelled) setMock2Enabled(false); });
+    return () => { cancelled = true; };
+  }, [isAdmin]);
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
@@ -178,6 +196,9 @@ export default function Layout() {
     { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
     { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
+    // Mock2 dev/build module — only present when the backend reports it
+    // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
+    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];

@@ -82,6 +82,12 @@ export function getDb() {
 //   300 Notifications — durable backend-posted notifications
 //   400 Cert mounts — service_cert_mounts (TLS cert bind-mount intent
 //                     into sibling LXCs; consumed by lib/cert-mount-reconciler)
+//   500 Mock2 (M0) — users.is_superadmin (the ONLY main-schema touch Mock2
+//                     makes; ADR-007). Additive + harmless when Mock2 is
+//                     disabled. Note: Mock2's OWN tables live in a separate
+//                     file (data/db/mock2.db) and also claim block 500 in
+//                     THAT database's schema_migrations — a different table,
+//                     no collision (see src/mock2/migrations.js).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -148,6 +154,30 @@ function backfillSchemaMigrations(db) {
       insertIfMissing.run(4, 'phase2b_d14_admin_domain_snapshot');
     }
   } catch { /* tolerate */ }
+}
+
+// Ensure at least one superadmin exists (ADR-007). Idempotent and
+// non-destructive: acts ONLY when zero superadmins are present, promoting
+// the oldest admin. This covers the fresh-install ordering gap (the first
+// admin is seeded after migration 500 runs) without ever overriding a
+// deliberate demotion once a superadmin has been established.
+function backfillSuperadmin(db) {
+  try {
+    const hasSuper = db
+      .prepare(`SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1`)
+      .get();
+    if (hasSuper) return;
+    const firstAdmin = db
+      .prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC, username ASC LIMIT 1`)
+      .get();
+    if (firstAdmin) {
+      db.prepare(`UPDATE users SET is_superadmin = 1 WHERE id = ?`).run(firstAdmin.id);
+      console.log('Backfilled is_superadmin on the first admin user');
+    }
+  } catch (e) {
+    // Column absent (very old snapshot mid-migration) or no users table
+    // yet — tolerate; the next boot after migration 500 lands retries.
+  }
 }
 
 // Public API for future migrations. Wraps a migration function in the
@@ -1341,6 +1371,30 @@ export function initDatabase() {
         ON service_cert_mounts(service_id)
     `);
   });
+
+  // Mock2 (M0) — users.is_superadmin (ADR-007). The local break-glass
+  // marker that outlives the future LDAPS provisioning layer. Additive
+  // and harmless on hosts where Mock2 is disabled: the column exists, the
+  // rule that references it (routes/user.js) is inert until a superadmin
+  // is targeted. Backfills the oldest admin as superadmin for installs
+  // that already have users at upgrade time; fresh installs (no users yet)
+  // are handled by backfillSuperadmin() below on the next boot.
+  runMigration(db, 500, 'mock2_users_is_superadmin', (d) => {
+    d.exec(`ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0`);
+    const firstAdmin = d
+      .prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC, username ASC LIMIT 1`)
+      .get();
+    if (firstAdmin) {
+      d.prepare(`UPDATE users SET is_superadmin = 1 WHERE id = ?`).run(firstAdmin.id);
+    }
+  });
+
+  // Self-heal the superadmin backfill. On a fresh install the first admin
+  // is created (via initial-setup) AFTER migrations run, so migration 500's
+  // backfill is a no-op there. Whenever NO superadmin exists, promote the
+  // oldest admin. Guarded on "zero superadmins" so it never demotes or
+  // overrides a deliberate assignment — once one exists, this stops acting.
+  backfillSuperadmin(db);
 
   // Create file versions table for version control
   db.exec(`

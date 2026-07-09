@@ -970,6 +970,12 @@ ACME_EMAIL=${ACME_EMAIL}
 # Phase B host-side agent: dual-track flag for Caddy adapt + reload.
 # Leave false until Phase F flips defaults after burn-in.
 PROXYPILOT_USE_AGENT_FOR_CADDY=false
+
+# Mock2 dev/build module (ADR-001: absence-by-installation). Off unless
+# explicitly enabled at install time; the /etc/proxypilot/mock2.production.pin
+# file hard-disables it regardless. See .env.example for the full contract.
+MOCK2_ENABLED=${MOCK2_ENABLED:-false}
+MOCK2_DATA_DIR=${MOCK2_DATA_DIR:-/var/lib/proxypilot/mock2}
 EOF
 
     chmod 600 "${install_dir}/.env"
@@ -1191,12 +1197,46 @@ main() {
         read -rp "Enter email for TLS certificates: " EMAIL
     done
 
+    # Mock2 dev/build module (ADR-001: absence-by-installation). Off by
+    # default; must stay absent on production hosts. Precedence:
+    #   1. Pin file present -> never prompt, force disabled.
+    #   2. Existing .env already has MOCK2_ENABLED=true -> keep it, don't ask.
+    #   3. Otherwise ask once, default No. (A re-run only re-asks while the
+    #      current value is false — an enabled host is left enabled above.)
+    MOCK2_PIN_FILE="/etc/proxypilot/mock2.production.pin"
+    MOCK2_DATA_DIR="/var/lib/proxypilot/mock2"
+    MOCK2_ENABLED="false"
+    local existing_mock2=""
+    if [ -f "${INSTALL_DIR}/.env" ]; then
+        existing_mock2=$(grep -E '^[[:space:]]*MOCK2_ENABLED=' "${INSTALL_DIR}/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]' || true)
+    fi
+    if [ -f "$MOCK2_PIN_FILE" ]; then
+        log_info "Mock2 production pin present (${MOCK2_PIN_FILE}) — Mock2 stays disabled; not prompting."
+        MOCK2_ENABLED="false"
+    elif [ "$existing_mock2" = "true" ]; then
+        log_info "Mock2 already enabled in existing .env — leaving it enabled."
+        MOCK2_ENABLED="true"
+    else
+        echo ""
+        echo -e "${YELLOW}Mock2 is the dev/build module (AI-assisted project containers with"
+        echo -e "reverse trust — the orchestrator writes into project containers)."
+        echo -e "It is OFF by default and should stay off on production hosts.${NC}"
+        read -rp "Enable the Mock2 dev/build module? [y/N]: " ENABLE_MOCK2
+        ENABLE_MOCK2=${ENABLE_MOCK2:-N}
+        if [[ "$ENABLE_MOCK2" =~ ^[Yy]$ ]]; then
+            MOCK2_ENABLED="true"
+        else
+            MOCK2_ENABLED="false"
+        fi
+    fi
+
     echo ""
     echo -e "${CYAN}=== Installation Summary ===${NC}"
     echo "  Dashboard Port: ${PORT}"
     echo "  Admin Username: ${ADMIN_USER}"
     echo "  Domain: ${DOMAIN}"
     echo "  ACME Email: ${EMAIL}"
+    echo "  Mock2 module: ${MOCK2_ENABLED}"
     echo ""
 
     read -rp "Proceed with installation? [Y/n]: " CONFIRM

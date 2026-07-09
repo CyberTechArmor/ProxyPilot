@@ -13,6 +13,7 @@ import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
+import ParentDomains from '@/pages/ParentDomains';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -77,6 +78,7 @@ function App() {
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
+        <Route path="projects/domains" element={<ParentDomains />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

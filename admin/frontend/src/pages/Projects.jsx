@@ -12,11 +12,12 @@
 // the Layout wrapper. Renders cleanly at 360px with no horizontal scroll.
 
 import { useEffect, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Link } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { FolderGit2, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { FolderGit2, Loader2, Globe } from 'lucide-react';
 
 export default function Projects() {
   const { user } = useAuth();
@@ -64,6 +65,25 @@ export default function Projects() {
 
       <Card>
         <CardHeader>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="min-w-0">
+              <CardTitle className="flex items-center gap-2">
+                <Globe className="h-5 w-5 shrink-0 text-primary" />
+                Parent domains
+              </CardTitle>
+              <CardDescription>
+                Register dev domains and issue per-slug TLS so projects get live HTTPS URLs.
+              </CardDescription>
+            </div>
+            <Button asChild className="h-11 sm:h-10 shrink-0">
+              <Link to="/projects/domains">Manage domains</Link>
+            </Button>
+          </div>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>No projects yet</CardTitle>
           <CardDescription>
             The Mock2 module is enabled. Creating projects — with per-project
@@ -72,9 +92,8 @@ export default function Projects() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            This page is a placeholder for Phase M0. The module gate, separate
-            state database, and schema are in place; project provisioning and
-            the build workflow ship next.
+            Parent domains and per-slug TLS are in place (Phase M1). Project
+            provisioning and the build workflow ship next.
           </p>
         </CardContent>
       </Card>

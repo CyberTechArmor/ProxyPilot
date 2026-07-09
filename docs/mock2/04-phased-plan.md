@@ -89,6 +89,34 @@ valid per-host TLS, the noindex header, and robots.txt deny; an unregistered
 label gets no cert/route; an un-verified domain is not selectable in the
 (stub) project-create API.
 
+**Caddy-shape decision (recorded 2026-07-09, implemented in M1).** M1 took
+ADR-009's **primary option: one explicit per-FQDN site block**, NOT the
+on-demand-TLS `ask` alternative. Why: Caddy's `on_demand_tls { ask … }` is a
+*global-options* directive, so the alternative would force an edit to the
+shared main-Caddyfile global block that the per-service generator owns —
+invasive, and harder to keep byte-for-byte absent on a disabled host. The
+per-FQDN blocks live entirely in a dedicated **`/etc/caddy/mock2/` dir**
+(`MOCK2_CADDY_DIR`), one file per parent domain, wired in with a single
+idempotent `import /etc/caddy/mock2/*.caddy` line added to the main Caddyfile
+**only on an enabled host**. This touches neither the per-service generator
+(`/etc/caddy/sites`) nor the operator tree (`/etc/caddy/custom`), and uses
+pure HTTP-01 (no wildcard address, no DNS-01). **M2 extends this shape:** on
+slug mint/rotate, regenerate the domain's file via
+`buildMock2DomainConfig(domain, activeFqdns)` (in `mock2/caddy.js`) and
+`reloadMock2Caddy()`. The per-FQDN block template (`buildMock2SiteBlock`) —
+X-Robots-Tag noindex + robots.txt deny + a rendered-but-commented
+`forward_auth` hook + a placeholder handler — is exactly what M2 swaps the
+placeholder handler in for a `reverse_proxy` to the container. M1 exercises
+that template through the verification **canary** FQDN.
+
+**Module map delivered in M1** (`admin/backend/src/mock2/`): `domain-logic.js`
+(pure: validation, `isSelectable`, DNS/probe verdicts, `publicDomainShape`),
+`caddy.js` (pure builders + host writers), `verify.js` (DNS+probe pipeline,
+deps-injectable), `domains.js` (CRUD), `queue.js` (`renewal_failed` items),
+`reconcile.js` (boot re-publish of enabled domains), routes in `routes.js`.
+Frontend: `pages/ParentDomains.jsx` at `/projects/domains`, linked from
+`Projects.jsx`. Tests: `__tests__/mock2-domains.test.js` (stub-first).
+
 ## Phase M2 — Project registry, container, bare repo, live URL (no AI)
 
 **Goal:** the brief's first instinct phase: create project → container +

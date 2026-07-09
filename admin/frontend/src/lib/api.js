@@ -1075,6 +1075,10 @@ export const api = {
   // Python engine reads + executes them per-host. These endpoints
   // back the dashboard's CVEs section: list view, detail view, and
   // the operator-driven actions (mark seen, dismiss, run-on-this-host).
+  // Mock2 module presence probe. 200 when enabled; 404 on a disabled or
+  // production-pinned host (ADR-001) — callers key their UI off which.
+  mock2Status: () => request('/mock2/status'),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

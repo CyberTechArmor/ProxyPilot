@@ -12,6 +12,7 @@ import Vpn from '@/pages/Vpn';
 import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
+import Projects from '@/pages/Projects';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -72,6 +73,10 @@ function App() {
         <Route path="cves" element={<CVEs />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
+        {/* Mock2 dev/build module. The page self-guards: on a disabled or
+            production-pinned host GET /api/mock2/status 404s and it bounces
+            home, so the route staying registered leaks nothing. */}
+        <Route path="projects" element={<Projects />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

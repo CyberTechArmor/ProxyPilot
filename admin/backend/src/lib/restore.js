@@ -518,6 +518,14 @@ export async function runModeB({
 
   // Step 3: apply.  readTar returns a name→Buffer map; pull the
   // entries we already decrypted + verified in runModeCInner.
+  //
+  // Mock2 note (ADR-001): only the main DB (proxypilot.db) is restored
+  // here. Mock2's separate state file (data/db/mock2.db) is deliberately
+  // NOT part of this restore. When a later Mock2 phase adds mock2.db to
+  // the backup scope, the restore MUST skip it on a production-pinned host
+  // (pin present ⇒ the module is absent, so its state file must not
+  // reappear) — gate any future mock2.db restore on the same pin check the
+  // module boot uses (src/mock2/gating.js).
   const entries = inner.entries || {};
   const dbDumpBuf = entries['proxypilot.db.json'];
   const envBuf = entries['.env'];

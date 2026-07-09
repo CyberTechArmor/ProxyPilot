@@ -31,6 +31,10 @@ import { attachTerminalServer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
 import { postNotification } from './lib/notifications.js';
 import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
+// Mock2 gate ONLY — the pure decision layer, no native/DB imports, so a
+// disabled host never loads the module (ADR-001). The module itself is
+// dynamically imported below only when the gate resolves enabled.
+import { resolveMock2Gate } from './mock2/gating.js';
 
 // Load environment variables - check multiple paths for .env
 // The .env file may be in the install root (/opt/proxypilot/.env) or
@@ -421,6 +425,34 @@ app.use('/api/cves', authenticateToken, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, housekeepingRouter);
 app.use('/api/backups', authenticateToken, backupsRouter);
 app.use('/api/notifications', authenticateToken, notificationsRouter);
+
+// Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
+// no native imports; only when it resolves enabled do we dynamically
+// import the module (which opens data/db/mock2.db and pulls in
+// better-sqlite3) and mount /api/mock2. On a disabled or production-pinned
+// host: no import, no state file, no route (every /api/mock2/* is a 404,
+// indistinguishable from an unknown path), and the frontend hides its nav.
+// Top-level await here runs before the SPA catch-all and error middleware
+// below, preserving Express's route ordering.
+const mock2Gate = resolveMock2Gate({ env: process.env, existsSync });
+if (mock2Gate.warning) {
+  console.warn(mock2Gate.warning);
+}
+if (mock2Gate.enabled) {
+  try {
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot } = await import('./mock2/index.js');
+    initMock2Db();
+    sweepMock2OnBoot();
+    app.use('/api/mock2', authenticateToken, createMock2Router());
+    console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
+  } catch (err) {
+    console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);
+  }
+} else if (!mock2Gate.pinned) {
+  console.log('[mock2] module disabled (MOCK2_ENABLED not true) — no route, no state file');
+} else {
+  console.log('[mock2] module hard-off via production pin — no route, no state file');
+}
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

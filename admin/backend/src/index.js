@@ -440,10 +440,14 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
     app.use('/api/mock2', authenticateToken, createMock2Router());
+    // Re-publish enabled parent-domain Caddy site files after restart (M1).
+    // Non-fatal — never blocks the listen even if Caddy is momentarily down.
+    reconcileMock2Domains().catch((err) =>
+      console.error('[mock2] domain reconcile failed:', err?.message || err));
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);

@@ -1079,6 +1079,20 @@ export const api = {
   // production-pinned host (ADR-001) — callers key their UI off which.
   mock2Status: () => request('/mock2/status'),
 
+  // Mock2 parent domains (Phase M1). Admin-gated; delete requires sudo.
+  mock2ListParentDomains: () => request('/mock2/parent-domains'),
+  mock2GetParentDomain: (id) => request(`/mock2/parent-domains/${id}`),
+  mock2RegisterParentDomain: (domain) =>
+    request('/mock2/parent-domains', { method: 'POST', body: JSON.stringify({ domain }) }),
+  mock2VerifyParentDomain: (id) =>
+    request(`/mock2/parent-domains/${id}/verify`, { method: 'POST' }),
+  mock2EnableParentDomain: (id) =>
+    request(`/mock2/parent-domains/${id}/enable`, { method: 'POST' }),
+  mock2DisableParentDomain: (id) =>
+    request(`/mock2/parent-domains/${id}/disable`, { method: 'POST' }),
+  mock2DeleteParentDomain: (id) =>
+    request(`/mock2/parent-domains/${id}`, { method: 'DELETE' }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

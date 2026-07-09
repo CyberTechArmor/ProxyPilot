@@ -1077,7 +1077,19 @@ export const api = {
   // the operator-driven actions (mark seen, dismiss, run-on-this-host).
   // Mock2 module presence probe. 200 when enabled; 404 on a disabled or
   // production-pinned host (ADR-001) — callers key their UI off which.
-  mock2Status: () => request('/mock2/status'),
+  // Mock2 enabled-probe. Every Mock2 page gates its render on this resolving.
+  // A disabled/unmounted module makes /api/mock2/status 404 (JSON) — request()
+  // throws, the gate goes 'disabled', correct. Defensively, if a stale backend
+  // (without the /api JSON-404 guard) lets the SPA answer the GET with a 200
+  // HTML body, request() surfaces that as {} — so require the real status
+  // payload before treating the module as enabled.
+  mock2Status: async () => {
+    const res = await request('/mock2/status');
+    if (!res || (res.enabled !== true && res.status !== 'ok')) {
+      throw new ApiError('Mock2 module is not enabled on this host', 404);
+    }
+    return res;
+  },
 
   // Mock2 parent domains (Phase M1). Admin-gated; delete requires sudo.
   mock2ListParentDomains: () => request('/mock2/parent-domains'),
@@ -1113,6 +1125,12 @@ export const api = {
   mock2SetProjectCustomDomain: (id, domain) =>
     request(`/mock2/projects/${id}/custom-domain`, { method: 'POST', body: JSON.stringify({ domain }) }),
   mock2DeleteProject: (id) => request(`/mock2/projects/${id}`, { method: 'DELETE' }),
+  mock2ArchiveProject: (id) => request(`/mock2/projects/${id}/archive`, { method: 'POST' }),
+  mock2RehydrateProject: (id) => request(`/mock2/projects/${id}/rehydrate`, { method: 'POST' }),
+  mock2WakeProject: (id) => request(`/mock2/projects/${id}/wake`, { method: 'POST' }),
+  mock2GetIdleStopDays: () => request('/mock2/settings/idle-stop-days'),
+  mock2SetIdleStopDays: (days) =>
+    request('/mock2/settings/idle-stop-days', { method: 'POST', body: JSON.stringify({ days }) }),
 
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),

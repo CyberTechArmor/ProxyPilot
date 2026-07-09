@@ -440,7 +440,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
     app.use('/api/mock2', authenticateToken, createMock2Router());
@@ -448,6 +448,10 @@ if (mock2Gate.enabled) {
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>
       console.error('[mock2] domain reconcile failed:', err?.message || err));
+    // Idle-stop sweep (M3 groundwork): stop containers idle past the configured
+    // window. Non-fatal, fire-and-forget; M9 adds the periodic timer.
+    sweepIdleStops().catch((err) =>
+      console.error('[mock2] idle sweep failed:', err?.message || err));
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);
@@ -457,6 +461,18 @@ if (mock2Gate.enabled) {
 } else {
   console.log('[mock2] module hard-off via production pin — no route, no state file');
 }
+
+// API 404 guard — MUST sit after every /api router (including the conditional
+// Mock2 mount above) and BEFORE the SPA catch-all. Without it, the `app.get('*')`
+// below serves index.html with a 200 for an unmatched GET /api/* — so a GET to a
+// disabled/unmounted module's endpoint (e.g. /api/mock2/status when Mock2 is off
+// or failed to load) returns HTML instead of a 404, and a client probing for the
+// feature's presence gets a false positive (then its POSTs 404 with an HTML body,
+// surfacing as "404 (no JSON body)"). Returning JSON here keeps every /api/* path
+// honestly a 404 when nothing matched, in both dev and production.
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {

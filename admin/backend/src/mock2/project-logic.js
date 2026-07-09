@@ -95,6 +95,31 @@ export function deriveProjectStatus(project, ctx = {}) {
   return 'online';
 }
 
+// ---- archived read-only + idle-stop (M3) ----
+
+// isProjectReadOnly(project) — an archived project is frozen: its git repo,
+// chats, change records, and memberships are retained but nothing about it may
+// change except VIEW and REHYDRATE (Q4 / 04-phased-plan §M3). This is the ONE
+// predicate the API-layer guard keys off — no per-route sprinkles.
+export function isProjectReadOnly(project) {
+  return !!project && project.lifecycle === 'archived';
+}
+
+// isIdleStale(project, now, days) — has an ACTIVE project gone untouched long
+// enough to idle-stop its container (M3 groundwork; M9 enforces)? Pure so the
+// threshold logic is unit-testable without Incus. now is an ISO-8601 string;
+// days is the configured idle window (mock2_settings). Only an active project
+// with a valid last-activity timestamp can be stale; archived/stopped/
+// provisioning projects are never idle-stopped by this function.
+export function isIdleStale(project, now, days) {
+  if (!project || project.lifecycle !== 'active') return false;
+  if (!(Number(days) > 0)) return false;
+  const last = Date.parse(project.last_activity_at || project.created_at || '');
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(last) || !Number.isFinite(nowMs)) return false;
+  return nowMs - last >= Number(days) * 86400000;
+}
+
 // ---- API response shape ----
 
 // publicProjectShape(project, extra) — decorate a stored project row for the

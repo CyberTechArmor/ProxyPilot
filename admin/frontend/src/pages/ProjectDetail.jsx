@@ -30,8 +30,14 @@ import {
 } from '@/components/ui/dialog';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
+  Archive, RotateCcw, Play, Lock,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
+
+// Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
+// until the row reaches the job's target lifecycle (or fails). One map so the
+// poll-until-done logic stays a single implementation.
+const JOB_TARGET = { archive: 'archived', rehydrate: 'active', wake: 'active' };
 
 export default function ProjectDetail() {
   const { id } = useParams();
@@ -50,6 +56,8 @@ export default function ProjectDetail() {
   const [newMember, setNewMember] = useState({ user_id: '', role: 'editor' });
   const [customDomain, setCustomDomain] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
 
   const load = useCallback(async () => {
     try {
@@ -79,12 +87,23 @@ export default function ProjectDetail() {
     return () => { cancelled = true; };
   }, [load, isAdmin]);
 
-  // Poll while provisioning so the status + URL settle on their own.
+  // Poll while provisioning OR while a background lifecycle job is in flight so
+  // the status + URL settle on their own (provisioning also covers rehydrate,
+  // which flips the row to 'provisioning' server-side).
   useEffect(() => {
-    if (gate !== 'enabled' || project?.lifecycle !== 'provisioning') return undefined;
+    if (gate !== 'enabled') return undefined;
+    if (project?.lifecycle !== 'provisioning' && !pendingJob) return undefined;
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
-  }, [gate, project, load]);
+  }, [gate, project, pendingJob, load]);
+
+  // Clear the pending job once the row reaches its target (or fails).
+  useEffect(() => {
+    if (!pendingJob || !project) return;
+    if (project.lifecycle === JOB_TARGET[pendingJob] || project.lifecycle === 'failed_provisioning') {
+      setPendingJob(null);
+    }
+  }, [pendingJob, project]);
 
   const run = async (fn, okMsg) => {
     setBusy(true);
@@ -112,6 +131,31 @@ export default function ProjectDetail() {
     run(() => api.mock2SetProjectCustomDomain(id, customDomain.trim()), 'Custom domain attached')
       .then(() => setCustomDomain(''));
   };
+
+  // Kick off a background lifecycle job (archive/rehydrate/wake): fire the 202,
+  // then let the poll drive the row to its target lifecycle. On a failed 202
+  // (e.g. a 409 because the state changed under us) clear the pending flag so
+  // the poll doesn't run forever.
+  const startJob = async (job, apiCall, okMsg) => {
+    setPendingJob(job);
+    setBusy(true);
+    try {
+      await apiCall();
+      if (okMsg) toast({ title: okMsg });
+    } catch (err) {
+      setPendingJob(null);
+      toast({ variant: 'destructive', title: 'Action failed', description: err.message });
+    } finally {
+      setBusy(false);
+      await load();
+    }
+  };
+  const doArchive = () => {
+    setConfirmArchive(false);
+    startJob('archive', () => api.mock2ArchiveProject(id), 'Archiving project');
+  };
+  const doRehydrate = () => startJob('rehydrate', () => api.mock2RehydrateProject(id), 'Rehydrating project');
+  const doWake = () => startJob('wake', () => api.mock2WakeProject(id), 'Starting container');
 
   const doDelete = async () => {
     setConfirmDelete(false);
@@ -142,7 +186,13 @@ export default function ProjectDetail() {
   // mutation via requireMock2Role). Admins and project editors may edit.
   const canEdit = isAdmin || project.my_role === 'admin' || project.my_role === 'editor';
   const isProvisioning = project.lifecycle === 'provisioning';
+  const isArchived = project.lifecycle === 'archived';
+  const isStopped = project.lifecycle === 'stopped';
   const orphaned = project.status === 'orphaned';
+  // An archived project is frozen (Q4): every mutating control is hidden and
+  // the server refuses the route regardless. Only view + rehydrate remain.
+  const readOnly = isArchived;
+  const jobBusy = busy || !!pendingJob;
 
   return (
     <div className="space-y-6">
@@ -161,10 +211,21 @@ export default function ProjectDetail() {
         </Button>
       </div>
 
-      {orphaned ? (
+      {orphaned && !isArchived ? (
         <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm">
           <ShieldAlert className="h-4 w-4 mt-0.5 shrink-0" />
           <span>This project has no editors — it is orphaned. Add an editor to restore ownership.</span>
+        </div>
+      ) : null}
+
+      {isArchived ? (
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-muted text-muted-foreground text-sm">
+          <Lock className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>
+            This project is <span className="font-medium">archived and read-only</span>. Its git repo, history, and
+            members are kept, but nothing can change until you rehydrate it.
+            {project.archived_at ? <> Archived {new Date(project.archived_at).toLocaleString()}.</> : null}
+          </span>
         </div>
       ) : null}
 
@@ -178,8 +239,15 @@ export default function ProjectDetail() {
           {isProvisioning ? (
             <div className="flex items-center gap-2 text-sm text-blue-500">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Provisioning container, repo, and route…
+              {pendingJob === 'rehydrate' ? 'Rehydrating from the bare repo…' : 'Provisioning container, repo, and route…'}
             </div>
+          ) : isArchived ? (
+            <p className="text-sm text-muted-foreground">
+              No live URL while archived. The slug <span className="font-mono break-all">{project.slug || '—'}</span> is
+              still reserved — rehydrate to bring the same URL back.
+            </p>
+          ) : isStopped ? (
+            <p className="text-sm text-muted-foreground">Container stopped to save resources. Start it to serve again.</p>
           ) : project.url ? (
             <a
               href={project.url}
@@ -196,14 +264,34 @@ export default function ProjectDetail() {
           {project.provision_error ? (
             <p className="text-xs text-red-500 break-all">{project.provision_error}</p>
           ) : null}
-          {canEdit && !isProvisioning && project.slug ? (
-            <Button
-              variant="outline" size="sm" className="h-9" disabled={busy}
-              onClick={() => run(() => api.mock2RotateProjectSlug(id), 'Slug rotated')}
-            >
-              <RefreshCw className={`h-4 w-4 mr-1 ${busy ? 'animate-spin' : ''}`} />Rotate slug
-            </Button>
-          ) : null}
+          <div className="flex flex-wrap gap-2">
+            {canEdit && !isProvisioning && !isArchived && !isStopped && project.slug ? (
+              <Button
+                variant="outline" size="sm" className="h-9" disabled={jobBusy}
+                onClick={() => run(() => api.mock2RotateProjectSlug(id), 'Slug rotated')}
+              >
+                <RefreshCw className={`h-4 w-4 mr-1 ${busy ? 'animate-spin' : ''}`} />Rotate slug
+              </Button>
+            ) : null}
+            {isStopped ? (
+              <Button
+                variant="outline" size="sm" className="h-9" disabled={jobBusy}
+                onClick={doWake}
+              >
+                {pendingJob === 'wake' ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                Start container
+              </Button>
+            ) : null}
+            {canEdit && isArchived ? (
+              <Button
+                size="sm" className="h-9" disabled={jobBusy}
+                onClick={doRehydrate}
+              >
+                {pendingJob === 'rehydrate' ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                Rehydrate
+              </Button>
+            ) : null}
+          </div>
         </CardContent>
       </Card>
 
@@ -223,7 +311,7 @@ export default function ProjectDetail() {
                   <span className="font-medium truncate">{m.username || `user ${m.user_id}`}</span>
                   <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{m.role}</span>
                 </div>
-                {canEdit ? (
+                {canEdit && !readOnly ? (
                   <Button
                     variant="ghost" size="icon" className="h-9 w-9 text-red-500 shrink-0" disabled={busy}
                     onClick={() => run(() => api.mock2RemoveProjectMember(id, m.user_id), 'Member removed')}
@@ -236,7 +324,7 @@ export default function ProjectDetail() {
             ))
           )}
 
-          {canEdit && isAdmin ? (
+          {canEdit && isAdmin && !readOnly ? (
             <div className="flex flex-col sm:flex-row gap-2 sm:items-end pt-1">
               <div className="flex-1 min-w-0 space-y-1.5">
                 <Label htmlFor="member-user">Add member</Label>
@@ -265,7 +353,7 @@ export default function ProjectDetail() {
       </Card>
 
       {/* Flag overlay (editors) */}
-      {canEdit ? (
+      {canEdit && !readOnly ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Flag for admin</CardTitle>
@@ -286,7 +374,7 @@ export default function ProjectDetail() {
       ) : null}
 
       {/* Admin: custom domain + debug */}
-      {isAdmin ? (
+      {isAdmin && !readOnly ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Custom domain</CardTitle>
@@ -329,8 +417,32 @@ export default function ProjectDetail() {
         </Card>
       ) : null}
 
-      {/* Danger zone (admin + sudo) */}
-      {isAdmin ? (
+      {/* Archive (admin or editor) — checkpoint into the bare repo, destroy the
+          container, freeze the project read-only. Rehydrate rebuilds it later. */}
+      {canEdit && !isArchived && !isProvisioning ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Archive</CardTitle>
+            <CardDescription>
+              Checkpoint the working tree into the bare repo, then destroy the container. The repo, history, and
+              members are kept — rehydrate rebuilds the same URL from the repo alone (no snapshot).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              variant="outline" size="sm" className="h-10" disabled={jobBusy}
+              onClick={() => setConfirmArchive(true)}
+            >
+              {pendingJob === 'archive' ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Archive className="h-4 w-4 mr-1" />}
+              Archive project
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* Danger zone (admin + sudo). Hidden for archived projects — they are
+          read-only and cannot be deleted, only rehydrated (Q4). */}
+      {isAdmin && !isArchived ? (
         <Card className="border-red-500/30">
           <CardHeader className="pb-3">
             <CardTitle className="text-base text-red-500">Danger zone</CardTitle>
@@ -343,6 +455,23 @@ export default function ProjectDetail() {
           </CardContent>
         </Card>
       ) : null}
+
+      <Dialog open={confirmArchive} onOpenChange={(o) => !o && setConfirmArchive(false)}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Archive project?</DialogTitle>
+            <DialogDescription>
+              The working tree of <span className="font-medium">{project.name}</span> is committed and pushed into
+              the bare repo, then the container is destroyed. The project becomes read-only. You can rehydrate it
+              later to the same URL. Nothing is lost.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setConfirmArchive(false)} className="h-11 sm:h-10">Cancel</Button>
+            <Button onClick={doArchive} className="h-11 sm:h-10">Archive</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmDelete} onOpenChange={(o) => !o && setConfirmDelete(false)}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">

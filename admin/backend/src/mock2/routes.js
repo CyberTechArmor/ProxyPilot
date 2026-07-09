@@ -42,16 +42,20 @@ import {
   removeMember,
   lookupUser,
 } from './projects.js';
-import { publicProjectShape } from './project-logic.js';
+import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { requireMock2Role } from './authz.js';
 import {
   startProvision,
+  startArchive,
+  startRehydrate,
+  startWake,
   getProvisionStatus,
   teardownProject,
   repoPathForProject,
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY } from './settings.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -138,6 +142,10 @@ const flagSchema = z.object({
   flagged: z.boolean(),
   reason: z.string().trim().max(500).optional(),
 });
+const idleDaysSchema = z.object({
+  days: z.union([z.number().int(), z.string()]).transform((v) => Number(v))
+    .refine((n) => Number.isInteger(n) && n >= 0 && n <= 3650, 'out of range'),
+});
 
 // Shape a project row for a response, computing the derived inputs M2 has
 // (editor/viewer counts, parent-domain name) and gating the admin debug fields.
@@ -152,13 +160,25 @@ function shapeProject(project, { isAdmin }) {
   });
 }
 
+// The ONE archived read-only guard (04-phased-plan §M3 / Q4): an archived
+// project is frozen — every mutating project route refuses it except VIEW and
+// REHYDRATE. Runs AFTER requireMock2Role (which loads req.mock2Project), so it
+// reads the already-loaded row rather than re-querying. Not a per-route
+// sprinkle: it is inserted once into each mutating route's middleware chain.
+function refuseIfArchived(req, res, next) {
+  if (isProjectReadOnly(req.mock2Project)) {
+    return res.status(409).json({ error: 'This project is archived (read-only). Rehydrate it to make changes.' });
+  }
+  next();
+}
+
 export function createMock2Router() {
   const router = Router();
 
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M2' });
+    res.json({ status: 'ok', enabled: true, phase: 'M3' });
   });
 
   // ---- Parent domains ----
@@ -331,7 +351,7 @@ export function createMock2Router() {
 
   // Rotate the slug: new slug, 1h grace on the old one, old slug 404s after and
   // is never reusable. Editor-gated; republishes the domain's Caddy file.
-  router.post('/projects/:id/rotate-slug', requireMock2Role('editor'), async (req, res) => {
+  router.post('/projects/:id/rotate-slug', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
     if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
       return res.status(409).json({ error: 'Only an active project can rotate its slug' });
@@ -350,7 +370,7 @@ export function createMock2Router() {
   });
 
   // Add or change a member's role. Editor-gated (admins bypass).
-  router.post('/projects/:id/members', requireMock2Role('editor'), (req, res) => {
+  router.post('/projects/:id/members', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const parsed = memberSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'user_id and role (editor|viewer) are required' });
@@ -363,7 +383,7 @@ export function createMock2Router() {
     res.json({ member: { user_id: userId, username: user.username, role: member.role } });
   });
 
-  router.delete('/projects/:id/members/:userId', requireMock2Role('editor'), (req, res) => {
+  router.delete('/projects/:id/members/:userId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const userId = Number(req.params.userId);
     removeMember(project.id, userId);
@@ -374,7 +394,7 @@ export function createMock2Router() {
   });
 
   // Flag / unflag the project for admin attention (the one manual overlay).
-  router.post('/projects/:id/flag', requireMock2Role('editor'), (req, res) => {
+  router.post('/projects/:id/flag', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const parsed = flagSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'flagged (boolean) is required' });
@@ -402,7 +422,7 @@ export function createMock2Router() {
   // cert for it. The custom-domain block rides in the parent domain's Mock2
   // file (its explicit address obtains its own cert; Caddy is indifferent to
   // which file the block lives in).
-  router.post('/projects/:id/custom-domain', requireAdmin, requireMock2Role('editor'), async (req, res) => {
+  router.post('/projects/:id/custom-domain', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
     const parsed = customDomainSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'domain is required' });
@@ -417,12 +437,83 @@ export function createMock2Router() {
     res.json({ project: shapeProject(updated, { isAdmin: true }), dns: dnsCheck, caddy });
   });
 
+  // Archive (M3): checkpoint the working tree into the bare repo → destroy the
+  // container → lifecycle='archived'. The bare repo, slug history, chats,
+  // change records, and memberships are all RETAINED (ADR-006 / Q4). Admin or
+  // editor. 202 + poll (the frontend polls until lifecycle flips to 'archived').
+  router.post('/projects/:id/archive', requireMock2Role('editor'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle === 'archived') return res.status(409).json({ error: 'Project is already archived' });
+    if (project.lifecycle === 'provisioning') return res.status(409).json({ error: 'Cannot archive a project while it is still provisioning' });
+    if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
+      return res.status(409).json({ error: `Cannot archive a project in state "${project.lifecycle}"` });
+    }
+    logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE', 'mock2_project', project.id,
+      { name: project.name, slug: project.slug, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    startArchive(project);
+    res.status(202).json({ project: shapeProject(getProject(project.id), { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Rehydrate (M3): rebuild an archived project's container from the bare repo
+  // (ADR-006 — never a snapshot), same slug/URL (it was never released). Admin
+  // or editor. Flip to 'provisioning' + restore container_name so the existing
+  // provisioning poll/UI drives it, then run the shared launch sequence.
+  router.post('/projects/:id/rehydrate', requireMock2Role('editor'), (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'archived') {
+      return res.status(409).json({ error: 'Only an archived project can be rehydrated' });
+    }
+    const containerName = containerNameForProject(project.id);
+    // Restore container_name (NULLed at archive) and flip to provisioning WITHOUT
+    // clearing archived_at — the bring-up success path clears it, so a failed
+    // rehydrate reverts cleanly to 'archived' with its original timestamp.
+    updateProject(project.id, { lifecycle: 'provisioning', container_name: containerName, provision_error: null });
+    logAudit(req.user.id, 'MOCK2_PROJECT_REHYDRATE', 'mock2_project', project.id,
+      { name: project.name, slug: project.slug, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    startRehydrate({ ...project, lifecycle: 'provisioning', container_name: containerName });
+    res.status(202).json({ project: shapeProject(getProject(project.id), { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Wake (M3, restart-on-visit): start a stopped container, refresh its IP, and
+  // republish. Any member may wake (viewer-gated — opening a stopped project
+  // should bring it back). 202 + poll.
+  router.post('/projects/:id/wake', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle === 'archived') {
+      return res.status(409).json({ error: 'Project is archived — rehydrate it instead of waking' });
+    }
+    if (project.lifecycle !== 'stopped') {
+      return res.status(409).json({ error: 'Only a stopped project can be woken' });
+    }
+    logAudit(req.user.id, 'MOCK2_PROJECT_WAKE', 'mock2_project', project.id, { name: project.name }, req.ip);
+    startWake(project);
+    res.status(202).json({ project: shapeProject(getProject(project.id), { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Idle-stop window (M3 groundwork). Admin-gated read/write of the
+  // mock2_settings.idle_stop_days value that the idle sweep (idle.js) keys off.
+  router.get('/settings/idle-stop-days', requireAdmin, (_req, res) => {
+    res.json({ idle_stop_days: getIdleStopDays() });
+  });
+  router.post('/settings/idle-stop-days', requireAdmin, (req, res) => {
+    const parsed = idleDaysSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'days must be an integer between 0 and 3650 (0 disables idle-stop)' });
+    setMock2Setting(IDLE_STOP_DAYS_KEY, parsed.data.days, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_IDLE_STOP_DAYS', 'mock2_setting', 0, { days: parsed.data.days }, req.ip);
+    res.json({ idle_stop_days: getIdleStopDays() });
+  });
+
   // Destroy a project: tear down its container, drop its slug block, delete the
   // row + memberships. The bare repo AND slug-history reservations are kept so
-  // the slug stays un-reusable forever (ADR-006). Admin + fresh sudo.
+  // the slug stays un-reusable forever (ADR-006). Admin + fresh sudo. An
+  // archived project is read-only (Q4) — it cannot be deleted, only rehydrated;
+  // long-term purge policy is deferred (ADR-006 / Q4).
   router.delete('/projects/:id', requireAdmin, requireSudo, async (req, res) => {
     const project = getProject(Number(req.params.id));
     if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.lifecycle === 'archived') {
+      return res.status(409).json({ error: 'Archived projects are read-only and cannot be deleted (rehydrate first). Purge policy is a future decision.' });
+    }
     const containerName = project.container_name || containerNameForProject(project.id);
     // Remove the row first so the republish drops this project's FQDN blocks.
     deleteProject(project.id);

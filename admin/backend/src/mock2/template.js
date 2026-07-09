@@ -149,6 +149,38 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
   ];
 }
 
+// buildCheckpointScript(opts) → a POSIX-sh script run INSIDE the container to
+// checkpoint the working tree back into the bare repo over the ADR-011 mount.
+// Used by archive (M3): `git add -A` → commit any dirty state → push to the
+// bare repo's main branch (origin = /srv/repo.git). Pure string so it is
+// unit-testable without Incus (stub-first, risk R9); provision.js base64-streams
+// it into `incus exec`.
+//
+// Tolerant by design: a container with no working clone exits 0 (the bare repo
+// already holds the last pushed state — ADR-006), and a clean tree skips the
+// commit but still pushes so any already-made commits reach the bare repo.
+export function buildCheckpointScript({ appDir = '/srv/app', message = 'checkpoint: pre-archive' } = {}) {
+  const msg = String(message).replace(/["'`$\\]/g, '');
+  return `set -e
+APP_DIR="${appDir}"
+if [ ! -d "$APP_DIR/.git" ]; then
+  echo "[mock2] no working clone to checkpoint — bare repo already holds last state"
+  exit 0
+fi
+cd "$APP_DIR"
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+git add -A
+if ! git diff --cached --quiet 2>/dev/null; then
+  git -c user.name="ProxyPilot Mock2" -c user.email="mock2@proxypilot.local" \\
+    commit -q -m "${msg}" || true
+fi
+# Push to the bare repo (origin = /srv/repo.git over the ADR-011 disk-device
+# mount). This is the ONLY recovery path — no snapshot dependency (ADR-006).
+git push -q origin HEAD:main
+echo "[mock2] checkpoint pushed to bare repo"
+`;
+}
+
 // buildContainerSetupScript(opts) → a bash script run once inside the container
 // after the working clone lands. Installs the runtime + Postgres (ADR-008,
 // best-effort — a failure to install Postgres does not fail provisioning of the

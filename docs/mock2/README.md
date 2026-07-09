@@ -21,6 +21,17 @@ core-infrastructure work.
 | `04-phased-plan.md` | Ten phases, each independently testable and useful, with verification checklists and dependency ordering. |
 | `05-risks-and-open-questions.md` | Risks the existing architecture creates, plus open policy questions the operator must answer (some block specific phases; none block Phase M0). |
 | `NEXT-SESSION-PROMPT-mock2-phase-01.md` | Ready-to-carry handoff prompt for the first build session (Phase M0 + M1 groundwork), in the repo's established `NEXT-SESSION-PROMPT` format. |
+| `NEXT-SESSION-PROMPT-mock2-phase-0N.md` | One handoff prompt per subsequent phase; `-04` opens Phase M3 (archive/rehydrate), `-05` opens Phase M4 (network isolation). |
+
+## Build status
+
+M0 (skeleton/absence), M1 (parent domains + per-slug TLS), M2 (project registry
++ container + bare repo + live URL) and **M3 (archive & rehydrate, idle-stop
+groundwork)** are implemented. The M3 host round-trip is verified by
+`scripts/mock2-m3-verify.sh` on an enabled host (create → modify in container →
+archive → rehydrate → same URL, then image-cache-delete → rehydrate again to
+prove no snapshot dependency, ADR-006). The pure decision layer is unit-tested
+stub-first in `admin/backend/src/__tests__/mock2-lifecycle.test.js`.
 
 ## How to use this bundle
 

@@ -107,6 +107,73 @@ sshAccessRouter.get('/', async (req, res) => {
   }
 });
 
+// ── SSH host key fingerprints (read-only) ──────────────────────────────
+// When a server's SSH host keys are regenerated (reinstall, config-mgmt
+// run, IP reassignment), clients abort with "REMOTE HOST IDENTIFICATION
+// HAS CHANGED" before authentication is even attempted. This endpoint
+// surfaces the host's current host key fingerprints so an operator can
+// confirm the key SSH is warning about actually belongs to this host
+// before clearing their client-side known_hosts entry. It reads
+// /etc/ssh/ssh_host_*_key.pub and runs `ssh-keygen -lf` on each file; it
+// NEVER writes, generates, or removes keys. Registered above `/:id` so
+// the single-segment path is not swallowed by the show route.
+let hostKeyCache = null; // { at: epochMs, payload }
+const HOST_KEY_CACHE_MS = 10000;
+
+async function readHostKeyFingerprints() {
+  // Fixed glob over a fixed directory — no operator-supplied input, so
+  // there is nothing to escape. Each match emits one tab-separated
+  // record: <path>\t<mtime-epoch>\t<`ssh-keygen -lf` output>.
+  const script = [
+    'for f in /etc/ssh/ssh_host_*_key.pub; do',
+    '  [ -e "$f" ] || continue;',
+    '  m=$(stat -c %Y "$f" 2>/dev/null || echo 0);',
+    '  line=$(ssh-keygen -lf "$f" 2>/dev/null) || continue;',
+    "  printf '%s\\t%s\\t%s\\n' \"$f\" \"$m\" \"$line\";",
+    'done',
+  ].join(' ');
+  const { stdout } = await execOnHost(script, { timeout: 10000 });
+  const keys = [];
+  for (const raw of (stdout || '').split('\n')) {
+    if (!raw.trim()) continue;
+    const [path, mtimeStr, ...rest] = raw.split('\t');
+    const info = (rest.join('\t') || '').trim();
+    if (!info) continue;
+    // `ssh-keygen -lf` prints: "<bits> <fingerprint> <comment> (<TYPE>)"
+    const parts = info.split(/\s+/);
+    const bits = Number.parseInt(parts[0], 10);
+    const typeMatch = info.match(/\(([^)]+)\)\s*$/);
+    const mtimeEpoch = Number.parseInt(mtimeStr, 10);
+    keys.push({
+      type: typeMatch ? typeMatch[1] : null,
+      fingerprint: parts[1] || null,
+      bits: Number.isFinite(bits) ? bits : null,
+      file: (path || '').trim(),
+      mtime: Number.isFinite(mtimeEpoch) && mtimeEpoch > 0
+        ? new Date(mtimeEpoch * 1000).toISOString()
+        : null,
+    });
+  }
+  // Newest-changed first so the UI leads with the most recently rotated key.
+  keys.sort((a, b) => (b.mtime || '').localeCompare(a.mtime || ''));
+  return keys;
+}
+
+sshAccessRouter.get('/host-keys', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (hostKeyCache && now - hostKeyCache.at < HOST_KEY_CACHE_MS) {
+      return res.json(hostKeyCache.payload);
+    }
+    const keys = await readHostKeyFingerprints();
+    const payload = { ok: true, keys };
+    hostKeyCache = { at: now, payload };
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 sshAccessRouter.get('/:id', async (req, res) => {
   try {
     const result = await callProxypilot(['show', req.params.id]);

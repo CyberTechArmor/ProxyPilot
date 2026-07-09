@@ -958,6 +958,12 @@ export const api = {
       body: JSON.stringify({ dry_run: !!dryRun }),
     }),
 
+  // ── SSH host key fingerprints (read-only) ──────────────────────────────
+  // GET host-keys: { ok, keys: [{ type, fingerprint, bits, file, mtime }] }
+  // Surfaced in the connect modal so an operator can compare against the
+  // fingerprint SSH warns about when host keys have been regenerated.
+  getSshHostKeys: () => request('/ssh-access/host-keys'),
+
   // ── SSH password-auth toggle (sshd_config PasswordAuthentication) ─────
   // GET status: { ok, password_auth: 'yes'|'no'|'default', effective_default,
   //   match_overrides[], active_keys_total, active_keys_per_user }

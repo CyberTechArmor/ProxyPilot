@@ -1,48 +1,110 @@
-// Projects — the Mock2 dev/build module landing page.
+// Projects — the Mock2 dev/build module landing page (Phase M2).
 //
-// Phase M0 ships this as an intentional placeholder: the module gate and
-// schema exist, but projects, chat, and cycles arrive in later phases
-// (M2+). The page is reachable only when the backend reports Mock2 enabled
-// (GET /api/mock2/status → 200); on a disabled or production-pinned host
-// the route 404s and both this page and its nav entry are hidden. We
-// re-check status here so a direct URL visit on a disabled host bounces
-// home rather than rendering an orphaned shell.
+// M0 shipped this as a placeholder; M1 added the parent-domains card. M2 turns
+// it into the real project list: tiles showing each project's derived status +
+// live URL, and a create flow that only offers SELECTABLE parent domains (the
+// M1 gate: verified cert_ok AND enabled). Creating a project provisions a
+// container + bare repo + slug route asynchronously (202 → poll), so a freshly
+// created tile shows `provisioning` and flips to `online` on its own.
 //
-// MOBILE_FIRST: single-column, no fixed widths, 16px mobile padding from
-// the Layout wrapper. Renders cleanly at 360px with no horizontal scroll.
+// Reachable only when the backend reports Mock2 enabled (GET /api/mock2/status
+// → 200); a direct visit on a disabled/pinned host bounces home (ADR-001).
+//
+// MOBILE_FIRST: single-column tiles that grow to two columns at sm, a create
+// dialog that is full-screen on <sm, 44px primary touch targets. Renders clean
+// at 360px with no horizontal scroll.
 
-import { useEffect, useState } from 'react';
-import { Navigate, Link } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { Navigate, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { FolderGit2, Loader2, Globe } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from '@/components/ui/dialog';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import { FolderGit2, Loader2, Globe, Plus, ExternalLink } from 'lucide-react';
+import { statusChip } from '@/lib/mock2-status.jsx';
 
 export default function Projects() {
   const { user } = useAuth();
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+  const { toast } = useToast();
+  const navigate = useNavigate();
 
-  // 'checking' | 'enabled' | 'disabled'
-  const [gate, setGate] = useState('checking');
+  const [gate, setGate] = useState('checking'); // 'checking' | 'enabled' | 'disabled'
+  const [projects, setProjects] = useState([]);
+  const [domains, setDomains] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '' });
+  const [creating, setCreating] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [pRes, dRes] = await Promise.all([
+        api.mock2ListProjects(),
+        api.mock2ListParentDomains().catch(() => ({ domains: [] })),
+      ]);
+      setProjects(pRes.projects || []);
+      setDomains((dRes.domains || []).filter((d) => d.selectable));
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load projects failed:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     api.mock2Status()
-      .then(() => { if (!cancelled) setGate('enabled'); })
+      .then(() => { if (!cancelled) { setGate('enabled'); load(); } })
       .catch((err) => {
-        // 404 = module absent (disabled/pinned host). Anything else we also
-        // treat as not-available rather than rendering a broken page.
         if (!cancelled) setGate('disabled');
         if (!(err instanceof ApiError)) console.error('mock2 status check failed:', err);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [load]);
+
+  // Poll while any project is provisioning so its tile flips without a refresh.
+  useEffect(() => {
+    if (gate !== 'enabled') return undefined;
+    const anyProvisioning = projects.some((p) => p.lifecycle === 'provisioning');
+    if (!anyProvisioning) return undefined;
+    const id = setInterval(load, 4000);
+    return () => clearInterval(id);
+  }, [gate, projects, load]);
+
+  const submitCreate = async () => {
+    if (!form.name.trim() || !form.parent_domain_id) return;
+    setCreating(true);
+    try {
+      const res = await api.mock2CreateProject({
+        name: form.name.trim(),
+        description: form.description.trim() || undefined,
+        parent_domain_id: Number(form.parent_domain_id),
+      });
+      setCreateOpen(false);
+      setForm({ name: '', description: '', parent_domain_id: '' });
+      toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
+      if (res.project?.id) navigate(`/projects/${res.project.id}`);
+      else load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not create project', description: err.message });
+    } finally {
+      setCreating(false);
+    }
+  };
 
   if (!isAdmin) return <Navigate to="/" replace />;
   if (gate === 'disabled') return <Navigate to="/" replace />;
-
   if (gate === 'checking') {
     return (
       <div className="flex items-center justify-center py-16">
@@ -51,16 +113,24 @@ export default function Projects() {
     );
   }
 
+  const canCreate = domains.length > 0;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <FolderGit2 className="h-6 w-6 shrink-0 text-primary" />
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-bold tracking-tight truncate">Projects</h1>
-          <p className="text-sm text-muted-foreground">
-            Mock2 dev/build module
-          </p>
+          <p className="text-sm text-muted-foreground">Mock2 dev/build module</p>
         </div>
+        <Button
+          className="h-11 sm:h-10 shrink-0"
+          onClick={() => setCreateOpen(true)}
+          disabled={!canCreate}
+          title={canCreate ? undefined : 'Register and enable a parent domain first'}
+        >
+          <Plus className="h-4 w-4 mr-1" />New project
+        </Button>
       </div>
 
       <Card>
@@ -75,28 +145,127 @@ export default function Projects() {
                 Register dev domains and issue per-slug TLS so projects get live HTTPS URLs.
               </CardDescription>
             </div>
-            <Button asChild className="h-11 sm:h-10 shrink-0">
+            <Button asChild variant="outline" className="h-11 sm:h-10 shrink-0">
               <Link to="/projects/domains">Manage domains</Link>
             </Button>
           </div>
         </CardHeader>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>No projects yet</CardTitle>
-          <CardDescription>
-            The Mock2 module is enabled. Creating projects — with per-project
-            containers, git repos, and live URLs — arrives in a later phase.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Parent domains and per-slug TLS are in place (Phase M1). Project
-            provisioning and the build workflow ship next.
-          </p>
-        </CardContent>
-      </Card>
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : projects.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>No projects yet</CardTitle>
+            <CardDescription>
+              {canCreate
+                ? 'Create your first project — it gets a container, a bare git repo, and a live HTTPS URL on a selectable parent domain.'
+                : 'Register and enable a parent domain first, then create a project on it.'}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {projects.map((p) => (
+            <Card key={p.id} className="min-w-0">
+              <CardHeader className="pb-3">
+                <div className="flex items-start justify-between gap-2 min-w-0">
+                  <CardTitle className="truncate text-base">{p.name}</CardTitle>
+                  {statusChip(p.status, p.flagged)}
+                </div>
+                {p.description ? (
+                  <CardDescription className="line-clamp-2">{p.description}</CardDescription>
+                ) : null}
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {p.url ? (
+                  <a
+                    href={p.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
+                  >
+                    {p.url.replace(/^https:\/\//, '')}
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                  </a>
+                ) : (
+                  <span className="text-sm text-muted-foreground">URL pending…</span>
+                )}
+                <div>
+                  <Button asChild variant="outline" size="sm" className="h-9">
+                    <Link to={`/projects/${p.id}`}>Open</Link>
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!creating) setCreateOpen(o); }}>
+        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>New project</DialogTitle>
+            <DialogDescription>
+              A container, bare git repo, and a per-slug HTTPS URL are provisioned on the
+              chosen parent domain. The project name is display-only — the URL uses a minted slug.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => { e.preventDefault(); submitCreate(); }}
+            className="space-y-4"
+          >
+            <div className="space-y-1.5">
+              <Label htmlFor="proj-name">Name</Label>
+              <Input
+                id="proj-name"
+                placeholder="My prototype"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="proj-desc">Description <span className="text-muted-foreground">(optional)</span></Label>
+              <Input
+                id="proj-desc"
+                placeholder="What is this?"
+                value={form.description}
+                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="proj-domain">Parent domain</Label>
+              <Select
+                value={form.parent_domain_id}
+                onValueChange={(v) => setForm((f) => ({ ...f, parent_domain_id: v }))}
+              >
+                <SelectTrigger id="proj-domain" className="h-11 sm:h-10">
+                  <SelectValue placeholder="Choose a verified domain" />
+                </SelectTrigger>
+                <SelectContent>
+                  {domains.map((d) => (
+                    <SelectItem key={d.id} value={String(d.id)}>{d.domain}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Only verified &amp; enabled domains appear here.</p>
+            </div>
+            <DialogFooter className="flex-col sm:flex-row gap-2">
+              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={creating} className="h-11 sm:h-10">
+                Cancel
+              </Button>
+              <Button type="submit" disabled={creating || !form.name.trim() || !form.parent_domain_id} className="h-11 sm:h-10">
+                {creating ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                Create project
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

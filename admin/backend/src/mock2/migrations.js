@@ -13,6 +13,8 @@
 //   501 M0 — framework registry (versions)
 //   502 M0 — chat, cycles, change records, audit questions, queue
 //   503 M0 — connectors, quotas, git connectors, remotes, summaries
+//   504 M2 — project provisioning cache columns (web_port, container_ip,
+//            provision_error) — additive, never edits 500-503
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -330,6 +332,29 @@ export const MOCK2_MIGRATIONS = [
           created_at TEXT,
           UNIQUE (project_id, version)
         );
+      `);
+    },
+  },
+  {
+    // Phase M2. The Caddy upstream for a project's slug FQDN is
+    // `<container_ip>:<web_port>` — the web port is DECLARED in the repo's
+    // mock2.yaml (ADR-005, never discovered) and the IP is the container's
+    // address on the shared bridge. Both are cached on the row so the boot
+    // reconcile (reconcile.js) can re-publish the Caddy block without
+    // re-reading git or shelling into Incus for every project, and so the
+    // admin debug view can render `bridge_ip:port` after a page reload.
+    // container_ip is refreshed from `incus list` on provision/reconcile —
+    // it is a cache, not the source of truth. provision_error records why a
+    // row landed in lifecycle='failed_provisioning'. All three are additive
+    // and NULL on every pre-existing row, so this is harmless on a disabled
+    // host that never ran M2.
+    version: 504,
+    name: 'mock2_project_provisioning_cache',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN web_port INTEGER;
+        ALTER TABLE mock2_projects ADD COLUMN container_ip TEXT;
+        ALTER TABLE mock2_projects ADD COLUMN provision_error TEXT;
       `);
     },
   },

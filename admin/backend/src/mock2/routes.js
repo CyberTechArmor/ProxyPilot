@@ -8,6 +8,7 @@
 // Mock2-owned Caddy site file. All admin-gated; register/enable/disable/delete
 // are audit-logged; delete additionally requires a fresh sudo grant.
 
+import dns from 'dns/promises';
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
@@ -25,6 +26,32 @@ import { validateDomain, publicDomainShape, isSelectable } from './domain-logic.
 import { runVerification } from './verify.js';
 import { writeMock2DomainSite, unpublishMock2Domain, reloadMock2Caddy } from './caddy.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
+import {
+  listProjects,
+  getProject,
+  createProject,
+  updateProject,
+  deleteProject,
+  mintUniqueSlug,
+  rotateProjectSlug,
+  countEditors,
+  countMembersByRole,
+  listMembers,
+  getMembership,
+  upsertMember,
+  removeMember,
+  lookupUser,
+} from './projects.js';
+import { publicProjectShape } from './project-logic.js';
+import { requireMock2Role } from './authz.js';
+import {
+  startProvision,
+  getProvisionStatus,
+  teardownProject,
+  repoPathForProject,
+  containerNameForProject,
+} from './provision.js';
+import { publishDomain } from './publish.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -96,10 +123,34 @@ function startVerification(row) {
 }
 
 const registerSchema = z.object({ domain: z.string().min(1).max(253) });
-const projectStubSchema = z.object({
-  name: z.string().min(1).optional(),
-  parent_domain_id: z.union([z.number().int(), z.string()]).optional(),
+
+const createProjectSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).optional(),
+  parent_domain_id: z.union([z.number().int(), z.string()]),
 });
+const memberSchema = z.object({
+  user_id: z.union([z.number().int(), z.string()]),
+  role: z.enum(['editor', 'viewer']),
+});
+const customDomainSchema = z.object({ domain: z.string().trim().min(1).max(253) });
+const flagSchema = z.object({
+  flagged: z.boolean(),
+  reason: z.string().trim().max(500).optional(),
+});
+
+// Shape a project row for a response, computing the derived inputs M2 has
+// (editor/viewer counts, parent-domain name) and gating the admin debug fields.
+function shapeProject(project, { isAdmin }) {
+  const parent = project.parent_domain_id ? getParentDomain(project.parent_domain_id) : null;
+  const counts = countMembersByRole(project.id);
+  return publicProjectShape(project, {
+    parentDomain: parent?.domain || null,
+    editorCount: counts.editor,
+    viewerCount: counts.viewer,
+    isAdmin,
+  });
+}
 
 export function createMock2Router() {
   const router = Router();
@@ -107,7 +158,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M1' });
+    res.json({ status: 'ok', enabled: true, phase: 'M2' });
   });
 
   // ---- Parent domains ----
@@ -202,20 +253,210 @@ export function createMock2Router() {
     res.json({ ok: true });
   });
 
-  // ---- Project create (M1 stub gate) ----
-  // M2 owns project creation. M1 ships only the guard that proves the
-  // "un-verified domain is not selectable" contract: a project cannot be
-  // created against a domain that isn't cert_ok AND enabled.
+  // ---- Projects (M2) ----
+
+  const isReqAdmin = (req) => req.user?.role === 'admin';
+
+  // List projects. Admins see all; a non-admin sees only projects they are a
+  // member of. (The module's nav entry is admin-only today, but the routes are
+  // mounted behind plain auth, so filter defensively.)
+  router.get('/projects', (req, res) => {
+    const admin = isReqAdmin(req);
+    let rows = listProjects();
+    if (!admin) rows = rows.filter((p) => getMembership(p.id, req.user.id));
+    res.json({ projects: rows.map((p) => shapeProject(p, { isAdmin: admin })) });
+  });
+
+  // Create a project: mint a slug under a SELECTABLE parent domain (the M1
+  // gate), create the row + permanent slug reservation, add the creator as an
+  // editor (so it isn't born orphaned), and kick off provisioning (202 + poll).
+  // Admin-gated — creating a project provisions a container.
   router.post('/projects', requireAdmin, (req, res) => {
-    const parsed = projectStubSchema.safeParse(req.body || {});
-    const pid = parsed.success ? parsed.data.parent_domain_id : undefined;
-    const row = pid != null ? getParentDomain(Number(pid)) : null;
-    if (!row) return res.status(400).json({ error: 'A verified parent domain is required' });
-    if (!isSelectable(row)) {
-      return res.status(400).json({ error: `Parent domain "${row.domain}" is not verified and enabled — it cannot host a project yet` });
+    const parsed = createProjectSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'name and parent_domain_id are required' });
+    const { name, description } = parsed.data;
+    const parentId = Number(parsed.data.parent_domain_id);
+    const parent = getParentDomain(parentId);
+    if (!parent) return res.status(400).json({ error: 'A verified parent domain is required' });
+    if (!isSelectable(parent)) {
+      return res.status(400).json({ error: `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet` });
     }
-    return res.status(501).json({ error: 'Project creation arrives in Phase M2' });
+
+    let project;
+    try {
+      const slug = mintUniqueSlug(parentId);
+      project = createProject({
+        name, description, parentDomainId: parentId, slug,
+        repoPathFor: repoPathForProject,
+        containerNameFor: containerNameForProject,
+        createdBy: req.user.id,
+      });
+      // Add the creator as the first editor so the project isn't born orphaned.
+      upsertMember({ projectId: project.id, userId: req.user.id, role: 'editor', invitedBy: req.user.id });
+    } catch (err) {
+      console.error('[mock2] project create failed:', err?.message);
+      return res.status(500).json({ error: `Could not create project: ${err?.message || 'unknown error'}` });
+    }
+
+    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain }, req.ip);
+    startProvision(project);
+    res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+  });
+
+  router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
+    shaped.members = listMembers(project.id).map((m) => {
+      const u = lookupUser(m.user_id);
+      return { user_id: m.user_id, username: u?.username || null, role: m.role };
+    });
+    shaped.acting_as_admin = req.mock2Access.actingAsAdmin;
+    // The requesting user's effective role ('admin' | 'editor' | 'viewer') so
+    // the frontend can hide mutating controls from a pure viewer. The server
+    // still enforces every mutation via requireMock2Role regardless.
+    shaped.my_role = req.mock2Access.role;
+    res.json({ project: shaped });
+  });
+
+  // Live provisioning progress (mirrors the LXC create-status poll).
+  router.get('/projects/:id/provision-status', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const status = getProvisionStatus(project.id);
+    res.json({
+      lifecycle: project.lifecycle,
+      provision_error: project.provision_error || null,
+      progress: status ? { phase: status.phase, message: status.message } : null,
+    });
+  });
+
+  // Rotate the slug: new slug, 1h grace on the old one, old slug 404s after and
+  // is never reusable. Editor-gated; republishes the domain's Caddy file.
+  router.post('/projects/:id/rotate-slug', requireMock2Role('editor'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
+      return res.status(409).json({ error: 'Only an active project can rotate its slug' });
+    }
+    if (!project.parent_domain_id) return res.status(409).json({ error: 'Project has no parent domain to rotate within' });
+    let result;
+    try {
+      result = rotateProjectSlug(project.id, req.user.id);
+    } catch (err) {
+      return res.status(500).json({ error: `Rotate failed: ${err?.message || 'unknown error'}` });
+    }
+    logAudit(req.user.id, 'MOCK2_PROJECT_ROTATE_SLUG', 'mock2_project', project.id,
+      { old_slug: result.oldSlug, new_slug: result.newSlug, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    const caddy = await publishDomain(project.parent_domain_id);
+    res.json({ project: shapeProject(getProject(project.id), { isAdmin: isReqAdmin(req) }), rotation: result, caddy });
+  });
+
+  // Add or change a member's role. Editor-gated (admins bypass).
+  router.post('/projects/:id/members', requireMock2Role('editor'), (req, res) => {
+    const project = req.mock2Project;
+    const parsed = memberSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'user_id and role (editor|viewer) are required' });
+    const userId = Number(parsed.data.user_id);
+    const user = lookupUser(userId);
+    if (!user) return res.status(400).json({ error: 'No such user' });
+    const member = upsertMember({ projectId: project.id, userId, role: parsed.data.role, invitedBy: req.user.id });
+    logAudit(req.user.id, 'MOCK2_PROJECT_MEMBER_SET', 'mock2_project', project.id,
+      { user_id: userId, role: parsed.data.role }, req.ip);
+    res.json({ member: { user_id: userId, username: user.username, role: member.role } });
+  });
+
+  router.delete('/projects/:id/members/:userId', requireMock2Role('editor'), (req, res) => {
+    const project = req.mock2Project;
+    const userId = Number(req.params.userId);
+    removeMember(project.id, userId);
+    logAudit(req.user.id, 'MOCK2_PROJECT_MEMBER_REMOVE', 'mock2_project', project.id, { user_id: userId }, req.ip);
+    // Surface the resulting editor count so the UI can warn about an
+    // orphaned (zero-editor) project.
+    res.json({ ok: true, editor_count: countEditors(project.id) });
+  });
+
+  // Flag / unflag the project for admin attention (the one manual overlay).
+  router.post('/projects/:id/flag', requireMock2Role('editor'), (req, res) => {
+    const project = req.mock2Project;
+    const parsed = flagSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'flagged (boolean) is required' });
+    const updated = updateProject(project.id, parsed.data.flagged
+      ? { flagged: 1, flagged_by: req.user.id, flagged_reason: parsed.data.reason || null }
+      : { flagged: 0, flagged_by: null, flagged_reason: null });
+    if (parsed.data.flagged) {
+      try {
+        raiseQueueItem({
+          kind: 'flag', project_id: project.id,
+          dedupe_key: `mock2-flag:${project.id}`,
+          ref_table: 'mock2_projects', ref_id: project.id,
+          detail: `${project.name}: ${parsed.data.reason || 'flagged for admin attention'}`,
+        });
+      } catch { /* best effort */ }
+    } else {
+      resolveQueueItem(`mock2-flag:${project.id}`, { resolution: 'unflagged', resolvedBy: req.user.id });
+    }
+    logAudit(req.user.id, 'MOCK2_PROJECT_FLAG', 'mock2_project', project.id, { flagged: parsed.data.flagged }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // Attach a custom domain (admin-gated): validate, best-effort A-record check
+  // against the host's public IP, then republish so Caddy issues an HTTP-01
+  // cert for it. The custom-domain block rides in the parent domain's Mock2
+  // file (its explicit address obtains its own cert; Caddy is indifferent to
+  // which file the block lives in).
+  router.post('/projects/:id/custom-domain', requireAdmin, requireMock2Role('editor'), async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = customDomainSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'domain is required' });
+    const v = validateDomain(parsed.data.domain);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    if (!project.parent_domain_id) return res.status(409).json({ error: 'Custom domains attach to a slug-based project in M2' });
+
+    const dnsCheck = await checkARecord(v.domain);
+    const updated = updateProject(project.id, { custom_domain: v.domain });
+    const caddy = await publishDomain(project.parent_domain_id);
+    logAudit(req.user.id, 'MOCK2_PROJECT_CUSTOM_DOMAIN', 'mock2_project', project.id, { domain: v.domain, dns: dnsCheck }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: true }), dns: dnsCheck, caddy });
+  });
+
+  // Destroy a project: tear down its container, drop its slug block, delete the
+  // row + memberships. The bare repo AND slug-history reservations are kept so
+  // the slug stays un-reusable forever (ADR-006). Admin + fresh sudo.
+  router.delete('/projects/:id', requireAdmin, requireSudo, async (req, res) => {
+    const project = getProject(Number(req.params.id));
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const containerName = project.container_name || containerNameForProject(project.id);
+    // Remove the row first so the republish drops this project's FQDN blocks.
+    deleteProject(project.id);
+    resolveQueueItem(`mock2-provision:${project.id}`, { resolution: 'project deleted' });
+    resolveQueueItem(`mock2-flag:${project.id}`, { resolution: 'project deleted' });
+    let caddy = { ok: true };
+    if (project.parent_domain_id) caddy = await publishDomain(project.parent_domain_id);
+    // Destroy the container; KEEP the bare repo (ADR-006 — slug/history live on).
+    teardownProject({ containerName, repoPath: project.repo_path, removeRepo: false }).catch((err) =>
+      console.error('[mock2] teardown failed:', err?.message));
+    logAudit(req.user.id, 'MOCK2_PROJECT_DELETE', 'mock2_project', project.id, { name: project.name, slug: project.slug }, req.ip);
+    res.json({ ok: true, caddy });
   });
 
   return router;
+}
+
+// Best-effort A/AAAA lookup for a custom domain, cross-checked against
+// MOCK2_PUBLIC_IP when set. Returns { ok, resolved, matched, reason } — never
+// throws; a mismatch is a warning, not a hard block (the operator may be behind
+// a proxy/CDN the host can't see).
+async function checkARecord(domain) {
+  const expected = (process.env.MOCK2_PUBLIC_IP || '').split(',').map((s) => s.trim()).filter(Boolean);
+  let resolved = [];
+  try { resolved = resolved.concat(await dns.resolve4(domain)); } catch { /* no A */ }
+  try { resolved = resolved.concat(await dns.resolve6(domain)); } catch { /* no AAAA */ }
+  if (resolved.length === 0) {
+    return { ok: false, resolved, matched: false, reason: 'domain does not resolve — point an A/AAAA record at this host' };
+  }
+  if (expected.length === 0) {
+    return { ok: true, resolved, matched: false, reason: 'resolves, but host public IP unknown (set MOCK2_PUBLIC_IP to cross-check)' };
+  }
+  const matched = resolved.some((ip) => expected.includes(ip));
+  return matched
+    ? { ok: true, resolved, matched: true, reason: 'resolves to this host' }
+    : { ok: false, resolved, matched: false, reason: `resolves to ${resolved.join(', ')} but host answers on ${expected.join(', ')}` };
 }

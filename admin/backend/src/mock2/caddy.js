@@ -48,25 +48,54 @@ function q(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+// A bridge-address upstream is `<ip>:<port>` — the container's address on the
+// shared Incus bridge and its DECLARED web port (mock2.yaml, ADR-005). Never a
+// host port. Validated defensively before it reaches a Caddy directive: an
+// IPv4/IPv6 host plus a 1-65535 port. Returns the normalized string or null.
+export function normalizeUpstream(upstream) {
+  if (!upstream) return null;
+  const s = String(upstream).trim();
+  const m = s.match(/^([0-9a-fA-F:.]+):(\d{1,5})$/);
+  if (!m) return null;
+  const port = Number(m[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `${m[1]}:${port}`;
+}
+
 // One site block for a single FQDN. Carries, per ADR-009 / the brief:
 //   - an explicit address → Caddy fetches a per-host LE cert via HTTP-01
 //   - X-Robots-Tag: noindex on every response (dev plane stays de-indexed)
 //   - a robots.txt deny handler independent of whatever the app serves
 //   - a forward_auth block rendered but DISABLED — the day-one SSO seam
-//   - a placeholder handler (M2 swaps this for reverse_proxy to the slug)
-export function buildMock2SiteBlock({ fqdn, note = '' } = {}) {
+//   - the terminal handler:
+//       * M2 with an `upstream` → reverse_proxy to the container's bridge
+//         IP + declared web port (the live project route), OR
+//       * no upstream → the placeholder handler (an M1 canary FQDN, or a
+//         slug whose container isn't up yet).
+// The headers/robots/forward_auth lines are identical in both shapes so the
+// block template stays stable (04-phased-plan §M1 Caddy-shape decision).
+export function buildMock2SiteBlock({ fqdn, note = '', upstream = null } = {}) {
   const host = q(fqdn);
-  const placeholder =
-    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
-    `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-    `<meta name="robots" content="noindex, nofollow">` +
-    `<title>ProxyPilot dev preview</title></head>` +
-    `<body style="font-family:system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1rem;color:#334155">` +
-    `<h1 style="font-size:1.25rem">Dev preview host ready</h1>` +
-    `<p>This hostname is served by a ProxyPilot Mock2 parent domain. ` +
-    `A project deployed to this slug will appear here.</p>` +
-    `<p style="color:#94a3b8;font-size:.85rem">${q(fqdn)}</p>` +
-    `</body></html>`;
+  const up = normalizeUpstream(upstream);
+
+  // The terminal handler is a `handle {}` block in BOTH shapes so it stays
+  // mutually exclusive with the `handle /robots.txt` block above (mixing a
+  // bare directive with `handle` blocks is a Caddy footgun — everything routes
+  // through `handle` here).
+  const terminal = up
+    ? `	# Live project route — reverse_proxy to the container's bridge IP +
+	# declared web port (mock2.yaml, ADR-005). No host port is involved.
+	handle {
+		reverse_proxy ${up}
+		encode gzip zstd
+	}`
+    : `	# Placeholder handler (no upstream yet — canary FQDN or a slug whose
+	# container is still provisioning). Swapped for reverse_proxy once the
+	# project's container has a bridge IP.
+	handle {
+		header Content-Type "text/html; charset=utf-8"
+		respond "${buildPlaceholderHtml(fqdn)}" 200
+	}`;
 
   return `${note ? `\t# ${note}\n` : ''}${host} {
 	# Dev plane must never be indexed by search engines.
@@ -80,7 +109,7 @@ Disallow: /
 " 200
 	}
 
-	# forward_auth hook — RENDERED BUT DISABLED in M1 (the day-one seam for
+	# forward_auth hook — RENDERED BUT DISABLED (the day-one seam for
 	# per-project SSO). A later phase uncomments this and points it at the
 	# Mock2 auth endpoint; leaving it inert keeps the block shape stable.
 	# forward_auth 127.0.0.1:3001 {
@@ -88,14 +117,23 @@ Disallow: /
 	#	copy_headers X-Mock2-User X-Mock2-Project
 	# }
 
-	# Placeholder handler. M2 replaces this with a reverse_proxy to the
-	# project container's declared web port.
-	handle {
-		header Content-Type "text/html; charset=utf-8"
-		respond "${placeholder}" 200
-	}
+${terminal}
 }
 `;
+}
+
+// The dev-preview placeholder body served by a block with no upstream.
+function buildPlaceholderHtml(fqdn) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+    `<meta name="robots" content="noindex, nofollow">` +
+    `<title>ProxyPilot dev preview</title></head>` +
+    `<body style="font-family:system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1rem;color:#334155">` +
+    `<h1 style="font-size:1.25rem">Dev preview host ready</h1>` +
+    `<p>This hostname is served by a ProxyPilot Mock2 parent domain. ` +
+    `A project deployed to this slug will appear here.</p>` +
+    `<p style="color:#94a3b8;font-size:.85rem">${q(fqdn)}</p>` +
+    `</body></html>`;
 }
 
 // The full site file for one parent domain: a provenance header plus one

@@ -13,6 +13,7 @@ import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
+import ProjectDetail from '@/pages/ProjectDetail';
 import ParentDomains from '@/pages/ParentDomains';
 import Layout from '@/components/Layout';
 
@@ -79,6 +80,7 @@ function App() {
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
         <Route path="projects/domains" element={<ParentDomains />} />
+        <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

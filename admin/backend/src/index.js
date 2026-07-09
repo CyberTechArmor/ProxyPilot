@@ -462,6 +462,18 @@ if (mock2Gate.enabled) {
   console.log('[mock2] module hard-off via production pin — no route, no state file');
 }
 
+// API 404 guard — MUST sit after every /api router (including the conditional
+// Mock2 mount above) and BEFORE the SPA catch-all. Without it, the `app.get('*')`
+// below serves index.html with a 200 for an unmatched GET /api/* — so a GET to a
+// disabled/unmounted module's endpoint (e.g. /api/mock2/status when Mock2 is off
+// or failed to load) returns HTML instead of a 404, and a client probing for the
+// feature's presence gets a false positive (then its POSTs 404 with an HTML body,
+// surfacing as "404 (no JSON body)"). Returning JSON here keeps every /api/* path
+// honestly a 404 when nothing matched, in both dev and production.
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
   console.log('Serving static files from:', FRONTEND_PATH);

@@ -91,8 +91,7 @@ Harness assigns. Commit as `mock2-M0: <description>`. Do not push to main.
 
 Write `docs/mock2/NEXT-SESSION-PROMPT-mock2-phase-02.md` for Phase M1 in this
 same format: what M0 shipped (so M1 doesn't re-implement it), pointers into
-the plan bundle, and M1 scope from `04-phased-plan.md`. M1 is fully
-unblocked (ADR-009 accepted: per-slug HTTP-01, no DNS provider API). Also
-note in that prompt that **ADR-008 must be confirmed by the operator before
-Phase M2** (see `05-risks-and-open-questions.md` §Q2) unless the plan bundle
-already records the confirmation.
+the plan bundle, and M1 scope from `04-phased-plan.md`. All gating decisions
+are closed (ADR-007/008/009/010 accepted — see `05-risks-and-open-questions.md`);
+the only outstanding external prerequisite is the framework content handoff
+for Phase M5 (risk R8).

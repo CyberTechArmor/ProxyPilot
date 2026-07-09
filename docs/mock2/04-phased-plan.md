@@ -339,6 +339,7 @@ M0 ─► M1 ─► M2 ─► M3 ─► M4 ─► M6 ─► M7 ─► M8 ─► 
               └─► M5 ────────┘        (M5 can run parallel to M3/M4)
 ```
 
-M0 and M1 are fully unblocked (ADR-009 accepted 2026-07-09; no DNS provider
-needed). M2 needs ADR-008 confirmation (ADR-007 is accepted). M4 needs
-ADR-010 confirmation (see `05-risks-and-open-questions.md` §Q6).
+All gating decisions are closed (ADR-007/008/009/010 accepted 2026-07-09;
+ADR-010 carries a complexity guardrail). The one remaining external
+prerequisite is the Mock2 framework content handoff for the Phase M5 seed
+(risk R8).

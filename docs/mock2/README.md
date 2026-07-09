@@ -42,9 +42,10 @@ Nothing blocks Phases M0–M1.
 1. **Identity — ACCEPTED.** Built-in ProxyPilot auth for initial setup; LDAPS
    arrives later as the user-provisioning layer (LDAP authenticates, local
    flags authorize admin/editor/viewer/nothing). See ADR-007.
-2. **Project databases — STILL OPEN, blocks Phase M2.** Postgres inside each
-   project container vs. a shared cluster (nothing exists today either way).
-   See ADR-008.
+2. **Project databases — ACCEPTED.** Access control and all project
+   details/chats stay in SQLite; each project runs its own Postgres inside
+   its container, used only by that project's generated application. See
+   ADR-008.
 3. **TLS — ACCEPTED.** Per-slug Let's Encrypt HTTP-01 certs for v1; wildcard
    DNS points at the host; DNS-01 wildcard is the deferred upgrade path. See
    ADR-009.

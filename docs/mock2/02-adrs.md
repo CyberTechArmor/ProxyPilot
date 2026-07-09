@@ -230,9 +230,12 @@ No schema in `mock2.db` references LDAP.
 
 ## ADR-008 — Project databases: Postgres inside the project container
 
-**Status:** **Proposed — still awaiting an explicit operator answer.** The
-operator's 2026-07-09 review answered the identity half of the question but
-not this one; confirm before Phase M2. **Phase:** M2 (template),
+**Status:** **Accepted** (operator, 2026-07-09). The confirmed three-way
+split: user access to projects is gated by SQLite (memberships on top of
+ProxyPilot auth); project details, chats, cycles, and change records live in
+SQLite (`mock2.db`); and **each project gets its own Postgres, inside its
+container, used only by that project's generated application** — ProxyPilot
+itself never stores anything in it. **Phase:** M2 (template),
 M4 (isolation verifies it).
 
 **Context.** The brief wants a shared Postgres cluster with per-project roles,

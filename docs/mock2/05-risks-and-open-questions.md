@@ -89,9 +89,10 @@ ADR-009 updated and accepted. M1 unblocked.
   authenticates; local authorization flags decide whether that directory
   user is admin / editor / viewer / **nothing at all**. The ADR-007 model
   already has that shape; no change needed when LDAPS lands.
-- *Project databases (ADR-008): still open.* The answer addressed identity
-  only. **Confirm Postgres-inside-each-project-container vs. shared cluster
-  before Phase M2.**
+- *Project databases (ADR-008): accepted (follow-up, 2026-07-09).* User
+  access to projects is gated by SQLite; project details and chats are
+  SQLite; each project gets its own Postgres, inside its container, for that
+  project's application only. Phase M2 unblocked.
 
 **Q3 — Framework v1 source. ANSWERED.** Seed is the operator's current Mock2
 framework, vendored into this repo ("built in by default"), editable in-app

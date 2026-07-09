@@ -38,18 +38,17 @@ envelope (per-stage historical p90 from the ledger × safety factor), refuse
 on the envelope, and rely on the mid-cycle buffer stop as the real guard.
 Expect the first weeks of estimates to be bad; the ledger exists to fix that.
 
-**R6 — Bare-repo ↔ container git transport needs a decision in M2.** Options:
-mount the bare repo into the container as an Incus disk device (simplest;
-but a hostile container can then corrupt the bare repo directly — mitigate
-with `git fsck` on fetch and repo backups), or expose it read-write over the
-project bridge via `git daemon`/http on the host (cleaner trust story, more
-moving parts). Recommend the mount for v1 **read-only** with commits fetched
-by the orchestrator from the container's working clone (orchestrator-side
-`git fetch <container-path>` via `incus file pull` is not viable at scale —
-so: orchestrator runs `git -C <bare> fetch <container-clone-via-incus-mount>`;
-concretely, mount a host-side *fetch mirror* rather than the bare repo
-itself). This paragraph is deliberately unresolved: settle it in the M2
-session with a spike, and record it as ADR-011.
+**R6 — Bare-repo ↔ container git transport. RESOLVED (M2, 2026-07-09 —
+ADR-011).** M2 mounts the bare repo into the container as an Incus disk device
+(`reporepo disk source=<repo> path=/srv/repo.git shift=true`); the working clone
+at `/srv/app` uses it as `origin` over the mount — no git-over-bridge transport,
+no host port. The seed commit is made host-side in `provision.js` before the
+container exists, so the bare repo's `git log` proves the seed immediately.
+Checkpoint write-back (M6 runner) is `git push` over the same mount. The
+shared-mount corruption concern is bounded by `shift=true`, planned `git fsck`
+on checkpoint, and the bare repo joining the backup story (ADR-006); the
+read-only + orchestrator-fetch refinement stays available if a hostile runner
+becomes a real threat model. See ADR-011 for the full rationale.
 
 **R7 — Terminology collision: "agent."** `proxypilot-agent` is an installed
 Go host daemon, load-bearing for one CVE path (`security-cve-driver.js:18-59`).

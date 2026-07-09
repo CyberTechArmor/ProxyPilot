@@ -1093,6 +1093,27 @@ export const api = {
   mock2DeleteParentDomain: (id) =>
     request(`/mock2/parent-domains/${id}`, { method: 'DELETE' }),
 
+  // Mock2 projects (Phase M2). Create is admin-gated + provisions async
+  // (202 → poll provision-status); delete requires sudo.
+  mock2ListProjects: () => request('/mock2/projects'),
+  mock2GetProject: (id) => request(`/mock2/projects/${id}`),
+  mock2CreateProject: ({ name, description, parent_domain_id }) =>
+    request('/mock2/projects', {
+      method: 'POST',
+      body: JSON.stringify({ name, description, parent_domain_id }),
+    }),
+  mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
+  mock2RotateProjectSlug: (id) => request(`/mock2/projects/${id}/rotate-slug`, { method: 'POST' }),
+  mock2SetProjectMember: (id, { user_id, role }) =>
+    request(`/mock2/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),
+  mock2RemoveProjectMember: (id, userId) =>
+    request(`/mock2/projects/${id}/members/${userId}`, { method: 'DELETE' }),
+  mock2FlagProject: (id, { flagged, reason }) =>
+    request(`/mock2/projects/${id}/flag`, { method: 'POST', body: JSON.stringify({ flagged, reason }) }),
+  mock2SetProjectCustomDomain: (id, domain) =>
+    request(`/mock2/projects/${id}/custom-domain`, { method: 'POST', body: JSON.stringify({ domain }) }),
+  mock2DeleteProject: (id) => request(`/mock2/projects/${id}`, { method: 'DELETE' }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

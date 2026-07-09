@@ -357,3 +357,45 @@ pattern shows how). The shared-bridge assumption in `ensureNetworkNat()` and
 the L4 reconciler is untouched — Mock2 containers don't use `service_l4_forwards`.
 Allowlist edits are editor-visible, admin-gated, audit-logged. Scan-vs-manifest
 drift (ADR-005) covers the inbound side; this ADR covers outbound.
+
+---
+
+## ADR-011 — Bare-repo ↔ container git transport: Incus disk-device mount
+
+**Status:** **Accepted** (M2 build session, 2026-07-09; resolves risk R6).
+**Phase:** M2 (transport), M3 (rehydrate exercises it).
+
+**Context.** Every project has a bare repo at `MOCK2_DATA_DIR/repos/<id>.git`
+(ADR-006). R6 left the container↔bare-repo transport open: mount the bare repo
+as an Incus disk device (simplest, but a hostile container can corrupt the bare
+repo), or expose it over the project bridge via `git daemon`/HTTP (cleaner trust
+story, more moving parts, and in M2 there is no per-project bridge yet — that is
+M4). The M2 verification checklist also requires that `git log` in the bare repo
+shows the seed commit immediately, and that no host port is ever exposed.
+
+**Decision.** M2 mounts the bare repo into the container as an **Incus disk
+device** (`incus config device add <c> reporepo disk source=<repo>
+path=/srv/repo.git shift=true`); the container's working clone at `/srv/app`
+uses `/srv/repo.git` as `origin` over that mount. No git-over-bridge transport,
+no `git daemon`, no host port. The **seed commit is made host-side** in
+`provision.js` (a temp work tree → `git push` into the bare repo) *before* the
+container exists, so the bare repo's `git log` proves the seed the moment
+provisioning reaches step 2 — independent of the container ever coming up.
+Checkpoint fetches (the runner writing back, M6) will `git push` from inside the
+container over the same mount; the orchestrator never depends on `incus file
+pull` at scale (R6's rejected path).
+
+**Mitigations for the shared-mount trust cost (R6's concern).** `shift=true`
+keeps the mount inside the unprivileged container's id-map; a future phase can
+tighten to read-only + orchestrator-side fetch if a hostile runner becomes a
+real threat model. `git fsck` on the bare repo after a checkpoint and the bare
+repo joining the backup story (ADR-006) bound the blast radius. M2's placeholder
+has no runner writing into the container, so the write path is not yet exercised
+— M3 rehydrate is where the mount's round-trip (clone-from-repo → modify →
+fetch-back → rehydrate) is proven end to end.
+
+**Consequences.** Archive (M3) keeps the bare repo and the mount definition;
+rehydrate re-adds the disk device and re-clones. Per-project bridges (M4) do not
+change this decision — the mount is orthogonal to the network fence. Delete (M2)
+destroys the container but **keeps** the bare repo and the slug-history
+reservation, so the slug stays un-reusable forever.

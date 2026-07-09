@@ -33,9 +33,9 @@ CREATE TABLE mock2_settings (          -- singleton key/value (lock timeout, idl
 CREATE TABLE mock2_parent_domains (
   id INTEGER PRIMARY KEY,
   domain TEXT NOT NULL UNIQUE,                 -- 'dev.example.com'
-  dns_provider TEXT NOT NULL,                  -- 'cloudflare' | ... (lego provider id)
-  dns_credentials_enc TEXT NOT NULL,           -- provider API token, encrypted
-  cert_path TEXT,                              -- /var/lib/proxypilot/mock2/certs/<domain>/
+  dns_provider TEXT,                           -- NULL in v1; deferred wildcard DNS-01 path (ADR-009)
+  dns_credentials_enc TEXT,                    -- NULL in v1; encrypted when the wildcard path lands
+  cert_path TEXT,                              -- NULL in v1; wildcard-path cert dir when it lands
   verify_status TEXT NOT NULL DEFAULT 'pending'
     CHECK (verify_status IN ('pending','dns_ok','cert_ok','failed')),
   verified_at TEXT, last_renewal_at TEXT, renewal_error TEXT,
@@ -231,7 +231,8 @@ CREATE TABLE mock2_model_connectors (          -- clone of backup_destinations p
   capabilities TEXT NOT NULL,                  -- JSON: ['agentic_build','chat','summarize','classify']
   test_status TEXT, test_at TEXT,              -- cached healthcheck verdict
   enabled INTEGER NOT NULL DEFAULT 1,
-  created_by INTEGER, created_at TEXT
+  baa_ack_by INTEGER, baa_ack_at TEXT,         -- BAA acknowledgement (cloud providers;
+  created_by INTEGER, created_at TEXT          --  operator decision 2026-07-09: ack, not blocker)
 );
 
 CREATE TABLE mock2_model_slots (               -- per-stage AND per-capability (brief)

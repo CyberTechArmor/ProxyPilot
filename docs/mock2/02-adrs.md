@@ -96,7 +96,10 @@ with fixed-choice options; free-text answer is always the escape hatch.
 **Decision.** The framework (constitution prose + four skills + gate scripts)
 is a versioned bundle in `mock2_framework_versions` — one monotonic integer
 across the whole bundle; content rows are immutable; revert = new version with
-old content. Superadmin-only editing, diff before commit, `logAudit` entry.
+old content. Editing is **admin-gated** (operator decision 2026-07-09, relaxing the
+  brief's superadmin-only rule; `is_superadmin` remains for the
+  cannot-be-demoted protection in ADR-007), diff before commit, `logAudit`
+  entry.
 Projects are never pinned: each cycle snapshots `current_framework_version_id`
 at start into `mock2_cycles.framework_version_id` and uses it for the entire
 cycle; change records stamp it immutably. Drift = audit compares the project's
@@ -185,7 +188,16 @@ deleted; retention/purge is an open policy item (risks §Q4).
 
 ## ADR-007 — Identity: reuse ProxyPilot auth now; LDAPS is a separate feature
 
-**Status:** **Proposed** (deviation from brief). **Phase:** M2.
+**Status:** **Accepted** (operator, 2026-07-09). **Phase:** M2.
+
+**Operator clarification (2026-07-09).** ProxyPilot's built-in auth is the
+initial-setup and break-glass path. LDAPS, when it lands, is the
+**user-provisioning/management layer**: LDAP authenticates ("proves
+employment"); the local tables below authorize — a directory user maps to
+admin / editor / viewer / **or nothing at all** (signed in but no access
+until approved). That is exactly the shape this ADR's model supports, so
+nothing here changes when LDAPS arrives; it slots in front of the same
+`users` + membership tables.
 
 **Context.** The brief specifies LDAPS-proves-employment + Postgres-grants-
 access, directory reconcile, and a local break-glass superadmin. ProxyPilot
@@ -218,7 +230,9 @@ No schema in `mock2.db` references LDAP.
 
 ## ADR-008 — Project databases: Postgres inside the project container
 
-**Status:** **Proposed** (deviation from brief). **Phase:** M2 (template),
+**Status:** **Proposed — still awaiting an explicit operator answer.** The
+operator's 2026-07-09 review answered the identity half of the question but
+not this one; confirm before Phase M2. **Phase:** M2 (template),
 M4 (isolation verifies it).
 
 **Context.** The brief wants a shared Postgres cluster with per-project roles,
@@ -248,44 +262,60 @@ the point of this ADR.
 
 ---
 
-## ADR-009 — Wildcard TLS via a DNS-01 sidecar, not a custom Caddy build
+## ADR-009 — TLS for project URLs: per-slug HTTP-01 certs; wildcard DNS-01 deferred
 
-**Status:** **Proposed.** **Phase:** M1.
+**Status:** **Accepted** (operator, 2026-07-09: "Caddy just grabs the Let's
+Encrypt cert — that is fine for now"). **Phase:** M1.
 
-**Context.** Wildcard certs require ACME DNS-01. Stock cloudsmith Caddy has no
-DNS provider modules; today ProxyPilot downgrades wildcard domains to HTTP
-(survey §5). Two viable mechanisms:
+**Context.** True wildcard certs require ACME DNS-01, which stock cloudsmith
+Caddy cannot do (no DNS provider modules), and today ProxyPilot downgrades
+wildcard domains to HTTP (survey §5). The original proposal was a `lego`
+DNS-01 sidecar; the operator chose to stay on Caddy's ordinary Let's Encrypt
+automation instead.
 
-- **(a) `caddy add-package github.com/caddy-dns/<provider>`** — official, but
-  mutates the installed binary; every apt upgrade of Caddy can silently strip
-  the module, and `update.sh` (plus unattended-upgrades, if enabled) must
-  re-ensure it. Failure mode: wildcard sites stop loading config at reload.
-- **(b) External ACME client (`lego`) as a systemd service + timer** issuing
-  the wildcard cert via the DNS provider API into
-  `/var/lib/proxypilot/mock2/certs/<domain>/`, with the Mock2 site block using
-  explicit `tls cert key`. Caddy stays stock; renewal is an independent,
-  monitorable unit; a renewal failure is a cert-expiry horizon, not a config
-  failure.
+**Decision.** v1 issues an **individual certificate per active slug FQDN**
+via Caddy's automatic HTTPS (HTTP-01) — no wildcard cert, no DNS provider
+API, no new system service:
 
-**Decision.** Mechanism **(b)**: `lego` sidecar, per-parent-domain cert files,
-explicit `tls` in the Mock2-owned Caddy site file. DNS provider credentials
-(e.g. Cloudflare API token scoped to the zone) are stored encrypted in
-`mock2_parent_domains` via `encryptSecret`. Registration is verified before a
-domain becomes selectable: (1) mint TXT challenge via lego dry-run /
-`_acme-challenge` check, (2) confirm `<random-label>.<domain>` resolves to
-this host, (3) obtain the cert. Renewal timer + expiry check posts a deduped
-notification on failure (S3-healthcheck pattern).
+- Parent-domain registration still requires **wildcard DNS**
+  (`*.dev.example.com` → this host). Verification before the domain becomes
+  selectable: a random-label resolution check, then a successful probe-cert
+  issuance on a canary FQDN (proves ACME works end to end).
+- The Mock2-owned Caddy site file per parent domain contains **one site block
+  per active slug/custom-domain FQDN** (bare-domain address → auto-HTTPS),
+  regenerated on slug mint/rotate and custom-domain changes, reloaded through
+  the existing `caddyAdapt`/`caddyReload` driver. The dev headers
+  (`X-Robots-Tag: noindex`), `robots.txt` deny, and the disabled
+  `forward_auth` hook ride in every block, unchanged from the brief.
+- Rotation grace: old and new slug blocks coexist for the 1-hour window.
+- Implementation option the M1 session may take instead of per-slug blocks:
+  Caddy **on-demand TLS** with an `ask` endpoint (`GET /api/mock2/tls-ask`)
+  that approves exactly the FQDNs in `mock2_projects`/grace-window slug
+  history — one wildcard-address site block, certs minted on first hit.
+  Either satisfies this ADR; pick whichever survives contact with the
+  existing generator more cleanly.
 
-**Consequences.** `install.sh`/`update.sh` install lego + timer only when
-Mock2 is enabled (consistent with ADR-001). Per-project *custom domains*
-(non-wildcard) can use ordinary Caddy HTTP-01 — no lego involvement — after a
-DNS A-record verification step (new but simple).
+**Known limits, accepted:** Let's Encrypt rate limits (50 new certs/week per
+registered domain — ample for dev scale, but slug-rotation churn counts
+against it; surface a notification if issuance starts failing); first hit
+after a mint/rotate pays cert-issuance latency (seconds).
+
+**Upgrade path, deferred:** the lego DNS-01 sidecar issuing a real wildcard
+cert into `/var/lib/proxypilot/mock2/certs/<domain>/` with explicit
+`tls cert key`. The `mock2_parent_domains.dns_provider`/`dns_credentials_enc`
+columns exist for it and stay NULL in v1.
 
 ---
 
 ## ADR-010 — Egress control: default-deny bridge + filtering proxy
 
-**Status:** **Proposed.** **Phase:** M4.
+**Status:** **Proposed — awaiting operator confirmation.** The operator's
+2026-07-09 review asked what the egress proxy is; the plain-language
+explanation and the weaker fallbacks are in `05-risks-and-open-questions.md`
+§Q6. Nothing here is in ProxyPilot today; the proxy is installed **only when
+Mock2 is enabled** (ADR-001-consistent). If vetoed, Phase M4 ships bridge
+isolation without FQDN egress filtering and the brief's "egress allowlist"
+requirement is formally dropped. **Phase:** M4.
 
 **Context.** The brief wants a per-project egress allowlist (registries, git
 remote, model APIs — nothing else). Allowlists are FQDN-shaped; nftables

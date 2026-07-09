@@ -34,22 +34,21 @@ Same workflow as `docs/core/plan/00-how-to-use.md`:
    recording what shipped and what the next session must not re-implement
    (mirror the style of `docs/core/plan/NEXT-SESSION-PROMPT-dashboard.md`).
 
-## Decisions that need the operator's sign-off before their phase starts
+## Operator sign-off status (reviewed 2026-07-09)
 
-These are argued in `02-adrs.md` and listed with alternatives in
-`05-risks-and-open-questions.md`. None of them block Phase M0.
+Argued in `02-adrs.md`, answers recorded in `05-risks-and-open-questions.md`.
+Nothing blocks Phases M0–M1.
 
-1. **Identity (blocks Phase M2's membership model at "who is a superadmin"):**
-   ProxyPilot has **no LDAP/LDAPS anywhere** and its user store is SQLite, not
-   Postgres. The plan reuses ProxyPilot auth and adds Mock2 roles on top;
-   LDAPS becomes a separate, later feature. See ADR-007.
-2. **Project databases (blocks Phase M2 container template):** No Postgres or
-   PgBouncer exists on a ProxyPilot host today (they are unbuilt phases 4–7 of
-   the core plan). The plan runs Postgres **inside each project container**
-   instead of a shared cluster — a deliberate deviation from the brief. See ADR-008.
-3. **Wildcard TLS mechanism (blocks Phase M1):** stock Caddy has no DNS-01
-   provider; wildcard domains are currently downgraded to plain HTTP. Pick a
-   DNS provider and one of the two mechanisms in ADR-009.
-4. **Egress allowlisting mechanism (blocks Phase M4):** FQDN allowlists don't
-   work as pure nftables rules; the plan uses a filtering egress proxy plus
-   default-deny at the bridge. See ADR-010.
+1. **Identity — ACCEPTED.** Built-in ProxyPilot auth for initial setup; LDAPS
+   arrives later as the user-provisioning layer (LDAP authenticates, local
+   flags authorize admin/editor/viewer/nothing). See ADR-007.
+2. **Project databases — STILL OPEN, blocks Phase M2.** Postgres inside each
+   project container vs. a shared cluster (nothing exists today either way).
+   See ADR-008.
+3. **TLS — ACCEPTED.** Per-slug Let's Encrypt HTTP-01 certs for v1; wildcard
+   DNS points at the host; DNS-01 wildcard is the deferred upgrade path. See
+   ADR-009.
+4. **Egress allowlisting — AWAITING DECISION, blocks Phase M4 only.**
+   Explained in plain language in `05-risks-and-open-questions.md` §Q6;
+   recommendation is a squid egress proxy installed only when Mock2 is
+   enabled. See ADR-010.

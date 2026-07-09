@@ -52,7 +52,7 @@ Background only (do not implement from it directly): `00-original-brief.md`.
 
 ## Do NOT implement (later phases)
 
-- Parent domains, lego/wildcard TLS, any Caddy changes (M1).
+- Parent domains, per-slug TLS, any Caddy changes (M1).
 - Projects, containers, repos, memberships beyond the schema (M2).
 - Anything called a runner, cycle, chat, connector, framework editor
   (M5–M9). The tables exist after your migrations; the features do not.
@@ -91,6 +91,8 @@ Harness assigns. Commit as `mock2-M0: <description>`. Do not push to main.
 
 Write `docs/mock2/NEXT-SESSION-PROMPT-mock2-phase-02.md` for Phase M1 in this
 same format: what M0 shipped (so M1 doesn't re-implement it), pointers into
-the plan bundle, M1 scope from `04-phased-plan.md`, and the open question
-that gates it (Q1 in `05-risks-and-open-questions.md` — the DNS provider
-decision; if it is still unanswered, say so at the top of the prompt).
+the plan bundle, and M1 scope from `04-phased-plan.md`. M1 is fully
+unblocked (ADR-009 accepted: per-slug HTTP-01, no DNS provider API). Also
+note in that prompt that **ADR-008 must be confirmed by the operator before
+Phase M2** (see `05-risks-and-open-questions.md` §Q2) unless the plan bundle
+already records the confirmation.

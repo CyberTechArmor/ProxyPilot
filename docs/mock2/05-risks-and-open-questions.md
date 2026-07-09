@@ -2,13 +2,13 @@
 
 ## Risks the existing architecture creates
 
-**R1 — Wildcard TLS is the plan's hardest external dependency.** Nothing in
-the stack does DNS-01 today; wildcards are actively downgraded to HTTP
-(`services.js:6056-6060`). ADR-009's lego sidecar keeps Caddy stock, but it
-adds a new system service, a DNS-provider API dependency, and a renewal
-failure mode that must be monitored. If the operator's DNS host has no API
-(or no lego provider), parent domains are dead in the water — confirm the
-provider before Phase M1 (Q1).
+**R1 — TLS for project URLs.** *(Downgraded 2026-07-09: the operator accepted
+per-slug Let's Encrypt HTTP-01 certs — ADR-009 — removing the lego/DNS-API
+dependency.)* Residual risk is Let's Encrypt rate limits (50 new certs/week
+per registered domain; slug-rotation churn counts) and first-hit issuance
+latency. M1 must surface ACME failures as notifications rather than silent
+502s. The wildcard DNS-01 sidecar remains the documented upgrade path if the
+limits ever bite.
 
 **R2 — Per-project bridges interact with existing networking code.**
 `ensureNetworkNat()` NATs *every* managed bridge it finds (`lxc.js:105-154`),
@@ -57,11 +57,14 @@ The brief's "agent" (the AI that builds) is called the **runner** everywhere
 in this bundle. Keep that discipline in code (`mock2/runner.js`, not
 `mock2/agent.js`) or grep will lie to future sessions.
 
-**R8 — Framework seed content is a prerequisite, not a code artifact.** Phase
-M5 seeds framework v1 (constitution, four skills, gate scripts, design
-system, project template). That content is the Mock2 product itself and
-doesn't exist in this repo. It must come from the operator's Mock2 material —
-without it M6+ can only run with placeholder gates (Q3).
+**R8 — Framework seed content is a prerequisite, not a code artifact.**
+*(Resolved in direction, 2026-07-09: seed v1 is the operator's current Mock2
+framework, vendored into this repo so it is "built in by default" — see Q3.)*
+The content handoff itself is still a Phase M5 prerequisite: the operator
+must supply the current Mock2 material (constitution, four skills, gate
+scripts, design system, project template) for vendoring under
+`admin/backend/src/mock2/framework-seed/`. Without it, M6+ runs on
+placeholder gates.
 
 **R9 — Existing test-suite gap.** Three backend tests already fail in fresh
 checkouts because they import real `db.js` (`docs/known-issues.md`). Mock2
@@ -73,37 +76,57 @@ rule questions + gates-going-green must be designed at 360px from the first
 mock, or M7–M9 will churn on retrofits. Reuse the phase-stepper pattern
 (`LxcContainers.jsx:2304-2340`) for the build view.
 
-## Open questions for the operator
+## Open questions — operator answers recorded 2026-07-09
 
-**Q1 (blocks M1):** Which DNS provider(s) for parent domains? (Needs a lego-
-supported API; Cloudflare is the well-trodden path.) Also: is a low-effort
-alternative acceptable as an M1 fallback — per-slug HTTP-01 certs (no
-wildcard, slower first-hit, no DNS API needed) — if wildcard setup stalls?
+**Q1 — TLS mechanism. ANSWERED.** "Caddy just grabs the Let's Encrypt cert —
+fine for now." → v1 uses per-slug HTTP-01 certificates; no DNS provider API;
+wildcard DNS still points at the host; DNS-01 is the deferred upgrade path.
+ADR-009 updated and accepted. M1 unblocked.
 
-**Q2 (blocks M2):** ADR-007 (ride existing auth, defer LDAPS) and ADR-008
-(Postgres-in-container) are deviations from the brief. Approve, or redirect —
-each redirect adds a sizable prerequisite phase (LDAP integration; shared
-Postgres+PgBouncer buildout ≈ core-plan phases 4+7).
+**Q2 — Identity and project databases. HALF-ANSWERED.**
+- *Identity (ADR-007): accepted.* ProxyPilot's built-in auth is the
+  initial-setup path. LDAPS, later, is the user-provisioning layer: LDAP
+  authenticates; local authorization flags decide whether that directory
+  user is admin / editor / viewer / **nothing at all**. The ADR-007 model
+  already has that shape; no change needed when LDAPS lands.
+- *Project databases (ADR-008): still open.* The answer addressed identity
+  only. **Confirm Postgres-inside-each-project-container vs. shared cluster
+  before Phase M2.**
 
-**Q3 (blocks M5 seed / M6 usefulness):** Where does Mock2 framework v1
-content come from? (Constitution, the four skills, gate scripts, design
-system, project template.) If it lives in another repo, the git-sync import
-in M5 becomes the seed path.
+**Q3 — Framework v1 source. ANSWERED.** Seed is the operator's current Mock2
+framework, vendored into this repo ("built in by default"), editable in-app
+as markdown, **admin-gated** (relaxed from superadmin-only), versioned in the
+registry (`mock2_framework_versions` — the brief's "versioned by postgres"
+maps to `mock2.db` per survey §2). Content handoff remains an M5
+prerequisite (R8).
 
-**Q4 (policy, non-blocking, from the brief):** Retention and purge are
-deferred by design — but "nothing is ever deleted" needs an eventual policy:
-archived-project repos, chat transcripts, change records, quota ledgers.
-Flagged here so it's a decision, not an oversight.
+**Q4 — Retention/purge. ANSWERED (as policy direction).** Archive leaves the
+git repo alone, destroys the LXC, and freezes everything else **read-only**:
+viewable but not changeable (no chat, cycles, membership or settings edits;
+rehydrate is the only action). Long-term purge policy remains deferred by
+design — still flagged, still a future decision.
 
-**Q5 (non-blocking):** Does the dev-plane host run anything else? If the
-Mock2 host is dedicated (recommended — it makes the trust-inversion story
-cleaner), say so in the runbook; if it shares with production-adjacent
-proxying, the M4 isolation matrix gets stricter.
+**Q5 — Host topology. ANSWERED.** Typical company setup: one dedicated
+dev/build server (Mock2 enabled) + a separate production server (pinned
+disabled). Home lab may run a single host for everything. Both are supported;
+the runbook documents the two shapes, and the single-host shape leans harder
+on M4 isolation.
 
-**Q6 (M4 detail):** Egress proxy choice — squid (per-source ACLs, SNI
-peeking, heavier) vs tinyproxy (lighter, cruder filtering). Default
-recommendation is squid; veto if there's an operational preference.
+**Q6 — Egress proxy. AWAITING DECISION (explained).** What it is: the brief
+requires each project container to reach *only* npm, the model APIs, and its
+git remote. Firewalls match IP addresses, but those services are host*names*
+on CDNs whose IPs change constantly — so the standard mechanism is a small
+host-side "egress proxy" (squid): containers are pointed at it via standard
+`HTTP(S)_PROXY` env vars, it forwards traffic only to allowlisted hostnames,
+and the bridge firewall blocks everything that tries to go around it. It is
+**not** in ProxyPilot today; it would be installed only when Mock2 is
+enabled. Alternatives if vetoed: (a) bridge isolation only — containers can't
+reach each other or the control plane but have open internet egress (drops
+the brief's allowlist requirement); (b) DNS-resolved IP sets in nftables —
+no new daemon, but brittle against CDN rotation. Recommendation stands:
+squid. Decision gates Phase M4 only.
 
-**Q7 (M5 detail):** Are Anthropic/OpenAI/Gemini keys expected to be
-BAA-covered accounts (per the brief's PHI position)? Doesn't change code,
-does change the connector-setup runbook text.
+**Q7 — BAA. ANSWERED.** Yes, cloud model accounts are expected to be
+BAA-covered — enforced as a one-time acknowledgement message on connector
+save (recorded: who/when on the connector row), not a blocker. Added to M5
+scope and the data model.

@@ -12,12 +12,12 @@ the verification checklist, commit `mock2-MN: <description>`, write the next
 The brief proposed: registry/routing → rehydrate → cycle runner → chat/mockup
 → audit → classifier. Three amendments, all driven by the codebase:
 
-1. **Wildcard TLS moves to the front (M1).** It's the plan's only piece with
-   installer impact, a new system dependency (lego), and an external
-   dependency (a DNS provider API). Everything user-visible routes through it.
-   If it slips, every later phase can still be tested on plain HTTP, but you
-   want that discovered in week one, not week six. (Survey §5: wildcards are
-   HTTP-only today; ADR-009.)
+1. **Parent-domain routing + TLS moves to the front (M1).** Everything
+   user-visible routes through it, and it's where any external surprise
+   (DNS, ACME, the Caddy generator) lives — discover that in week one, not
+   week six. *(Updated 2026-07-09: the operator accepted per-slug Let's
+   Encrypt HTTP-01 certs for v1 — ADR-009 — which removes the lego/DNS-API
+   dependency entirely; M1 is now lighter but stays first.)*
 2. **Network isolation (M4) moves before the cycle runner (M6).** The brief's
    own safety argument — "the unconstrained agent is safe because of the
    network, enforce it in the network not the prompt" — is an ordering
@@ -59,28 +59,35 @@ entry. Pin + `MOCK2_ENABLED=true` → still off, warning logged. Enabled →
 status 200, `mock2.db` created with schema, nav visible to admins.
 `update.sh` on a `.env` without the key → key appended as `false`.
 
-## Phase M1 — Parent domains and wildcard TLS
+## Phase M1 — Parent domains and per-slug TLS
 
-**Goal:** superadmin registers `dev.example.com`; `https://anything.dev.example.com`
-serves a placeholder with dev headers. *(ADR-009; survey §5.)*
+**Goal:** admin registers `dev.example.com` (with wildcard DNS pointed at the
+host); registered slug FQDNs serve HTTPS placeholders with dev headers.
+*(ADR-009 as accepted 2026-07-09; survey §5.)*
 
 **Scope:**
-- `mock2_parent_domains` CRUD (superadmin; DNS credentials via `encryptSecret`).
-- lego integration: install-when-enabled (install.sh/update.sh), issuance +
-  renewal systemd timer, renewal-failure → deduped notification
-  (S3-healthcheck pattern, survey §10).
+- `mock2_parent_domains` CRUD (admin-gated; the `dns_provider`/
+  `dns_credentials_enc` columns exist for the deferred wildcard upgrade and
+  stay NULL).
 - Registration verification pipeline: wildcard DNS check (random label →
-  host IP) → DNS-01 issuance → `verify_status='cert_ok'`.
+  host IP) → probe-cert issuance on a canary FQDN via ordinary Caddy
+  auto-HTTPS → `verify_status='cert_ok'`. Issuance failures → deduped
+  notification (S3-healthcheck pattern, survey §10).
 - **Mock2-owned Caddy site file per parent domain** (do not modify
-  `buildDomainCaddyConfig`): wildcard site address, explicit `tls cert key`,
-  `X-Robots-Tag: noindex`, `robots.txt` deny handler, a `forward_auth`
-  block behind a comment/flag **rendered but disabled** (the day-one hook),
-  and a slug→upstream map (empty for now → placeholder page). Reload via the
-  existing `caddyAdapt`/`caddyReload` driver.
+  `buildDomainCaddyConfig`): one site block per active FQDN (bare-domain
+  address → Caddy fetches a Let's Encrypt cert per slug via HTTP-01), each
+  block carrying `X-Robots-Tag: noindex`, a `robots.txt` deny handler, and a
+  `forward_auth` block **rendered but disabled** (the day-one hook). Reload
+  via the existing `caddyAdapt`/`caddyReload` driver. Alternative allowed by
+  ADR-009: a single on-demand-TLS site with a backend `ask` endpoint — the
+  session picks whichever is cleaner, and records the choice in this file.
+- Watch-item from ADR-009: log/notify on ACME issuance failures so Let's
+  Encrypt rate limits surface instead of silently 502ing.
 
-**Verify:** register a real domain end to end; `curl -H 'Host: x.dev.example.com'`
-gets valid TLS, noindex header, robots.txt deny; cert renewal dry-run passes;
-un-verified domain is not selectable in the (stub) project-create API.
+**Verify:** register a real domain end to end; a registered test FQDN serves
+valid per-host TLS, the noindex header, and robots.txt deny; an unregistered
+label gets no cert/route; an un-verified domain is not selectable in the
+(stub) project-create API.
 
 ## Phase M2 — Project registry, container, bare repo, live URL (no AI)
 
@@ -121,6 +128,11 @@ backend, and rehydrate must never depend on one.)*
 - Archive: checkpoint-commit inside container → final fetch into bare repo →
   destroy container + bridge + route → `lifecycle='archived'`; repo, chats,
   change records, memberships retained. Archived list filter.
+- **Archived = read-only** (operator decision 2026-07-09): the git repo is
+  left alone, the LXC is destroyed, and everything else about the project is
+  viewable but not changeable — no chat, no cycles, no membership or
+  settings edits. The only actions on an archived project are viewing and
+  rehydrate. Enforce in the API layer (one guard, not per-route sprinkles).
 - Rehydrate: rebuild container from template + clone from bare repo + re-run
   manifest → route registration; same slug (it was never released).
 - Idle-stop groundwork: `incus stop` after N days idle (`mock2_settings`),
@@ -175,11 +187,20 @@ models/quotas/git-connectors sections.)*
 - Quotas: budgets, ledger, buffer; a pure function
   `canStartCycle(estimate) → {ok, reason}` used (and unit-tested) now,
   enforced by M6.
-- Framework registry: versions table, superadmin editor (markdown +
-  side-by-side diff before commit), revert-as-new-version, `logAudit` on
-  publish; optional git-sync import; seed version 1 with the Mock2 bundle
-  (constitution, four skills, gate scripts, design system, project template
-  ref).
+- Framework registry: versions table, **admin-gated** editor (markdown +
+  side-by-side diff before commit — operator relaxed the brief's
+  superadmin-only rule, 2026-07-09), revert-as-new-version, `logAudit` on
+  publish; optional git-sync import. **Seed version 1 is built in by
+  default**: the operator's current Mock2 framework (constitution, four
+  skills, gate scripts, design system, project template) is vendored into
+  this repo under `admin/backend/src/mock2/framework-seed/` and inserted as
+  version 1 on first enabled boot. Obtaining that content from the operator
+  is a prerequisite task of this phase.
+- BAA acknowledgement (operator decision 2026-07-09): saving a cloud model
+  connector (anthropic/openai/gemini) shows a one-time acknowledgement
+  message — "confirm this account is covered by a BAA if this instance will
+  handle PHI-adjacent work" — and records who acknowledged and when on the
+  connector row. An acknowledgement, not a blocker.
 
 **Verify:** connector test endpoints round-trip against a real key and a fake
 one; slot assignment refuses a chat-only model for `build_runner`; framework
@@ -318,5 +339,6 @@ M0 ─► M1 ─► M2 ─► M3 ─► M4 ─► M6 ─► M7 ─► M8 ─► 
               └─► M5 ────────┘        (M5 can run parallel to M3/M4)
 ```
 
-M1 needs a DNS provider decision (ADR-009). M2 needs ADR-007/008 sign-off.
-M4 needs ADR-010 sign-off. Nothing blocks M0.
+M0 and M1 are fully unblocked (ADR-009 accepted 2026-07-09; no DNS provider
+needed). M2 needs ADR-008 confirmation (ADR-007 is accepted). M4 needs
+ADR-010 confirmation (see `05-risks-and-open-questions.md` §Q6).

@@ -1,10 +1,17 @@
-// Mock2 project provisioning job (Phase M2).
+// Mock2 project provisioning + lifecycle host jobs (Phase M2 + M3).
 //
 // Mirrors the LXC create pattern (routes/lxc.js: 202 + in-memory progress map +
 // poll endpoint). The route inserts the project row (lifecycle='provisioning'),
 // returns 202 immediately, and this module drives the host-side work in the
 // background; the frontend polls GET /projects/:id/provision-status until the
 // row flips to 'active' or 'failed_provisioning'.
+//
+// M3 adds three more host jobs that share the SAME progress map + poll
+// endpoint: archive (checkpoint → push → destroy → 'archived'), rehydrate
+// (rebuild from the bare repo → 'active', same slug) and wake (restart a
+// stopped container). The launch→mount→clone→setup→publish sequence is factored
+// into bringUpFromRepo() so create and rehydrate never fork it (04-phased-plan
+// §M3). Rehydrate depends ONLY on the bare repo (ADR-006) — never a snapshot.
 //
 // EVERY host mutation pivots through lib/host-exec.js spawnHost (risk R3:
 // nsenter when the backend runs inside Docker). New host artifacts — the bare
@@ -26,7 +33,7 @@ import { spawnHost } from '../lib/host-exec.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { buildSeedFiles, buildContainerSetupScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 // Base image for project containers. Overridable for hosts that mirror images
@@ -135,11 +142,15 @@ export function startProvision(project) {
   return true;
 }
 
-function fail(project, reason) {
+// Land the project in a terminal failure state. `lifecycle` is the state to
+// mark: 'failed_provisioning' for a create (M2), but 'archived' for a failed
+// REHYDRATE so the project falls back to its safe archived state and can be
+// retried (its bare repo is untouched — ADR-006).
+function fail(project, reason, { lifecycle = 'failed_provisioning' } = {}) {
   const projectId = Number(project.id);
   setStatus(projectId, { phase: 'failed', message: reason, error: reason });
   try {
-    updateProject(projectId, { lifecycle: 'failed_provisioning', provision_error: reason });
+    updateProject(projectId, { lifecycle, provision_error: reason });
   } catch (e) { console.error('[mock2] failed to mark provision failure:', e?.message); }
   try {
     raiseQueueItem({
@@ -161,50 +172,69 @@ function scheduleCleanup(projectId) {
   setTimeout(() => activeProvisions.delete(Number(projectId)), 120000);
 }
 
-// The full provisioning sequence. Each step updates the progress map; any hard
-// failure calls fail() and returns.
+// Create-only step 1: seed the bare repo host-side (ADR-006/011). Runs before
+// any container exists, so `git log` in the bare repo proves the seed
+// immediately. Then hands off to the shared bringUpFromRepo sequence.
 async function provisionProject(project, { repoPath, containerName }) {
   const projectId = Number(project.id);
-  const image = MOCK2_BASE_IMAGE;
-
-  // ---- 1. Bare repo + seed commit (host, ADR-006) ----
   setStatus(projectId, { phase: 'repo', message: 'Creating bare repo and seeding template…' });
-  const webPort = DEFAULT_WEB_PORT;
-  const seedFiles = buildSeedFiles(project, { webPort });
+  const seedFiles = buildSeedFiles(project, { webPort: DEFAULT_WEB_PORT });
   const seed = await sh(buildSeedScript({ repoPath, files: seedFiles, projectName: project.name }), { timeoutMs: 60000 });
   if (seed.code !== 0) return fail(project, `bare repo seed failed: ${(seed.stderr || seed.stdout || '').trim().slice(-500)}`);
+  return bringUpFromRepo(project, { repoPath, containerName, mode: 'provision' });
+}
 
-  // ---- 2. Launch the container (unprivileged, shared bridge) ----
-  setStatus(projectId, { phase: 'launch', message: 'Launching container…' });
+// bringUpFromRepo — the SHARED launch→mount→clone→setup→publish sequence used
+// by BOTH create (after the seed) and rehydrate (the bare repo already holds
+// the archived state). Rehydrate re-adds the ADR-011 disk-device mount and
+// re-clones from the bare repo — never a snapshot (ADR-006), which is why the
+// M3 verify test can delete the image cache between archive and rehydrate and
+// still succeed. Each step updates the progress map; any hard failure calls
+// fail() (with the mode-appropriate terminal lifecycle) and returns.
+async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provision' }) {
+  const projectId = Number(project.id);
+  const image = MOCK2_BASE_IMAGE;
+  const rehydrate = mode === 'rehydrate';
+  const failLifecycle = rehydrate ? 'archived' : 'failed_provisioning';
+  const bail = (reason) => fail(project, reason, { lifecycle: failLifecycle });
+
+  // Idempotency: clear any stale container of this name (a prior failed
+  // attempt, or a leftover) so the sequence can always start clean. No-op if
+  // absent. On rehydrate the container was destroyed at archive, so this is a
+  // cheap safety net.
+  await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
+
+  // ---- Launch the container (unprivileged, shared bridge) ----
+  setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
   const launch = await sh(`incus launch ${image} ${containerName}`, { timeoutMs: 300000 });
-  if (launch.code !== 0) return fail(project, `container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
+  if (launch.code !== 0) return bail(`container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
 
-  // ---- 3. Wait for a bridge IP ----
+  // ---- Wait for a bridge IP ----
   setStatus(projectId, { phase: 'network', message: 'Waiting for network…' });
   const ip = await waitForContainerIp(containerName);
-  if (!ip) return fail(project, 'container did not obtain a bridge IP within timeout');
-  updateProject(projectId, { container_ip: ip });
+  if (!ip) return bail('container did not obtain a bridge IP within timeout');
+  updateProject(projectId, { container_ip: ip, container_name: containerName });
 
   // Public DNS so apt/registry reachability works on the shared bridge (M4
   // replaces this with the egress proxy).
   await sh(`incus exec ${containerName} -- sh -c 'grep -q 9.9.9.9 /etc/resolv.conf 2>/dev/null || printf "nameserver 9.9.9.9\\nnameserver 1.1.1.1\\n" > /etc/resolv.conf'`).catch(() => {});
 
-  // ---- 4. Mount the bare repo (ADR-011) + clone the working tree ----
+  // ---- Mount the bare repo (ADR-011) + clone the working tree ----
   setStatus(projectId, { phase: 'repo-mount', message: 'Mounting repo and cloning working tree…' });
   const mount = await sh(`incus config device add ${containerName} reporepo disk source=${repoPath} path=${REPO_MOUNT} shift=true 2>&1`);
-  if (mount.code !== 0) return fail(project, `repo mount failed: ${(mount.stderr || mount.stdout || '').trim().slice(-500)}`);
+  if (mount.code !== 0) return bail(`repo mount failed: ${(mount.stderr || mount.stdout || '').trim().slice(-500)}`);
   const clone = await sh(
-    `incus exec ${containerName} -- sh -c 'command -v git >/dev/null 2>&1 || (apt-get update -y && apt-get install -y --no-install-recommends git); git config --global --add safe.directory ${REPO_MOUNT}; rm -rf ${APP_DIR}; git clone ${REPO_MOUNT} ${APP_DIR}'`,
+    `incus exec ${containerName} -- sh -c 'command -v git >/dev/null 2>&1 || (apt-get update -y && apt-get install -y --no-install-recommends git); git config --global --add safe.directory ${REPO_MOUNT}; rm -rf ${APP_DIR}; git clone ${REPO_MOUNT} ${APP_DIR}; git config --global --add safe.directory ${APP_DIR}'`,
     { timeoutMs: 180000 },
   );
-  if (clone.code !== 0) return fail(project, `working clone failed: ${(clone.stderr || clone.stdout || '').trim().slice(-800)}`);
+  if (clone.code !== 0) return bail(`working clone failed: ${(clone.stderr || clone.stdout || '').trim().slice(-800)}`);
 
-  // ---- 5. Read the DECLARED web port from the repo (ADR-005) ----
+  // ---- Read the DECLARED web port from the repo (ADR-005) ----
   setStatus(projectId, { phase: 'manifest', message: 'Reading declared topology…' });
   const manifest = await sh(`incus exec ${containerName} -- cat ${APP_DIR}/mock2.yaml 2>/dev/null`);
-  const declaredPort = parseManifestWebPort(manifest.stdout) || webPort;
+  const declaredPort = parseManifestWebPort(manifest.stdout) || project.web_port || DEFAULT_WEB_PORT;
 
-  // ---- 6. Run the container setup script (runtime + Postgres + dev server) ----
+  // ---- Run the container setup script (runtime + Postgres + dev server) ----
   setStatus(projectId, { phase: 'setup', message: 'Installing runtime and starting dev server…' });
   const setupScript = buildContainerSetupScript({ appDir: APP_DIR, webPort: declaredPort });
   const pushSetup = await sh(
@@ -212,19 +242,22 @@ async function provisionProject(project, { repoPath, containerName }) {
     { timeoutMs: 420000 },
   );
   if (pushSetup.code !== 0) {
-    // Non-fatal for the manifest read, but the dev server not starting means no
-    // live URL — treat as failure so the operator sees why.
-    return fail(project, `container setup failed: ${(pushSetup.stderr || pushSetup.stdout || '').trim().slice(-800)}`);
+    // The dev server not starting means no live URL — treat as failure so the
+    // operator sees why.
+    return bail(`container setup failed: ${(pushSetup.stderr || pushSetup.stdout || '').trim().slice(-800)}`);
   }
 
   updateProject(projectId, { web_port: declaredPort, container_ip: ip });
 
-  // ---- 7. Register the slug's FQDN block in the parent-domain Caddy file ----
+  // ---- Register the slug's FQDN block in the parent-domain Caddy file ----
   setStatus(projectId, { phase: 'caddy', message: 'Publishing route…' });
   // Flip to active FIRST so publishDomain's active-FQDN computation includes
   // this project (projectActiveFqdns skips non-active/no-upstream projects).
-  updateProject(projectId, { lifecycle: 'active', provision_error: null });
+  // archived_at cleared here (and only here) so a failed rehydrate that reverts
+  // to 'archived' keeps its original archive timestamp.
+  updateProject(projectId, { lifecycle: 'active', provision_error: null, archived_at: null, last_activity_at: new Date().toISOString() });
   const reload = await publishDomain(project.parent_domain_id);
+  const caddyDedupe = `mock2-provision-caddy:${projectId}`;
   if (!reload.ok) {
     // The container is up but Caddy didn't reload — surface it (ACME/reload
     // failures become notifications, not a rolled-back provision).
@@ -233,19 +266,156 @@ async function provisionProject(project, { repoPath, containerName }) {
       raiseQueueItem({
         kind: 'provisioning_failed',
         project_id: projectId,
-        dedupe_key: `mock2-provision-caddy:${projectId}`,
+        dedupe_key: caddyDedupe,
         ref_table: 'mock2_projects',
         ref_id: projectId,
         detail: `${project.name}: container online but Caddy reload failed — ${reload.error}`,
       });
     } catch { /* best effort */ }
   } else {
-    resolveQueueItem(`mock2-provision:${projectId}`, { resolution: 'provisioned' });
-    resolveQueueItem(`mock2-provision-caddy:${projectId}`, { resolution: 'published' });
-    setStatus(projectId, { phase: 'ready', message: 'Project online', caddy: reload });
+    resolveQueueItem(`mock2-provision:${projectId}`, { resolution: rehydrate ? 'rehydrated' : 'provisioned' });
+    resolveQueueItem(caddyDedupe, { resolution: 'published' });
+    setStatus(projectId, { phase: 'ready', message: rehydrate ? 'Project rehydrated' : 'Project online', caddy: reload });
   }
 
-  console.log(`[mock2] project ${projectId} provisioned: ${containerName} @ ${ip}:${declaredPort}`);
+  console.log(`[mock2] project ${projectId} ${rehydrate ? 'rehydrated' : 'provisioned'}: ${containerName} @ ${ip}:${declaredPort}`);
+  scheduleCleanup(projectId);
+}
+
+// ---- Rehydrate (M3): rebuild an archived project from the bare repo ----
+
+// startRehydrate(project) — kick off the background rebuild. The route has
+// already flipped lifecycle to 'provisioning' and restored container_name, so
+// the existing provisioning poll/UI drives it. Same slug, same URL — the slug
+// was never released (ADR-006). Returns immediately.
+export function startRehydrate(project) {
+  const projectId = Number(project.id);
+  const repoPath = project.repo_path || repoPathForProject(projectId);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  setStatus(projectId, { phase: 'starting', message: 'Starting rehydrate…', startedAt: Date.now(), error: null });
+  rehydrateProject(project, { repoPath, containerName }).catch((err) => {
+    console.error(`[mock2] rehydrate crashed for project ${projectId}:`, err?.message || err);
+    fail(project, `rehydrate crashed: ${err?.message || err}`, { lifecycle: 'archived' });
+  });
+  return true;
+}
+
+async function rehydrateProject(project, { repoPath, containerName }) {
+  const projectId = Number(project.id);
+  // The bare repo IS the recovery path (ADR-006). If it is gone there is
+  // nothing to rehydrate from — fail back to archived rather than launch an
+  // empty container.
+  const check = await sh(`[ -d ${repoPath} ] && echo ok || echo missing`);
+  if ((check.stdout || '').trim() !== 'ok') {
+    return fail(project, `bare repo missing at ${repoPath} — cannot rehydrate`, { lifecycle: 'archived' });
+  }
+  return bringUpFromRepo(project, { repoPath, containerName, mode: 'rehydrate' });
+}
+
+// ---- Archive (M3): checkpoint → push → destroy → 'archived' ----
+
+// startArchive(project) — kick off the background archive. Returns immediately;
+// the frontend polls until lifecycle flips to 'archived'. The bare repo, slug
+// history, chats, change records, and memberships are all RETAINED (ADR-006);
+// only the container is destroyed.
+export function startArchive(project) {
+  const projectId = Number(project.id);
+  setStatus(projectId, { phase: 'archiving', message: 'Archiving…', startedAt: Date.now(), error: null });
+  archiveProjectJob(project).catch((err) => {
+    console.error(`[mock2] archive crashed for project ${projectId}:`, err?.message || err);
+    // Leave lifecycle unchanged (still active/stopped) so the operator can
+    // retry; record the error on the progress map.
+    setStatus(projectId, { phase: 'failed', message: `archive crashed: ${err?.message || err}`, error: String(err?.message || err) });
+  });
+  return true;
+}
+
+async function archiveProjectJob(project) {
+  const projectId = Number(project.id);
+  const containerName = project.container_name || containerNameForProject(projectId);
+
+  // 1. Checkpoint-commit the working tree and push it into the bare repo over
+  //    the ADR-011 mount (the ONLY recovery path). Tolerant: a container that's
+  //    already gone means the last checkpoint is already the repo state.
+  setStatus(projectId, { phase: 'checkpoint', message: 'Checkpointing working tree into the bare repo…' });
+  const checkpoint = await sh(
+    `printf '%s' '${b64(buildCheckpointScript({ appDir: APP_DIR }))}' | base64 -d | incus exec ${containerName} -- sh 2>&1`,
+    { timeoutMs: 120000 },
+  );
+  if (checkpoint.code !== 0) {
+    // Non-zero here is either "container already gone" (safe — the bare repo
+    // holds the last pushed state) or a real push failure. Log it; still
+    // archive so the row doesn't get stuck. A genuine push failure would leave
+    // the last checkpoint as the recoverable state, not the newest edits.
+    console.warn(`[mock2] archive checkpoint non-zero for ${projectId}: ${(checkpoint.stdout || checkpoint.stderr || '').trim().slice(-400)}`);
+  }
+
+  // 2. Destroy the container. KEEP the bare repo + slug history + memberships.
+  setStatus(projectId, { phase: 'teardown', message: 'Destroying container…' });
+  await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
+
+  // 3. Mark archived. container_name/container_ip go NULL (03-data-model.md:
+  //    container_name is NULL when archived); archived_at stamped.
+  updateProject(projectId, {
+    lifecycle: 'archived',
+    archived_at: new Date().toISOString(),
+    container_name: null,
+    container_ip: null,
+  });
+
+  // 4. Republish — drops this project's slug block (an archived project has no
+  //    upstream, so projectActiveFqdns returns nothing). The slug STAYS
+  //    reserved in mock2_slug_history (never reusable, ADR-006).
+  setStatus(projectId, { phase: 'caddy', message: 'Removing route…' });
+  let caddy = { ok: true };
+  if (project.parent_domain_id) caddy = await publishDomain(project.parent_domain_id);
+
+  setStatus(projectId, { phase: 'archived', message: 'Project archived', caddy });
+  console.log(`[mock2] project ${projectId} archived (bare repo + slug retained)`);
+  scheduleCleanup(projectId);
+}
+
+// ---- Idle-stop groundwork (M3): stop / wake a container without archiving ----
+
+// stopProjectContainer(project) — `incus stop` (graceful), mark 'stopped', drop
+// the route. Distinct from archive: the container is STOPPED, not destroyed, so
+// wake is a fast `incus start`. Used by the idle sweep (idle.js).
+export async function stopProjectContainer(project) {
+  const containerName = project.container_name || containerNameForProject(project.id);
+  const r = await sh(`incus stop ${containerName} 2>&1`, { timeoutMs: 60000 });
+  updateProject(project.id, { lifecycle: 'stopped', container_ip: null });
+  if (project.parent_domain_id) await publishDomain(project.parent_domain_id).catch(() => {});
+  console.log(`[mock2] project ${project.id} idle-stopped (container ${containerName})`);
+  return r;
+}
+
+// startWake(project) — restart-on-visit: start a stopped container, refresh its
+// IP, republish, flip back to 'active'. Background job on the shared progress
+// map so the frontend can poll.
+export function startWake(project) {
+  const projectId = Number(project.id);
+  setStatus(projectId, { phase: 'waking', message: 'Starting container…', startedAt: Date.now(), error: null });
+  wakeProjectJob(project).catch((err) => {
+    console.error(`[mock2] wake crashed for project ${projectId}:`, err?.message || err);
+    setStatus(projectId, { phase: 'failed', message: `wake failed: ${err?.message || err}`, error: String(err?.message || err) });
+  });
+  return true;
+}
+
+async function wakeProjectJob(project) {
+  const projectId = Number(project.id);
+  const containerName = project.container_name || containerNameForProject(projectId);
+  await sh(`incus start ${containerName} 2>&1`, { timeoutMs: 60000 }); // 'already running' is harmless
+  setStatus(projectId, { phase: 'network', message: 'Waiting for network…' });
+  const ip = await waitForContainerIp(containerName);
+  if (!ip) {
+    setStatus(projectId, { phase: 'failed', message: 'container did not obtain an IP after start', error: 'no ip after start' });
+    return;
+  }
+  updateProject(projectId, { container_ip: ip, lifecycle: 'active', last_activity_at: new Date().toISOString() });
+  const caddy = await publishDomain(project.parent_domain_id);
+  setStatus(projectId, { phase: 'ready', message: 'Container running', caddy });
+  console.log(`[mock2] project ${projectId} woken (container ${containerName} @ ${ip})`);
   scheduleCleanup(projectId);
 }
 

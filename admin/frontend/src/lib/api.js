@@ -1113,6 +1113,12 @@ export const api = {
   mock2SetProjectCustomDomain: (id, domain) =>
     request(`/mock2/projects/${id}/custom-domain`, { method: 'POST', body: JSON.stringify({ domain }) }),
   mock2DeleteProject: (id) => request(`/mock2/projects/${id}`, { method: 'DELETE' }),
+  mock2ArchiveProject: (id) => request(`/mock2/projects/${id}/archive`, { method: 'POST' }),
+  mock2RehydrateProject: (id) => request(`/mock2/projects/${id}/rehydrate`, { method: 'POST' }),
+  mock2WakeProject: (id) => request(`/mock2/projects/${id}/wake`, { method: 'POST' }),
+  mock2GetIdleStopDays: () => request('/mock2/settings/idle-stop-days'),
+  mock2SetIdleStopDays: (days) =>
+    request('/mock2/settings/idle-stop-days', { method: 'POST', body: JSON.stringify({ days }) }),
 
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),

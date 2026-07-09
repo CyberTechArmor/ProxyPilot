@@ -114,6 +114,8 @@ export default function Projects() {
   }
 
   const canCreate = domains.length > 0;
+  const activeProjects = projects.filter((p) => p.lifecycle !== 'archived');
+  const archivedProjects = projects.filter((p) => p.lifecycle === 'archived');
 
   return (
     <div className="space-y-6">
@@ -168,41 +170,24 @@ export default function Projects() {
           </CardHeader>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {projects.map((p) => (
-            <Card key={p.id} className="min-w-0">
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-2 min-w-0">
-                  <CardTitle className="truncate text-base">{p.name}</CardTitle>
-                  {statusChip(p.status, p.flagged)}
-                </div>
-                {p.description ? (
-                  <CardDescription className="line-clamp-2">{p.description}</CardDescription>
-                ) : null}
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {p.url ? (
-                  <a
-                    href={p.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
-                  >
-                    {p.url.replace(/^https:\/\//, '')}
-                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                  </a>
-                ) : (
-                  <span className="text-sm text-muted-foreground">URL pending…</span>
-                )}
-                <div>
-                  <Button asChild variant="outline" size="sm" className="h-9">
-                    <Link to={`/projects/${p.id}`}>Open</Link>
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
+        <>
+          {activeProjects.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {activeProjects.map((p) => <ProjectTile key={p.id} p={p} />)}
+            </div>
+          ) : null}
+
+          {archivedProjects.length > 0 ? (
+            <div className="space-y-3">
+              <h2 className="text-sm font-medium text-muted-foreground">
+                Archived ({archivedProjects.length})
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {archivedProjects.map((p) => <ProjectTile key={p.id} p={p} archived />)}
+              </div>
+            </div>
+          ) : null}
+        </>
       )}
 
       <Dialog open={createOpen} onOpenChange={(o) => { if (!creating) setCreateOpen(o); }}>
@@ -267,5 +252,46 @@ export default function Projects() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// One project tile — used by both the active grid and the archived section. An
+// archived tile is dimmed and shows a rehydrate hint instead of a live URL (its
+// slug is retained but currently 404s).
+function ProjectTile({ p, archived = false }) {
+  return (
+    <Card className={`min-w-0${archived ? ' opacity-75' : ''}`}>
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-2 min-w-0">
+          <CardTitle className="truncate text-base">{p.name}</CardTitle>
+          {statusChip(p.status, p.flagged)}
+        </div>
+        {p.description ? (
+          <CardDescription className="line-clamp-2">{p.description}</CardDescription>
+        ) : null}
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {archived ? (
+          <span className="text-sm text-muted-foreground">Archived — open to rehydrate the same URL.</span>
+        ) : p.url ? (
+          <a
+            href={p.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
+          >
+            {p.url.replace(/^https:\/\//, '')}
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+          </a>
+        ) : (
+          <span className="text-sm text-muted-foreground">URL pending…</span>
+        )}
+        <div>
+          <Button asChild variant="outline" size="sm" className="h-9">
+            <Link to={`/projects/${p.id}`}>Open</Link>
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

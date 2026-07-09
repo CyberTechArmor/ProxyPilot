@@ -440,7 +440,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
     app.use('/api/mock2', authenticateToken, createMock2Router());
@@ -448,6 +448,10 @@ if (mock2Gate.enabled) {
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>
       console.error('[mock2] domain reconcile failed:', err?.message || err));
+    // Idle-stop sweep (M3 groundwork): stop containers idle past the configured
+    // window. Non-fatal, fire-and-forget; M9 adds the periodic timer.
+    sweepIdleStops().catch((err) =>
+      console.error('[mock2] idle sweep failed:', err?.message || err));
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);

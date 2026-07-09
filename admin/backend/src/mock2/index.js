@@ -10,3 +10,4 @@
 export { initMock2Db, getMock2Db, mock2DbPath, sweepMock2OnBoot } from './db.js';
 export { createMock2Router } from './routes.js';
 export { reconcileMock2Domains } from './reconcile.js';
+export { sweepIdleStops } from './idle.js';

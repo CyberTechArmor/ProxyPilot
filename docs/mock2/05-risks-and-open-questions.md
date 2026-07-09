@@ -112,19 +112,20 @@ disabled). Home lab may run a single host for everything. Both are supported;
 the runbook documents the two shapes, and the single-host shape leans harder
 on M4 isolation.
 
-**Q6 — Egress proxy. AWAITING DECISION (explained).** What it is: the brief
+**Q6 — Egress proxy. ANSWERED (conditionally).** What it is: the brief
 requires each project container to reach *only* npm, the model APIs, and its
 git remote. Firewalls match IP addresses, but those services are host*names*
 on CDNs whose IPs change constantly — so the standard mechanism is a small
 host-side "egress proxy" (squid): containers are pointed at it via standard
 `HTTP(S)_PROXY` env vars, it forwards traffic only to allowlisted hostnames,
-and the bridge firewall blocks everything that tries to go around it. It is
-**not** in ProxyPilot today; it would be installed only when Mock2 is
-enabled. Alternatives if vetoed: (a) bridge isolation only — containers can't
-reach each other or the control plane but have open internet egress (drops
-the brief's allowlist requirement); (b) DNS-resolved IP sets in nftables —
-no new daemon, but brittle against CDN rotation. Recommendation stands:
-squid. Decision gates Phase M4 only.
+and the bridge firewall blocks everything that tries to go around it.
+Operator: "squid is only fine if it doesn't add that much complexity" →
+accepted with that as a hard guardrail, written into ADR-010: the M4
+implementation must stay at the weight of ProxyPilot's existing
+generated-config subsystems (one package, one service, one regenerated ACL
+file); if it grows beyond that, fall back to bridge-isolation-only and
+record the dropped allowlist requirement. Installed only when Mock2 is
+enabled.
 
 **Q7 — BAA. ANSWERED.** Yes, cloud model accounts are expected to be
 BAA-covered — enforced as a one-time acknowledgement message on connector

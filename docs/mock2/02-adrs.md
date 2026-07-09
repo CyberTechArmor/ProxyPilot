@@ -309,13 +309,17 @@ columns exist for it and stay NULL in v1.
 
 ## ADR-010 — Egress control: default-deny bridge + filtering proxy
 
-**Status:** **Proposed — awaiting operator confirmation.** The operator's
-2026-07-09 review asked what the egress proxy is; the plain-language
-explanation and the weaker fallbacks are in `05-risks-and-open-questions.md`
-§Q6. Nothing here is in ProxyPilot today; the proxy is installed **only when
-Mock2 is enabled** (ADR-001-consistent). If vetoed, Phase M4 ships bridge
-isolation without FQDN egress filtering and the brief's "egress allowlist"
-requirement is formally dropped. **Phase:** M4.
+**Status:** **Accepted with a complexity guardrail** (operator, 2026-07-09:
+"squid is only fine if it doesn't add that much complexity"). The intended
+weight is: one apt package, one systemd service, and one ProxyPilot-generated
+config file with per-project ACLs — the same generate-config → reload →
+reconcile-at-boot pattern already used for Caddy sites and L4 forwards, and
+smaller than either. **Guardrail:** if the Phase M4 implementation grows
+materially beyond that (custom builds, TLS interception, per-project proxy
+instances), stop, fall back to bridge-isolation-only (no FQDN egress
+filtering), and record the dropped allowlist requirement here. The proxy is
+installed **only when Mock2 is enabled** (ADR-001-consistent). Plain-language
+explanation in `05-risks-and-open-questions.md` §Q6. **Phase:** M4.
 
 **Context.** The brief wants a per-project egress allowlist (registries, git
 remote, model APIs — nothing else). Allowlists are FQDN-shaped; nftables

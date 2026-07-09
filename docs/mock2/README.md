@@ -48,7 +48,8 @@ Nothing blocks Phases M0–M1.
 3. **TLS — ACCEPTED.** Per-slug Let's Encrypt HTTP-01 certs for v1; wildcard
    DNS points at the host; DNS-01 wildcard is the deferred upgrade path. See
    ADR-009.
-4. **Egress allowlisting — AWAITING DECISION, blocks Phase M4 only.**
-   Explained in plain language in `05-risks-and-open-questions.md` §Q6;
-   recommendation is a squid egress proxy installed only when Mock2 is
-   enabled. See ADR-010.
+4. **Egress allowlisting — ACCEPTED with a complexity guardrail.** Squid
+   egress proxy, installed only when Mock2 is enabled, required to stay at
+   the weight of the existing generated-config subsystems; fallback to
+   bridge-isolation-only if it can't. See ADR-010 and
+   `05-risks-and-open-questions.md` §Q6.

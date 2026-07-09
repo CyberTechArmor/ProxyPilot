@@ -22,6 +22,7 @@ core-infrastructure work.
 | `05-risks-and-open-questions.md` | Risks the existing architecture creates, plus open policy questions the operator must answer (some block specific phases; none block Phase M0). |
 | `NEXT-SESSION-PROMPT-mock2-phase-01.md` | Ready-to-carry handoff prompt for the first build session (Phase M0 + M1 groundwork), in the repo's established `NEXT-SESSION-PROMPT` format. |
 | `NEXT-SESSION-PROMPT-mock2-phase-0N.md` | One handoff prompt per subsequent phase; `-04` opens Phase M3 (archive/rehydrate), `-05` opens Phase M4 (network isolation). |
+| `design/` | UI design references. `07-chat-mockup-design-reference.md` + `chat-mockup-reference.html` capture the operator's Claude-designed chat → mockup → build → live surface that Phases **M7–M9** build toward. |
 
 ## Build status
 

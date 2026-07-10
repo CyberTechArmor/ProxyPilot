@@ -14,6 +14,8 @@ import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
 import ProjectDetail from '@/pages/ProjectDetail';
+import AwaitingRole from '@/pages/AwaitingRole';
+import { effectiveRole } from '@/lib/roles';
 import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
 import Quotas from '@/pages/Quotas';
@@ -37,6 +39,18 @@ function ProtectedRoute({ children }) {
   }
 
   return children;
+}
+
+// RoleLanding — the single place the post-login landing route is decided
+// (ADR-011), so it never drifts per page. Superadmin/admin land on the operator
+// Dashboard; a developer lands straight on their Projects; a pending account
+// gets only the awaiting-role screen.
+function RoleLanding() {
+  const { user } = useAuth();
+  const role = effectiveRole(user);
+  if (role === 'developer') return <Navigate to="/projects" replace />;
+  if (role === 'pending') return <Navigate to="/awaiting-role" replace />;
+  return <Dashboard />;
 }
 
 function App() {
@@ -64,7 +78,8 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Dashboard />} />
+        <Route index element={<RoleLanding />} />
+        <Route path="awaiting-role" element={<AwaitingRole />} />
         <Route path="incus" element={<IncusManagement />} />
         <Route path="users" element={<Users />} />
         <Route path="profile" element={<Profile />} />

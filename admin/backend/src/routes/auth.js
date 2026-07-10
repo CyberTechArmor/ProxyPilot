@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
+import { effectiveRole } from '../lib/roles.js';
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -225,6 +226,8 @@ authRouter.post('/initial-setup', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        isSuperadmin: user.is_superadmin === 1,
+        effectiveRole: effectiveRole(user),
         totpEnabled: false,
         passwordChangeRequired: false,
       },
@@ -320,6 +323,8 @@ authRouter.post('/complete-totp-setup', authenticateToken, async (req, res) => {
         username: freshUser.username,
         displayName: freshUser.display_name,
         role: freshUser.role || 'admin',
+        isSuperadmin: freshUser.is_superadmin === 1,
+        effectiveRole: effectiveRole(freshUser),
         totpEnabled: true,
         passwordChangeRequired: false,
       },
@@ -419,6 +424,8 @@ authRouter.post('/login', async (req, res) => {
             username: user.username,
             displayName: user.display_name,
             role: user.role || 'admin',
+            isSuperadmin: user.is_superadmin === 1,
+            effectiveRole: effectiveRole(user),
             totpEnabled: true,
             passwordChangeRequired: !!user.password_change_required,
           },
@@ -556,6 +563,8 @@ authRouter.post('/login', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        isSuperadmin: user.is_superadmin === 1,
+        effectiveRole: effectiveRole(user),
         totpEnabled: true, // Always true after successful login
         passwordChangeRequired: !!user.password_change_required,
       },
@@ -643,7 +652,7 @@ authRouter.post('/sudo', authenticateToken, async (req, res) => {
 // Verify token endpoint
 authRouter.get('/verify', authenticateToken, (req, res) => {
   const db = getDb();
-  const user = db.prepare('SELECT id, username, display_name, role, totp_enabled, password_change_required FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare('SELECT id, username, display_name, role, is_superadmin, totp_enabled, password_change_required FROM users WHERE id = ?').get(req.user.id);
 
   if (!user) {
     return res.status(401).json({ error: 'User not found' });
@@ -655,6 +664,8 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
       username: user.username,
       displayName: user.display_name,
       role: user.role || 'admin',
+      isSuperadmin: user.is_superadmin === 1,
+      effectiveRole: effectiveRole(user),
       totpEnabled: !!user.totp_enabled,
       passwordChangeRequired: !!user.password_change_required,
     },
@@ -1095,6 +1106,8 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        isSuperadmin: user.is_superadmin === 1,
+        effectiveRole: effectiveRole(user),
         totpEnabled: !!user.totp_enabled,
         passwordChangeRequired: !!user.password_change_required,
       },

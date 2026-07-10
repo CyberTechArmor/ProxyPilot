@@ -25,6 +25,16 @@ import { useToast } from '@/hooks/use-toast';
 import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
+import { effectiveRole, roleLabel, isOperator as isOperatorRole, isSuperadmin as isSuperadminRole } from '@/lib/roles';
+
+// Effective-role badge styling (ADR-011): superadmin/admin blue, developer
+// grey, pending amber ("awaiting a role"). The label comes from roleLabel().
+const ROLE_BADGE_CLASS = {
+  superadmin: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+  admin: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+  developer: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+  pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+};
 
 export default function UsersPage() {
   const { user: authUser } = useAuth();
@@ -34,7 +44,7 @@ export default function UsersPage() {
   const [createUserOpen, setCreateUserOpen] = useState(false);
   const [creatingUser, setCreatingUser] = useState(false);
   const [createdUser, setCreatedUser] = useState(null);
-  const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'user' });
+  const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'developer' });
   const [deleteUserOpen, setDeleteUserOpen] = useState(false);
   const [userToDelete, setUserToDelete] = useState(null);
   const [deleteTotpCode, setDeleteTotpCode] = useState('');
@@ -54,7 +64,10 @@ export default function UsersPage() {
 
   const { toast } = useToast();
 
-  const isAdmin = authUser?.role === 'admin' || JSON.parse(localStorage.getItem('user') || '{}').role === 'admin';
+  const cachedUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const actor = authUser || cachedUser;
+  const isAdmin = isOperatorRole(actor);            // admin-tier (superadmin/admin)
+  const actorIsSuperadmin = isSuperadminRole(actor);
 
   useEffect(() => {
     if (isAdmin) {
@@ -229,6 +242,22 @@ export default function UsersPage() {
     setTimeout(() => setCopiedPassword(false), 2000);
   };
 
+  // Assign / reassign a user's effective role (ADR-011). This is the admin
+  // onboarding path for a pending (e.g. LDAP-provisioned) account, and the
+  // demote/promote path between admin and developer. The backend enforces the
+  // superadmin rules (only a superadmin grants superadmin; a superadmin target
+  // is untouchable by a non-superadmin; the last superadmin is not removable).
+  const handleChangeRole = async (u, role) => {
+    if (role === effectiveRole(u)) return;
+    try {
+      await api.updateUser(u.id, { role });
+      toast({ title: 'Role updated', description: `${u.username} is now ${roleLabel({ effectiveRole: role })}.` });
+      fetchUsers();
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message });
+    }
+  };
+
   const handleResetPassword = async (userId) => {
     try {
       const result = await api.updateUser(userId, { resetPassword: true });
@@ -281,7 +310,7 @@ export default function UsersPage() {
               <Button size="sm" onClick={() => {
                 setCreateUserOpen(true);
                 setCreatedUser(null);
-                setNewUserForm({ username: '', displayName: '', role: 'user' });
+                setNewUserForm({ username: '', displayName: '', role: 'developer' });
               }}>
                 <UserPlus className="h-4 w-4 mr-2" />
                 Add User
@@ -298,7 +327,14 @@ export default function UsersPage() {
             <p className="text-center text-muted-foreground py-8">No users found</p>
           ) : (
             <div className="space-y-2">
-              {users.map((user) => (
+              {users.map((user) => {
+                const targetEff = effectiveRole(user);
+                // A superadmin target is untouchable by a non-superadmin actor
+                // (ADR-011). The backend enforces this; here we also hide the
+                // controls so the UI never offers an action that would 403.
+                const locked = user.isSuperadmin && !actorIsSuperadmin;
+                const isSelf = user.id === actor?.id;
+                return (
                 <div key={user.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 border rounded-lg">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -306,10 +342,8 @@ export default function UsersPage() {
                       {user.displayName && (
                         <span className="text-sm text-muted-foreground">({user.displayName})</span>
                       )}
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${
-                        user.role === 'admin' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300' : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
-                      }`}>
-                        {user.role}
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${ROLE_BADGE_CLASS[targetEff] || ROLE_BADGE_CLASS.pending}`}>
+                        {roleLabel(user)}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-muted-foreground">
@@ -322,7 +356,27 @@ export default function UsersPage() {
                       <span>Created: {new Date(user.createdAt).toLocaleDateString()}</span>
                     </div>
                   </div>
-                  <div className="flex gap-1 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1 shrink-0">
+                    {/* Role assignment (ADR-011). Locked for a superadmin target
+                        a non-superadmin can't touch; offers Superadmin only to a
+                        superadmin actor. Onboards a pending account to a real role. */}
+                    <Select
+                      value={targetEff}
+                      onValueChange={(v) => handleChangeRole(user, v)}
+                      disabled={locked}
+                    >
+                      <SelectTrigger className="h-11 sm:h-9 w-[9.5rem]" aria-label={`Role for ${user.username}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(actorIsSuperadmin || targetEff === 'superadmin') && (
+                          <SelectItem value="superadmin" disabled={!actorIsSuperadmin}>Superadmin</SelectItem>
+                        )}
+                        <SelectItem value="admin">Admin</SelectItem>
+                        <SelectItem value="developer">Developer</SelectItem>
+                        <SelectItem value="pending">Awaiting role</SelectItem>
+                      </SelectContent>
+                    </Select>
                     {user.role !== 'admin' && (
                       <Button
                         variant="ghost"
@@ -339,6 +393,7 @@ export default function UsersPage() {
                       size="sm"
                       className="h-11 w-11 sm:h-9 sm:w-9 p-0"
                       onClick={() => handleResetPassword(user.id)}
+                      disabled={locked}
                       title="Reset password"
                     >
                       <RefreshCw className="h-4 w-4" />
@@ -352,14 +407,15 @@ export default function UsersPage() {
                         setDeleteUserOpen(true);
                         setDeleteTotpCode('');
                       }}
-                      disabled={user.id === authUser?.id}
+                      disabled={isSelf || locked}
                       title="Delete user"
                     >
                       <Trash2 className="h-4 w-4 text-red-500" />
                     </Button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -437,12 +493,17 @@ export default function UsersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="user">User (Limited Access)</SelectItem>
-                    <SelectItem value="admin">Admin (Full Access)</SelectItem>
+                    <SelectItem value="developer">Developer (AI dev / Projects)</SelectItem>
+                    <SelectItem value="admin">Admin (Full operator access)</SelectItem>
+                    {actorIsSuperadmin && (
+                      <SelectItem value="superadmin">Superadmin (Full control)</SelectItem>
+                    )}
+                    <SelectItem value="pending">Awaiting role (No access)</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Users require specific service access. Admins have full access to all services.
+                  Developers get the AI dev/Projects flow and only the services shared with them.
+                  Admins have full operator access{actorIsSuperadmin ? '; superadmins can also manage other superadmins and platform settings' : ''}.
                 </p>
               </div>
               <DialogFooter>

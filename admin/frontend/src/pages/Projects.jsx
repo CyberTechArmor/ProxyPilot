@@ -31,11 +31,15 @@ import {
 } from '@/components/ui/select';
 import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
+import { effectiveRole, isOperator as isOperatorRole } from '@/lib/roles';
 
 export default function Projects() {
   const { user } = useAuth();
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
-  const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+  const effUser = user || storedUser;
+  const isAdmin = isOperatorRole(effUser);          // admin-tier (superadmin/admin)
+  const effRole = effectiveRole(effUser);
+  const isPending = effRole === 'pending';
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -51,10 +55,12 @@ export default function Projects() {
     try {
       const [pRes, dRes] = await Promise.all([
         api.mock2ListProjects(),
-        api.mock2ListParentDomains().catch(() => ({ domains: [] })),
+        // The selectable-domains endpoint is open to developer+ and already
+        // returns only verified+enabled domains ({ id, domain }).
+        api.mock2ListSelectableDomains().catch(() => ({ domains: [] })),
       ]);
       setProjects(pRes.projects || []);
-      setDomains((dRes.domains || []).filter((d) => d.selectable));
+      setDomains(dRes.domains || []);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load projects failed:', err);
     } finally {
@@ -103,8 +109,11 @@ export default function Projects() {
     }
   };
 
-  if (!isAdmin) return <Navigate to="/" replace />;
-  if (gate === 'disabled') return <Navigate to="/" replace />;
+  if (isPending) return <Navigate to="/awaiting-role" replace />;
+  // On a Mock2-disabled host an operator falls back to the Dashboard; a
+  // developer (whose only surface is Projects) falls back to Profile — never
+  // back to "/", which RoleLanding would bounce here again (redirect loop).
+  if (gate === 'disabled') return <Navigate to={isAdmin ? '/' : '/profile'} replace />;
   if (gate === 'checking') {
     return (
       <div className="flex items-center justify-center py-16">
@@ -114,6 +123,10 @@ export default function Projects() {
   }
 
   const canCreate = domains.length > 0;
+  // A developer cannot register domains themselves — point them at an admin.
+  const noDomainHint = isAdmin
+    ? 'Register and enable a parent domain first, then create a project on it.'
+    : 'Ask an admin to register and enable a parent domain, then you can create a project on it.';
   const activeProjects = projects.filter((p) => p.lifecycle !== 'archived');
   const archivedProjects = projects.filter((p) => p.lifecycle === 'archived');
 
@@ -129,30 +142,34 @@ export default function Projects() {
           className="h-11 sm:h-10 shrink-0"
           onClick={() => setCreateOpen(true)}
           disabled={!canCreate}
-          title={canCreate ? undefined : 'Register and enable a parent domain first'}
+          title={canCreate ? undefined : noDomainHint}
         >
           <Plus className="h-4 w-4 mr-1" />New project
         </Button>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="min-w-0">
-              <CardTitle className="flex items-center gap-2">
-                <Globe className="h-5 w-5 shrink-0 text-primary" />
-                Parent domains
-              </CardTitle>
-              <CardDescription>
-                Register dev domains and issue per-slug TLS so projects get live HTTPS URLs.
-              </CardDescription>
+      {/* Parent-domain management is admin-tier tooling (ADR-011) — a developer
+          picks from selectable domains at create time but never manages them. */}
+      {isAdmin && (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="min-w-0">
+                <CardTitle className="flex items-center gap-2">
+                  <Globe className="h-5 w-5 shrink-0 text-primary" />
+                  Parent domains
+                </CardTitle>
+                <CardDescription>
+                  Register dev domains and issue per-slug TLS so projects get live HTTPS URLs.
+                </CardDescription>
+              </div>
+              <Button asChild variant="outline" className="h-11 sm:h-10 shrink-0">
+                <Link to="/projects/domains">Manage domains</Link>
+              </Button>
             </div>
-            <Button asChild variant="outline" className="h-11 sm:h-10 shrink-0">
-              <Link to="/projects/domains">Manage domains</Link>
-            </Button>
-          </div>
-        </CardHeader>
-      </Card>
+          </CardHeader>
+        </Card>
+      )}
 
       {/* M5 admin tooling: model/git connectors, quotas, framework registry.
           Admin-only, reachable only on an enabled host (each page self-guards). */}
@@ -196,7 +213,7 @@ export default function Projects() {
             <CardDescription>
               {canCreate
                 ? 'Create your first project — it gets a container, a bare git repo, and a live HTTPS URL on a selectable parent domain.'
-                : 'Register and enable a parent domain first, then create a project on it.'}
+                : noDomainHint}
             </CardDescription>
           </CardHeader>
         </Card>

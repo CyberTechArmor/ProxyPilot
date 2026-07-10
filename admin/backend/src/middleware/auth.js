@@ -208,7 +208,10 @@ export function requireSudo(req, res, next) {
   next();
 }
 
-// Middleware to require admin role
+// Middleware to require admin role. Both admin tiers (plain admin and
+// superadmin) carry role='admin' under ADR-011's Option B, so this stays
+// correct for the 89 existing call sites unchanged — a developer or a pending
+// user is denied here.
 export function requireAdmin(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ error: 'Authentication required' });
@@ -218,6 +221,39 @@ export function requireAdmin(req, res, next) {
     return res.status(403).json({ error: 'Admin access required' });
   }
 
+  next();
+}
+
+// requireSuperadmin — superadmin-only endpoints (granting/removing the
+// superadmin role, owner-only platform settings). The JWT deliberately does
+// NOT carry is_superadmin (ADR-007), so it is re-read from the DB, mirroring
+// the isUserSuperadmin lookup in mock2/authz.js. requireAdmin is left
+// untouched; this composes on top of it where a stricter gate is needed.
+export function requireSuperadmin(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Superadmin access required' });
+  }
+  const row = getDb().prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+  if (row?.is_superadmin !== 1) {
+    return res.status(403).json({ error: 'Superadmin access required' });
+  }
+  next();
+}
+
+// requireDeveloperOrAbove — surfaces open to every real role but closed to a
+// pending (no-role) account: the Mock2 developer flow (project create, the
+// module-enabled probe, selectable-domain lookup). role='admin' covers both
+// admin tiers; role='developer' is the AI-dev role; role='pending' is denied.
+export function requireDeveloperOrAbove(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  if (req.user.role !== 'admin' && req.user.role !== 'developer') {
+    return res.status(403).json({ error: 'Your account is awaiting a role assignment' });
+  }
   next();
 }
 

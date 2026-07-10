@@ -81,7 +81,7 @@ export default function Profile() {
   const [createUserOpen, setCreateUserOpen] = useState(false);
   const [creatingUser, setCreatingUser] = useState(false);
   const [createdUser, setCreatedUser] = useState(null);
-  const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'user' });
+  const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'developer' });
   const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [userAccess, setUserAccess] = useState([]);

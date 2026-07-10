@@ -11,7 +11,7 @@
 import dns from 'dns/promises';
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireAdmin, requireSudo, requireDeveloperOrAbove } from '../middleware/auth.js';
 import { logAudit } from '../db.js';
 import { postNotification, resolveNotification } from '../lib/notifications.js';
 import {
@@ -346,10 +346,23 @@ function refuseIfArchived(req, res, next) {
 export function createMock2Router() {
   const router = Router();
 
-  // Presence probe (admin-gated). Reaching this handler already implies the
-  // module is enabled; the frontend keys its nav entry off a 200 here.
-  router.get('/status', requireAdmin, (_req, res) => {
+  // Presence probe. Reaching this handler already implies the module is
+  // enabled; the frontend keys its nav entry off a 200 here. Open to
+  // developer+ (ADR-011) so the developer AI-dev flow can gate its Projects
+  // nav/pages on it too; a pending account is denied (no access to anything).
+  router.get('/status', requireDeveloperOrAbove, (_req, res) => {
     res.json({ status: 'ok', enabled: true, phase: 'M8' });
+  });
+
+  // Selectable parent domains for the project-create picker (ADR-011). A
+  // developer creating a project needs to choose a verified+enabled parent
+  // domain, but /parent-domains is admin-only and exposes verify state. This
+  // returns only { id, domain } for selectable domains, open to developer+.
+  router.get('/selectable-domains', requireDeveloperOrAbove, (_req, res) => {
+    const rows = listParentDomains()
+      .filter((d) => isSelectable(d))
+      .map((d) => ({ id: d.id, domain: d.domain }));
+    res.json({ domains: rows });
   });
 
   // ---- Parent domains ----
@@ -461,8 +474,9 @@ export function createMock2Router() {
   // Create a project: mint a slug under a SELECTABLE parent domain (the M1
   // gate), create the row + permanent slug reservation, add the creator as an
   // editor (so it isn't born orphaned), and kick off provisioning (202 + poll).
-  // Admin-gated — creating a project provisions a container.
-  router.post('/projects', requireAdmin, (req, res) => {
+  // Developer+ gated (ADR-011): a developer owns the projects they create;
+  // admins bypass membership on any project. Pending accounts are denied.
+  router.post('/projects', requireDeveloperOrAbove, (req, res) => {
     const parsed = createProjectSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'name and parent_domain_id are required' });
     const { name, description } = parsed.data;
@@ -491,7 +505,7 @@ export function createMock2Router() {
 
     logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain }, req.ip);
     startProvision(project);
-    res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+    res.status(202).json({ project: shapeProject(project, { isAdmin: isReqAdmin(req) }) });
   });
 
   router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {

@@ -34,6 +34,7 @@ import {
   Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
+import { effectiveRole, isOperator as isOperatorRole } from '@/lib/roles';
 import ConceptStage from '@/components/mock2/ConceptStage';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
@@ -45,7 +46,9 @@ export default function ProjectDetail() {
   const { id } = useParams();
   const { user } = useAuth();
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
-  const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+  const effUser = user || storedUser;
+  const isAdmin = isOperatorRole(effUser);          // admin-tier (superadmin/admin)
+  const isPending = effectiveRole(effUser) === 'pending';
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -93,7 +96,9 @@ export default function ProjectDetail() {
         setGate('enabled');
         load();
         loadAllowlist();
-        if (isAdmin) api.getUsers().then((r) => setUsers(r.users || r || [])).catch(() => {});
+        // The member picker is available to any editor (developer or admin), so
+        // load the developer+ pickable directory rather than the admin-only list.
+        api.getPickableUsers().then((r) => setUsers(r.users || r || [])).catch(() => {});
       })
       .catch((err) => {
         if (!cancelled) setGate('disabled');
@@ -214,8 +219,9 @@ export default function ProjectDetail() {
     }
   };
 
-  if (!isAdmin && gate === 'disabled') return <Navigate to="/" replace />;
-  if (gate === 'disabled') return <Navigate to="/" replace />;
+  if (isPending) return <Navigate to="/awaiting-role" replace />;
+  // Developer fallback goes to Profile, not "/", to avoid the RoleLanding loop.
+  if (gate === 'disabled') return <Navigate to={isAdmin ? '/' : '/profile'} replace />;
   if (notFound) return <Navigate to="/projects" replace />;
   if (gate === 'checking' || loading) {
     return (
@@ -385,7 +391,7 @@ export default function ProjectDetail() {
             ))
           )}
 
-          {canEdit && isAdmin && !readOnly ? (
+          {canEdit && !readOnly ? (
             <div className="flex flex-col sm:flex-row gap-2 sm:items-end pt-1">
               <div className="flex-1 min-w-0 space-y-1.5">
                 <Label htmlFor="member-user">Add member</Label>

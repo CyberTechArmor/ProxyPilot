@@ -4,9 +4,10 @@ import * as OTPAuth from 'otpauth';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireAdmin, requireSudo, requireDeveloperOrAbove } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
-import { checkSuperadminProtection } from '../lib/superadmin.js';
+import { checkSuperadminProtection, checkSuperadminGrant } from '../lib/superadmin.js';
+import { effectiveRole, roleToColumns } from '../lib/roles.js';
 import {
   generateAuthenticationOptions,
   putChallenge,
@@ -204,6 +205,7 @@ userRouter.get('/profile', (req, res) => {
         displayName: user.display_name,
         role: user.role || 'admin',
         isSuperadmin: user.is_superadmin === 1,
+        effectiveRole: effectiveRole(user),
         totpEnabled: !!user.totp_enabled,
         hasPasskey: userHasPasskey(user.id),
         createdAt: user.created_at,
@@ -681,6 +683,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
         displayName: u.display_name,
         role: u.role || 'admin',
         isSuperadmin: u.is_superadmin === 1,
+        effectiveRole: effectiveRole(u),
         totpEnabled: !!u.totp_enabled,
         passwordChangeRequired: !!u.password_change_required,
         createdAt: u.created_at,
@@ -693,18 +696,57 @@ userRouter.get('/users', requireAdmin, (req, res) => {
   }
 });
 
-// Create new user validation schema
+// Minimal user directory for the Mock2 share/add-members picker (ADR-011).
+// A developer sharing a project they own needs to pick a collaborator, but the
+// full /users list is admin-only and exposes roles/secrets. This returns only
+// id + username + displayName for real (non-pending) accounts, and is open to
+// developer+ (pending is denied). No role, no security state, no secrets.
+userRouter.get('/users/pickable', requireDeveloperOrAbove, (req, res) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT id, username, display_name
+      FROM users
+      WHERE role IN ('admin', 'developer')
+      ORDER BY username
+    `).all();
+    res.json({
+      users: rows.map((u) => ({ id: u.id, username: u.username, displayName: u.display_name })),
+    });
+  } catch (error) {
+    console.error('Error listing pickable users:', error);
+    res.status(500).json({ error: 'Failed to list users' });
+  }
+});
+
+// Create new user validation schema. `role` is an effective-role token
+// (ADR-011); it is translated to the { role, is_superadmin } column pair on
+// write. Default 'developer' — the API onboarding role — even though the DB
+// column DEFAULT is the inert 'pending' (future LDAP safety).
 const createUserSchema = z.object({
   username: z.string().min(3, 'Username must be at least 3 characters').max(50),
   displayName: z.string().max(100).optional(),
-  role: z.enum(['admin', 'user']).default('user'),
+  role: z.enum(['superadmin', 'admin', 'developer', 'pending']).default('developer'),
 });
 
-// Create new user
+// Create new user. requireAdmin (both admin tiers) may create users and assign
+// admin/developer/pending; only a superadmin may create a superadmin
+// (checkSuperadminGrant).
 userRouter.post('/users', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { username, displayName, role } = createUserSchema.parse(req.body);
     const db = getDb();
+
+    const cols = roleToColumns(role);
+    if (!cols) return res.status(400).json({ error: 'Invalid role' });
+
+    // Only a superadmin may grant the superadmin role.
+    const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+    const grant = checkSuperadminGrant({
+      actorIsSuperadmin: actor?.is_superadmin === 1,
+      grantingSuperadmin: cols.is_superadmin === 1,
+    });
+    if (!grant.allowed) return res.status(403).json({ error: grant.error });
 
     // Check if username already exists
     const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
@@ -719,9 +761,9 @@ userRouter.post('/users', requireAdmin, requireSudo, async (req, res) => {
     // Create user
     const userId = uuidv4();
     db.prepare(`
-      INSERT INTO users (id, username, display_name, password_hash, totp_secret, totp_enabled, role, password_change_required)
-      VALUES (?, ?, ?, ?, '', 0, ?, 1)
-    `).run(userId, username, displayName || null, passwordHash, role);
+      INSERT INTO users (id, username, display_name, password_hash, totp_secret, totp_enabled, role, is_superadmin, password_change_required)
+      VALUES (?, ?, ?, ?, '', 0, ?, ?, 1)
+    `).run(userId, username, displayName || null, passwordHash, cols.role, cols.is_superadmin);
 
     logAudit(req.user.id, 'USER_CREATED', 'user', userId, { username, role }, req.ip);
 
@@ -745,14 +787,17 @@ userRouter.post('/users', requireAdmin, requireSudo, async (req, res) => {
   }
 });
 
-// Update user validation schema
+// Update user validation schema. `role` is an effective-role token (ADR-011).
 const updateUserSchema = z.object({
   displayName: z.string().max(100).optional(),
-  role: z.enum(['admin', 'user']).optional(),
+  role: z.enum(['superadmin', 'admin', 'developer', 'pending']).optional(),
   resetPassword: z.boolean().optional(),
 });
 
-// Update user
+// Update user. requireAdmin may edit users and assign admin/developer/pending;
+// the superadmin guards below add: (1) a non-superadmin cannot touch a
+// superadmin target AT ALL (any field), (2) only a superadmin may grant the
+// superadmin role, (3) the last superadmin can never be demoted.
 userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { id } = req.params;
@@ -764,26 +809,47 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Superadmin protection (ADR-007): a non-superadmin cannot demote a
-    // superadmin (role admin -> user). Actor's flag is read from the DB —
-    // the JWT does not carry is_superadmin.
-    if (role === 'user' && user.role === 'admin') {
-      const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+    const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
+    const actorIsSuperadmin = actor?.is_superadmin === 1;
+    const targetIsSuperadmin = user.is_superadmin === 1;
+
+    // (1) Superadmin protection (ADR-011): a non-superadmin cannot modify a
+    // superadmin account at all — role change, display-name edit, or password
+    // reset. Actor's flag is read from the DB (the JWT does not carry it).
+    {
       const guard = checkSuperadminProtection({
-        actorIsSuperadmin: actor?.is_superadmin === 1,
-        targetIsSuperadmin: user.is_superadmin === 1,
-        action: 'demote',
+        actorIsSuperadmin,
+        targetIsSuperadmin,
+        action: 'modify',
       });
       if (!guard.allowed) {
         return res.status(403).json({ error: guard.error });
       }
     }
 
-    // Prevent demoting the last admin
-    if (role === 'user' && user.role === 'admin') {
-      const adminCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?').get('admin').count;
-      if (adminCount <= 1) {
-        return res.status(400).json({ error: 'Cannot demote the last admin user' });
+    // Translate the effective-role token to columns (when a role change is
+    // requested) and apply the remaining superadmin rules.
+    let cols = null;
+    if (role !== undefined) {
+      cols = roleToColumns(role);
+      if (!cols) return res.status(400).json({ error: 'Invalid role' });
+
+      // (2) Only a superadmin may grant the superadmin role.
+      const grant = checkSuperadminGrant({
+        actorIsSuperadmin,
+        grantingSuperadmin: cols.is_superadmin === 1 && !targetIsSuperadmin,
+      });
+      if (!grant.allowed) return res.status(403).json({ error: grant.error });
+
+      // (3) The last superadmin can never be demoted (applies even to a
+      // superadmin actor demoting themselves / another).
+      if (targetIsSuperadmin && cols.is_superadmin !== 1) {
+        const superCount = db.prepare(
+          'SELECT COUNT(*) as count FROM users WHERE is_superadmin = 1'
+        ).get().count;
+        if (superCount <= 1) {
+          return res.status(400).json({ error: 'Cannot remove the last superadmin' });
+        }
       }
     }
 
@@ -797,16 +863,16 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       `).run(passwordHash, id);
     }
 
-    // Update display name and role
+    // Update display name, role, and the superadmin flag together.
     const updates = [];
     const params = [];
     if (displayName !== undefined) {
       updates.push('display_name = ?');
       params.push(displayName);
     }
-    if (role !== undefined) {
-      updates.push('role = ?');
-      params.push(role);
+    if (cols) {
+      updates.push('role = ?', 'is_superadmin = ?');
+      params.push(cols.role, cols.is_superadmin);
     }
 
     if (updates.length > 0) {
@@ -852,25 +918,26 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       return res.status(400).json({ error: 'Cannot delete your own account' });
     }
 
-    // Superadmin protection (ADR-007): a non-superadmin cannot deactivate
-    // (delete) a superadmin account.
+    // Superadmin protection (ADR-011): a non-superadmin cannot delete a
+    // superadmin account.
     {
       const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
       const guard = checkSuperadminProtection({
         actorIsSuperadmin: actor?.is_superadmin === 1,
         targetIsSuperadmin: user.is_superadmin === 1,
-        action: 'deactivate',
+        action: 'delete',
       });
       if (!guard.allowed) {
         return res.status(403).json({ error: guard.error });
       }
     }
 
-    // Prevent deleting the last admin
-    if (user.role === 'admin') {
-      const adminCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?').get('admin').count;
-      if (adminCount <= 1) {
-        return res.status(400).json({ error: 'Cannot delete the last admin user' });
+    // Prevent deleting the last superadmin (a plain admin being the last admin
+    // is fine — the platform only guards its last break-glass account).
+    if (user.is_superadmin === 1) {
+      const superCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE is_superadmin = 1').get().count;
+      if (superCount <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last superadmin' });
       }
     }
 

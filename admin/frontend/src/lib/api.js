@@ -540,6 +540,10 @@ export const api = {
   // User Management (Admin only)
   getUsers: () => request('/user/users'),
 
+  // Minimal user directory for the Mock2 share/add-members picker (developer+,
+  // ADR-011) — returns only { id, username, displayName }.
+  getPickableUsers: () => request('/user/users/pickable'),
+
   createUser: (data) => request('/user/users', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -1090,6 +1094,10 @@ export const api = {
     }
     return res;
   },
+
+  // Selectable parent domains for the project-create picker (developer+,
+  // ADR-011) — { id, domain } for verified+enabled domains only.
+  mock2ListSelectableDomains: () => request('/mock2/selectable-domains'),
 
   // Mock2 parent domains (Phase M1). Admin-gated; delete requires sudo.
   mock2ListParentDomains: () => request('/mock2/parent-domains'),

@@ -1396,6 +1396,58 @@ export function initDatabase() {
   // overrides a deliberate assignment — once one exists, this stops acting.
   backfillSuperadmin(db);
 
+  // Three-tier RBAC (ADR-011). Widen users.role from ('admin','user') to
+  // ('admin','developer','pending') and rename the data 'user' -> 'developer'.
+  // SQLite cannot alter a CHECK in place, so the users table is rebuilt
+  // (new table -> copy rows -> drop -> rename) with FKs disabled during the
+  // swap so the child tables' ON DELETE CASCADE doesn't fire on the DROP.
+  // is_superadmin and every other column are preserved verbatim; only role is
+  // remapped. The new column DEFAULT is 'pending' so any insert path that
+  // forgets a role yields an inert, access-less account (future LDAP safety) —
+  // the API create path still defaults to 'developer' explicitly.
+  runMigration(db, 501, 'rbac_three_tier_roles', (d) => {
+    d.exec(`
+      CREATE TABLE users_new (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        display_name TEXT,
+        password_hash TEXT NOT NULL,
+        totp_secret TEXT NOT NULL,
+        totp_enabled INTEGER DEFAULT 1,
+        role TEXT DEFAULT 'pending' CHECK(role IN ('admin', 'developer', 'pending')),
+        password_change_required INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        failed_attempts INTEGER NOT NULL DEFAULT 0,
+        last_failed_at TEXT,
+        locked_until TEXT,
+        webauthn_user_handle BLOB,
+        is_superadmin INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    d.exec(`
+      INSERT INTO users_new (
+        id, username, display_name, password_hash, totp_secret, totp_enabled,
+        role, password_change_required, created_at, updated_at,
+        failed_attempts, last_failed_at, locked_until, webauthn_user_handle, is_superadmin
+      )
+      SELECT
+        id, username, display_name, password_hash, totp_secret, totp_enabled,
+        CASE
+          WHEN role = 'admin' THEN 'admin'
+          WHEN role = 'user' THEN 'developer'
+          WHEN role = 'developer' THEN 'developer'
+          WHEN role = 'pending' THEN 'pending'
+          ELSE 'developer'
+        END,
+        password_change_required, created_at, updated_at,
+        failed_attempts, last_failed_at, locked_until, webauthn_user_handle, is_superadmin
+      FROM users
+    `);
+    d.exec(`DROP TABLE users`);
+    d.exec(`ALTER TABLE users_new RENAME TO users`);
+  }, { disableFks: true });
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

@@ -25,6 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { effectiveRole, roleLabel, isOperator as isOperatorRole, isPending as isPendingRole } from '@/lib/roles';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
 import SnapshotExportBanner from '@/components/SnapshotExportBanner';
 
@@ -138,9 +139,17 @@ export default function Layout() {
   // CVE inbox unread count for the sidebar badge.
   const [cveUnread, setCveUnread] = useState(0);
 
-  // Check admin status from user context and localStorage fallback
+  // Effective role (ADR-011) from user context, with the localStorage cache as
+  // a fallback during hydration. Operator = superadmin/admin (full operator
+  // nav); developer = the AI-dev Projects flow only; pending = Profile only.
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
-  const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+  const effUser = user || storedUser;
+  const isAdmin = isOperatorRole(effUser);        // admin-tier: superadmin or admin
+  const effRole = effectiveRole(effUser);
+  const isDeveloper = effRole === 'developer';
+  const isPending = isPendingRole(effUser);
+  // developer+ (not pending) may use the Mock2 Projects surface.
+  const canUseProjects = isAdmin || isDeveloper;
 
   // Mock2 nav visibility. The entry appears only when the backend reports
   // the module enabled (GET /api/mock2/status → 200). On a disabled or
@@ -192,19 +201,23 @@ export default function Layout() {
     return () => { cancelled = true; clearInterval(id); };
   }, [isAdmin]);
 
-  // Probe Mock2 presence once on mount (admins only — the route is
-  // admin-gated). A 404 (disabled/pinned host) leaves the entry hidden.
+  // Probe Mock2 presence once on mount (developer+ — the status route is open
+  // to developer+ under ADR-011; a pending account never probes). A 404
+  // (disabled/pinned host) leaves the entry hidden.
   useEffect(() => {
-    if (!isAdmin) { setMock2Enabled(false); return undefined; }
+    if (!canUseProjects) { setMock2Enabled(false); return undefined; }
     let cancelled = false;
     api.mock2Status()
       .then(() => { if (!cancelled) setMock2Enabled(true); })
       .catch(() => { if (!cancelled) setMock2Enabled(false); });
     return () => { cancelled = true; };
-  }, [isAdmin]);
+  }, [canUseProjects]);
 
+  // Nav by effective role (ADR-011). `adminOnly` items show for the operator
+  // tiers only; the Projects entry is developer-visible; Profile is universal
+  // (so a pending account still has it beside the awaiting-role screen).
   const navigation = [
-    { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+    { name: 'Dashboard', href: '/', icon: LayoutDashboard, adminOnly: true },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
@@ -214,15 +227,18 @@ export default function Layout() {
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
     { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
-    // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
-    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true }] : []),
+    // enabled (ADR-001). Visible to operators AND developers; hidden entirely
+    // on disabled/pinned hosts and for pending accounts.
+    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, devVisible: true }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
 
-  const filteredNavigation = navigation.filter(item =>
-    !item.adminOnly || isAdmin
-  );
+  const filteredNavigation = navigation.filter((item) => {
+    if (item.adminOnly) return isAdmin;
+    if (item.devVisible) return canUseProjects; // operator or developer
+    return true; // universal (Profile)
+  });
 
   return (
     <SnapshotExportProvider>
@@ -343,7 +359,7 @@ export default function Layout() {
             <div className="flex items-center gap-3 px-3 py-2">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{user?.username}</p>
-                <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
+                <p className="text-xs text-muted-foreground">{roleLabel(effUser)}</p>
               </div>
               <div className="relative" ref={notifPanelRef}>
                 <Button

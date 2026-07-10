@@ -22,9 +22,19 @@
 import { writeFile, mkdir, readFile, unlink, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
+import { sh } from './host.js';
 
 export const MOCK2_CADDY_DIR = process.env.MOCK2_CADDY_DIR || '/etc/caddy/mock2';
 const CADDY_CONFIG_FILE = process.env.CADDY_CONFIG_FILE || '/etc/caddy/Caddyfile';
+// Caddy's on-disk certificate/key store. Removing a Mock2 site block stops
+// SERVING an FQDN, but Caddy keeps the issued cert on disk until it expires, so
+// a deleted project leaves cert files behind. removeMock2Certs purges them.
+// Default matches the Debian caddy service ("FileStorage:/var/lib/caddy/.local/
+// share/caddy" — seen in `caddy` logs); override for a non-standard data dir.
+const CADDY_DATA_DIR = process.env.MOCK2_CADDY_DATA_DIR || '/var/lib/caddy/.local/share/caddy';
+// An FQDN safe to interpolate into a host `rm` glob: letters, digits, dot, dash
+// only — no spaces, quotes, slashes, or shell metacharacters.
+const SAFE_CERT_FQDN = /^[a-z0-9][a-z0-9.-]{0,252}$/i;
 // The import line Mock2 adds to the main Caddyfile. `.caddy` glob so a
 // stray README or editor swap file in the dir can't break config parse
 // (mirrors the per-service custom-dir convention in services.js).
@@ -229,6 +239,32 @@ export async function reloadMock2Caddy() {
 export async function unpublishMock2Domain(domain) {
   await removeMock2DomainSite(domain);
   return reloadMock2Caddy();
+}
+
+// buildCertRmTargets(fqdns, dataDir) — the validated `certificates/<ca>/<fqdn>`
+// glob targets to remove for a set of FQDNs. Pure + exported so the shell-safety
+// filter is unit-testable without touching the host. Drops any FQDN that isn't
+// plain letters/digits/dot/dash (so nothing shell-unsafe reaches the rm), and
+// de-dupes. The `*` is the issuer dir (Let's Encrypt, ZeroSSL, …).
+export function buildCertRmTargets(fqdns = [], dataDir = CADDY_DATA_DIR) {
+  const safe = [...new Set(
+    (fqdns || []).map((f) => String(f || '').trim().toLowerCase()).filter((f) => SAFE_CERT_FQDN.test(f)),
+  )];
+  return safe.map((f) => `"${dataDir}/certificates"/*/"${f}"`);
+}
+
+// removeMock2Certs(fqdns) — best-effort purge of a deleted project's issued
+// certificates from Caddy's on-disk store. The site block is already gone
+// (publishDomain), so no reload is needed — this just stops the cert/key files
+// lingering until expiry. Runs host-side (rm reaches the caddy data dir, which
+// is NOT mounted into the container). Never throws; a missing file is success.
+export async function removeMock2Certs(fqdns = []) {
+  const targets = buildCertRmTargets(fqdns);
+  if (targets.length === 0) return { ok: true, removed: 0 };
+  const r = await sh(`rm -rf ${targets.join(' ')} 2>&1`, { timeoutMs: 30000 });
+  return r.code === 0
+    ? { ok: true, removed: targets.length }
+    : { ok: false, removed: 0, error: (r.stderr || r.stdout || '').trim().slice(-300) };
 }
 
 // Remove the whole Mock2 caddy dir (used by tests / full teardown). Never

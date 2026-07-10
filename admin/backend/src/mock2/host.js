@@ -20,15 +20,38 @@ export function runHost(bin, args, { input = null, timeoutMs = 120000 } = {}) {
     let stdout = '';
     let stderr = '';
     let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      // Release the pipe fds. A helper the command spawned may still hold the
+      // write end open (see the 'exit' note below), so destroy our read end
+      // rather than leak it across many provisions.
+      try { child.stdout?.destroy(); } catch { /* ignore */ }
+      try { child.stderr?.destroy(); } catch { /* ignore */ }
+      resolve(v);
+    };
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* ignore */ }
       finish({ code: null, stdout, stderr: stderr + '\n[mock2] host command timed out', timedOut: true });
     }, timeoutMs);
     child.stdout?.on('data', (d) => { stdout += d.toString(); });
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
+    // Destroying the pipes in finish() can emit 'error' on the stream; swallow it.
+    child.stdout?.on('error', () => { /* ignore */ });
+    child.stderr?.on('error', () => { /* ignore */ });
     child.on('error', (err) => { clearTimeout(timer); finish({ code: null, stdout, stderr: stderr + err.message }); });
-    child.on('close', (code) => { clearTimeout(timer); finish({ code, stdout, stderr }); });
+    // Resolve when the command PROCESS exits — NOT only when its stdio streams
+    // 'close'. An Incus operation can leave a helper alive that inherited our
+    // stdout/stderr pipes: `incus network create … ipv4.dhcp=true` starts a
+    // dnsmasq for the new subnet, and that dnsmasq keeps the pipes open, so
+    // 'close' never fires and the call hangs to its timeout even though the
+    // command already succeeded (the bridge IS created — visible in
+    // `incus network list`). By 'exit' we have the exit code and the command's
+    // own output; setImmediate lets queued 'data' callbacks flush, then resolve.
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      setImmediate(() => finish({ code, stdout, stderr }));
+    });
     if (input != null) {
       try { child.stdin.write(input); child.stdin.end(); } catch { /* ignore */ }
     }

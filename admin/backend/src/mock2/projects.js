@@ -190,6 +190,16 @@ export function listGraceSlugs(projectId) {
     .all(projectId);
 }
 
+// EVERY slug a project has ever held (current + any rotated-away ones), from the
+// never-reuse history. Used on delete to purge each FQDN's Caddy cert. History
+// rows survive deletion, so this is safe to call before or after deleteProject.
+export function listProjectSlugs(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT slug FROM mock2_slug_history WHERE project_id = ?`)
+    .all(projectId)
+    .map((r) => r.slug);
+}
+
 // ---- membership (ADR-007) ----
 
 export function listMembers(projectId) {

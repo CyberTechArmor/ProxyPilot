@@ -29,6 +29,7 @@ import {
   buildMock2SiteBlock,
   buildMock2DomainConfig,
   mock2SiteFileName,
+  buildCertRmTargets,
 } from '../mock2/caddy.js';
 import { runVerification } from '../mock2/verify.js';
 
@@ -200,6 +201,16 @@ test('buildMock2DomainConfig: one block per FQDN', () => {
   assert.match(cfg, /a\.dev\.example\.com \{/);
   assert.match(cfg, /b\.dev\.example\.com \{/);
   assert.match(cfg, /# canary/);
+});
+
+test('buildCertRmTargets: builds per-issuer globs, dedupes, drops unsafe FQDNs', () => {
+  const t = buildCertRmTargets(['my-app.dev.example.com', 'my-app.dev.example.com'], '/data');
+  assert.deepEqual(t, ['"/data/certificates"/*/"my-app.dev.example.com"']);
+  // Shell-unsafe values never reach the rm command.
+  assert.deepEqual(buildCertRmTargets(['a.com; rm -rf /', 'b $(x)`y`', 'ok.dev.example.com'], '/d'),
+    ['"/d/certificates"/*/"ok.dev.example.com"']);
+  assert.deepEqual(buildCertRmTargets([], '/d'), []);
+  assert.deepEqual(buildCertRmTargets(['', null, undefined], '/d'), []);
 });
 
 test('mock2SiteFileName: filesystem-safe', () => {

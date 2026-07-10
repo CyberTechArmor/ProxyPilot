@@ -24,7 +24,7 @@ import {
 } from './domains.js';
 import { validateDomain, publicDomainShape, isSelectable, parseHostIps } from './domain-logic.js';
 import { runVerification } from './verify.js';
-import { writeMock2DomainSite, unpublishMock2Domain, reloadMock2Caddy } from './caddy.js';
+import { writeMock2DomainSite, unpublishMock2Domain, reloadMock2Caddy, removeMock2Certs } from './caddy.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import {
   listProjects,
@@ -42,6 +42,7 @@ import {
   upsertMember,
   removeMember,
   lookupUser,
+  listProjectSlugs,
 } from './projects.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { requireMock2Role } from './authz.js';
@@ -739,7 +740,24 @@ export function createMock2Router() {
     resolveQueueItem(`mock2-provision:${project.id}`, { resolution: 'project deleted' });
     resolveQueueItem(`mock2-flag:${project.id}`, { resolution: 'project deleted' });
     let caddy = { ok: true };
-    if (project.parent_domain_id) caddy = await publishDomain(project.parent_domain_id);
+    if (project.parent_domain_id) {
+      caddy = await publishDomain(project.parent_domain_id);
+      // publishDomain dropped the routes, but Caddy keeps the issued certs on
+      // disk until they expire — purge them so a deleted project leaves nothing
+      // behind. Every FQDN the project ever served: current + rotated slugs, and
+      // a custom domain. Best-effort (never blocks the delete response).
+      try {
+        const domain = getParentDomain(project.parent_domain_id);
+        if (domain) {
+          const fqdns = [...new Set([project.slug, ...listProjectSlugs(project.id)].filter(Boolean)
+            .map((s) => `${s}.${domain.domain}`))];
+          if (project.custom_domain) fqdns.push(project.custom_domain);
+          await removeMock2Certs(fqdns);
+        }
+      } catch (err) {
+        console.error('[mock2] cert cleanup on delete failed:', err?.message);
+      }
+    }
     // Destroy the container + its bridge; KEEP the bare repo (ADR-006 —
     // slug/history live on). The row is already deleted, so the fence + proxy
     // reconciles below drop this project from both plans (M4).

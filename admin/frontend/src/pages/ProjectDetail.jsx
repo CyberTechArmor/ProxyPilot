@@ -13,7 +13,7 @@
 // MOBILE_FIRST: single column, stacked rows, 44px primary touch targets, a
 // full-screen-on-<sm delete dialog. Renders clean at 360px.
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -28,10 +28,12 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
+  Monitor, Smartphone, Sparkles, TerminalSquare, MessageSquare,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -64,6 +66,17 @@ export default function ProjectDetail() {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
+  const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  const archivedDefaulted = useRef(false);
+
+  // An archived project has no chat/terminal — land on Details once we know it's
+  // archived (only the first time, so a manual tab switch still sticks).
+  useEffect(() => {
+    if (project?.lifecycle === 'archived' && !archivedDefaulted.current) {
+      archivedDefaulted.current = true;
+      setTab('details');
+    }
+  }, [project?.lifecycle]);
 
   const load = useCallback(async () => {
     try {
@@ -257,6 +270,16 @@ export default function ProjectDetail() {
   // the server refuses the route regardless. Only view + rehydrate remain.
   const readOnly = isArchived;
   const jobBusy = busy || !!pendingJob;
+  const designApproved = !!project.stage?.design_approved;
+
+  // The Chat tab's centerpiece: the live preview iframe. While online, prefer the
+  // current mockup's /_preview; once the design is approved (mockup discarded)
+  // fall back to the built app at the project URL. Null ⇒ show a placeholder and
+  // center the chat instead (matches "if the iframe can display, center the chat").
+  const previewSrc = project.lifecycle === 'active'
+    ? (project.preview_url || (designApproved && project.url ? project.url : null))
+    : null;
+  const terminalAvailable = !isArchived && canEdit && project.lifecycle === 'active';
 
   return (
     <div className="space-y-6">
@@ -296,6 +319,67 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
+      <Tabs value={tab} onValueChange={setTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-3 h-auto">
+          <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
+          <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
+          <TabsTrigger value="details" className="py-2"><Circle className="h-4 w-4 mr-1.5" />Details</TabsTrigger>
+        </TabsList>
+
+        {/* CHAT — the design-assistant conversation with the live mockup/app
+            preview as the centerpiece. With a preview, it's the large left pane
+            and the chat sits beside it; with no preview yet, the chat is centered
+            on its own so it stays the focus. */}
+        <TabsContent value="chat" className="mt-4">
+          {isArchived ? (
+            <p className="text-sm text-muted-foreground">
+              This project is archived — the chat and preview are read-only history. Rehydrate it to continue building.
+            </p>
+          ) : previewSrc ? (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
+              <div className="min-w-0">
+                <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} />
+              </div>
+              <div className="min-w-0 space-y-4">
+                <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+                {designApproved ? (
+                  <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="mx-auto w-full max-w-3xl space-y-4">
+              <PreviewPlaceholder project={project} />
+              <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+              {designApproved ? (
+                <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+              ) : null}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* TERMINAL — a shell into the project container (m2-<id>). */}
+        <TabsContent value="terminal" className="mt-4">
+          {terminalAvailable ? (
+            <ProjectTerminal projectId={id} containerName={project.container_name} defaultOpen />
+          ) : (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2"><TerminalSquare className="h-4 w-4" /> Terminal</CardTitle>
+                <CardDescription>
+                  {isArchived
+                    ? 'The container is archived — rehydrate the project to open a shell.'
+                    : project.lifecycle !== 'active'
+                      ? 'The container is not online. Start it to open a shell.'
+                      : 'A shell into this project is available to editors and admins.'}
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* DETAILS — the live URL, members, and all project administration. */}
+        <TabsContent value="details" className="mt-4 space-y-6">
       {/* Live URL + provisioning progress */}
       <Card>
         <CardHeader>
@@ -382,26 +466,7 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* M7: Stage 1 (Concept) — chat, mockup preview, design approval. The
-          primary surface until the design is approved; the persistent stage
-          indicator lives in its header. */}
-      {!isArchived ? (
-        <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
-      ) : null}
-
-      {/* M6/M8: build cycle — the Build press runs the M8 audit first (rule
-          questions in the chat above, framework deviations to the admin queue),
-          then the runner. Only appears once the Stage-1 design is approved. */}
-      {!isArchived && project.stage?.design_approved ? (
-        <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
-      ) : null}
-
-      {/* Project terminal — a shell into the container (m2-<id>). Editors/admins
-          only, and only while the container is online; the backend authorizer
-          enforces the same. Lazily connects on open. */}
-      {!isArchived && canEdit && project.lifecycle === 'active' ? (
-        <ProjectTerminal projectId={id} containerName={project.container_name} />
-      ) : null}
+      {/* (chat, build cycle, and terminal now live in the Chat/Terminal tabs above) */}
 
       {/* Members */}
       <Card>
@@ -619,6 +684,8 @@ export default function ProjectDetail() {
           </CardContent>
         </Card>
       ) : null}
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={confirmArchive} onOpenChange={(o) => !o && setConfirmArchive(false)}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
@@ -652,6 +719,87 @@ export default function ProjectDetail() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// PreviewPanel — the Chat tab's centerpiece: the project's live mockup (or the
+// built app, once the design is approved) in an embedded iframe with a
+// Desktop/Mobile width toggle and an open-in-new-tab. The framed doc is a
+// different origin (the project's own HTTPS host), so it renders sandboxed with
+// its own origin's privileges — the mock2 dev server sets no X-Frame-Options, so
+// it embeds cleanly. MOBILE_FIRST: full-width, toggle labels collapse to icons.
+function PreviewPanel({ src, title, approved }) {
+  const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
+  return (
+    <div className="flex flex-col rounded-lg border overflow-hidden bg-muted/20">
+      <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="hidden sm:flex items-center gap-1.5 shrink-0">
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+          </span>
+          <span className="truncate text-xs font-mono text-muted-foreground">{src}</span>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <div className="flex rounded-md border p-0.5">
+            <button
+              type="button" aria-pressed={width === 'desktop'} onClick={() => setWidth('desktop')}
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'desktop' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+            >
+              <Monitor className="h-3.5 w-3.5" /><span className="hidden sm:inline">Desktop</span>
+            </button>
+            <button
+              type="button" aria-pressed={width === 'mobile'} onClick={() => setWidth('mobile')}
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'mobile' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+            >
+              <Smartphone className="h-3.5 w-3.5" /><span className="hidden sm:inline">Mobile</span>
+            </button>
+          </div>
+          <Button asChild variant="ghost" size="icon" className="h-9 w-9">
+            <a href={src} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab">
+              <ExternalLink className="h-4 w-4" />
+            </a>
+          </Button>
+        </div>
+      </div>
+      <div className="flex justify-center overflow-auto bg-white" style={{ height: 'min(70vh, 760px)' }}>
+        <iframe
+          title={`${title || 'Project'} preview`}
+          src={src}
+          className="h-full border-0 bg-white"
+          style={{ width: width === 'mobile' ? 390 : '100%', maxWidth: '100%' }}
+          sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
+        />
+      </div>
+      {!approved ? (
+        <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+          Non-functional mockup preview — approve the design in the chat to build the working app.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// PreviewPlaceholder — shown in the Chat tab when there is no preview yet (no
+// mockup, or the project is still provisioning). Keeps the chat centered as the
+// focus while explaining what will appear here.
+function PreviewPlaceholder({ project }) {
+  const building = project.lifecycle === 'provisioning';
+  return (
+    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed bg-muted/10 px-6 py-10 text-center">
+      {building
+        ? <Loader2 className="mb-3 h-6 w-6 animate-spin text-muted-foreground" />
+        : <Sparkles className="mb-3 h-6 w-6 text-muted-foreground" />}
+      <p className="text-sm font-medium">
+        {building ? 'Setting up your project…' : 'Your live preview will appear here'}
+      </p>
+      <p className="mt-1 max-w-sm text-xs text-muted-foreground">
+        {building
+          ? 'The container, repository, and URL are being provisioned.'
+          : 'Describe your app in the chat below. As soon as a mockup is generated it shows up here — and once you approve the design and build, the working app replaces it.'}
+      </p>
     </div>
   );
 }

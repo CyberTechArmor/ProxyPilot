@@ -16,7 +16,16 @@ import { spawnHost } from '../lib/host-exec.js';
 
 export function runHost(bin, args, { input = null, timeoutMs = 120000 } = {}) {
   return new Promise((resolve) => {
-    const child = spawnHost(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // stdin is 'pipe' only when we actually feed input; otherwise 'ignore' so
+    // the child gets an EOF stdin from the start. Leaving stdin as an open,
+    // never-closed pipe (the previous default) makes some host commands block
+    // FOREVER: `incus network create` reads its non-EOF stdin and never returns,
+    // so neither 'exit' nor 'close' ever fires and the call dies at the timeout.
+    // The equivalent `docker exec` (no -i) works precisely because its stdin is
+    // EOF — this matches that. (Confirmed by reproduction: ['pipe',…] hangs,
+    // ['ignore',…] returns in ~0.5s.)
+    const stdinMode = input != null ? 'pipe' : 'ignore';
+    const child = spawnHost(bin, args, { stdio: [stdinMode, 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let done = false;
@@ -41,13 +50,10 @@ export function runHost(bin, args, { input = null, timeoutMs = 120000 } = {}) {
     child.stderr?.on('error', () => { /* ignore */ });
     child.on('error', (err) => { clearTimeout(timer); finish({ code: null, stdout, stderr: stderr + err.message }); });
     // Resolve when the command PROCESS exits — NOT only when its stdio streams
-    // 'close'. An Incus operation can leave a helper alive that inherited our
-    // stdout/stderr pipes: `incus network create … ipv4.dhcp=true` starts a
-    // dnsmasq for the new subnet, and that dnsmasq keeps the pipes open, so
-    // 'close' never fires and the call hangs to its timeout even though the
-    // command already succeeded (the bridge IS created — visible in
-    // `incus network list`). By 'exit' we have the exit code and the command's
-    // own output; setImmediate lets queued 'data' callbacks flush, then resolve.
+    // 'close'. Safeguard for a command that leaves a helper alive holding our
+    // stdout/stderr pipes (e.g. Incus's dnsmasq for a managed bridge): 'close'
+    // would never fire, but 'exit' does. By 'exit' we have the exit code and the
+    // command's output; setImmediate lets queued 'data' callbacks flush first.
     child.on('exit', (code) => {
       clearTimeout(timer);
       setImmediate(() => finish({ code, stdout, stderr }));

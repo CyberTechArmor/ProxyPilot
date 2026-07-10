@@ -44,6 +44,35 @@
   }
 }
 
+/* Themed scrollbars — subtle and translucent so they read as part of the dark
+   UI rather than the OS default. Firefox uses scrollbar-width/color; WebKit and
+   Chromium use the ::-webkit-scrollbar pseudo-elements. Thumb color is derived
+   from the muted-foreground token so it tracks the theme. (Cross-origin iframe
+   content styles its own scrollbars and is unaffected.) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.55);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* CodeMirror styles */
 .cm-editor {
   height: 100% !important;

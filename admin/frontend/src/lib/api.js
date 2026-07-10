@@ -1208,8 +1208,8 @@ export const api = {
 
   // ---- Mock2 M7: Stage 1 (Concept) — chat, mockup, design approval ----
   mock2GetChat: (id) => request(`/mock2/projects/${id}/chat`),
-  mock2SendChatMessage: (id, message) =>
-    request(`/mock2/projects/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
+  mock2SendChatMessage: (id, message, mode) =>
+    request(`/mock2/projects/${id}/chat`, { method: 'POST', body: JSON.stringify(mode ? { message, mode } : { message }) }),
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
 

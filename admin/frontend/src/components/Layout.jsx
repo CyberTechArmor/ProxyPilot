@@ -13,6 +13,7 @@ import {
   Server,
   Bell,
   Menu,
+  ChevronsLeft,
   TerminalSquare,
   KeyRound,
   Shield,
@@ -35,6 +36,15 @@ export default function Layout() {
 
   // Mobile sidebar drawer state
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Desktop sidebar collapse (md+). Auto-collapses on the project studio page
+  // (a /projects/<id> detail route) to give the preview + chat room; the
+  // operator can expand it again with the toggle. Runs on every route change so
+  // leaving the studio restores the full sidebar.
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    setCollapsed(/^\/projects\/\d+$/.test(location.pathname));
+  }, [location.pathname]);
 
   // Close the mobile sidebar whenever the route changes
   useEffect(() => {
@@ -253,26 +263,51 @@ export default function Layout() {
         />
       )}
 
+      {/* Desktop "expand sidebar" affordance — shown only when collapsed on md+
+          (mobile has its own top-bar menu). Reclaims the sidebar the operator
+          collapsed (or the studio auto-collapsed). */}
+      {collapsed && (
+        <button
+          type="button"
+          onClick={() => setCollapsed(false)}
+          aria-label="Expand navigation"
+          className="hidden md:flex fixed top-3 left-3 z-50 h-10 w-10 items-center justify-center rounded-md border bg-card shadow-sm hover:bg-accent"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+      )}
+
       {/* Sidebar */}
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-50 w-64 bg-card border-r transform transition-transform duration-200 ease-out",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
-          "md:translate-x-0"
+          collapsed ? "md:-translate-x-full" : "md:translate-x-0"
         )}
       >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
-          <div className="flex flex-col px-6 py-4 border-b">
-            <div className="flex items-center gap-2">
-              <Rocket className="h-8 w-8 text-primary" />
-              <span className="text-xl font-bold">ProxyPilot</span>
+          <div className="flex items-start justify-between gap-2 px-6 py-4 border-b">
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-2">
+                <Rocket className="h-8 w-8 text-primary shrink-0" />
+                <span className="text-xl font-bold">ProxyPilot</span>
+              </div>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-xs text-muted-foreground">
+                  v{version || '...'}
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-xs text-muted-foreground">
-                v{version || '...'}
-              </span>
-            </div>
+            {/* Collapse (md+ only — mobile closes via the backdrop/route change). */}
+            <button
+              type="button"
+              onClick={() => setCollapsed(true)}
+              aria-label="Collapse navigation"
+              className="hidden md:inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            >
+              <ChevronsLeft className="h-5 w-5" />
+            </button>
           </div>
 
           {/* Navigation */}
@@ -476,7 +511,12 @@ export default function Layout() {
           falls back to content-sized heights and pages like Host Shell
           render their terminal short. Stacked-content pages scroll
           inside the inner div via overflow-y-auto. */}
-      <main className="pl-0 md:pl-64 pt-14 md:pt-0 h-screen flex flex-col">
+      <main className={cn(
+        "pl-0 pt-14 md:pt-0 h-screen flex flex-col transition-[padding] duration-200 ease-out",
+        // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
+        // doesn't overlap page content; expanded: clear the full sidebar.
+        collapsed ? "md:pl-14" : "md:pl-64"
+      )}>
         <SnapshotExportBanner />
         <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
           <Outlet />

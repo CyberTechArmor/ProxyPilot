@@ -192,8 +192,9 @@ async function maybePushRemote(projectId) {
 // startConceptTurn — the Builder sent a chat message. Synchronous setup (lock,
 // insert the user message, quota check, create the concept cycle), then fire the
 // background turn. Returns { status:'started'|'refused'|'error', cycle, userMessage, error }.
-export async function startConceptTurn({ project, message, user, actingAsAdmin = 0 }) {
+export async function startConceptTurn({ project, message, user, actingAsAdmin = 0, mode = 'design' }) {
   const projectId = Number(project.id);
+  const turnMode = mode === 'plan' ? 'plan' : 'design';
 
   if (project.lifecycle !== 'active') {
     return { status: 'error', error: `The project must be online to chat (it is "${project.lifecycle}"). Bring it online first.` };
@@ -239,7 +240,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   updateCycle(cycle.id, { started_at: nowIso() });
   setJob(projectId, { phase: 'thinking', message: 'Thinking…', kind: 'turn', cycleId: cycle.id, startedAt: Date.now() });
 
-  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message }).catch((err) => {
+  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message, mode: turnMode }).catch((err) => {
     console.error(`[mock2] concept turn crashed for project ${projectId}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `concept turn crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Something went wrong on that turn: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -250,23 +251,26 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   return { status: 'started', cycle: getCycle(cycle.id), userMessage };
 }
 
-async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message }) {
+async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message, mode = 'design' }) {
   const projectId = Number(project.id);
   const containerName = project.container_name || containerNameForProject(projectId);
   const holder = { type: 'user', id: user.id };
+  const planMode = mode === 'plan';
 
   // 1) The concept_chat reply (+ optional mockup request). Restricted tool set:
   //    the ONLY tool is generate_mockup — no write/exec, so the stage cannot
   //    touch backend code or rules (enforced here in dispatch, not the prompt).
-  //    The Builder's message is already stored, so buildConceptTranscript reads
-  //    the whole history (including it) — don't append it again.
+  //    In PLAN mode the model gets NO tools at all, so it structurally cannot
+  //    produce a mockup and stays in conversation until the Builder switches to
+  //    Design. The Builder's message is already stored, so buildConceptTranscript
+  //    reads the whole history (including it) — don't append it again.
   const transcript = buildConceptTranscript(listMessages(projectId));
   const hasMockup = !!project.current_mockup_id;
-  const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup });
+  const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup, mode });
 
   const chatRes = await callModelTurn({
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
-    system, tools: CONCEPT_CHAT_TOOLS, transcript, maxTokens: 4000,
+    system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 4000,
   });
   if (!chatRes.ok) {
     finishCycle(cycle.id, { status: 'failed', error: chatRes.error });

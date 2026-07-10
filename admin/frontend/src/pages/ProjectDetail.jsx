@@ -282,8 +282,8 @@ export default function ProjectDetail() {
   const terminalAvailable = !isArchived && canEdit && project.lifecycle === 'active';
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
+    <div className="flex flex-col h-full min-h-0 gap-3">
+      <div className="flex items-center gap-3 shrink-0">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <h1 className="text-2xl font-bold tracking-tight truncate">{project.name}</h1>
@@ -299,17 +299,16 @@ export default function ProjectDetail() {
       </div>
 
       {orphaned && !isArchived ? (
-        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm">
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm shrink-0">
           <ShieldAlert className="h-4 w-4 mt-0.5 shrink-0" />
           <span>This project has no editors — it is orphaned. Add an editor to restore ownership.</span>
         </div>
       ) : null}
 
-      {/* M6: checkout-lock banner (holder + time remaining + request-takeover). */}
-      {!isArchived ? <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} /> : null}
-
+      {/* The checkout-lock banner moved into the Chat tab (above the preview) to
+          reclaim vertical space; only the archived notice stays up here. */}
       {isArchived ? (
-        <div className="flex items-start gap-2 p-3 rounded-lg bg-muted text-muted-foreground text-sm">
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-muted text-muted-foreground text-sm shrink-0">
           <Lock className="h-4 w-4 mt-0.5 shrink-0" />
           <span>
             This project is <span className="font-medium">archived and read-only</span>. Its git repo, history, and
@@ -319,49 +318,57 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
-      <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-3 h-auto">
+      <Tabs value={tab} onValueChange={setTab} className="w-full flex-1 min-h-0 flex flex-col">
+        <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
           <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
           <TabsTrigger value="terminal" className="py-2"><TerminalSquare className="h-4 w-4 mr-1.5" />Terminal</TabsTrigger>
           <TabsTrigger value="details" className="py-2"><Circle className="h-4 w-4 mr-1.5" />Details</TabsTrigger>
         </TabsList>
 
         {/* CHAT — the design-assistant conversation with the live mockup/app
-            preview as the centerpiece. With a preview, it's the large left pane
-            and the chat sits beside it; with no preview yet, the chat is centered
-            on its own so it stays the focus. */}
-        <TabsContent value="chat" className="mt-4">
+            preview as the centerpiece, sized to fill the viewport. With a preview
+            it's the large left pane and the chat sits beside it; with no preview
+            yet the chat is centered on its own so it stays the focus. The
+            checkout-lock banner rides at the top of this tab. */}
+        <TabsContent value="chat" className="mt-3 flex-1 min-h-0 overflow-hidden">
           {isArchived ? (
             <p className="text-sm text-muted-foreground">
               This project is archived — the chat and preview are read-only history. Rehydrate it to continue building.
             </p>
-          ) : previewSrc ? (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-              <div className="min-w-0">
-                <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} />
-              </div>
-              <div className="min-w-0 space-y-4">
-                <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
-                {designApproved ? (
-                  <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
-                ) : null}
-              </div>
-            </div>
           ) : (
-            <div className="mx-auto w-full max-w-3xl space-y-4">
-              <PreviewPlaceholder project={project} />
-              <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
-              {designApproved ? (
-                <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
-              ) : null}
+            <div className="flex h-full min-h-0 flex-col gap-3">
+              <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
+              {previewSrc ? (
+                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
+                  <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
+                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} />
+                  </div>
+                  <div className="min-w-0 space-y-4 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
+                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+                    {designApproved ? (
+                      <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <div className="mx-auto w-full max-w-3xl space-y-4">
+                    <PreviewPlaceholder project={project} />
+                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+                    {designApproved ? (
+                      <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+                    ) : null}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </TabsContent>
 
-        {/* TERMINAL — a shell into the project container (m2-<id>). */}
-        <TabsContent value="terminal" className="mt-4">
+        {/* TERMINAL — a shell into the project container (m2-<id>), filling the tab. */}
+        <TabsContent value="terminal" className="mt-3 flex-1 min-h-0 overflow-hidden">
           {terminalAvailable ? (
-            <ProjectTerminal projectId={id} containerName={project.container_name} defaultOpen />
+            <ProjectTerminal projectId={id} containerName={project.container_name} defaultOpen fill />
           ) : (
             <Card>
               <CardHeader className="pb-3">
@@ -379,7 +386,7 @@ export default function ProjectDetail() {
         </TabsContent>
 
         {/* DETAILS — the live URL, members, and all project administration. */}
-        <TabsContent value="details" className="mt-4 space-y-6">
+        <TabsContent value="details" className="mt-3 space-y-6 flex-1 min-h-0 overflow-y-auto">
       {/* Live URL + provisioning progress */}
       <Card>
         <CardHeader>
@@ -732,8 +739,8 @@ export default function ProjectDetail() {
 function PreviewPanel({ src, title, approved }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   return (
-    <div className="flex flex-col rounded-lg border overflow-hidden bg-muted/20">
-      <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2">
+    <div className="flex flex-col h-full min-h-0 rounded-lg border overflow-hidden bg-muted/20">
+      <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <span className="hidden sm:flex items-center gap-1.5 shrink-0">
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
@@ -764,7 +771,7 @@ function PreviewPanel({ src, title, approved }) {
           </Button>
         </div>
       </div>
-      <div className="flex justify-center overflow-auto bg-white" style={{ height: 'min(70vh, 760px)' }}>
+      <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">
         <iframe
           title={`${title || 'Project'} preview`}
           src={src}
@@ -774,7 +781,7 @@ function PreviewPanel({ src, title, approved }) {
         />
       </div>
       {!approved ? (
-        <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+        <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground shrink-0">
           Non-functional mockup preview — approve the design in the chat to build the working app.
         </p>
       ) : null}

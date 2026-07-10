@@ -318,6 +318,37 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
+      {/* Stage flow — always visible above the tabs. "Chat to App" opens the
+          preview + chat; Build is the next step (styled clickable but not yet
+          active); Run follows. */}
+      <div className="flex items-center gap-2 shrink-0 overflow-x-auto pb-0.5">
+        <button
+          type="button"
+          onClick={() => setTab('chat')}
+          className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors ${
+            tab === 'chat'
+              ? 'bg-primary/15 text-primary'
+              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+          }`}
+        >
+          <MessageSquare className="h-4 w-4" /> Chat to App
+        </button>
+        <span className="text-muted-foreground/40" aria-hidden>→</span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 border-dashed text-muted-foreground"
+          title="Build turns the approved design into a working app — coming next"
+          onClick={() => toast({ title: 'Build isn’t ready yet', description: 'Finish your design first — Build will turn it into the working app.' })}
+        >
+          <Hammer className="h-4 w-4 mr-1" /> Build
+        </Button>
+        <span className="text-muted-foreground/40" aria-hidden>→</span>
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-muted-foreground whitespace-nowrap">
+          <Play className="h-4 w-4" /> Run
+        </span>
+      </div>
+
       <Tabs value={tab} onValueChange={setTab} className="w-full flex-1 min-h-0 flex flex-col">
         <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
           <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
@@ -343,7 +374,7 @@ export default function ProjectDetail() {
                   <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
                     <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} />
                   </div>
-                  <div className="min-w-0 space-y-4 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
+                  <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
                     {designApproved ? (
                       <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />

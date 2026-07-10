@@ -126,10 +126,10 @@ export function seedFrameworkV1(createdBy = null) {
   }
   const row = insertFrameworkVersion({
     ...content,
-    changelog: 'Seed v1 (vendored placeholder — real operator content owed, risk R8)',
+    changelog: 'Seed v1 — Mock2 Framework v1.1 (constitution, four skills, deterministic gate battery, locked design system). Runtime scaffold still placeholder (R8).',
     source: 'in_app',
     createdBy,
   });
-  console.log('[mock2] framework registry seeded with placeholder version 1 (R8: real content owed)');
+  console.log('[mock2] framework registry seeded with version 1 (Mock2 Framework v1.1 content; runtime scaffold still placeholder — R8)');
   return row;
 }

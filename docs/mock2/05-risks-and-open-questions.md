@@ -59,11 +59,25 @@ in this bundle. Keep that discipline in code (`mock2/runner.js`, not
 **R8 — Framework seed content is a prerequisite, not a code artifact.**
 *(Resolved in direction, 2026-07-09: seed v1 is the operator's current Mock2
 framework, vendored into this repo so it is "built in by default" — see Q3.)*
-The content handoff itself is still a Phase M5 prerequisite: the operator
-must supply the current Mock2 material (constitution, four skills, gate
-scripts, design system, project template) for vendoring under
-`admin/backend/src/mock2/framework-seed/`. Without it, M6+ runs on
-placeholder gates.
+*(Largely closed, 2026-07-10: the framework CONTENT is now authored from the
+operator's* The Mock2 Framework *spec, v1.1, and vendored under
+`admin/backend/src/mock2/framework-seed/` — a real constitution (stack /
+scaffold / auth / security / the four stages), the four stage skills
+(concept / define / build / review) as prompt templates, a real deterministic
+Tier-1 gate battery (typecheck, constitution-lint, rule-coverage,
+security-scan, test), and the locked design system. The gate scripts are
+**self-adapting**: a project on the placeholder template is skipped green, a
+real TypeScript scaffold is enforced for real — so M6's verify checklist stays
+green while the gates genuinely reject a forbidden DB/ORM once a real app
+exists. Verified 2026-07-10.)* **The one remaining piece is the runtime
+scaffold** — the actual TypeScript/Express/Drizzle project code the container
+is seeded from is still ProxyPilot's M2 placeholder (`mock2/template.js`);
+`project_template_ref` names the intended scaffold
+(`builtin:mock2-ts-express-drizzle-v1`) but the seed implementation is a
+separate infra deliverable. Until it lands, real user builds run against the
+placeholder app (the gates skip the TS-specific checks); everything else in the
+framework bundle is real. Content revisions publish a new framework version
+through the admin editor (append-only; never edit the seeded v1 row in place).
 
 **R9 — Existing test-suite gap.** Three backend tests already fail in fresh
 checkouts because they import real `db.js` (`docs/known-issues.md`). Mock2

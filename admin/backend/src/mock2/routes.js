@@ -93,6 +93,17 @@ import {
 import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
+// ---- M6: cycle runner + checkout lock ----
+import { startCycle, getCycleJobStatus, stopAllCycles } from './runner.js';
+import {
+  getCycle, listCyclesForProject, latestCycle, setInterrupt,
+} from './cycles.js';
+import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
+import {
+  getLock, releaseLock, requestTakeover, getLockIdleMinutes,
+} from './locks.js';
+import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
+import { listChangeRecords, verifyProjectChain } from './change-records.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -237,6 +248,17 @@ const projectRemoteSchema = z.object({
   remote_repo: z.string().trim().min(1).max(500),
   push_on_checkpoint: z.boolean().optional(),
 });
+// ---- M6 Zod schemas ----
+const cycleStartSchema = z.object({
+  instruction: z.string().trim().min(1).max(2000),
+});
+const interruptSchema = z.object({
+  action: z.enum(INTERRUPTS),
+});
+const lockIdleSchema = z.object({
+  minutes: z.union([z.number().int(), z.string()]).transform((v) => Number(v))
+    .refine((n) => Number.isInteger(n) && n >= 1 && n <= 1440, 'out of range'),
+});
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
   skills_json: z.string().min(1),
@@ -277,7 +299,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M5' });
+    res.json({ status: 'ok', enabled: true, phase: 'M6' });
   });
 
   // ---- Parent domains ----
@@ -1029,6 +1051,146 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_FRAMEWORK_REVERT', 'mock2_framework_version', row.id,
       { version: row.version, reverted_from_version: source.version }, req.ip);
     res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
+  });
+
+  // ============================================================
+  // M6 — Cycle runner + checkout lock (ADR-003/004). A cycle is one targeted
+  // change: exec into the fenced container, run the pinned gates, checkpoint. The
+  // lock guards the CONTAINER (ADR-004) — startCycle takes it as the cycle holder
+  // and the runner releases it (checkpoint-then-release). The container-writing
+  // mutation M6 introduces is the cycle; membership/flag/domain edits are metadata
+  // and don't take the lock (ADR-004: the lock guards the working tree + dev
+  // server + project DB, not the registry row). refuseIfArchived on the mutators.
+  // ============================================================
+
+  // Start a cycle (editor-gated). estimate → canStartCycle quota check
+  // (refused_quota terminal) → pin framework version → take lock → copy pinned
+  // gates → run in the background. 202 + poll (or 200 refused_quota).
+  router.post('/projects/:id/cycles', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = cycleStartSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'instruction is required (1–2000 chars)' });
+    let result;
+    try {
+      result = await startCycle({
+        project, instruction: parsed.data.instruction,
+        initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not start cycle: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_CYCLE_START', 'mock2_cycle', result.cycle?.id || 0,
+      { instruction: parsed.data.instruction, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(result.status === 'refused' ? 200 : 202).json({
+      cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
+    });
+  });
+
+  // List a project's cycles (viewer).
+  router.get('/projects/:id/cycles', requireMock2Role('viewer'), (req, res) => {
+    res.json({ cycles: listCyclesForProject(req.mock2Project.id).map(publicCycleShape) });
+  });
+
+  // The project's latest cycle — the poll target for the "gates going green" view.
+  router.get('/projects/:id/cycle', requireMock2Role('viewer'), (req, res) => {
+    const cycle = latestCycle(req.mock2Project.id);
+    res.json({ cycle: cycle ? publicCycleShape(cycle) : null, job: cycle ? getCycleJobStatus(cycle.id) : null });
+  });
+
+  // Poll one cycle (viewer). Job progress rides alongside (house 202+poll pattern).
+  router.get('/projects/:id/cycles/:cycleId', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    res.json({ cycle: publicCycleShape(cycle), job: getCycleJobStatus(cycle.id) });
+  });
+
+  // Request an interrupt on a running cycle (editor). Honored at the next step
+  // boundary by the runner: queue_after_step / stop_after_step / abandon.
+  router.post('/projects/:id/cycles/:cycleId/interrupt', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const parsed = interruptSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: `action must be one of ${INTERRUPTS.join(', ')}` });
+    if (cycle.status !== 'running') return res.status(409).json({ error: `Cycle is "${cycle.status}", not running` });
+    setInterrupt(cycle.id, parsed.data.action);
+    logAudit(req.user.id, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { action: parsed.data.action }, req.ip);
+    res.json({ cycle: publicCycleShape(getCycle(cycle.id)) });
+  });
+
+  // Admin stop-all — interrupt every running cycle (escape hatch). Sets
+  // stop_after_step so runners checkpoint and stop at their next boundary.
+  router.post('/cycles/stop-all', requireAdmin, (req, res) => {
+    const r = stopAllCycles();
+    logAudit(req.user.id, 'MOCK2_CYCLE_STOP_ALL', 'mock2_cycle', 0, r, req.ip);
+    res.json(r);
+  });
+
+  // ---- Checkout lock (ADR-004) ----
+
+  // Lock status for the project-detail banner (any member). Holder, remaining
+  // time, warn state, takeover-pending.
+  router.get('/projects/:id/lock', requireMock2Role('viewer'), (req, res) => {
+    const lock = getLock(req.mock2Project.id);
+    let holderName = null;
+    if (lock?.holder_user_id) { const u = lookupUser(lock.holder_user_id); holderName = u?.username || `user ${lock.holder_user_id}`; }
+    else if (lock?.holder_cycle_id) holderName = `cycle #${lock.holder_cycle_id}`;
+    res.json({
+      lock: publicLockShape(lock, { nowIso: new Date().toISOString(), idleMinutes: getLockIdleMinutes(), holderName }),
+      my_role: req.mock2Access.role,
+      idle_minutes: getLockIdleMinutes(),
+    });
+  });
+
+  // Request a takeover — pings the current holder (editor). Doesn't release; the
+  // holder decides, the lock idle-expires, or an admin force-releases.
+  router.post('/projects/:id/lock/takeover', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const r = requestTakeover(req.mock2Project.id, req.user.id);
+    if (!r.ok) return res.status(409).json({ error: 'Project is not checked out.' });
+    logAudit(req.user.id, 'MOCK2_LOCK_TAKEOVER_REQUEST', 'mock2_project', req.mock2Project.id, {}, req.ip);
+    res.json({ ok: true, lock: publicLockShape(getLock(req.mock2Project.id), { nowIso: new Date().toISOString(), idleMinutes: getLockIdleMinutes() }) });
+  });
+
+  // Admin force-release (ADR-004 — audit-logged). The override for a stuck lock.
+  router.post('/projects/:id/lock/force-release', requireAdmin, requireMock2Role('editor'), (req, res) => {
+    const project = req.mock2Project;
+    const lock = getLock(project.id);
+    if (!lock) return res.status(409).json({ error: 'Project is not checked out.' });
+    releaseLock(project.id);
+    logAudit(req.user.id, 'MOCK2_LOCK_FORCE_RELEASE', 'mock2_project', project.id,
+      { released_holder_user: lock.holder_user_id ?? null, released_holder_cycle: lock.holder_cycle_id ?? null }, req.ip);
+    res.json({ ok: true });
+  });
+
+  // Lock idle-timeout (ADR-004 default 15 min). Admin read/write of the
+  // mock2_settings.lock_idle_minutes value the lock sweep keys off.
+  router.get('/settings/lock-idle-minutes', requireAdmin, (_req, res) => {
+    res.json({ lock_idle_minutes: getLockIdleMinutes() });
+  });
+  router.post('/settings/lock-idle-minutes', requireAdmin, (req, res) => {
+    const parsed = lockIdleSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'minutes must be an integer between 1 and 1440' });
+    setMock2Setting(LOCK_IDLE_MINUTES_KEY, parsed.data.minutes, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_LOCK_IDLE', 'mock2_setting', 0, { minutes: parsed.data.minutes }, req.ip);
+    res.json({ lock_idle_minutes: getLockIdleMinutes() });
+  });
+
+  // ---- Change records + chain verification (03-data-model.md; M10 formalizes) ----
+
+  // The project's append-only, hash-chained change history + a live verification
+  // of the whole chain (any member). The M6 verify checklist asserts this passes.
+  router.get('/projects/:id/change-records', requireMock2Role('viewer'), (req, res) => {
+    const records = listChangeRecords(req.mock2Project.id).map((r) => {
+      let gates = null;
+      try { gates = r.gates_run ? JSON.parse(r.gates_run) : null; } catch { gates = null; }
+      return {
+        seq: r.seq, prev_hash: r.prev_hash, hash: r.hash, summary: r.summary,
+        commit_sha: r.commit_sha, gates_run: gates, framework_version: r.framework_version,
+        cycle_id: r.cycle_id, initiated_by: r.initiated_by,
+        acting_as_admin: Number(r.acting_as_admin) === 1, created_at: r.created_at,
+      };
+    });
+    res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
   });
 
   return router;

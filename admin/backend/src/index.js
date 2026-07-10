@@ -440,7 +440,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1 } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, sweepMock2Locks } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
     // Framework registry seed (M5, ADR-003 / risk R8): insert the vendored
@@ -463,6 +463,13 @@ if (mock2Gate.enabled) {
     // window. Non-fatal, fire-and-forget; M9 adds the periodic timer.
     sweepIdleStops().catch((err) =>
       console.error('[mock2] idle sweep failed:', err?.message || err));
+    // M6 checkout-lock idle sweep (ADR-004): auto-release stale human checkouts,
+    // on boot and every 60s. Orphaned CYCLE locks are already released by
+    // sweepMock2OnBoot above; this reclaims idle human holds. Non-fatal.
+    sweepMock2Locks().catch((err) => console.error('[mock2] lock sweep failed:', err?.message || err));
+    setInterval(() => {
+      sweepMock2Locks().catch((err) => console.error('[mock2] lock sweep failed:', err?.message || err));
+    }, 60000).unref();
     console.log('[mock2] module ENABLED — /api/mock2 mounted, mock2.db ready');
   } catch (err) {
     console.error('[mock2] failed to initialize — leaving module unmounted:', err?.message || err);

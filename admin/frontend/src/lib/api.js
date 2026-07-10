@@ -1189,6 +1189,23 @@ export const api = {
   mock2RevertFramework: (id, changelog) =>
     request(`/mock2/framework/versions/${id}/revert`, { method: 'POST', body: JSON.stringify({ changelog }) }),
 
+  // ---- Mock2 M6: cycle runner + checkout lock ----
+  mock2StartCycle: (id, instruction) =>
+    request(`/mock2/projects/${id}/cycles`, { method: 'POST', body: JSON.stringify({ instruction }) }),
+  mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
+  mock2GetCycle: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}`),
+  mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
+  mock2InterruptCycle: (id, cycleId, action) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/interrupt`, { method: 'POST', body: JSON.stringify({ action }) }),
+  mock2StopAllCycles: () => request('/mock2/cycles/stop-all', { method: 'POST' }),
+  mock2GetLock: (id) => request(`/mock2/projects/${id}/lock`),
+  mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),
+  mock2ForceReleaseLock: (id) => request(`/mock2/projects/${id}/lock/force-release`, { method: 'POST' }),
+  mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
+  mock2GetLockIdleMinutes: () => request('/mock2/settings/lock-idle-minutes'),
+  mock2SetLockIdleMinutes: (minutes) =>
+    request('/mock2/settings/lock-idle-minutes', { method: 'POST', body: JSON.stringify({ minutes }) }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

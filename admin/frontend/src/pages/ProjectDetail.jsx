@@ -34,6 +34,7 @@ import {
   Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
+import ConceptStage from '@/components/mock2/ConceptStage';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -341,8 +342,16 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* M6: build cycle — run a targeted change, watch the gates go green. */}
+      {/* M7: Stage 1 (Concept) — chat, mockup preview, design approval. The
+          primary surface until the design is approved; the persistent stage
+          indicator lives in its header. */}
       {!isArchived ? (
+        <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+      ) : null}
+
+      {/* M6: build cycle — run a targeted change, watch the gates go green.
+          Build only appears once the Stage-1 design is approved (M7 unlock). */}
+      {!isArchived && project.stage?.design_approved ? (
         <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} />
       ) : null}
 

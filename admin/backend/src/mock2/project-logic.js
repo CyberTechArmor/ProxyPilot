@@ -17,6 +17,7 @@
 // named "agent".
 
 import { slugFqdn } from './slug.js';
+import { conceptStageInfo, mockupPreviewUrl } from './concept-logic.js';
 
 // ---- role / access resolution (ADR-007) ----
 
@@ -162,6 +163,14 @@ export function publicProjectShape(project, extra = {}) {
     created_by: project.created_by ?? null,
     created_at: project.created_at || null,
     archived_at: project.archived_at || null,
+    // M7 concept stage: the persistent stage indicator (Concept → Define →
+    // Build → Run), the design-approval sign-off, and the live mockup preview
+    // URL (project URL + the dev-server preview path). preview_url is null until
+    // a mockup exists / the project has a live URL.
+    stage: conceptStageInfo(project),
+    design_approved_at: project.design_approved_at || null,
+    current_mockup_id: project.current_mockup_id || null,
+    preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
   };
 
   if (isAdmin) {

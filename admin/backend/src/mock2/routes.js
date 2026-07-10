@@ -104,6 +104,12 @@ import {
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain } from './change-records.js';
+// ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
+import { listMessages } from './chats.js';
+import {
+  startConceptTurn, startDesignApproval, getConceptJobStatus, conceptReady,
+} from './concept.js';
+import { publicChatMessageShape } from './concept-logic.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -259,6 +265,10 @@ const lockIdleSchema = z.object({
   minutes: z.union([z.number().int(), z.string()]).transform((v) => Number(v))
     .refine((n) => Number.isInteger(n) && n >= 1 && n <= 1440, 'out of range'),
 });
+// ---- M7 Zod schemas ----
+const chatMessageSchema = z.object({
+  message: z.string().trim().min(1).max(4000),
+});
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
   skills_json: z.string().min(1),
@@ -299,7 +309,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M6' });
+    res.json({ status: 'ok', enabled: true, phase: 'M7' });
   });
 
   // ---- Parent domains ----
@@ -1191,6 +1201,82 @@ export function createMock2Router() {
       };
     });
     res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
+  });
+
+  // ============================================================
+  // M7 — Stage 1 (Concept): chat, mockup, design approval. A Builder describes an
+  // idea in chat; the concept loop (concept_chat + mockup slots, constrained to
+  // the pinned design system) generates an interactive HTML mockup served at the
+  // project's preview URL; iteration is conversational; the ONLY exit is the
+  // design-approval gesture that extracts state/inventory.json, discards the
+  // mockup, records a hash-chained change record (sign-off #1), and unlocks Build.
+  // Chat polls (whole-message updates) like the rest of the app. A human chat
+  // write takes the checkout lock (ADR-004). refuseIfArchived on the mutators.
+  // ============================================================
+
+  // The concept-stage view: the whole chat, the live turn/approval job, the stage
+  // indicator, and the mockup preview URL (any member — viewers watch, editors
+  // drive). Polled while a turn is in flight.
+  router.get('/projects/:id/chat', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
+    const ready = conceptReady();
+    res.json({
+      messages: listMessages(project.id).map(publicChatMessageShape),
+      job: getConceptJobStatus(project.id),
+      stage: shaped.stage,
+      current_mockup_id: shaped.current_mockup_id,
+      preview_url: shaped.preview_url,
+      concept_ready: ready.ok,
+      concept_ready_reason: ready.ok ? null : ready.reason,
+      my_role: req.mock2Access.role,
+    });
+  });
+
+  // Send a chat message (editor-gated — a chat write takes the lock and may
+  // mutate the container). 202 + poll: the user message lands immediately, the
+  // assistant reply + any mockup update arrive on the background turn.
+  router.post('/projects/:id/chat', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = chatMessageSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'message is required (1–4000 chars)' });
+    let result;
+    try {
+      result = await startConceptTurn({
+        project, message: parsed.data.message, user: req.user,
+        actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not send message: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_CHAT_MESSAGE', 'mock2_project', project.id,
+      { acting_as_admin: req.mock2Access.actingAsAdmin, status: result.status }, req.ip);
+    return res.status(result.status === 'refused' ? 200 : 202).json({
+      message: result.userMessage ? publicChatMessageShape(result.userMessage) : null,
+      refused: result.status === 'refused', reason: result.error || null,
+      job: getConceptJobStatus(project.id),
+    });
+  });
+
+  // Approve the design — Stage 1's only exit (sign-off #1). Editor-gated. 202 +
+  // poll: extraction/commit run in the background; the frontend polls the chat
+  // endpoint until stage.design_approved flips (or a system message reports why
+  // it couldn't).
+  router.post('/projects/:id/design/approve', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    let result;
+    try {
+      result = await startDesignApproval({
+        project, user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not approve the design: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_APPROVE', 'mock2_project', project.id,
+      { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(202).json({ job: getConceptJobStatus(project.id) });
   });
 
   return router;

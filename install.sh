@@ -1301,6 +1301,22 @@ main() {
     # root writes. Engine systemd units run as root.
     install -d -m 0755 /var/lib/proxypilot/cve-inbox
 
+    # Mock2 filtering egress proxy (Phase M4, ADR-010). Installed ONLY when
+    # Mock2 is enabled (absence-by-installation): a disabled/pinned host gets no
+    # squid, no data dir, nothing. The backend generates the per-project ACL
+    # file at runtime; this makes squid present + listening on the fence port.
+    # Best-effort — a failure leaves the bridge default-deny in force (no
+    # egress, the safe direction); re-run scripts/mock2-enable-egress.sh to fix.
+    if [ "${MOCK2_ENABLED:-false}" = "true" ]; then
+        install -d -m 0700 "${MOCK2_DATA_DIR:-/var/lib/proxypilot/mock2}"
+        if [[ -f "${SCRIPT_DIR}/scripts/mock2-enable-egress.sh" ]]; then
+            log_info "Enabling Mock2 filtering egress proxy (squid)..."
+            MOCK2_EGRESS_PROXY_PORT="${MOCK2_EGRESS_PROXY_PORT:-3128}" \
+                bash "${SCRIPT_DIR}/scripts/mock2-enable-egress.sh" \
+                || log_warn "Mock2 egress proxy setup failed — run scripts/mock2-enable-egress.sh on the host (bridge stays default-deny until then)"
+        fi
+    fi
+
     # Engine systemd units (inventory hourly, poll every 5 min).
     if [[ -d "${SCRIPT_DIR}/deploy" ]]; then
         for unit in proxypilot-engine-inventory.service \

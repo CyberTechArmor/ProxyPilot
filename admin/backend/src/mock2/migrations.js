@@ -15,6 +15,9 @@
 //   503 M0 — connectors, quotas, git connectors, remotes, summaries
 //   504 M2 — project provisioning cache columns (web_port, container_ip,
 //            provision_error) — additive, never edits 500-503
+//   505 M4 — network isolation: mock2_projects.bridge_cidr (the per-project
+//            managed bridge's /24) + mock2_egress_allowlist (the per-project
+//            filtering-proxy allowlist, editable, audit-logged) — additive
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -355,6 +358,45 @@ export const MOCK2_MIGRATIONS = [
         ALTER TABLE mock2_projects ADD COLUMN web_port INTEGER;
         ALTER TABLE mock2_projects ADD COLUMN container_ip TEXT;
         ALTER TABLE mock2_projects ADD COLUMN provision_error TEXT;
+      `);
+    },
+  },
+  {
+    // Phase M4 — network isolation (ADR-010). Two additive changes:
+    //
+    //   1. mock2_projects.bridge_cidr — the /24 of the per-project MANAGED
+    //      Incus bridge m2br<id> the project's container is pinned to. The
+    //      bridge name already exists as a column (bridge_name, migration
+    //      500); M4 fills both in at provision. The CIDR is stored (not only
+    //      derived from the id) so the firewall/proxy generators and the boot
+    //      reconcile have a stable per-project subnet even if the derivation
+    //      function ever changes, and so the admin debug view can render it.
+    //      NULL on every row a pre-M4 host created (those still ran on the
+    //      shared bridge — the boot reconcile derives + backfills on wake).
+    //
+    //   2. mock2_egress_allowlist — the per-project filtering-proxy allowlist
+    //      (ADR-010: squid CONNECT/GET only to these dstdomains, keyed by the
+    //      bridge subnet). Seeded on project create with a static default set
+    //      (npm/apt/pypi/model-API hosts — M5 wires the model half to
+    //      connectors); editable by admins (audit-logged). One row per
+    //      (project, host); the squid ACL file is regenerated from these rows.
+    //
+    // Both are additive and absent on a disabled host (block-500 migrations
+    // only ever run inside data/db/mock2.db, which never exists there).
+    version: 505,
+    name: 'mock2_network_isolation',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN bridge_cidr TEXT;
+
+        CREATE TABLE mock2_egress_allowlist (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          host TEXT NOT NULL,
+          created_by INTEGER,
+          created_at TEXT,
+          UNIQUE (project_id, host)
+        );
       `);
     },
   },

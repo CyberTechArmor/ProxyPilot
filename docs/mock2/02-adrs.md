@@ -358,6 +358,50 @@ the L4 reconciler is untouched — Mock2 containers don't use `service_l4_forwar
 Allowlist edits are editor-visible, admin-gated, audit-logged. Scan-vs-manifest
 drift (ADR-005) covers the inbound side; this ADR covers outbound.
 
+**Implementation note (M4 build session, 2026-07-10).** Two decisions were
+made against the running code and are recorded here (as M1 recorded its
+Caddy-shape choice):
+
+1. **A dedicated `table inet mock2`, NOT an extension of `table inet
+   proxypilot`.** The letter of this ADR said "extend the `container_egress`
+   chain." Building it revealed that would be actively unsafe: the running
+   backend does not manage nftables directly — it shells to the CLI binary
+   (`routes/firewall.js` → `proxypilot firewall …`), whose renderer emits
+   `flush table inet proxypilot` on *every* reconcile
+   (`cli/src/core/firewall/render.js`). Anything Mock2 added to that table
+   would be wiped the next time an operator toggled a firewall rule, and the
+   CLI firewall may not be installed at all (it is the "largely-planned core"
+   layer, survey §13). A dedicated table is (a) byte-for-byte absent on a
+   disabled host — the module never imports the firewall code there, so the
+   table never exists (ADR-001); (b) un-clobberable by the CLI's flush; and
+   (c) no weaker for the deny half, because nftables `drop` is final across
+   tables. State lives in Mock2's own file (`MOCK2_DATA_DIR/firewall.json`),
+   never the CLI's `/var/lib/proxypilot/firewall.json`. Implemented in
+   `admin/backend/src/mock2/firewall.js` (rules) + `network-logic.js` (pure
+   renderer). The forward hook denies bridge egress + non-web inbound; the
+   input hook permits DNS/DHCP/proxy to the bridge gateway only and denies the
+   control plane. Both at `priority -10` (in front of the postrouting NAT path
+   — risk R2).
+2. **The R2 cross-table matrix is verified on a host, not from docs.** The one
+   interaction the code cannot settle by construction is how Mock2's *allow*
+   rules (DNS/proxy to the gateway) coexist with the CLI firewall's input
+   `policy drop` *when that firewall is installed and active*: an `accept` in
+   the Mock2 table does not stop a later `drop` in the CLI's `input_hook`. This
+   is exactly the "real test matrix, not reasoning from docs" R2 demanded, and
+   is a step in `scripts/mock2-m4-verify.sh`. The deny half holds regardless
+   (drop is final); if the allow half is blocked on a CLI-firewalled host, the
+   remedy is to permit the `m2br*` bridges' DNS+proxy ingress in that firewall.
+   On a host without the CLI firewall's input policy-drop (the common case),
+   the Mock2 input chain's allow + deny is self-sufficient.
+
+**Guardrail compliance.** The squid layer meets the ADR-010 weight exactly:
+one package (squid), one service (the stock unit), one generated file
+(`/etc/squid/conf.d/mock2.conf`, ACL-only, regenerated per project by
+`mock2/egress.js`). Installed only when enabled, by `scripts/mock2-enable-egress.sh`
+(invoked from `install.sh`). No custom build, no TLS interception, no
+per-project proxy instance — so the guardrail's fallback (bridge-isolation-only)
+was not triggered and no allowlist requirement was dropped.
+
 ---
 
 ## ADR-011 — Bare-repo ↔ container git transport: Incus disk-device mount

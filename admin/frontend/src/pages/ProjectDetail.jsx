@@ -55,6 +55,8 @@ export default function ProjectDetail() {
   const [users, setUsers] = useState([]);
   const [newMember, setNewMember] = useState({ user_id: '', role: 'editor' });
   const [customDomain, setCustomDomain] = useState('');
+  const [allowlist, setAllowlist] = useState(null); // null = not loaded; [] = empty
+  const [newHost, setNewHost] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
@@ -71,6 +73,16 @@ export default function ProjectDetail() {
     }
   }, [id]);
 
+  const loadAllowlist = useCallback(async () => {
+    try {
+      const res = await api.mock2GetEgressAllowlist(id);
+      setAllowlist(res.hosts || []);
+    } catch (err) {
+      // A viewer on a disabled/absent route just gets no card — don't spam.
+      if (!(err instanceof ApiError && err.status === 404)) console.error('load allowlist failed:', err);
+    }
+  }, [id]);
+
   useEffect(() => {
     let cancelled = false;
     api.mock2Status()
@@ -78,6 +90,7 @@ export default function ProjectDetail() {
         if (cancelled) return;
         setGate('enabled');
         load();
+        loadAllowlist();
         if (isAdmin) api.getUsers().then((r) => setUsers(r.users || r || [])).catch(() => {});
       })
       .catch((err) => {
@@ -85,7 +98,7 @@ export default function ProjectDetail() {
         if (!(err instanceof ApiError)) console.error('mock2 status check failed:', err);
       });
     return () => { cancelled = true; };
-  }, [load, isAdmin]);
+  }, [load, loadAllowlist, isAdmin]);
 
   // Poll while provisioning OR while a background lifecycle job is in flight so
   // the status + URL settle on their own (provisioning also covers rehydrate,
@@ -130,6 +143,35 @@ export default function ProjectDetail() {
     if (!customDomain.trim()) return;
     run(() => api.mock2SetProjectCustomDomain(id, customDomain.trim()), 'Custom domain attached')
       .then(() => setCustomDomain(''));
+  };
+
+  const addEgressHost = async () => {
+    const host = newHost.trim().toLowerCase();
+    if (!host) return;
+    setBusy(true);
+    try {
+      const res = await api.mock2AddEgressHost(id, host);
+      setAllowlist(res.hosts || []);
+      setNewHost('');
+      toast({ title: res.added ? 'Host allowed' : 'Host already allowed' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not add host', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeEgressHost = async (host) => {
+    setBusy(true);
+    try {
+      const res = await api.mock2RemoveEgressHost(id, host);
+      setAllowlist(res.hosts || []);
+      toast({ title: 'Host removed' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not remove host', description: err.message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   // Kick off a background lifecycle job (archive/rehydrate/wake): fire the 202,
@@ -401,15 +443,67 @@ export default function ProjectDetail() {
         </Card>
       ) : null}
 
+      {/* Admin: egress allowlist editor (M4) — the per-project filtering-proxy
+          allowlist. Editing widens what the container can reach; audit-logged.
+          Hidden for archived projects (read-only). */}
+      {isAdmin && allowlist ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Egress allowlist</CardTitle>
+            <CardDescription>
+              The container reaches the internet only through the filtering proxy, and only these hosts.
+              Everything else is blocked at the project bridge. Add npm/model/registry hosts as needed.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <ul className="space-y-1.5">
+              {allowlist.length === 0 ? (
+                <li className="text-sm text-muted-foreground">No hosts allowed — all egress is blocked.</li>
+              ) : allowlist.map((host) => (
+                <li key={host} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+                  <span className="font-mono text-sm break-all">{host}</span>
+                  {!readOnly ? (
+                    <Button
+                      variant="ghost" size="icon" className="h-9 w-9 shrink-0"
+                      disabled={busy} onClick={() => removeEgressHost(host)} aria-label={`Remove ${host}`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {!readOnly ? (
+              <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <Label htmlFor="egress-host">Add host</Label>
+                  <Input
+                    id="egress-host" placeholder="registry.npmjs.org or .npmjs.org" value={newHost}
+                    onChange={(e) => setNewHost(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') addEgressHost(); }}
+                    autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                  />
+                </div>
+                <Button className="h-11 sm:h-10 shrink-0" disabled={busy || !newHost.trim()} onClick={addEgressHost}>
+                  Allow
+                </Button>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
       {isAdmin ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Debug</CardTitle>
-            <CardDescription>Container upstream on the shared bridge — never a host port.</CardDescription>
+            <CardDescription>Container upstream on its per-project bridge — never a host port.</CardDescription>
           </CardHeader>
           <CardContent className="text-sm space-y-1 text-muted-foreground">
             <div className="flex justify-between gap-3"><span>Container</span><span className="font-mono break-all">{project.container_name || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Upstream</span><span className="font-mono break-all">{project.upstream || '—'}</span></div>
+            <div className="flex justify-between gap-3"><span>Bridge</span><span className="font-mono break-all">{project.bridge_name || '—'}</span></div>
+            <div className="flex justify-between gap-3"><span>Bridge subnet</span><span className="font-mono break-all">{project.bridge_cidr || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Bridge IP</span><span className="font-mono break-all">{project.bridge_ip || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Web port</span><span className="font-mono">{project.web_port || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Repo</span><span className="font-mono break-all">{project.repo_path || '—'}</span></div>

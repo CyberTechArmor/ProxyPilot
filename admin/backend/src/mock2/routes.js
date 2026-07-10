@@ -56,6 +56,15 @@ import {
 } from './provision.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY } from './settings.js';
+import {
+  listAllowlist,
+  addAllowlistHost,
+  removeAllowlistHost,
+  isAllowlistHost,
+  normalizeAllowlistHost,
+} from './allowlist.js';
+import { reconcileMock2Egress } from './egress.js';
+import { reconcileMock2Firewall } from './firewall.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -178,7 +187,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M3' });
+    res.json({ status: 'ok', enabled: true, phase: 'M4' });
   });
 
   // ---- Parent domains ----
@@ -503,6 +512,39 @@ export function createMock2Router() {
     res.json({ idle_stop_days: getIdleStopDays() });
   });
 
+  // ---- Egress allowlist (M4, ADR-010) ----
+  // The per-project filtering-proxy allowlist. Admin-gated + audit-logged (an
+  // allowlist edit widens what a container can reach — a security-relevant
+  // change). Read is allowed to any project member so editors/viewers can SEE
+  // the fence; only admins mutate it. refuseIfArchived on the mutators (an
+  // archived project is read-only, Q4). Every edit re-renders the squid ACL.
+  router.get('/projects/:id/egress-allowlist', requireMock2Role('viewer'), (req, res) => {
+    res.json({ hosts: listAllowlist(req.mock2Project.id), editable: isReqAdmin(req) });
+  });
+
+  router.post('/projects/:id/egress-allowlist', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const host = normalizeAllowlistHost(req.body?.host);
+    if (!isAllowlistHost(host)) {
+      return res.status(400).json({ error: 'host must be a bare hostname or domain (e.g. registry.npmjs.org or .npmjs.org)' });
+    }
+    const { added } = addAllowlistHost(project.id, host, req.user.id);
+    // Regenerate the squid ACL so the change is live. Non-fatal (a squid that is
+    // absent leaves the fence denying — safe direction).
+    const egress = await reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
+    logAudit(req.user.id, 'MOCK2_EGRESS_ALLOW_ADD', 'mock2_project', project.id, { host, added }, req.ip);
+    res.json({ hosts: listAllowlist(project.id), added, egress });
+  });
+
+  router.delete('/projects/:id/egress-allowlist/:host', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const host = normalizeAllowlistHost(decodeURIComponent(req.params.host || ''));
+    const { removed } = removeAllowlistHost(project.id, host);
+    const egress = await reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
+    logAudit(req.user.id, 'MOCK2_EGRESS_ALLOW_REMOVE', 'mock2_project', project.id, { host, removed }, req.ip);
+    res.json({ hosts: listAllowlist(project.id), removed, egress });
+  });
+
   // Destroy a project: tear down its container, drop its slug block, delete the
   // row + memberships. The bare repo AND slug-history reservations are kept so
   // the slug stays un-reusable forever (ADR-006). Admin + fresh sudo. An
@@ -521,9 +563,15 @@ export function createMock2Router() {
     resolveQueueItem(`mock2-flag:${project.id}`, { resolution: 'project deleted' });
     let caddy = { ok: true };
     if (project.parent_domain_id) caddy = await publishDomain(project.parent_domain_id);
-    // Destroy the container; KEEP the bare repo (ADR-006 — slug/history live on).
-    teardownProject({ containerName, repoPath: project.repo_path, removeRepo: false }).catch((err) =>
-      console.error('[mock2] teardown failed:', err?.message));
+    // Destroy the container + its bridge; KEEP the bare repo (ADR-006 —
+    // slug/history live on). The row is already deleted, so the fence + proxy
+    // reconciles below drop this project from both plans (M4).
+    teardownProject({ containerName, projectId: project.id, repoPath: project.repo_path, removeRepo: false })
+      .then(() => Promise.all([
+        reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (delete) failed:', e?.message)),
+        reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (delete) failed:', e?.message)),
+      ]))
+      .catch((err) => console.error('[mock2] teardown failed:', err?.message));
     logAudit(req.user.id, 'MOCK2_PROJECT_DELETE', 'mock2_project', project.id, { name: project.name, slug: project.slug }, req.ip);
     res.json({ ok: true, caddy });
   });

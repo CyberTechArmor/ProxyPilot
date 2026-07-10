@@ -11,3 +11,8 @@ export { initMock2Db, getMock2Db, mock2DbPath, sweepMock2OnBoot } from './db.js'
 export { createMock2Router } from './routes.js';
 export { reconcileMock2Domains } from './reconcile.js';
 export { sweepIdleStops } from './idle.js';
+// M4 network isolation: re-apply the per-project nftables fence + regenerate the
+// squid egress ACLs after a restart (l4-reconciler boot pattern). Both are
+// DB-authoritative and non-fatal.
+export { reconcileMock2Firewall } from './firewall.js';
+export { reconcileMock2Egress } from './egress.js';

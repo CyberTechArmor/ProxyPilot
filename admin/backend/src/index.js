@@ -440,7 +440,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
     app.use('/api/mock2', authenticateToken, createMock2Router());
@@ -448,6 +448,13 @@ if (mock2Gate.enabled) {
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>
       console.error('[mock2] domain reconcile failed:', err?.message || err));
+    // Re-apply the M4 network isolation after restart: the per-project nftables
+    // fence and the squid egress ACLs are DB-authoritative, so a restart
+    // re-asserts them (l4-reconciler boot pattern). Non-fatal, fire-and-forget.
+    reconcileMock2Firewall().catch((err) =>
+      console.error('[mock2] firewall reconcile failed:', err?.message || err));
+    reconcileMock2Egress().catch((err) =>
+      console.error('[mock2] egress reconcile failed:', err?.message || err));
     // Idle-stop sweep (M3 groundwork): stop containers idle past the configured
     // window. Non-fatal, fire-and-forget; M9 adds the periodic timer.
     sweepIdleStops().catch((err) =>

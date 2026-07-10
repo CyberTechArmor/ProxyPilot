@@ -22,6 +22,7 @@ import {
 import {
   roleSatisfies,
   resolveMock2Access,
+  mock2TerminalDecision,
   deriveProjectStatus,
   publicProjectShape,
   projectActiveFqdns,
@@ -303,4 +304,50 @@ test('buildMock2DomainConfig: passes each entry upstream through to its block', 
   });
   assert.match(cfg, /reverse_proxy 10\.0\.1\.2:3000/);
   assert.match(cfg, /reverse_proxy 10\.0\.1\.3:8080/);
+});
+
+// ---- mock2TerminalDecision (shell-terminal upgrade verdict) ----
+
+const activeProject = { id: 5, lifecycle: 'active' };
+
+test('mock2TerminalDecision: editor member on an online project is allowed', () => {
+  const access = resolveMock2Access({ user: { id: 'u1', role: 'user' }, membership: { role: 'editor' }, requiredRole: 'editor' });
+  const d = mock2TerminalDecision({ project: activeProject, access });
+  assert.equal(d.ok, true);
+  assert.equal(d.status, 200);
+  assert.equal(d.actingAsAdmin, false);
+});
+
+test('mock2TerminalDecision: admin bypass is allowed and stamped acting_as_admin', () => {
+  const access = resolveMock2Access({ user: { id: 'a1', role: 'admin' }, membership: null, requiredRole: 'editor' });
+  const d = mock2TerminalDecision({ project: activeProject, access });
+  assert.equal(d.ok, true);
+  assert.equal(d.actingAsAdmin, true);
+});
+
+test('mock2TerminalDecision: a viewer is refused (a shell is a mutate capability)', () => {
+  const access = resolveMock2Access({ user: { id: 'u2', role: 'user' }, membership: { role: 'viewer' }, requiredRole: 'editor' });
+  const d = mock2TerminalDecision({ project: activeProject, access });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 403);
+});
+
+test('mock2TerminalDecision: a non-member gets 404, never a 403 that confirms existence', () => {
+  const access = resolveMock2Access({ user: { id: 'u3', role: 'user' }, membership: null, requiredRole: 'editor' });
+  const d = mock2TerminalDecision({ project: activeProject, access });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 404);
+});
+
+test('mock2TerminalDecision: a missing project is 404', () => {
+  const d = mock2TerminalDecision({ project: null, access: null });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 404);
+});
+
+test('mock2TerminalDecision: an allowed member on an offline project is 409', () => {
+  const access = resolveMock2Access({ user: { id: 'u4', role: 'user' }, membership: { role: 'editor' }, requiredRole: 'editor' });
+  const d = mock2TerminalDecision({ project: { id: 6, lifecycle: 'stopped' }, access });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 409);
 });

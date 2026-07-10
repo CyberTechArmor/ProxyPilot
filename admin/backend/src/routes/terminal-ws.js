@@ -13,6 +13,17 @@ import {
 const execAsync = promisify(exec);
 const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
+// Mock2 project-terminal authorizer, registered by the mock2 module on enabled
+// boot (setMock2TerminalAuthorizer). Kept as an injected hook so this core file
+// never statically imports mock2/db.js — ADR-001 (a disabled/pinned host stays
+// byte-for-byte unchanged). Null ⇒ the module is off ⇒ /api/terminal/mock2/* is
+// an unknown target (404). The authorizer is synchronous (better-sqlite3) and
+// returns { ok, status, reason, containerName }.
+let mock2TerminalAuthorizer = null;
+export function setMock2TerminalAuthorizer(fn) {
+  mock2TerminalAuthorizer = typeof fn === 'function' ? fn : null;
+}
+
 // Run `incus info pp-<name> --format json` with a hard 3s budget and
 // return true iff the instance reports at least one routable IPv4 on a
 // non-loopback interface. That's the closest "guest agent is talking"
@@ -116,6 +127,11 @@ function parseTarget(rawUrl) {
   if (url === '/api/terminal/host') return { kind: 'host', target: null, cwd, typeHint: null };
   const m = url.match(/^\/api\/terminal\/lxc\/([a-zA-Z0-9_-]{1,64})$/);
   if (m) return { kind: 'lxc', target: m[1], cwd, typeHint };
+  // Mock2 project terminal: target is the numeric project id; the mock2
+  // authorizer resolves + authorizes it into a container name (m2-<id>). No
+  // cwd/type hints — the shell starts in the container's /srv/app (pty.js).
+  const mm = url.match(/^\/api\/terminal\/mock2\/(\d{1,18})$/);
+  if (mm) return { kind: 'mock2', target: mm[1], cwd: null, typeHint: null };
   return null;
 }
 
@@ -142,6 +158,26 @@ export function attachTerminalServer(httpServer) {
 
     if (target.kind === 'host' && user.role !== 'admin') {
       return rejectUpgrade(socket, 403, 'Admin role required for host shell');
+    }
+
+    // Mock2 project terminal: resolve + authorize via the injected authorizer
+    // (editor-or-admin on an online project, ADR-007). Replace the project id in
+    // target.target with the resolved container name for the PTY. When the mock2
+    // module is off, mock2TerminalAuthorizer is null → unknown target.
+    if (target.kind === 'mock2') {
+      if (!mock2TerminalAuthorizer) {
+        return rejectUpgrade(socket, 404, 'Unknown terminal target');
+      }
+      let decision;
+      try {
+        decision = mock2TerminalAuthorizer({ user, projectId: target.target });
+      } catch {
+        return rejectUpgrade(socket, 500, 'Terminal authorization failed');
+      }
+      if (!decision || !decision.ok) {
+        return rejectUpgrade(socket, decision?.status || 403, decision?.reason || 'Forbidden');
+      }
+      target.target = decision.containerName;
     }
 
     if (currentSessions(user.id) >= MAX_SESSIONS_PER_USER) {

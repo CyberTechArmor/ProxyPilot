@@ -560,7 +560,7 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const parsed = memberSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'user_id and role (editor|viewer) are required' });
-    const userId = Number(parsed.data.user_id);
+    const userId = String(parsed.data.user_id);  // users.id is a UUID, never coerce to Number
     const user = lookupUser(userId);
     if (!user) return res.status(400).json({ error: 'No such user' });
     const member = upsertMember({ projectId: project.id, userId, role: parsed.data.role, invitedBy: req.user.id });

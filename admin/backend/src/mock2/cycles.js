@@ -53,7 +53,7 @@ export function insertCycle({
           est_tokens, est_cost_cents, used_tokens, used_cost_cents, retries, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)`,
     )
-    .run(Number(projectId), Number(frameworkVersionId), stage, status, instruction ?? null, Number(initiatedBy),
+    .run(Number(projectId), Number(frameworkVersionId), stage, status, instruction ?? null, initiatedBy ?? null,
       actingAsAdmin ? 1 : 0, estTokens, estCostCents, nowIso());
   return getCycle(info.lastInsertRowid);
 }

@@ -227,6 +227,14 @@ table inet proxypilot {
     type filter hook input priority filter - 10; policy drop;
     iif lo accept
     iifname "${bridgeIface}" accept
+    # Mock2 per-project bridges (m2br<id>) — accept host-bound input from them
+    # (DHCP + DNS to the bridge gateway, and the egress-proxy port) so a project
+    # container can boot and get an address. Without this the host default-drop
+    # eats the container's DHCP DISCOVER and it never obtains an IP. Isolation is
+    # NOT relaxed: the dedicated \`table inet mock2\` fence still governs what each
+    # bridge may reach (nftables drop is final across tables). The wildcard is
+    # inert on a host with no Mock2 bridges — it matches no interface.
+    iifname "m2br*" accept
     ct state established,related accept
     ct state invalid drop
     ip protocol icmp icmp type echo-request limit rate 5/second accept

@@ -289,9 +289,6 @@ export default function ProjectDetail() {
             <h1 className="text-2xl font-bold tracking-tight truncate">{project.name}</h1>
             {statusChip(project.status, project.flagged)}
           </div>
-          {project.description ? (
-            <p className="text-sm text-muted-foreground truncate">{project.description}</p>
-          ) : null}
         </div>
         <Button asChild variant="ghost" size="sm" className="shrink-0">
           <Link to="/projects"><ArrowLeft className="h-4 w-4 mr-1" />Projects</Link>
@@ -769,16 +766,24 @@ export default function ProjectDetail() {
 // it embeds cleanly. MOBILE_FIRST: full-width, toggle labels collapse to icons.
 function PreviewPanel({ src, title, approved }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
+  const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border overflow-hidden bg-muted/20">
       <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2 shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
           <span className="hidden sm:flex items-center gap-1.5 shrink-0">
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
           </span>
           <span className="truncate text-xs font-mono text-muted-foreground">{src}</span>
+          <Button
+            variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+            onClick={() => setReloadNonce((n) => n + 1)}
+            aria-label="Reload preview" title="Reload preview"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <div className="flex rounded-md border p-0.5">
@@ -804,6 +809,7 @@ function PreviewPanel({ src, title, approved }) {
       </div>
       <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">
         <iframe
+          key={reloadNonce}
           title={`${title || 'Project'} preview`}
           src={src}
           className="h-full border-0 bg-white"

@@ -16,3 +16,7 @@ export { sweepIdleStops } from './idle.js';
 // DB-authoritative and non-fatal.
 export { reconcileMock2Firewall } from './firewall.js';
 export { reconcileMock2Egress } from './egress.js';
+// M5 connectors + quotas + git connectors + framework registry. The router
+// (routes.js) imports the data-access modules directly; only the boot seed is
+// re-exported here for index.js's first-enabled-boot insert (ADR-003 / R8).
+export { seedFrameworkV1 } from './framework.js';

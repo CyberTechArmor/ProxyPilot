@@ -1,0 +1,25 @@
+{
+  "_placeholder": "PLACEHOLDER (risk R8) — the four Mock2 skills are owed by the operator. These are named stubs so framework v1 is well-formed and M6 has slots to load; replace with the operator's real skill content before the runner builds against real intent.",
+  "skills": [
+    {
+      "name": "concept",
+      "title": "Concept & mockup",
+      "body": "PLACEHOLDER — how the model turns a plain-language description into an HTML mockup constrained by the design system (M7)."
+    },
+    {
+      "name": "audit",
+      "title": "Audit & rule routing",
+      "body": "PLACEHOLDER — how the model splits questions into editor rule-questions vs admin framework-deviations on Build (ADR-002 / M8)."
+    },
+    {
+      "name": "build",
+      "title": "Build & gates",
+      "body": "PLACEHOLDER — how the runner makes a targeted change, runs the pinned gate battery, and checkpoints (M6)."
+    },
+    {
+      "name": "iterate",
+      "title": "Iterate & classify",
+      "body": "PLACEHOLDER — how ongoing chat requests are classified implements/contradicts/unaddressed and folded back into rules (M9)."
+    }
+  ]
+}

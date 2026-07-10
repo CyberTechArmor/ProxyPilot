@@ -35,6 +35,7 @@ import { sh, b64 } from './host.js';
 import { listProjects } from './projects.js';
 import { allAllowlists } from './allowlist.js';
 import { buildEgressPlan, renderSquidAcl, EGRESS_PROXY_PORT } from './network-logic.js';
+import { configuredConnectorEgressHosts } from './connectors.js';
 
 export { EGRESS_PROXY_PORT };
 
@@ -88,6 +89,25 @@ export async function reconcileMock2Egress() {
     return { ok: false, error: err?.message };
   }
   const plan = buildEgressPlan(projects, allAllowlists());
+  // M5 seam (ADR-003 → ADR-010): fold the CONFIGURED model connectors' API
+  // hosts into every project's allowlist so a container using a slot can reach
+  // its model API. This DERIVES the model-API half from what's actually
+  // configured; the static DEFAULT_EGRESS_ALLOWLIST placeholder hosts (seeded on
+  // create, network-logic.js) remain the fallback when no connector is set up.
+  // A local ollama / IP endpoint contributes nothing (connectorEgressHost → null).
+  let connectorHosts = [];
+  try {
+    connectorHosts = configuredConnectorEgressHosts();
+  } catch (err) {
+    console.warn('[mock2] egress reconcile: could not read connectors:', err?.message);
+  }
+  if (connectorHosts.length > 0) {
+    for (const entry of plan) {
+      for (const host of connectorHosts) {
+        if (!entry.hosts.includes(host)) entry.hosts.push(host);
+      }
+    }
+  }
   const content = renderSquidAcl(plan);
   const r = await writeSquidAcl(content);
   if (!r.ok && r.installed === false) {

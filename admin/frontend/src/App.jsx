@@ -15,6 +15,9 @@ import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
 import ProjectDetail from '@/pages/ProjectDetail';
 import ParentDomains from '@/pages/ParentDomains';
+import ModelConnectors from '@/pages/ModelConnectors';
+import Quotas from '@/pages/Quotas';
+import FrameworkVersions from '@/pages/FrameworkVersions';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -80,6 +83,9 @@ function App() {
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
         <Route path="projects/domains" element={<ParentDomains />} />
+        <Route path="projects/connectors" element={<ModelConnectors />} />
+        <Route path="projects/quotas" element={<Quotas />} />
+        <Route path="projects/framework" element={<FrameworkVersions />} />
         <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

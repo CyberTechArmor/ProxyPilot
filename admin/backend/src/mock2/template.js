@@ -189,13 +189,46 @@ echo "[mock2] checkpoint pushed to bare repo"
 // repoMount:  where the bare repo is mounted read into the container
 // appDir:     the working clone path
 // webPort:    declared web port
-export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT } = {}) {
+// proxyUrl:   the host egress proxy URL (http://<gateway>:<port>) baked into the
+//             container env so apt/npm/pip/git honor it (M4, ADR-010). When the
+//             bridge fence is up, this is the ONLY way out; omit (M2/M3 default)
+//             and no proxy env is written.
+// noProxy:    NO_PROXY value (localhost + the bridge subnet stay direct).
+export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
+  // Sanitize (these come from derived host/port values, but never interpolate an
+  // unvetted string into a container-side shell): a proxy URL is a scheme + host
+  // + :port; NO_PROXY is a comma list of hosts/CIDRs.
+  const safeProxy = proxyUrl && /^https?:\/\/[a-zA-Z0-9.\-]+:\d{1,5}\/?$/.test(proxyUrl) ? proxyUrl : null;
+  const safeNoProxy = String(noProxy).replace(/[^a-zA-Z0-9.,:/\-]/g, '');
+  const proxyBlock = safeProxy ? `
+# ---- Egress proxy (M4, ADR-010) ----
+# The bridge default-deny fence forces all egress through the host filtering
+# proxy; bake it into the container env so apt/npm/pip/git use it. NO_PROXY keeps
+# in-container + gateway traffic direct.
+PROXY_URL="${safeProxy}"
+NO_PROXY_VAL="${safeNoProxy}"
+{
+  echo "http_proxy=$PROXY_URL"
+  echo "https_proxy=$PROXY_URL"
+  echo "HTTP_PROXY=$PROXY_URL"
+  echo "HTTPS_PROXY=$PROXY_URL"
+  echo "no_proxy=$NO_PROXY_VAL"
+  echo "NO_PROXY=$NO_PROXY_VAL"
+} >> /etc/environment
+cat > /etc/apt/apt.conf.d/01mock2proxy <<APTPROXY
+Acquire::http::Proxy "$PROXY_URL";
+Acquire::https::Proxy "$PROXY_URL";
+APTPROXY
+export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+export no_proxy="$NO_PROXY_VAL" NO_PROXY="$NO_PROXY_VAL"
+` : '';
   return `#!/bin/sh
 set -e
 APP_DIR="${appDir}"
 WEB_PORT="${webPort}"
 
 export DEBIAN_FRONTEND=noninteractive
+${proxyBlock}
 
 # Runtime for the placeholder dev server. Postgres is installed per ADR-008 but
 # is best-effort: the placeholder app does not need it to serve, and a base
@@ -220,6 +253,9 @@ After=network.target
 Type=simple
 WorkingDirectory=${appDir}
 Environment=PORT=${webPort}
+# Inherit the baked proxy env (M4) so anything the dev server spawns egresses
+# through the filtering proxy. The leading '-' makes it optional (M2/M3 hosts).
+EnvironmentFile=-/etc/environment
 ExecStart=/usr/bin/python3 ${appDir}/serve.py
 Restart=on-failure
 RestartSec=2

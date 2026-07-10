@@ -169,6 +169,10 @@ export function publicProjectShape(project, extra = {}) {
     // upstream, never a host port. NULL until the container has an IP.
     shaped.container_name = project.container_name || null;
     shaped.bridge_ip = project.container_ip || null;
+    // Per-project managed bridge (M4): its name + subnet. The container is
+    // pinned to this bridge and fenced by nftables + the egress proxy.
+    shaped.bridge_name = project.bridge_name || null;
+    shaped.bridge_cidr = project.bridge_cidr || null;
     shaped.upstream = project.container_ip && project.web_port
       ? `${project.container_ip}:${project.web_port}`
       : null;

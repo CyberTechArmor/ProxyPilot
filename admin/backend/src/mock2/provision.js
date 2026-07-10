@@ -29,11 +29,22 @@
 // Terminology (risk R7): the AI build component is the runner; this file
 // provisions a container + repo and is named accordingly. Nothing is "agent."
 
-import { spawnHost } from '../lib/host-exec.js';
+import { runHost, sh, b64 } from './host.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import {
+  bridgeNameForProject,
+  bridgeCidrForProject,
+  gatewayForCidr,
+  createProjectBridge,
+  deleteProjectBridge,
+} from './network.js';
+import { reconcileMock2Firewall } from './firewall.js';
+import { seedDefaultAllowlist } from './allowlist.js';
+import { reconcileMock2Egress, EGRESS_PROXY_PORT } from './egress.js';
+import { runPortDriftCheck } from './port-check.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 // Base image for project containers. Overridable for hosts that mirror images
@@ -57,37 +68,9 @@ export function containerNameForProject(projectId) {
   return `m2-${projectId}`;
 }
 
-// runHost — promise wrapper over spawnHost with captured stdout/stderr and an
-// optional stdin payload (used to stream base64 script bodies into the host or
-// a container). Resolves { code, stdout, stderr } (never rejects on non-zero
-// exit — the caller decides what a non-zero code means).
-function runHost(bin, args, { input = null, timeoutMs = 120000 } = {}) {
-  return new Promise((resolve) => {
-    const child = spawnHost(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { /* ignore */ }
-      finish({ code: null, stdout, stderr: stderr + '\n[mock2] host command timed out', timedOut: true });
-    }, timeoutMs);
-    child.stdout?.on('data', (d) => { stdout += d.toString(); });
-    child.stderr?.on('data', (d) => { stderr += d.toString(); });
-    child.on('error', (err) => { clearTimeout(timer); finish({ code: null, stdout, stderr: stderr + err.message }); });
-    child.on('close', (code) => { clearTimeout(timer); finish({ code, stdout, stderr }); });
-    if (input != null) {
-      try { child.stdin.write(input); child.stdin.end(); } catch { /* ignore */ }
-    }
-  });
-}
-
-// Run a shell one-liner on the host (nsenter-pivoted inside Docker).
-function sh(script, opts) {
-  return runHost('sh', ['-c', script], opts);
-}
-
-const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
+// runHost/sh/b64 are the shared host-command pivots (mock2/host.js) — imported
+// above so provision.js and the M4 network/firewall/egress modules use one
+// nsenter-aware runner (risk R3).
 
 // Build the host shell script that creates the bare repo and lands the seed
 // commit in it. Files are base64-encoded (shell-safe) and written into a temp
@@ -204,9 +187,28 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // cheap safety net.
   await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
 
-  // ---- Launch the container (unprivileged, shared bridge) ----
+  // ---- Create the per-project managed bridge (M4, ADR-010) ----
+  // Each project gets its OWN bridge m2br<id>/<own /24> so the fence and proxy
+  // can key rules on its source subnet. Deterministic + stored on the row
+  // (migration 505) so a boot reconcile can rebuild without extra state. On
+  // rehydrate the bridge was torn down at archive; recreate it (idempotent).
+  setStatus(projectId, { phase: 'bridge', message: 'Creating project network…' });
+  const bridgeName = bridgeNameForProject(projectId);
+  const bridgeCidr = project.bridge_cidr || bridgeCidrForProject(projectId);
+  const bridge = await createProjectBridge({ name: bridgeName, cidr: bridgeCidr });
+  if (!bridge.ok) return bail(`project bridge create failed: ${bridge.error}`);
+  updateProject(projectId, { bridge_name: bridgeName, bridge_cidr: bridgeCidr });
+  // Seed the egress allowlist on CREATE only (a rehydrate keeps whatever the
+  // admin curated). Then write the squid ACL so the container's setup step can
+  // reach the package registries through the proxy.
+  if (!rehydrate) {
+    try { seedDefaultAllowlist(projectId, project.created_by); } catch (e) { console.warn('[mock2] allowlist seed failed:', e?.message); }
+  }
+  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (provision) failed:', e?.message));
+
+  // ---- Launch the container, NIC pinned to the project bridge ----
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
-  const launch = await sh(`incus launch ${image} ${containerName}`, { timeoutMs: 300000 });
+  const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}`, { timeoutMs: 300000 });
   if (launch.code !== 0) return bail(`container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
 
   // ---- Wait for a bridge IP ----
@@ -215,9 +217,12 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   if (!ip) return bail('container did not obtain a bridge IP within timeout');
   updateProject(projectId, { container_ip: ip, container_name: containerName });
 
-  // Public DNS so apt/registry reachability works on the shared bridge (M4
-  // replaces this with the egress proxy).
-  await sh(`incus exec ${containerName} -- sh -c 'grep -q 9.9.9.9 /etc/resolv.conf 2>/dev/null || printf "nameserver 9.9.9.9\\nnameserver 1.1.1.1\\n" > /etc/resolv.conf'`).catch(() => {});
+  // Point the container's resolver at its OWN bridge gateway (Incus's dnsmasq
+  // on m2br<id> serves DNS there). Under the fence (applied at activation) DNS
+  // to the gateway is allowed; direct public resolvers are denied. DHCP usually
+  // sets this already, but force it so the value is deterministic (M4, ADR-010).
+  const gateway = gatewayForCidr(bridgeCidr);
+  await sh(`incus exec ${containerName} -- sh -c 'printf "nameserver ${gateway}\\n" > /etc/resolv.conf'`).catch(() => {});
 
   // ---- Mount the bare repo (ADR-011) + clone the working tree ----
   setStatus(projectId, { phase: 'repo-mount', message: 'Mounting repo and cloning working tree…' });
@@ -235,8 +240,16 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const declaredPort = parseManifestWebPort(manifest.stdout) || project.web_port || DEFAULT_WEB_PORT;
 
   // ---- Run the container setup script (runtime + Postgres + dev server) ----
+  // Bake the egress proxy into the container's environment (M4): once the fence
+  // is applied at activation, HTTP(S)_PROXY is the only way out, and NO_PROXY
+  // keeps in-container + gateway traffic direct. apt/npm/pip/git all honor these.
   setStatus(projectId, { phase: 'setup', message: 'Installing runtime and starting dev server…' });
-  const setupScript = buildContainerSetupScript({ appDir: APP_DIR, webPort: declaredPort });
+  const setupScript = buildContainerSetupScript({
+    appDir: APP_DIR,
+    webPort: declaredPort,
+    proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
+    noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
+  });
   const pushSetup = await sh(
     `printf '%s' '${b64(setupScript)}' | base64 -d | incus exec ${containerName} -- tee /tmp/mock2-setup.sh >/dev/null && incus exec ${containerName} -- sh /tmp/mock2-setup.sh`,
     { timeoutMs: 420000 },
@@ -249,13 +262,29 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 
   updateProject(projectId, { web_port: declaredPort, container_ip: ip });
 
+  // Flip to active FIRST so publishDomain's active-FQDN computation (and the
+  // fence plan) include this project — projectActiveFqdns / buildFenceEntries
+  // both skip non-active projects. archived_at cleared here (and only here) so a
+  // failed rehydrate that reverts to 'archived' keeps its original timestamp.
+  setStatus(projectId, { phase: 'activate', message: 'Activating…' });
+  updateProject(projectId, { lifecycle: 'active', provision_error: null, archived_at: null, last_activity_at: new Date().toISOString() });
+
+  // ---- Apply the network fence now the project is active (M4, ADR-010) ----
+  // With container_ip + web_port known and lifecycle 'active', this project is
+  // now included in the fence plan: default-deny egress off the bridge, DNS +
+  // egress-proxy to its gateway only, inbound only to the declared web port.
+  // Applied HERE (not during setup) so bootstrap apt/clone had direct egress;
+  // from this point the container's only way out is the filtering proxy.
+  setStatus(projectId, { phase: 'fence', message: 'Applying network isolation…' });
+  await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (provision) failed:', e?.message));
+  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (provision) failed:', e?.message));
+  // Verify declared vs live ports (ADR-005 inbound half). A listener the
+  // manifest does not declare raises a port_drift queue item (bell until M8).
+  await runPortDriftCheck({ ...project, container_name: containerName, web_port: declaredPort })
+    .catch((e) => console.warn('[mock2] port-drift check failed:', e?.message));
+
   // ---- Register the slug's FQDN block in the parent-domain Caddy file ----
   setStatus(projectId, { phase: 'caddy', message: 'Publishing route…' });
-  // Flip to active FIRST so publishDomain's active-FQDN computation includes
-  // this project (projectActiveFqdns skips non-active/no-upstream projects).
-  // archived_at cleared here (and only here) so a failed rehydrate that reverts
-  // to 'archived' keeps its original archive timestamp.
-  updateProject(projectId, { lifecycle: 'active', provision_error: null, archived_at: null, last_activity_at: new Date().toISOString() });
   const reload = await publishDomain(project.parent_domain_id);
   const caddyDedupe = `mock2-provision-caddy:${projectId}`;
   if (!reload.ok) {
@@ -350,18 +379,28 @@ async function archiveProjectJob(project) {
     console.warn(`[mock2] archive checkpoint non-zero for ${projectId}: ${(checkpoint.stdout || checkpoint.stderr || '').trim().slice(-400)}`);
   }
 
-  // 2. Destroy the container. KEEP the bare repo + slug history + memberships.
-  setStatus(projectId, { phase: 'teardown', message: 'Destroying container…' });
+  // 2. Destroy the container, then its per-project bridge (M4). Order matters —
+  //    Incus refuses to delete a network with an instance attached. KEEP the
+  //    bare repo + slug history + memberships + the allowlist + bridge_cidr (so
+  //    rehydrate reuses the same subnet).
+  setStatus(projectId, { phase: 'teardown', message: 'Destroying container and network…' });
   await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
+  await deleteProjectBridge(bridgeNameForProject(projectId))
+    .catch((e) => console.warn(`[mock2] archive: bridge teardown failed for ${projectId}:`, e?.message));
 
   // 3. Mark archived. container_name/container_ip go NULL (03-data-model.md:
-  //    container_name is NULL when archived); archived_at stamped.
+  //    container_name is NULL when archived); archived_at stamped. bridge_cidr
+  //    is retained so a later rehydrate lands on the same subnet.
   updateProject(projectId, {
     lifecycle: 'archived',
     archived_at: new Date().toISOString(),
     container_name: null,
     container_ip: null,
   });
+
+  // Drop this project from the fence + proxy plans now it is no longer active.
+  await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (archive) failed:', e?.message));
+  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (archive) failed:', e?.message));
 
   // 4. Republish — drops this project's slug block (an archived project has no
   //    upstream, so projectActiveFqdns returns nothing). The slug STAYS
@@ -385,6 +424,10 @@ export async function stopProjectContainer(project) {
   const r = await sh(`incus stop ${containerName} 2>&1`, { timeoutMs: 60000 });
   updateProject(project.id, { lifecycle: 'stopped', container_ip: null });
   if (project.parent_domain_id) await publishDomain(project.parent_domain_id).catch(() => {});
+  // A stopped project leaves the fence plan (no container to fence). The bridge
+  // is KEPT (unlike archive) so wake is a fast start. Egress ACLs stay too —
+  // harmless with no container, and one fewer reload on wake.
+  await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (idle-stop) failed:', e?.message));
   console.log(`[mock2] project ${project.id} idle-stopped (container ${containerName})`);
   return r;
 }
@@ -413,6 +456,10 @@ async function wakeProjectJob(project) {
     return;
   }
   updateProject(projectId, { container_ip: ip, lifecycle: 'active', last_activity_at: new Date().toISOString() });
+  // Re-apply the fence — the woken container is active again with a (possibly
+  // new) IP. The bridge and allowlist were kept across the stop, so this just
+  // re-asserts the rules for the fresh address.
+  await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (wake) failed:', e?.message));
   const caddy = await publishDomain(project.parent_domain_id);
   setStatus(projectId, { phase: 'ready', message: 'Container running', caddy });
   console.log(`[mock2] project ${projectId} woken (container ${containerName} @ ${ip})`);
@@ -452,12 +499,18 @@ function pickContainerIp(container) {
   return null;
 }
 
-// Tear down a project's host artifacts (container + mount + repo). Used by the
-// delete route. Best-effort; a missing artifact is success. The bare repo is
-// removed only on hard delete — archive (M3) keeps it.
-export async function teardownProject({ containerName, repoPath, removeRepo = false }) {
+// Tear down a project's host artifacts (container + bridge + mount + repo). Used
+// by the delete route. Best-effort; a missing artifact is success. The bare repo
+// is removed only on hard delete — archive (M3) keeps it. The per-project bridge
+// is always removed here (M4); the delete route reconciles the fence + proxy
+// afterwards (the row is already gone, so the reconcile drops this project).
+export async function teardownProject({ containerName, projectId, repoPath, removeRepo = false }) {
   const results = {};
   results.container = await sh(`incus delete ${containerName} --force 2>/dev/null || true`, { timeoutMs: 60000 });
+  if (projectId != null) {
+    results.bridge = await deleteProjectBridge(bridgeNameForProject(projectId))
+      .catch((e) => ({ ok: false, error: e?.message }));
+  }
   if (removeRepo && repoPath) {
     // Guard the rm to the repos dir so a malformed path can't escape.
     if (repoPath.startsWith(`${MOCK2_DATA_DIR}/repos/`) && repoPath.endsWith('.git')) {

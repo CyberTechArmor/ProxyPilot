@@ -1132,6 +1132,14 @@ export const api = {
   mock2SetIdleStopDays: (days) =>
     request('/mock2/settings/idle-stop-days', { method: 'POST', body: JSON.stringify({ days }) }),
 
+  // Mock2 per-project egress allowlist (Phase M4). Read is member-visible; add/
+  // remove are admin-only (audit-logged) and regenerate the squid ACL.
+  mock2GetEgressAllowlist: (id) => request(`/mock2/projects/${id}/egress-allowlist`),
+  mock2AddEgressHost: (id, host) =>
+    request(`/mock2/projects/${id}/egress-allowlist`, { method: 'POST', body: JSON.stringify({ host }) }),
+  mock2RemoveEgressHost: (id, host) =>
+    request(`/mock2/projects/${id}/egress-allowlist/${encodeURIComponent(host)}`, { method: 'DELETE' }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

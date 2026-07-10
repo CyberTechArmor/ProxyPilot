@@ -21,18 +21,23 @@ core-infrastructure work.
 | `04-phased-plan.md` | Ten phases, each independently testable and useful, with verification checklists and dependency ordering. |
 | `05-risks-and-open-questions.md` | Risks the existing architecture creates, plus open policy questions the operator must answer (some block specific phases; none block Phase M0). |
 | `NEXT-SESSION-PROMPT-mock2-phase-01.md` | Ready-to-carry handoff prompt for the first build session (Phase M0 + M1 groundwork), in the repo's established `NEXT-SESSION-PROMPT` format. |
-| `NEXT-SESSION-PROMPT-mock2-phase-0N.md` | One handoff prompt per subsequent phase; `-04` opens Phase M3 (archive/rehydrate), `-05` opens Phase M4 (network isolation). |
+| `NEXT-SESSION-PROMPT-mock2-phase-0N.md` | One handoff prompt per subsequent phase; `-04` opens Phase M3 (archive/rehydrate), `-05` opens Phase M4 (network isolation), `-06` opens Phase M5 (connectors/quotas/framework). |
 | `design/` | UI design references. `07-chat-mockup-design-reference.md` + `chat-mockup-reference.html` capture the operator's Claude-designed chat → mockup → build → live surface that Phases **M7–M9** build toward. |
 
 ## Build status
 
 M0 (skeleton/absence), M1 (parent domains + per-slug TLS), M2 (project registry
-+ container + bare repo + live URL) and **M3 (archive & rehydrate, idle-stop
-groundwork)** are implemented. The M3 host round-trip is verified by
-`scripts/mock2-m3-verify.sh` on an enabled host (create → modify in container →
-archive → rehydrate → same URL, then image-cache-delete → rehydrate again to
-prove no snapshot dependency, ADR-006). The pure decision layer is unit-tested
-stub-first in `admin/backend/src/__tests__/mock2-lifecycle.test.js`.
++ container + bare repo + live URL), **M3 (archive & rehydrate, idle-stop
+groundwork)** and **M4 (network isolation)** are implemented. The M3 host
+round-trip is verified by `scripts/mock2-m3-verify.sh` (create → modify in
+container → archive → rehydrate → same URL, then image-cache-delete → rehydrate
+again to prove no snapshot dependency, ADR-006). The M4 fence — per-project
+bridge, default-deny nftables, filtering egress proxy, manifest port-drift — is
+verified by `scripts/mock2-m4-verify.sh` (allow-via-proxy vs deny-direct,
+inter-bridge + control-plane unreachable, Postgres isolation, npm install,
+non-Mock2 `pp-*` regression check). The pure decision layers are unit-tested
+stub-first in `admin/backend/src/__tests__/mock2-lifecycle.test.js` and
+`mock2-network.test.js`.
 
 ## How to use this bundle
 

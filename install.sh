@@ -1008,6 +1008,21 @@ create_docker_compose() {
     local HOST_HOSTNAME
     HOST_HOSTNAME=$(hostname)
 
+    # Mock2 writes one Caddy site file per parent domain to /etc/caddy/mock2 on
+    # an enabled host, and the host Caddy imports them (import /etc/caddy/mock2/
+    # *.caddy). The admin backend runs in this container, so that directory must
+    # be bind-mounted through to the host exactly like /etc/caddy/sites — without
+    # it, the per-domain files land inside the container, the host Caddy's import
+    # glob matches nothing, and parent-domain verification hangs at "cert pending"
+    # (the canary FQDN has no cert, so its TLS handshake fails with an internal
+    # error). Only mounted on an enabled host (ADR-001: a disabled host stays
+    # byte-for-byte unchanged).
+    local MOCK2_CADDY_MOUNT=""
+    if [ "${MOCK2_ENABLED:-false}" = "true" ]; then
+        install -d -m 0755 /etc/caddy/mock2 2>/dev/null || true
+        MOCK2_CADDY_MOUNT="      - /etc/caddy/mock2:/etc/caddy/mock2"
+    fi
+
     cat > "${install_dir}/docker-compose.yml" <<EOF
 # Compose Spec — no `version:` key (it's been obsolete since
 # Compose v2 and recent compose CLIs warn on every invocation).
@@ -1053,6 +1068,7 @@ services:
       - /etc/caddy/sites:/etc/caddy/sites
       - /etc/caddy/custom:/etc/caddy/custom
       - /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
+${MOCK2_CADDY_MOUNT}
       - /var/run/docker.sock:/var/run/docker.sock
       # CVE inbox — read-write so paste/edit/delete from the
       # dashboard land on the host, where the engine systemd

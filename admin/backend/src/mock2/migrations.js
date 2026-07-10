@@ -18,6 +18,9 @@
 //   505 M4 — network isolation: mock2_projects.bridge_cidr (the per-project
 //            managed bridge's /24) + mock2_egress_allowlist (the per-project
 //            filtering-proxy allowlist, editable, audit-logged) — additive
+//   506 M6 — cycle instruction: mock2_cycles.instruction (the canned task text
+//            a cycle was started with — chat is M7, so M6 stores the one-shot
+//            instruction here) — additive, never edits 500-505
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -397,6 +400,20 @@ export const MOCK2_MIGRATIONS = [
           created_at TEXT,
           UNIQUE (project_id, host)
         );
+      `);
+    },
+  },
+  {
+    // Phase M6 — the cycle runner. mock2_cycles already exists (block 502); M6
+    // adds one column: the canned instruction a cycle is started with. No chat
+    // yet (that's M7), so the "make this targeted change" text is stored on the
+    // cycle row rather than derived from a trigger message. Additive and NULL on
+    // every pre-M6 row, so it is harmless on a disabled host that never ran M6.
+    version: 506,
+    name: 'mock2_cycle_instruction',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN instruction TEXT;
       `);
     },
   },

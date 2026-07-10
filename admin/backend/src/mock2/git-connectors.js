@@ -157,6 +157,82 @@ export function clearProjectRemote(projectId) {
   return { cleared: r.changes > 0 };
 }
 
+// ---- orchestrator-side push after checkpoint (ADR-006 / the M6 hook) ----
+//
+// If a project has a remote with push_on_checkpoint, the runner calls this after
+// each checkpoint fetch to push the bare repo's main to the external remote.
+// Credentials NEVER enter a container: the push runs host-side through the pivot
+// (host.js), and the token/key is injected into the transport here. Records
+// last_push_at / last_push_error on the mock2_project_remotes row. Always
+// resolves — a push failure is a status column, never a cycle failure.
+export async function pushProjectRemote(project) {
+  const remote = getProjectRemote(project.id);
+  if (!remote || !remote.push_on_checkpoint) return { ok: true, skipped: true };
+  const conn = getGitConnector(remote.git_connector_id);
+  if (!conn) return recordPush(project.id, { ok: false, error: 'git connector missing' });
+  const repoPath = project.repo_path;
+  if (!repoPath) return recordPush(project.id, { ok: false, error: 'project has no bare repo' });
+  const cred = decryptGitCredential(conn);
+  if (!cred) return recordPush(project.id, { ok: false, error: 'credential not decryptable' });
+
+  const safeRepo = String(repoPath).replace(/'/g, `'\\''`);
+  let result;
+  if (conn.auth_kind === 'token') {
+    // Token over HTTPS: build an authenticated URL for this one push (never
+    // written to the repo config). Host derives from the connector base_url or
+    // provider default; remote_repo is 'org/name' or a full URL.
+    const url = buildTokenPushUrl(conn, remote.remote_repo, cred);
+    if (!url) return recordPush(project.id, { ok: false, error: 'could not build push URL' });
+    const safeUrl = url.replace(/'/g, `'\\''`);
+    result = await sh(`git --git-dir='${safeRepo}' push '${safeUrl}' HEAD:refs/heads/main 2>&1`, { timeoutMs: 120000 });
+  } else {
+    // ssh_key: write the key to a 0600 temp file and point GIT_SSH_COMMAND at
+    // it for this push only, then remove it. remote_repo must be an ssh URL.
+    const b64key = Buffer.from(cred, 'utf8').toString('base64');
+    const safeRemote = String(remote.remote_repo).replace(/'/g, `'\\''`);
+    result = await sh(
+      `KF="$(mktemp)"; printf '%s' '${b64key}' | base64 -d > "$KF"; chmod 600 "$KF"; ` +
+      `GIT_SSH_COMMAND="ssh -i $KF -o StrictHostKeyChecking=accept-new" ` +
+      `git --git-dir='${safeRepo}' push '${safeRemote}' HEAD:refs/heads/main 2>&1; rc=$?; rm -f "$KF"; exit $rc`,
+      { timeoutMs: 120000 },
+    );
+  }
+  const out = (result.stdout || result.stderr || '').trim().slice(-400);
+  if (result.code !== 0) return recordPush(project.id, { ok: false, error: out || `git push exited ${result.code}` });
+  return recordPush(project.id, { ok: true });
+}
+
+// Build an authenticated HTTPS push URL from a token connector. Never persisted.
+function buildTokenPushUrl(conn, remoteRepo, token) {
+  const repo = String(remoteRepo || '').trim();
+  const m = /^(https?:\/\/)(.+)$/i.exec(repo);
+  if (m) {
+    // Full URL given — inject the token after the scheme, dropping any existing
+    // userinfo so we don't double it.
+    const rest = m[2].replace(/^[^@/]*@/, '');
+    return `${m[1]}${encodeURIComponent(token)}@${rest}`;
+  }
+  // 'org/name' — resolve the host from base_url or the provider default.
+  let host = null;
+  if (conn.base_url) {
+    const m = /^https?:\/\/([^/]+)/i.exec(conn.base_url);
+    if (m) host = m[1];
+  }
+  if (!host) host = conn.provider === 'gitea' ? null : 'github.com';
+  if (!host) return null;
+  const path = repo.replace(/^\/+/, '').replace(/\.git$/, '');
+  return `https://${encodeURIComponent(token)}@${host}/${path}.git`;
+}
+
+function recordPush(projectId, { ok, error = null }) {
+  try {
+    getMock2Db()
+      .prepare(`UPDATE mock2_project_remotes SET last_push_at = ?, last_push_error = ? WHERE project_id = ?`)
+      .run(ok ? nowIso() : null, ok ? null : error, Number(projectId));
+  } catch { /* best effort */ }
+  return { ok, error };
+}
+
 // ---- zip export (git archive of the bare repo, ADR-006) ----
 //
 // "Export as zip" is `git archive` of the project's bare repo — same state model

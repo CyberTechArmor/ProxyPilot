@@ -31,6 +31,7 @@ import {
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
+  Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
@@ -260,6 +261,9 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
+      {/* M6: checkout-lock banner (holder + time remaining + request-takeover). */}
+      {!isArchived ? <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} /> : null}
+
       {isArchived ? (
         <div className="flex items-start gap-2 p-3 rounded-lg bg-muted text-muted-foreground text-sm">
           <Lock className="h-4 w-4 mt-0.5 shrink-0" />
@@ -336,6 +340,11 @@ export default function ProjectDetail() {
           </div>
         </CardContent>
       </Card>
+
+      {/* M6: build cycle — run a targeted change, watch the gates go green. */}
+      {!isArchived ? (
+        <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} />
+      ) : null}
 
       {/* Members */}
       <Card>
@@ -670,6 +679,276 @@ function RepoRemoteCard({ projectId, isAdmin, slug }) {
             )}
           </div>
         ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+// M6 — the checkout-lock banner (ADR-004). Shows the holder, time remaining, a
+// warn state near expiry, and — for a lock held by someone else — a
+// request-takeover (editor) / force-release (admin) control. Polls every 5s so
+// the countdown stays live. Renders nothing when the project is not checked out.
+function LockBanner({ projectId, canEdit, isAdmin }) {
+  const { toast } = useToast();
+  const [lock, setLock] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.mock2GetLock(projectId);
+      setLock(r.lock?.held ? r.lock : null);
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load lock failed:', err);
+    }
+  }, [projectId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  if (!lock) return null;
+
+  const mins = lock.remaining_seconds == null ? null : Math.max(0, Math.floor(lock.remaining_seconds / 60));
+  const secs = lock.remaining_seconds == null ? null : Math.max(0, lock.remaining_seconds % 60);
+  const remaining = lock.remaining_seconds == null ? '—' : `${mins}m ${secs}s`;
+  const isCycle = lock.holder_type === 'cycle';
+
+  const requestTakeover = async () => {
+    setBusy(true);
+    try { await api.mock2RequestTakeover(projectId); toast({ title: 'Takeover requested', description: 'The current holder has been pinged.' }); await load(); }
+    catch (err) { toast({ variant: 'destructive', title: 'Could not request takeover', description: err.message }); }
+    finally { setBusy(false); }
+  };
+  const forceRelease = async () => {
+    setBusy(true);
+    try { await api.mock2ForceReleaseLock(projectId); toast({ title: 'Lock released' }); await load(); }
+    catch (err) { toast({ variant: 'destructive', title: 'Could not release lock', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className={`flex flex-col sm:flex-row sm:items-center gap-2 p-3 rounded-lg text-sm ${lock.warn ? 'bg-amber-500/10 text-amber-600' : 'bg-blue-500/10 text-blue-600'}`}>
+      <div className="flex items-start gap-2 min-w-0 flex-1">
+        <Lock className="h-4 w-4 mt-0.5 shrink-0" />
+        <span className="min-w-0">
+          {isCycle ? 'A build cycle holds this project' : `Checked out by ${lock.holder_name || 'another user'}`}
+          {' · '}<span className="whitespace-nowrap"><Clock className="inline h-3 w-3 mb-0.5" /> {remaining} left</span>
+          {lock.takeover_requested_by ? ' · takeover requested' : ''}
+        </span>
+      </div>
+      <div className="flex gap-2 shrink-0">
+        {canEdit && !isCycle ? (
+          <Button variant="outline" size="sm" className="h-9" disabled={busy} onClick={requestTakeover}>
+            <Hammer className="h-4 w-4 mr-1" />Request takeover
+          </Button>
+        ) : null}
+        {isAdmin ? (
+          <Button variant="ghost" size="sm" className="h-9" disabled={busy} onClick={forceRelease}>
+            <Unlock className="h-4 w-4 mr-1" />Force release
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// M6 — the build-cycle control + the "gates going green" view. A canned "run a
+// cycle" instruction box starts the runner; the running cycle shows its status,
+// the gate battery going green (the phase-stepper pattern from LxcContainers),
+// interrupt controls, spend, and the hash-chained change history with a live
+// chain-verification badge. No chat yet (M7). Polls while a cycle is live.
+function CycleCard({ projectId, canEdit, isAdmin, lifecycle }) {
+  const { toast } = useToast();
+  const [cycle, setCycle] = useState(null);
+  const [job, setJob] = useState(null);
+  const [instruction, setInstruction] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [changes, setChanges] = useState(null); // { records, verification } | null
+  const [showChanges, setShowChanges] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.mock2GetLatestCycle(projectId);
+      setCycle(r.cycle || null);
+      setJob(r.job || null);
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load cycle failed:', err);
+    }
+  }, [projectId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const active = cycle && ['queued', 'estimating', 'running'].includes(cycle.status);
+  // Poll while a cycle is live so the gates settle on their own.
+  useEffect(() => {
+    if (!active) return undefined;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [active, load]);
+
+  const online = lifecycle === 'active';
+
+  const run = async () => {
+    if (!instruction.trim()) return;
+    setBusy(true);
+    try {
+      const res = await api.mock2StartCycle(projectId, instruction.trim());
+      if (res.refused) {
+        toast({ variant: 'destructive', title: 'Cycle refused', description: res.reason || 'Quota exceeded.' });
+      } else {
+        toast({ title: 'Cycle started' });
+        setInstruction('');
+      }
+      setCycle(res.cycle || null);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start cycle', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const interrupt = async (action) => {
+    if (!cycle) return;
+    setBusy(true);
+    try { await api.mock2InterruptCycle(projectId, cycle.id, action); toast({ title: `Cycle: ${action.replace(/_/g, ' ')}` }); await load(); }
+    catch (err) { toast({ variant: 'destructive', title: 'Could not interrupt', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
+  const loadChanges = async () => {
+    setShowChanges((s) => !s);
+    if (changes) return;
+    try { setChanges(await api.mock2GetChangeRecords(projectId)); }
+    catch (err) { if (!(err instanceof ApiError)) console.error('load change records failed:', err); }
+  };
+
+  const gateIcon = (status) => {
+    if (status === 'passed') return <CheckCircle2 className="h-4 w-4 text-green-500" />;
+    if (status === 'failed') return <XCircle className="h-4 w-4 text-red-500" />;
+    if (status === 'running') return <Loader2 className="h-4 w-4 animate-spin text-cyan-500" />;
+    return <Circle className="h-4 w-4 text-muted-foreground/40" />;
+  };
+
+  const statusTone = {
+    running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
+    refused_quota: 'text-red-500', awaiting_admin: 'text-amber-500', interrupted: 'text-amber-500',
+    abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Hammer className="h-4 w-4" /> Build cycle</CardTitle>
+        <CardDescription>
+          Run one targeted change through the runner: it edits the code in the fenced container, runs the pinned
+          gate battery, and checkpoints into the repo. Chat arrives later — for now, describe the change directly.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Start control (editors, online only) */}
+        {canEdit && !active ? (
+          online ? (
+            <div className="space-y-2">
+              <Label htmlFor="cycle-instruction">Change to make</Label>
+              <textarea
+                id="cycle-instruction"
+                className="flex min-h-[64px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. Add a /health endpoint that returns 200 OK"
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+              />
+              <Button className="h-11 sm:h-10" disabled={busy || !instruction.trim()} onClick={run}>
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
+                Run a cycle
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Bring the project online to run a cycle.</p>
+          )
+        ) : null}
+
+        {/* Live / last cycle */}
+        {cycle ? (
+          <div className="space-y-3 border-t pt-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{cycle.instruction || '(cycle)'}</p>
+                <p className={`text-xs font-medium ${statusTone[cycle.status] || 'text-muted-foreground'}`}>
+                  {cycle.status.replace(/_/g, ' ')}{cycle.current_gate ? ` · ${cycle.current_gate}` : ''}
+                </p>
+              </div>
+              <div className="text-xs text-muted-foreground whitespace-nowrap">
+                {cycle.used_cost_cents ? `$${(cycle.used_cost_cents / 100).toFixed(2)}` : '$0.00'} · {cycle.used_tokens || 0} tok
+              </div>
+            </div>
+
+            {job?.message ? <p className="text-xs text-muted-foreground">{job.message}</p> : null}
+            {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+
+            {/* Gate battery — the "gates going green" stepper */}
+            {cycle.gates?.length ? (
+              <ul className="space-y-1.5">
+                {cycle.gates.map((g) => (
+                  <li key={g.name} className="flex items-center gap-2 text-sm">
+                    <span className="shrink-0">{gateIcon(g.status)}</span>
+                    <span className="min-w-0 truncate">{g.name}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">{g.status}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {/* Interrupts (editors) while running */}
+            {canEdit && active && cycle.status === 'running' ? (
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" className="h-9" disabled={busy} onClick={() => interrupt('stop_after_step')}>
+                  <Square className="h-4 w-4 mr-1" />Stop after step
+                </Button>
+                <Button variant="ghost" size="sm" className="h-9 text-red-500" disabled={busy} onClick={() => interrupt('abandon')}>
+                  Abandon
+                </Button>
+                {isAdmin ? (
+                  <Button variant="ghost" size="sm" className="h-9" disabled={busy} onClick={() => api.mock2StopAllCycles().then(() => load())}>
+                    Stop all
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {cycle.status === 'succeeded' ? (
+              <p className="text-xs text-green-600 flex items-center gap-1"><ShieldCheck className="h-3.5 w-3.5" /> Gates green — change checkpointed into the repo.</p>
+            ) : null}
+          </div>
+        ) : (
+          !canEdit ? <p className="text-sm text-muted-foreground">No cycles yet.</p> : null
+        )}
+
+        {/* Change history + chain verification */}
+        <div className="border-t pt-3">
+          <Button variant="ghost" size="sm" className="h-9 px-0" onClick={loadChanges}>
+            <GitBranch className="h-4 w-4 mr-1" />{showChanges ? 'Hide' : 'Show'} change history
+          </Button>
+          {showChanges && changes ? (
+            <div className="mt-2 space-y-2">
+              <p className="text-xs flex items-center gap-1">
+                {changes.verification?.ok
+                  ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({changes.verification.count} record{changes.verification.count === 1 ? '' : 's'})</span></>
+                  : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{changes.verification?.brokenAt}</span></>}
+              </p>
+              {(changes.records || []).length === 0 ? (
+                <p className="text-xs text-muted-foreground">No change records yet.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {changes.records.map((r) => (
+                    <li key={r.seq} className="text-xs border rounded-md px-2 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono">#{r.seq}</span>
+                        <span className="font-mono text-muted-foreground truncate">{r.commit_sha ? r.commit_sha.slice(0, 8) : '—'}</span>
+                      </div>
+                      <p className="truncate">{r.summary}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+        </div>
       </CardContent>
     </Card>
   );

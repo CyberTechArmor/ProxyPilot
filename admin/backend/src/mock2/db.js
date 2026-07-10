@@ -68,9 +68,14 @@ export function initMock2Db() {
   return db;
 }
 
-// Boot sweep (index.js boot-sweep pattern). Any cycle a crash left mid-run
-// is failed at startup so the UI never shows a phantom "building". No
-// cycles exist until Phase M6, so this is a wired-but-quiet no-op today.
+// Boot sweep (index.js boot-sweep pattern). Any cycle a crash left mid-run is
+// failed at startup so the UI never shows a phantom "building"; the working tree
+// is already at its last pushed checkpoint (the runner pushes each checkpoint
+// into the bare repo — ADR-006), so failing the row is enough. M6 extends this:
+// a crash also orphans the checkout lock the cycle held, so every CYCLE-held lock
+// is released on boot (there is no in-process runner to hold it after a restart).
+// Human-held locks are left for the idle sweep (a person may resume). Raw SQL
+// here (not locks.js) to avoid a db.js ↔ locks.js import cycle.
 export function sweepMock2OnBoot(db = getMock2Db()) {
   try {
     const r = db
@@ -84,6 +89,15 @@ export function sweepMock2OnBoot(db = getMock2Db()) {
       .run();
     if (r.changes > 0) {
       console.log(`[mock2] boot sweep failed ${r.changes} orphaned cycle(s)`);
+    }
+    // Release locks the failed cycles held — the container is at its last
+    // checkpoint and the runner is gone, so the lock is stale.
+    let lockRel = { changes: 0 };
+    try {
+      lockRel = db.prepare(`DELETE FROM mock2_locks WHERE holder_cycle_id IS NOT NULL`).run();
+    } catch { /* mock2_locks may not exist on a pre-M0 db; ignore */ }
+    if (lockRel.changes > 0) {
+      console.log(`[mock2] boot sweep released ${lockRel.changes} orphaned cycle lock(s)`);
     }
   } catch (err) {
     console.error('[mock2] boot sweep error:', err?.message || err);

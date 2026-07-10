@@ -91,21 +91,37 @@ console.log('Frontend path:', FRONTEND_PATH, '- exists:', existsSync(FRONTEND_PA
 //   * frame-ancestors 'none' — prevents clickjacking via iframe embed
 //   * object-src 'none' — no Flash/PDF plugin embeds
 //   * base-uri 'self' — locks <base> to defeat one XSS pivot
+// Resolve the Mock2 gate up front (native-free) so the CSP can conditionally
+// permit the admin SPA to embed a project's live preview. Reused for the module
+// mount below.
+const mock2Gate = resolveMock2Gate({ env: process.env, existsSync });
+
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'"],
+  styleSrc: ["'self'", "'unsafe-inline'"],
+  imgSrc: ["'self'", 'data:'],
+  fontSrc: ["'self'", 'data:'],
+  connectSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  frameAncestors: ["'none'"],
+  baseUri: ["'self'"],
+  formAction: ["'self'"],
+};
+// Mock2 (ADR-001): ONLY when the module is enabled do we allow the project page
+// to iframe a project's live mockup/app preview (its own HTTPS subdomain). A
+// disabled or production-pinned host emits the exact original CSP — no frame-src
+// key at all, so its response headers stay byte-for-byte unchanged. Scoped to
+// https: (the previews are always HTTPS project domains); frame-ancestors 'none'
+// still forbids the admin app itself from being embedded anywhere.
+if (mock2Gate.enabled) {
+  cspDirectives.frameSrc = ["'self'", 'https:'];
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: false,
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:'],
-      fontSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      frameAncestors: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-    },
+    directives: cspDirectives,
   },
   crossOriginEmbedderPolicy: false,
   hsts: process.env.NODE_ENV === 'production'
@@ -433,8 +449,8 @@ app.use('/api/notifications', authenticateToken, notificationsRouter);
 // host: no import, no state file, no route (every /api/mock2/* is a 404,
 // indistinguishable from an unknown path), and the frontend hides its nav.
 // Top-level await here runs before the SPA catch-all and error middleware
-// below, preserving Express's route ordering.
-const mock2Gate = resolveMock2Gate({ env: process.env, existsSync });
+// below, preserving Express's route ordering. (mock2Gate is resolved up top,
+// where the CSP also consumes it.)
 if (mock2Gate.warning) {
   console.warn(mock2Gate.warning);
 }

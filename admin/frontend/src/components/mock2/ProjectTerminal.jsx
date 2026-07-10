@@ -13,8 +13,8 @@ import { Button } from '@/components/ui/button';
 import { TerminalSquare, X } from 'lucide-react';
 import InteractiveTerminal from '@/components/InteractiveTerminal';
 
-export default function ProjectTerminal({ projectId, containerName }) {
-  const [open, setOpen] = useState(false);
+export default function ProjectTerminal({ projectId, containerName, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
 
   return (
     <Card>

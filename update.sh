@@ -276,6 +276,27 @@ maybe_enable_mock2() {
     fi
     set_env_key "MOCK2_ENABLED" "true"
     log "${GREEN}Mock2 dev/build module enabled (MOCK2_ENABLED=true in ${deployed}).${NC}"
+
+    # Ensure the mock2 Caddy dir exists on the host AND is bind-mounted into the
+    # backend container. The backend writes one Caddy site file per parent domain
+    # to /etc/caddy/mock2; without the mount those files never reach the host
+    # Caddy, its `import /etc/caddy/mock2/*.caddy` glob matches nothing, and
+    # parent-domain verification hangs at "cert pending" (the canary FQDN has no
+    # cert). A fresh install adds this mount; enabling on an existing install
+    # must retrofit it here.
+    install -d -m 0755 /etc/caddy/mock2 2>/dev/null || true
+    local compose; compose="$(dirname "$deployed")/docker-compose.yml"
+    if [ -f "$compose" ] && ! grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
+        if sed -i '\#Caddyfile:/etc/caddy/Caddyfile#a\      - /etc/caddy/mock2:/etc/caddy/mock2' "$compose" 2>/dev/null \
+           && grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
+            log "${GREEN}Added /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
+        else
+            log "${YELLOW}Could not auto-add the /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
+            log "${YELLOW}Add this line under the proxypilot service 'volumes:' and re-run 'docker compose up -d':${NC}"
+            log "      - /etc/caddy/mock2:/etc/caddy/mock2"
+        fi
+    fi
+
     if [ -f "$pin_file" ]; then
         log "${YELLOW}Note: production pin ${pin_file} is present — Mock2 stays OFF at runtime until it is removed.${NC}"
     fi

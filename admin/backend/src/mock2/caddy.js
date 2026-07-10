@@ -94,7 +94,7 @@ export function buildMock2SiteBlock({ fqdn, note = '', upstream = null } = {}) {
 	# project's container has a bridge IP.
 	handle {
 		header Content-Type "text/html; charset=utf-8"
-		respond "${buildPlaceholderHtml(fqdn)}" 200
+		respond "${q(buildPlaceholderHtml(fqdn))}" 200
 	}`;
 
   return `${note ? `\t# ${note}\n` : ''}${host} {
@@ -132,7 +132,7 @@ function buildPlaceholderHtml(fqdn) {
     `<h1 style="font-size:1.25rem">Dev preview host ready</h1>` +
     `<p>This hostname is served by a ProxyPilot Mock2 parent domain. ` +
     `A project deployed to this slug will appear here.</p>` +
-    `<p style="color:#94a3b8;font-size:.85rem">${q(fqdn)}</p>` +
+    `<p style="color:#94a3b8;font-size:.85rem">${fqdn}</p>` +
     `</body></html>`;
 }
 

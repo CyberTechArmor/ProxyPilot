@@ -173,6 +173,18 @@ test('buildMock2SiteBlock: carries the dev-plane guarantees', () => {
   assert.match(block, /respond ".*Dev preview host ready/s);
 });
 
+test('buildMock2SiteBlock: placeholder HTML quotes are escaped for the Caddyfile', () => {
+  // Regression: the placeholder HTML is embedded in `respond "..."`. Its own
+  // attribute quotes (lang="en", style="...") were emitted raw, so Caddy read
+  // `respond "<!doctype html><html lang="` as the token and `caddy adapt`
+  // failed ("Caddy reload failed during probe (adapt)"). Every double quote
+  // inside the respond body must be backslash-escaped.
+  const block = buildMock2SiteBlock({ fqdn: 'p-abc123.dev.example.com' });
+  // The HTML's own attribute quotes must be backslash-escaped, never raw.
+  assert.match(block, /lang=\\"en\\"/);
+  assert.doesNotMatch(block, /lang="en"/);
+});
+
 test('buildMock2DomainConfig: empty slug set → header-only (valid no-op file)', () => {
   const cfg = buildMock2DomainConfig({ domain: 'dev.example.com', fqdns: [] });
   assert.match(cfg, /# Parent domain: dev\.example\.com/);

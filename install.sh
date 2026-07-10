@@ -1197,11 +1197,12 @@ main() {
         read -rp "Enter email for TLS certificates: " EMAIL
     done
 
-    # Mock2 dev/build module (ADR-001: absence-by-installation). Off by
-    # default; must stay absent on production hosts. Precedence:
+    # Mock2 dev/build module (ADR-001: absence-by-installation). Enabled by
+    # default on a fresh install, but the pin file still forces it absent on a
+    # production/compliance host. Precedence:
     #   1. Pin file present -> never prompt, force disabled.
     #   2. Existing .env already has MOCK2_ENABLED=true -> keep it, don't ask.
-    #   3. Otherwise ask once, default No. (A re-run only re-asks while the
+    #   3. Otherwise ask once, default Yes. (A re-run only re-asks while the
     #      current value is false — an enabled host is left enabled above.)
     MOCK2_PIN_FILE="/etc/proxypilot/mock2.production.pin"
     MOCK2_DATA_DIR="/var/lib/proxypilot/mock2"
@@ -1220,13 +1221,14 @@ main() {
         echo ""
         echo -e "${YELLOW}Mock2 is the dev/build module (AI-assisted project containers with"
         echo -e "reverse trust — the orchestrator writes into project containers)."
-        echo -e "It is OFF by default and should stay off on production hosts.${NC}"
-        read -rp "Enable the Mock2 dev/build module? [y/N]: " ENABLE_MOCK2
-        ENABLE_MOCK2=${ENABLE_MOCK2:-N}
-        if [[ "$ENABLE_MOCK2" =~ ^[Yy]$ ]]; then
-            MOCK2_ENABLED="true"
-        else
+        echo -e "It is enabled by default. Decline for a production/compliance host, or"
+        echo -e "create the pin file (${MOCK2_PIN_FILE}) to force it off permanently.${NC}"
+        read -rp "Enable the Mock2 dev/build module? [Y/n]: " ENABLE_MOCK2
+        ENABLE_MOCK2=${ENABLE_MOCK2:-Y}
+        if [[ "$ENABLE_MOCK2" =~ ^[Nn]$ ]]; then
             MOCK2_ENABLED="false"
+        else
+            MOCK2_ENABLED="true"
         fi
     fi
 

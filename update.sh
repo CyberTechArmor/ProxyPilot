@@ -46,6 +46,7 @@ NC='\033[0m' # No Color
 FORCE_REBUILD=false
 SKIP_RESTART=false
 VERBOSE=false
+ENABLE_MOCK2=false
 for arg in "$@"; do
     case $arg in
         --rebuild|--force|-f)
@@ -57,6 +58,9 @@ for arg in "$@"; do
         --verbose|-v)
             VERBOSE=true
             ;;
+        --enable-mock2)
+            ENABLE_MOCK2=true
+            ;;
         --help|-h)
             echo "ProxyPilot Update Script"
             echo ""
@@ -65,6 +69,10 @@ for arg in "$@"; do
             echo "Options:"
             echo "  --rebuild, --force, -f   Force rebuild even if code is up to date"
             echo "  --no-restart             Don't restart after update"
+            echo "  --enable-mock2           Turn on the Mock2 dev/build module (sets"
+            echo "                           MOCK2_ENABLED=true in the deployed .env). The"
+            echo "                           'Projects' section appears for admins after"
+            echo "                           the restart. A production pin still forces it off."
             echo "  --verbose, -v            Show verbose output"
             echo "  --help, -h               Show this help message"
             exit 0
@@ -219,6 +227,51 @@ sync_env_keys() {
             log "  - ${key} (placeholder — review before next restart)"
         done
     fi
+}
+
+# Set KEY=VALUE in the deployed .env: replace the first matching line in
+# place, or append the key if it is absent. Used by the --enable-mock2 flag
+# to flip an existing MOCK2_ENABLED=false to true on an upgrade (sync_env_keys
+# never changes an existing value, so an operator who wants to enable a module
+# on a running host needs this explicit opt-in). Preserves the rest of the file
+# and, like sync_env_keys, writes via a tmp file rather than sed -i (portable
+# across GNU/BSD, and avoids any brace-redirect corruption).
+set_env_key() {
+    local key="$1" value="$2" deployed
+    deployed="$(resolve_env_path)"
+    if [ -z "$deployed" ]; then
+        log_verbose "No deployed .env found — cannot set ${key}"
+        return 1
+    fi
+    if grep -qE "^[[:space:]]*${key}=" "$deployed"; then
+        local tmp
+        tmp=$(mktemp)
+        awk -v k="$key" -v v="$value" '
+            !done && $0 ~ ("^[[:space:]]*" k "=") { print k "=" v; done=1; next }
+            { print }
+        ' "$deployed" > "$tmp" && cat "$tmp" > "$deployed"
+        rm -f "$tmp"
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> "$deployed"
+    fi
+}
+
+# --enable-mock2: opt an upgrading host into the Mock2 dev/build module.
+# Runs after sync_env_keys so the key exists (as false) before we flip it.
+maybe_enable_mock2() {
+    [ "$ENABLE_MOCK2" = true ] || return 0
+    local deployed pin_file="/etc/proxypilot/mock2.production.pin"
+    deployed="$(resolve_env_path)"
+    if [ -z "$deployed" ]; then
+        log "${YELLOW}--enable-mock2: no deployed .env found; skipping.${NC}"
+        return 0
+    fi
+    set_env_key "MOCK2_ENABLED" "true"
+    log "${GREEN}Mock2 dev/build module enabled (MOCK2_ENABLED=true in ${deployed}).${NC}"
+    if [ -f "$pin_file" ]; then
+        log "${YELLOW}Note: production pin ${pin_file} is present — Mock2 stays OFF at runtime until it is removed.${NC}"
+    fi
+    log "${CYAN}The 'Projects' section appears for admin users once the restart completes.${NC}"
 }
 
 resolve_db_path() {
@@ -590,6 +643,9 @@ fi
 # newly-introduced keys are appended to the deployed .env with a TODO
 # marker so the operator notices them before the next restart.
 sync_env_keys
+
+# Honor --enable-mock2 (after sync_env_keys, so the key exists to flip).
+maybe_enable_mock2
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

@@ -297,6 +297,23 @@ maybe_enable_mock2() {
         fi
     fi
 
+    # Install the filtering egress proxy (squid). A project container's ONLY
+    # internet path is this proxy (M4/ADR-010); without it the bridge default-deny
+    # blocks all egress, so the container can't `npm install` etc. A fresh install
+    # runs this from install.sh; enabling on an existing install must run it here.
+    # Idempotent + best-effort — a failure just leaves egress blocked (fail-safe).
+    local egress_script="${SCRIPT_DIR}/scripts/mock2-enable-egress.sh"
+    if [ -f "$egress_script" ]; then
+        install -d -m 0700 /var/lib/proxypilot/mock2 2>/dev/null || true
+        if MOCK2_EGRESS_PROXY_PORT="$(grep -E '^[[:space:]]*MOCK2_EGRESS_PROXY_PORT=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')" \
+           bash "$egress_script" >>"$LOG_FILE" 2>&1; then
+            log "${GREEN}Mock2 egress proxy (squid) installed and listening.${NC}"
+        else
+            log "${YELLOW}Could not auto-install the Mock2 egress proxy (squid). Run it manually:${NC}"
+            log "      sudo bash ${egress_script}"
+        fi
+    fi
+
     if [ -f "$pin_file" ]; then
         log "${YELLOW}Note: production pin ${pin_file} is present — Mock2 stays OFF at runtime until it is removed.${NC}"
     fi

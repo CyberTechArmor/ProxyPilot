@@ -229,14 +229,20 @@ echo "[mock2] checkpoint pushed to bare repo"
 //             bridge fence is up, this is the ONLY way out; omit (M2/M3 default)
 //             and no proxy env is written.
 // noProxy:    NO_PROXY value (localhost + the bridge subnet stay direct).
-export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
-  // Sanitize (these come from derived host/port values, but never interpolate an
-  // unvetted string into a container-side shell): a proxy URL is a scheme + host
-  // + :port; NO_PROXY is a comma list of hosts/CIDRs.
+// buildProxyConfigScript(opts) → a self-contained shell snippet that points the
+// container's egress at the host filtering proxy (M4/ADR-010) and forces IPv4.
+// It MUST run before anything fetches packages: the project bridge's ONLY egress
+// path is the proxy (direct egress is dropped by the fence), and the bridge has
+// no IPv6 — so the very first `apt-get` (installing git in the clone step) has to
+// be routed through the proxy and off IPv6, or it fails "Network is unreachable".
+// Idempotent (append to /etc/environment is the only non-idempotent bit, benign).
+// Returns '' when no valid proxy is given. Also exported so provision.js can run
+// it standalone (before the clone) — buildContainerSetupScript reuses it.
+export function buildProxyConfigScript({ proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
   const safeProxy = proxyUrl && /^https?:\/\/[a-zA-Z0-9.\-]+:\d{1,5}\/?$/.test(proxyUrl) ? proxyUrl : null;
   const safeNoProxy = String(noProxy).replace(/[^a-zA-Z0-9.,:/\-]/g, '');
-  const proxyBlock = safeProxy ? `
-# ---- Egress proxy (M4, ADR-010) ----
+  if (!safeProxy) return '';
+  return `# ---- Egress proxy (M4, ADR-010) ----
 # The bridge default-deny fence forces all egress through the host filtering
 # proxy; bake it into the container env so apt/npm/pip/git use it. NO_PROXY keeps
 # in-container + gateway traffic direct.
@@ -253,10 +259,16 @@ NO_PROXY_VAL="${safeNoProxy}"
 cat > /etc/apt/apt.conf.d/01mock2proxy <<APTPROXY
 Acquire::http::Proxy "$PROXY_URL";
 Acquire::https::Proxy "$PROXY_URL";
+Acquire::ForceIPv4 "true";
 APTPROXY
 export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
 export no_proxy="$NO_PROXY_VAL" NO_PROXY="$NO_PROXY_VAL"
-` : '';
+`;
+}
+
+export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
+  // Reuse the shared proxy-config builder (also run standalone before the clone).
+  const proxyBlock = buildProxyConfigScript({ proxyUrl, noProxy });
   return `#!/bin/sh
 set -e
 APP_DIR="${appDir}"

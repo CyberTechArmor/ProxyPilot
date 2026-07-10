@@ -62,6 +62,7 @@ export default function ProjectDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
+  const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
 
   const load = useCallback(async () => {
     try {
@@ -111,6 +112,24 @@ export default function ProjectDetail() {
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
   }, [gate, project, pendingJob, load]);
+
+  // Poll the granular provisioning progress + step log so the UI can show what's
+  // actually happening (and the failing step's error). Fetch once on load too, so
+  // a just-failed project still shows its log while it's in memory (~2 min).
+  useEffect(() => {
+    if (gate !== 'enabled') return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await api.mock2ProjectProvisionStatus(id);
+        if (!cancelled && s?.progress) setProvStatus(s);
+      } catch { /* ignore */ }
+    };
+    poll();
+    if (project?.lifecycle !== 'provisioning' && !pendingJob) return undefined;
+    const t = setInterval(poll, 4000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [gate, project, pendingJob, id]);
 
   // Clear the pending job once the row reaches its target (or fails).
   useEffect(() => {
@@ -286,7 +305,8 @@ export default function ProjectDetail() {
           {isProvisioning ? (
             <div className="flex items-center gap-2 text-sm text-blue-500">
               <Loader2 className="h-4 w-4 animate-spin" />
-              {pendingJob === 'rehydrate' ? 'Rehydrating from the bare repo…' : 'Provisioning container, repo, and route…'}
+              {provStatus?.progress?.message
+                || (pendingJob === 'rehydrate' ? 'Rehydrating from the bare repo…' : 'Provisioning container, repo, and route…')}
             </div>
           ) : isArchived ? (
             <p className="text-sm text-muted-foreground">
@@ -310,6 +330,25 @@ export default function ProjectDetail() {
           )}
           {project.provision_error ? (
             <p className="text-xs text-red-500 break-all">{project.provision_error}</p>
+          ) : null}
+          {provStatus?.progress?.log?.length ? (
+            <details className="rounded-md border bg-muted/30 text-xs">
+              <summary className="cursor-pointer select-none px-3 py-2 font-medium text-muted-foreground">
+                Provisioning log ({provStatus.progress.log.length} step{provStatus.progress.log.length === 1 ? '' : 's'})
+              </summary>
+              <ol className="max-h-64 overflow-auto border-t px-3 py-2 space-y-1 font-mono text-[11px] leading-relaxed">
+                {provStatus.progress.log.map((entry, i) => (
+                  <li key={i} className="break-all">
+                    <span className="text-muted-foreground">
+                      {entry.phase ? `[${entry.phase}] ` : ''}
+                    </span>
+                    <span className={/failed|error|not found|unreachable/i.test(entry.message) ? 'text-red-500' : 'text-foreground'}>
+                      {entry.message}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </details>
           ) : null}
           <div className="flex flex-wrap gap-2">
             {canEdit && !isProvisioning && !isArchived && !isStopped && project.slug ? (

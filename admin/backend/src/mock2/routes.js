@@ -531,7 +531,7 @@ export function createMock2Router() {
     res.json({
       lifecycle: project.lifecycle,
       provision_error: project.provision_error || null,
-      progress: status ? { phase: status.phase, message: status.message } : null,
+      progress: status ? { phase: status.phase, message: status.message, log: status.log || [] } : null,
     });
   });
 

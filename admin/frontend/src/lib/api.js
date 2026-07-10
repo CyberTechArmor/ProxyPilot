@@ -1213,6 +1213,10 @@ export const api = {
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
 
+  // ---- Mock2 M9: adaptive summary (iteration + summary + lifecycle polish) ----
+  mock2GetSummary: (id) => request(`/mock2/projects/${id}/summary`),
+  mock2GetSummaryVersion: (id, version) => request(`/mock2/projects/${id}/summary/${version}`),
+
   // ---- Mock2 M8: audit, rule questions, admin queue ----
   mock2ListQuestions: (id) => request(`/mock2/projects/${id}/questions`),
   mock2AnswerQuestion: (id, qid, answer) =>

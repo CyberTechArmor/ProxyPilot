@@ -13,6 +13,11 @@ const STATUS_STYLES = {
   idle: { label: 'Idle', cls: 'bg-amber-500/10 text-amber-500' },
   stopped: { label: 'Stopped', cls: 'bg-muted text-muted-foreground' },
   orphaned: { label: 'Orphaned', cls: 'bg-amber-500/10 text-amber-500' },
+  // M6/M9 — the runner is working; a human holds the checkout lock (ADR-004).
+  building: { label: 'Building', cls: 'bg-cyan-500/10 text-cyan-500', pulse: true },
+  checked_out: { label: 'Checked out', cls: 'bg-indigo-500/10 text-indigo-500' },
+  // M9 — budget exhausted (ledger vs budget); can't run a cycle until raised.
+  quota_exhausted: { label: 'Quota exhausted', cls: 'bg-red-500/10 text-red-500' },
   // M8 audit gate (ADR-002) — awaiting an editor rule confirmation or an admin
   // deviation resolution; and framework drift (ADR-003, "update available").
   awaiting_user: { label: 'Awaiting you', cls: 'bg-violet-500/10 text-violet-500', pulse: true },

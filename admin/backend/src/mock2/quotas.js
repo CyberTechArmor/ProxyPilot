@@ -120,3 +120,15 @@ export function shapeQuota(row) {
   const usage = periodUsage({ scope: row.scope, projectId: row.project_id, period: row.period });
   return publicQuotaShape(row, { spentCents: usage.costCents });
 }
+
+// isQuotaExhausted(projectId) — the ledger-vs-budget signal that DERIVES the
+// `quota_exhausted` project status (M9, 03-data-model.md). The applicable metered
+// quota's period spend has reached (or passed) its budget. An unmetered project
+// (no applicable quota, or a null budget) is never quota-exhausted. Cheap: one
+// quota lookup + the period ledger sum already used at cycle start.
+export function isQuotaExhausted(projectId, period = 'monthly') {
+  const quota = getApplicableQuota(projectId, period);
+  if (!quota || quota.budget_cents == null) return false;
+  const usage = periodUsage({ scope: quota.scope, projectId: quota.scope === 'project' ? quota.project_id : null, period: quota.period });
+  return Number(usage.costCents || 0) >= Number(quota.budget_cents);
+}

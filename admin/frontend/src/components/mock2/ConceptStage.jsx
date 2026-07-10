@@ -196,14 +196,16 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
 
   useEffect(() => { load(); }, [load]);
 
-  // Poll while a background turn/approval job is running, while the M8 audit is
-  // in flight, or while any rule question is open (so answers + the "starting the
-  // build" transition settle on their own).
+  // Poll while a background turn/approval job is running, while the M8 audit or
+  // the M9 iteration classifier is in flight, or while any rule question is open
+  // (so answers + the "starting the build" transition settle on their own).
   const jobActive = data?.job && !['done', 'approved', 'failed'].includes(data.job.phase);
   const auditJob = data?.audit_job || null;
   const auditActive = !!auditJob && !['building', 'awaiting_user', 'awaiting_admin', 'failed', 'done'].includes(auditJob.phase);
+  const classifierJob = data?.classifier_job || null;
+  const classifierActive = !!classifierJob && !['building', 'awaiting_user', 'failed', 'done'].includes(classifierJob.phase);
   const openQuestionCount = (data?.open_question_ids || []).length;
-  const shouldPoll = jobActive || auditActive || openQuestionCount > 0;
+  const shouldPoll = jobActive || auditActive || classifierActive || openQuestionCount > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);
@@ -270,20 +272,25 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
     }
   };
 
-  const composerDisabled = busy || jobActive || !online || approved;
+  // M9: after approval the chat is the ITERATION surface — a message runs the
+  // rule-change classifier (build directly, reconfirm, or a lazy rule question),
+  // not the concept loop. The composer stays enabled; it's blocked only while a
+  // turn/classifier job is live or a rule question is open.
+  const anyJobActive = jobActive || classifierActive || auditActive;
+  const composerDisabled = busy || anyJobActive || !online || (approved && openQuestionCount > 0);
 
   return (
     <Card>
       <CardHeader className="pb-3 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <CardTitle className="text-base flex items-center gap-2">
-            <MessageSquare className="h-4 w-4" /> Concept
+            <MessageSquare className="h-4 w-4" /> {approved ? 'Iterate' : 'Concept'}
           </CardTitle>
           <StageIndicator stage={stage} />
         </div>
         <CardDescription>
           {approved
-            ? 'The design is approved — the inventory is saved to the repository and Build is unlocked. This chat is the record of how you got here.'
+            ? 'Describe a change in plain language. Each message is checked against your confirmed rules first — a change that fits an existing rule builds straight away; a new or conflicting decision is confirmed with you below, then built.'
             : 'Describe your app. A live, interactive mockup appears at the preview URL (new tab). Iterate here, then approve the design to lock it in and unlock Build.'}
         </CardDescription>
       </CardHeader>
@@ -338,20 +345,32 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
                 : <ChatBubble key={m.id} m={m} />
             ))
           )}
-          {jobActive || auditActive ? (
+          {anyJobActive ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {data?.job?.message || auditJob?.message || 'Working…'}
+              {classifierJob?.message || data?.job?.message || auditJob?.message || 'Working…'}
             </div>
           ) : null}
         </div>
 
-        {/* Composer (editors, online, before approval) */}
-        {canEdit && !approved ? (
+        {/* M9 classifier-slot readiness (iteration needs the classifier slot). */}
+        {data && approved && !data.classifier_ready ? (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm">
+            <Lock className="h-4 w-4 mt-0.5 shrink-0" />
+            <span>{data.classifier_ready_reason || 'The classifier model slot is not configured yet.'}</span>
+          </div>
+        ) : null}
+
+        {/* Composer (editors, online) — Concept before approval, Iterate after. */}
+        {canEdit ? (
           <div className="space-y-2">
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-              placeholder={online ? 'Describe a screen, a change, or ask a question…' : 'Project must be online to chat.'}
+              placeholder={!online
+                ? 'Project must be online to chat.'
+                : approved
+                  ? (openQuestionCount > 0 ? 'Confirm the rule question above to continue…' : 'Describe a change to make…')
+                  : 'Describe a screen, a change, or ask a question…'}
               value={message}
               disabled={composerDisabled}
               onChange={(e) => setMessage(e.target.value)}
@@ -367,11 +386,11 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
               </Button>
             </div>
           </div>
-        ) : !canEdit && !approved ? (
+        ) : (
           <p className="text-sm text-muted-foreground flex items-center gap-1">
-            <Sparkles className="h-4 w-4" /> Viewers can follow the conversation; editors drive the design.
+            <Sparkles className="h-4 w-4" /> Viewers can follow the conversation; editors drive {approved ? 'the changes' : 'the design'}.
           </p>
-        ) : null}
+        )}
       </CardContent>
     </Card>
   );

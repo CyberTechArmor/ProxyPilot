@@ -65,19 +65,36 @@ export function resolveMock2Access({ user, membership = null, requiredRole = 'vi
 // ---- derived status (single source of truth) ----
 
 // deriveProjectStatus(project, ctx) → one lowercase status token the UI keys
-// off. ctx carries the derived inputs M2 has: editorCount (0 ⇒ orphaned) and
-// containerState (Incus status string: 'running'|'stopped'|... or null when
-// unknown). Later phases add lock/cycle/question/quota inputs to ctx and this
-// function grows — the tile and the detail page both call it, never a fork.
+// off. This is the SINGLE implementation (03-data-model.md) the tile list and
+// the detail page both call — never a fork. M9 finalizes it across ALL states by
+// adding the remaining derived inputs to the SAME ctx:
 //
-// Precedence: lifecycle terminal states win, then the flagged overlay is
-// reported separately (it is an overlay, not a status), then orphaned, then
-// container liveness.
+//   editorCount        : 0 ⇒ orphaned (ADR-007)
+//   containerState     : live Incus status ('running'|'stopped'|'frozen'|null)
+//   openEditorQuestions: >0 ⇒ awaiting_user (M8 + M9 classifier questions)
+//   openAdminItems     : >0 ⇒ awaiting_admin (M8)
+//   driftOpen          : an open drift queue item ⇒ drift (ADR-003)
+//   cycleRunning       : a live cycle (queued/estimating/running) ⇒ building (M6/M9)
+//   lockHeldByHuman    : a human holds the checkout lock ⇒ checked_out (ADR-004)
+//   quotaExhausted     : period spend ≥ budget (ledger vs budget) ⇒ quota_exhausted (M9)
+//
+// All are DERIVED (from locks, cycles, open questions, queue items, quota state,
+// membership counts) — never stored. Every input is optional with a safe default
+// so an older caller (M2 tests) gets the pre-M9 behavior unchanged.
+//
+// Precedence (lifecycle terminals first; the flagged overlay is reported
+// separately, it is an overlay not a status):
+//   provisioning/failed/archived → building → quota_exhausted → awaiting_user →
+//   awaiting_admin → checked_out → drift → orphaned → stopped → online/idle.
+// quota_exhausted is placed ahead of the awaiting/queue lanes deliberately: a
+// budget-exhausted project cannot proceed regardless of open questions, and its
+// quota_exhausted queue item would otherwise read as a generic "awaiting admin".
 export function deriveProjectStatus(project, ctx = {}) {
   if (!project) return 'unknown';
   const {
     editorCount = null, containerState = null,
     openEditorQuestions = 0, openAdminItems = 0, driftOpen = false,
+    cycleRunning = false, lockHeldByHuman = false, quotaExhausted = false,
   } = ctx;
   const lc = project.lifecycle;
 
@@ -85,20 +102,30 @@ export function deriveProjectStatus(project, ctx = {}) {
   if (lc === 'failed_provisioning') return 'failed';
   if (lc === 'archived') return 'archived';
 
-  // M8 audit gate (ADR-002) — DERIVED from open rows, never a stored flag. An
-  // open editor question means the Builder must confirm a rule (awaiting user);
-  // an open admin deviation/queue item means an admin must clear it (awaiting
-  // admin). Editors act first, so awaiting user wins.
+  // A live cycle is the most important thing to show — the runner is working
+  // (M6/M9). Derived from cycle state, never a stored flag.
+  if (cycleRunning) return 'building';
+
+  // Budget exhausted (M9 — ledger vs budget). Can't run a cycle regardless of
+  // anything below, so it fronts the awaiting/queue lanes.
+  if (quotaExhausted) return 'quota_exhausted';
+
+  // M8 audit gate (ADR-002) — DERIVED from open rows. An open editor question
+  // means a rule must be confirmed (awaiting user); an open admin deviation/queue
+  // item means an admin must clear it (awaiting admin). Editors act first.
   if (Number(openEditorQuestions) > 0) return 'awaiting_user';
   if (Number(openAdminItems) > 0) return 'awaiting_admin';
 
-  // Zero editors ⇒ orphaned (ADR-007). Only meaningful for a live project.
-  if (editorCount === 0) return 'orphaned';
+  // A human holds the checkout lock (ADR-004) — someone is actively editing the
+  // container. (A cycle-held lock is already 'building' above.)
+  if (lockHeldByHuman) return 'checked_out';
 
   // Framework moved since the last build (ADR-003) — an "update available"
-  // condition surfaced as its own status. Non-blocking; remediation is
-  // explicit-consent only.
+  // condition. Non-blocking; remediation is explicit-consent only.
   if (driftOpen) return 'drift';
+
+  // Zero editors ⇒ orphaned (ADR-007). Only meaningful for a live project.
+  if (editorCount === 0) return 'orphaned';
 
   if (lc === 'stopped') return 'stopped';
 
@@ -158,10 +185,15 @@ export function publicProjectShape(project, extra = {}) {
     frameworkUpdateAvailable = false,
     frameworkCurrentVersion = null,
     frameworkLastBuiltVersion = null,
+    // M9 lifecycle-derived inputs (03-data-model.md — all DERIVED).
+    cycleRunning = false,
+    lockHeldByHuman = false,
+    quotaExhausted = false,
   } = extra;
 
   const status = deriveProjectStatus(project, {
     editorCount, containerState, openEditorQuestions, openAdminItems, driftOpen,
+    cycleRunning, lockHeldByHuman, quotaExhausted,
   });
   const host = project.custom_domain
     ? project.custom_domain
@@ -203,6 +235,10 @@ export function publicProjectShape(project, extra = {}) {
     framework_update_available: !!frameworkUpdateAvailable,
     framework_current_version: frameworkCurrentVersion,
     framework_last_built_version: frameworkLastBuiltVersion,
+    // M9 derived lifecycle signals (drive the building/checked-out/quota chips).
+    cycle_running: !!cycleRunning,
+    checked_out: !!lockHeldByHuman,
+    quota_exhausted: !!quotaExhausted,
   };
 
   if (isAdmin) {

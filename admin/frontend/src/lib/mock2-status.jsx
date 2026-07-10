@@ -13,6 +13,11 @@ const STATUS_STYLES = {
   idle: { label: 'Idle', cls: 'bg-amber-500/10 text-amber-500' },
   stopped: { label: 'Stopped', cls: 'bg-muted text-muted-foreground' },
   orphaned: { label: 'Orphaned', cls: 'bg-amber-500/10 text-amber-500' },
+  // M8 audit gate (ADR-002) — awaiting an editor rule confirmation or an admin
+  // deviation resolution; and framework drift (ADR-003, "update available").
+  awaiting_user: { label: 'Awaiting you', cls: 'bg-violet-500/10 text-violet-500', pulse: true },
+  awaiting_admin: { label: 'Awaiting admin', cls: 'bg-amber-500/10 text-amber-500', pulse: true },
+  drift: { label: 'Update available', cls: 'bg-sky-500/10 text-sky-500' },
   failed: { label: 'Failed', cls: 'bg-red-500/10 text-red-500' },
   archived: { label: 'Archived', cls: 'bg-muted text-muted-foreground' },
   unknown: { label: 'Unknown', cls: 'bg-muted text-muted-foreground' },

@@ -95,6 +95,8 @@ const WRITABLE = new Set([
   'last_activity_at', 'web_port', 'container_ip', 'provision_error', 'archived_at',
   // M7 concept-stage exit (migration 507).
   'design_approved_at', 'design_inventory_seq', 'current_mockup_id',
+  // M8 drift comparison input — the framework a build last pinned (ADR-003).
+  'last_built_framework_version_id',
 ]);
 export function updateProject(id, patch = {}) {
   const cols = Object.keys(patch).filter((k) => WRITABLE.has(k));

@@ -94,7 +94,7 @@ import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { startCycle, getCycleJobStatus, stopAllCycles } from './runner.js';
+import { getCycleJobStatus, stopAllCycles } from './runner.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt,
 } from './cycles.js';
@@ -110,6 +110,22 @@ import {
   startConceptTurn, startDesignApproval, getConceptJobStatus, conceptReady,
 } from './concept.js';
 import { publicChatMessageShape } from './concept-logic.js';
+// ---- M8: audit, rule questions, admin queue (ADR-002/003) ----
+import {
+  startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
+} from './audit.js';
+import {
+  getQuestion, listQuestionsForProject, listOpenEditorQuestions,
+  countOpenEditorQuestions, countOpenAdminQuestions,
+} from './questions.js';
+import {
+  listQueueItems, getQueueItem, queueCounts, setQueueItemStatus,
+  countAwaitingAdminItems, hasOpenDrift,
+} from './queue.js';
+import {
+  QUEUE_KINDS, QUEUE_STATUSES, publicQuestionShape, publicQueueItemShape,
+  isFrameworkDrifted,
+} from './audit-logic.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -269,6 +285,14 @@ const lockIdleSchema = z.object({
 const chatMessageSchema = z.object({
   message: z.string().trim().min(1).max(4000),
 });
+// ---- M8 Zod schemas ----
+const answerQuestionSchema = z.object({
+  answer: z.string().trim().min(1).max(2000),
+});
+const queueStatusSchema = z.object({
+  status: z.enum(['open', 'in_progress', 'resolved', 'dismissed']),
+  resolution: z.string().trim().max(1000).optional(),
+});
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
   skills_json: z.string().min(1),
@@ -283,11 +307,27 @@ const frameworkContentSchema = z.object({
 function shapeProject(project, { isAdmin }) {
   const parent = project.parent_domain_id ? getParentDomain(project.parent_domain_id) : null;
   const counts = countMembersByRole(project.id);
+  // M8 derived inputs (03-data-model.md — all DERIVED from open rows, never
+  // stored): the audit-gate question counts, the open-drift signal, and the
+  // "update available" framework comparison (ADR-003). Cheap COUNT queries; kept
+  // in the shaper so both the tile list and the detail page derive identically.
+  const openEditorQuestions = countOpenEditorQuestions(project.id);
+  const openAdminItems = countOpenAdminQuestions(project.id) + countAwaitingAdminItems(project.id);
+  const driftOpen = hasOpenDrift(project.id);
+  const current = getCurrentFrameworkVersion();
+  const frameworkUpdateAvailable = isFrameworkDrifted(project.last_built_framework_version_id, current?.id ?? null);
+  const lastBuilt = project.last_built_framework_version_id ? getFrameworkVersion(project.last_built_framework_version_id) : null;
   return publicProjectShape(project, {
     parentDomain: parent?.domain || null,
     editorCount: counts.editor,
     viewerCount: counts.viewer,
     isAdmin,
+    openEditorQuestions,
+    openAdminItems,
+    driftOpen,
+    frameworkUpdateAvailable,
+    frameworkCurrentVersion: current?.version ?? null,
+    frameworkLastBuiltVersion: lastBuilt?.version ?? null,
   });
 }
 
@@ -309,7 +349,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M7' });
+    res.json({ status: 'ok', enabled: true, phase: 'M8' });
   });
 
   // ---- Parent domains ----
@@ -524,8 +564,10 @@ export function createMock2Router() {
     res.json({ ok: true, editor_count: countEditors(project.id) });
   });
 
-  // Flag / unflag the project for admin attention (the one manual overlay).
-  router.post('/projects/:id/flag', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+  // Flag / unflag the project for admin attention (the one manual overlay). M8
+  // extends this to VIEWERS (04-phased-plan §M8): a viewer who spots something
+  // wrong can raise the `!` overlay + a queue item, exactly like an editor.
+  router.post('/projects/:id/flag', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const parsed = flagSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'flagged (boolean) is required' });
@@ -1080,20 +1122,25 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const parsed = cycleStartSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'instruction is required (1–2000 chars)' });
+    // M8 (ADR-002): the Build press runs the AUDIT first. It compares the
+    // approved inventory + rules.md + the pinned framework and either asks
+    // editor/admin questions (blocking the build) or, when clear, hands off to
+    // the M6 runner. 202 + poll: the audit runs in the background.
     let result;
     try {
-      result = await startCycle({
+      result = await startBuild({
         project, instruction: parsed.data.instruction,
-        initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
       });
     } catch (err) {
-      return res.status(500).json({ error: `Could not start cycle: ${err?.message || 'unknown error'}` });
+      return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
-    logAudit(req.user.id, 'MOCK2_CYCLE_START', 'mock2_cycle', result.cycle?.id || 0,
+    logAudit(req.user.id, 'MOCK2_BUILD_AUDIT_START', 'mock2_cycle', result.cycle?.id || 0,
       { instruction: parsed.data.instruction, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
-      cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
+      cycle: publicCycleShape(result.cycle), refused: result.status === 'refused',
+      audit: result.status === 'started', reason: result.error || null,
     });
   });
 
@@ -1221,14 +1268,24 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
     const ready = conceptReady();
+    const audit = auditReady();
+    // Open editor questions (the rule_question rows the chat renders as tappable
+    // choices) — the frontend shows the choice buttons only for OPEN ids (M8).
+    const openQuestions = listOpenEditorQuestions(project.id);
     res.json({
       messages: listMessages(project.id).map(publicChatMessageShape),
       job: getConceptJobStatus(project.id),
+      audit_job: getAuditJobStatus(project.id),
       stage: shaped.stage,
       current_mockup_id: shaped.current_mockup_id,
       preview_url: shaped.preview_url,
       concept_ready: ready.ok,
       concept_ready_reason: ready.ok ? null : ready.reason,
+      audit_ready: audit.ok,
+      audit_ready_reason: audit.ok ? null : audit.reason,
+      open_question_ids: openQuestions.map((q) => q.id),
+      open_editor_questions: openQuestions.length,
+      open_admin_items: shaped.open_admin_items,
       my_role: req.mock2Access.role,
     });
   });
@@ -1277,6 +1334,102 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_DESIGN_APPROVE', 'mock2_project', project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ job: getConceptJobStatus(project.id) });
+  });
+
+  // ============================================================
+  // M8 — Audit questions, rule confirmation, admin queue (ADR-002/003). The Build
+  // press (POST /cycles above) now runs the audit first; the routes here let the
+  // editor confirm rules (append to state/rules.md → sign-off #2, resumes Build)
+  // and the admin work the queue (framework deviations, drift, retries, flags).
+  // ============================================================
+
+  // The project's audit questions (any member sees them; only editors answer the
+  // editor-routed ones). Open editor questions also ride in the chat as
+  // rule_question messages; this is the structured view + the admin's read.
+  router.get('/projects/:id/questions', requireMock2Role('viewer'), (req, res) => {
+    const rows = listQuestionsForProject(req.mock2Project.id).map(publicQuestionShape);
+    res.json({
+      questions: rows,
+      open_editor: countOpenEditorQuestions(req.mock2Project.id),
+      open_admin: countOpenAdminQuestions(req.mock2Project.id),
+      my_role: req.mock2Access.role,
+    });
+  });
+
+  // Answer an editor rule question — appends to state/rules.md (commit + change
+  // record + rules_md_anchor), posts a rule_answer, and resumes Build once every
+  // question is confirmed (sign-off #2). Editor-gated; free text always allowed.
+  router.post('/projects/:id/questions/:qid/answer', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const question = getQuestion(req.params.qid);
+    if (!question || question.project_id !== project.id) return res.status(404).json({ error: 'Question not found' });
+    const parsed = answerQuestionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'answer is required (1–2000 chars)' });
+    let result;
+    try {
+      result = await answerAuditQuestion({
+        project, question, answer: parsed.data.answer,
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not record the answer: ${err?.message || 'unknown error'}` });
+    }
+    if (!result.ok) return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_RULE_ANSWER', 'mock2_audit_question', question.id,
+      { resumed: result.resumed, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.json({ question: publicQuestionShape(result.question), resumed: !!result.resumed });
+  });
+
+  // ---- Admin queue page (the queue-of-items view) ----
+
+  // List queue items with optional filters (project, kind, status). Admin-gated —
+  // the queue is the admin's object. Project names are joined in (cross-DB ref).
+  router.get('/queue', requireAdmin, (req, res) => {
+    const { project_id: projectId, kind, status } = req.query || {};
+    if (kind && !QUEUE_KINDS.includes(String(kind))) return res.status(400).json({ error: 'unknown kind' });
+    if (status && !QUEUE_STATUSES.includes(String(status))) return res.status(400).json({ error: 'unknown status' });
+    const items = listQueueItems({
+      projectId: projectId != null && projectId !== '' ? Number(projectId) : null,
+      kind: kind ? String(kind) : null,
+      status: status ? String(status) : null,
+    });
+    const nameCache = new Map();
+    const shaped = items.map((it) => {
+      let pname = null;
+      if (it.project_id) {
+        if (!nameCache.has(it.project_id)) nameCache.set(it.project_id, getProject(it.project_id)?.name || null);
+        pname = nameCache.get(it.project_id);
+      }
+      return publicQueueItemShape(it, { projectName: pname });
+    });
+    res.json({ items: shaped, counts: queueCounts(), kinds: QUEUE_KINDS, statuses: QUEUE_STATUSES });
+  });
+
+  router.get('/queue/counts', requireAdmin, (_req, res) => {
+    res.json({ counts: queueCounts() });
+  });
+
+  // Change a queue item's status (admin). Resolving/dismissing a
+  // framework_deviation ALSO clears its linked audit question and resumes the
+  // blocked Build (a project's answer never writes the framework — ADR-002).
+  router.post('/queue/:id/status', requireAdmin, async (req, res) => {
+    const item = getQueueItem(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Queue item not found' });
+    const parsed = queueStatusSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: `status must be one of ${QUEUE_STATUSES.join(', ')}` });
+    const { status, resolution } = parsed.data;
+    const updated = setQueueItemStatus(item.id, status, { resolvedBy: req.user.id, resolution: resolution || null });
+    let resumed = false;
+    if (item.kind === 'framework_deviation' && item.ref_table === 'mock2_audit_questions' && item.ref_id
+        && (status === 'resolved' || status === 'dismissed')) {
+      try {
+        const r = await resolveFrameworkDeviation({ questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}` });
+        resumed = !!r.resumed;
+      } catch (err) { console.warn('[mock2] deviation resolve follow-through failed:', err?.message); }
+    }
+    logAudit(req.user.id, 'MOCK2_QUEUE_ITEM_STATUS', 'mock2_queue_item', item.id,
+      { kind: item.kind, status, resumed }, req.ip);
+    res.json({ item: publicQueueItemShape(updated, { projectName: updated.project_id ? getProject(updated.project_id)?.name || null : null }), resumed });
   });
 
   return router;

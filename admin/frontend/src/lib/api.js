@@ -1213,6 +1213,22 @@ export const api = {
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
 
+  // ---- Mock2 M8: audit, rule questions, admin queue ----
+  mock2ListQuestions: (id) => request(`/mock2/projects/${id}/questions`),
+  mock2AnswerQuestion: (id, qid, answer) =>
+    request(`/mock2/projects/${id}/questions/${qid}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
+  mock2ListQueue: ({ project_id, kind, status } = {}) => {
+    const qs = new URLSearchParams();
+    if (project_id != null && project_id !== '') qs.set('project_id', project_id);
+    if (kind) qs.set('kind', kind);
+    if (status) qs.set('status', status);
+    const q = qs.toString();
+    return request(`/mock2/queue${q ? `?${q}` : ''}`);
+  },
+  mock2QueueCounts: () => request('/mock2/queue/counts'),
+  mock2SetQueueItemStatus: (itemId, status, resolution) =>
+    request(`/mock2/queue/${itemId}/status`, { method: 'POST', body: JSON.stringify({ status, resolution }) }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

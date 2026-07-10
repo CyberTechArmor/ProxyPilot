@@ -18,6 +18,7 @@ import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
 import Quotas from '@/pages/Quotas';
 import FrameworkVersions from '@/pages/FrameworkVersions';
+import AdminQueue from '@/pages/AdminQueue';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -86,6 +87,7 @@ function App() {
         <Route path="projects/connectors" element={<ModelConnectors />} />
         <Route path="projects/quotas" element={<Quotas />} />
         <Route path="projects/framework" element={<FrameworkVersions />} />
+        <Route path="projects/queue" element={<AdminQueue />} />
         <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

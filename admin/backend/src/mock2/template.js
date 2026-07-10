@@ -18,8 +18,10 @@
 // is named "agent".
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
-// template a project was born from.
-export const MOCK2_TEMPLATE_VERSION = 'm2-placeholder-1';
+// template a project was born from. m7-concept-1: the dev server also serves the
+// Stage-1 mockup preview at /_preview (from state/mockups/), and the seed carries
+// an empty state/mockups/ so the preview path exists before the first mockup.
+export const MOCK2_TEMPLATE_VERSION = 'm7-concept-1';
 
 // The default declared web port. Overridable per project only by editing
 // mock2.yaml in the repo (a commit, visible in change records — ADR-005).
@@ -87,24 +89,49 @@ function placeholderIndexHtml(project) {
 
 // A stdlib-only static server bound to 0.0.0.0:<web>. No third-party deps so a
 // fresh container serves immediately; the real template swaps in its own dev
-// server in M5.
+// server in a later phase.
+//
+// Two roots (Phase M7):
+//   /            -> ./public         (the placeholder app; real app in Build)
+//   /_preview    -> ./state/mockups  (the Stage-1 concept mockup preview; the
+//                  concept loop writes current.html + <id>.html here and the
+//                  Builder opens /_preview in a new tab)
+// translate_path routes by prefix and confines each request to its root so a
+// model-authored mockup path can never escape the mockups dir.
 function serverPy(webPort) {
   return `#!/usr/bin/env python3
-"""Minimal static dev server for the Mock2 placeholder app (Phase M2).
-Serves ./public on 0.0.0.0:${webPort}. Replaced by the framework template's
-real dev server in a later phase."""
-import http.server, socketserver, os
+"""Minimal static dev server for the Mock2 placeholder app + Stage-1 mockup
+preview (Phase M7). Serves ./public at / and ./state/mockups at /_preview on
+0.0.0.0:${webPort}. Replaced by the framework template's real dev server in a
+later phase."""
+import http.server, socketserver, os, posixpath, urllib.parse
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+PUBLIC = os.path.join(BASE, "public")
+MOCKUPS = os.path.join(BASE, "state", "mockups")
+PREVIEW_PREFIX = "/_preview"
 PORT = int(os.environ.get("PORT", "${webPort}"))
-os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "public"))
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("X-Robots-Tag", "noindex, nofollow")
         super().end_headers()
 
+    def translate_path(self, path):
+        path = path.split("?", 1)[0].split("#", 1)[0]
+        path = urllib.parse.unquote(path)
+        if path == PREVIEW_PREFIX or path.startswith(PREVIEW_PREFIX + "/"):
+            rel = path[len(PREVIEW_PREFIX):].lstrip("/") or "current.html"
+            root = MOCKUPS
+        else:
+            rel = path.lstrip("/") or "index.html"
+            root = PUBLIC
+        # Confine to the chosen root — normpath drops any ../ traversal.
+        safe = posixpath.normpath("/" + rel).lstrip("/")
+        return os.path.join(root, safe)
+
 with socketserver.TCPServer(("0.0.0.0", PORT), Handler) as httpd:
-    print(f"Mock2 placeholder serving on 0.0.0.0:{PORT}")
+    print(f"Mock2 dev server on 0.0.0.0:{PORT} (/ -> public, /_preview -> state/mockups)")
     httpd.serve_forever()
 `;
 }
@@ -145,6 +172,14 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
       // (03-data-model.md); seed an empty rules file so the path exists.
       path: 'state/rules.md',
       content: `# Project rules\n\nRule answers append here (Phase M8).\n`,
+    },
+    {
+      // state/mockups/ is where the Stage-1 concept loop writes the interactive
+      // HTML mockup (current.html + <id>.html), served at /_preview by the dev
+      // server. Seed a .gitkeep so the directory (and the preview path) exist
+      // before the first mockup, and survive archive/rehydrate.
+      path: 'state/mockups/.gitkeep',
+      content: '',
     },
   ];
 }

@@ -21,6 +21,11 @@
 //   506 M6 — cycle instruction: mock2_cycles.instruction (the canned task text
 //            a cycle was started with — chat is M7, so M6 stores the one-shot
 //            instruction here) — additive, never edits 500-505
+//   507 M7 — concept-stage exit: mock2_projects.design_approved_at (sign-off #1
+//            timestamp — drives the persistent stage indicator + the Build
+//            unlock), design_inventory_seq (the change-record seq of the
+//            approval), current_mockup_id (the latest served mockup id, NULLed
+//            on approval when the mockup code is discarded) — all additive
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -414,6 +419,36 @@ export const MOCK2_MIGRATIONS = [
     up: (d) => {
       d.exec(`
         ALTER TABLE mock2_cycles ADD COLUMN instruction TEXT;
+      `);
+    },
+  },
+  {
+    // Phase M7 — Stage 1 (Concept): chat, mockup, design approval. The chat +
+    // cycle tables already exist (block 502); M7 needs only three additive
+    // columns on mock2_projects to track the concept-stage exit:
+    //
+    //   1. design_approved_at — the sign-off #1 timestamp. The design-approval
+    //      gesture stamps it; it drives the persistent stage indicator
+    //      (Concept → Define → Build → Run) and gates the Build affordance
+    //      (Build appears only once the design is approved). NULL = still in
+    //      Concept. Derived status stays derived (03-data-model.md) — this is a
+    //      point-in-time sign-off fact, not a status column.
+    //   2. design_inventory_seq — the mock2_change_records.seq of the approval
+    //      change record, so the UI can point at the sign-off in the chain.
+    //   3. current_mockup_id — the id of the mockup currently served at the
+    //      project's preview path (state/mockups/current.html). Set when a
+    //      mockup is generated; NULLed on approval when the mockup code is
+    //      discarded (the inventory, not the mockup, is the UI spec).
+    //
+    // All three are additive and NULL on every pre-M7 row, so this is harmless
+    // on a disabled host that never ran M7.
+    version: 507,
+    name: 'mock2_concept_design_approval',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN design_approved_at TEXT;
+        ALTER TABLE mock2_projects ADD COLUMN design_inventory_seq INTEGER;
+        ALTER TABLE mock2_projects ADD COLUMN current_mockup_id TEXT;
       `);
     },
   },

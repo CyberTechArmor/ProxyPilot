@@ -1206,6 +1206,13 @@ export const api = {
   mock2SetLockIdleMinutes: (minutes) =>
     request('/mock2/settings/lock-idle-minutes', { method: 'POST', body: JSON.stringify({ minutes }) }),
 
+  // ---- Mock2 M7: Stage 1 (Concept) — chat, mockup, design approval ----
+  mock2GetChat: (id) => request(`/mock2/projects/${id}/chat`),
+  mock2SendChatMessage: (id, message) =>
+    request(`/mock2/projects/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
+  mock2ApproveDesign: (id) =>
+    request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

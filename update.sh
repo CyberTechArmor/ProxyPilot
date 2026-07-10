@@ -264,6 +264,55 @@ set_env_key() {
     fi
 }
 
+# ensure_mock2_infra: make the host-side prerequisites for the Mock2 module
+# present + correct. Idempotent, best-effort. Called on EVERY update when Mock2
+# is enabled (self-healing), and by --enable-mock2. Covers the two things that
+# live outside the container image: the /etc/caddy/mock2 bind-mount and the
+# filtering egress proxy (squid).
+ensure_mock2_infra() {
+    local deployed="$1"
+    [ -n "$deployed" ] || return 0
+
+    # Caddy dir + bind-mount: the backend writes one site file per parent domain
+    # to /etc/caddy/mock2; without the mount those files never reach the host
+    # Caddy and domain verification hangs at "cert pending".
+    install -d -m 0755 /etc/caddy/mock2 2>/dev/null || true
+    local compose; compose="$(dirname "$deployed")/docker-compose.yml"
+    if [ -f "$compose" ] && ! grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
+        if sed -i '\#Caddyfile:/etc/caddy/Caddyfile#a\      - /etc/caddy/mock2:/etc/caddy/mock2' "$compose" 2>/dev/null \
+           && grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
+            log "${GREEN}Added /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
+        else
+            log "${YELLOW}Could not auto-add the /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
+            log "${YELLOW}Add this under the proxypilot service 'volumes:' + re-run 'docker compose up -d':${NC}"
+            log "      - /etc/caddy/mock2:/etc/caddy/mock2"
+        fi
+    fi
+
+    # Filtering egress proxy (squid): a project container's ONLY internet path
+    # (M4/ADR-010). Idempotent — mock2-enable-egress.sh no-ops if already present.
+    local egress_script="${SCRIPT_DIR}/scripts/mock2-enable-egress.sh"
+    if [ -f "$egress_script" ]; then
+        install -d -m 0700 /var/lib/proxypilot/mock2 2>/dev/null || true
+        if MOCK2_EGRESS_PROXY_PORT="$(grep -E '^[[:space:]]*MOCK2_EGRESS_PROXY_PORT=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')" \
+           bash "$egress_script" >>"$LOG_FILE" 2>&1; then
+            log_verbose "Mock2 egress proxy (squid) present + listening."
+        else
+            log "${YELLOW}Mock2 egress proxy (squid) not ready. Run: sudo bash ${egress_script}${NC}"
+        fi
+    fi
+}
+
+# On every update, keep an ENABLED host's Mock2 infra in sync (squid + Caddy
+# mount) so operators don't have to remember to re-run the enable script.
+sync_mock2_infra() {
+    local deployed; deployed="$(resolve_env_path)"
+    [ -n "$deployed" ] || return 0
+    local enabled; enabled="$(grep -E '^[[:space:]]*MOCK2_ENABLED=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+    [ "$enabled" = "true" ] || return 0
+    ensure_mock2_infra "$deployed"
+}
+
 # --enable-mock2: opt an upgrading host into the Mock2 dev/build module.
 # Runs after sync_env_keys so the key exists (as false) before we flip it.
 maybe_enable_mock2() {
@@ -277,42 +326,7 @@ maybe_enable_mock2() {
     set_env_key "MOCK2_ENABLED" "true"
     log "${GREEN}Mock2 dev/build module enabled (MOCK2_ENABLED=true in ${deployed}).${NC}"
 
-    # Ensure the mock2 Caddy dir exists on the host AND is bind-mounted into the
-    # backend container. The backend writes one Caddy site file per parent domain
-    # to /etc/caddy/mock2; without the mount those files never reach the host
-    # Caddy, its `import /etc/caddy/mock2/*.caddy` glob matches nothing, and
-    # parent-domain verification hangs at "cert pending" (the canary FQDN has no
-    # cert). A fresh install adds this mount; enabling on an existing install
-    # must retrofit it here.
-    install -d -m 0755 /etc/caddy/mock2 2>/dev/null || true
-    local compose; compose="$(dirname "$deployed")/docker-compose.yml"
-    if [ -f "$compose" ] && ! grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
-        if sed -i '\#Caddyfile:/etc/caddy/Caddyfile#a\      - /etc/caddy/mock2:/etc/caddy/mock2' "$compose" 2>/dev/null \
-           && grep -q '/etc/caddy/mock2:/etc/caddy/mock2' "$compose"; then
-            log "${GREEN}Added /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
-        else
-            log "${YELLOW}Could not auto-add the /etc/caddy/mock2 bind-mount to ${compose}.${NC}"
-            log "${YELLOW}Add this line under the proxypilot service 'volumes:' and re-run 'docker compose up -d':${NC}"
-            log "      - /etc/caddy/mock2:/etc/caddy/mock2"
-        fi
-    fi
-
-    # Install the filtering egress proxy (squid). A project container's ONLY
-    # internet path is this proxy (M4/ADR-010); without it the bridge default-deny
-    # blocks all egress, so the container can't `npm install` etc. A fresh install
-    # runs this from install.sh; enabling on an existing install must run it here.
-    # Idempotent + best-effort — a failure just leaves egress blocked (fail-safe).
-    local egress_script="${SCRIPT_DIR}/scripts/mock2-enable-egress.sh"
-    if [ -f "$egress_script" ]; then
-        install -d -m 0700 /var/lib/proxypilot/mock2 2>/dev/null || true
-        if MOCK2_EGRESS_PROXY_PORT="$(grep -E '^[[:space:]]*MOCK2_EGRESS_PROXY_PORT=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')" \
-           bash "$egress_script" >>"$LOG_FILE" 2>&1; then
-            log "${GREEN}Mock2 egress proxy (squid) installed and listening.${NC}"
-        else
-            log "${YELLOW}Could not auto-install the Mock2 egress proxy (squid). Run it manually:${NC}"
-            log "      sudo bash ${egress_script}"
-        fi
-    fi
+    ensure_mock2_infra "$deployed"
 
     if [ -f "$pin_file" ]; then
         log "${YELLOW}Note: production pin ${pin_file} is present — Mock2 stays OFF at runtime until it is removed.${NC}"
@@ -692,6 +706,9 @@ sync_env_keys
 
 # Honor --enable-mock2 (after sync_env_keys, so the key exists to flip).
 maybe_enable_mock2
+# Keep an already-enabled host's Mock2 host-side infra (squid + Caddy mount) in
+# sync on every update, so it self-heals without needing --enable-mock2.
+sync_mock2_infra
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

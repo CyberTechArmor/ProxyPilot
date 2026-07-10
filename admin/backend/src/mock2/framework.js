@@ -13,6 +13,7 @@ import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { getMock2Db } from './db.js';
+import { getDb } from '../db.js';
 import { nextVersionNumber } from './framework-logic.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -111,6 +112,20 @@ export function seedFrameworkV1(createdBy = null) {
   const db = getMock2Db();
   const existing = db.prepare(`SELECT COUNT(*) AS n FROM mock2_framework_versions`).get();
   if (existing && existing.n > 0) return null;
+  // created_by is NOT NULL (migration 501). The boot call passes null, so resolve
+  // the platform's first admin as the seed's author — falling back to 1 so the
+  // insert can never fail the constraint. Without this the seed threw on the NULL,
+  // the boot try/catch swallowed it, and the registry stayed empty ("No framework
+  // version exists to pin. Publish one first.").
+  let author = createdBy;
+  if (author == null) {
+    try {
+      const admin = getDb()
+        .prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC, id ASC LIMIT 1`)
+        .get();
+      author = admin?.id ?? 1;
+    } catch { author = 1; }
+  }
   let content;
   try {
     content = {
@@ -128,7 +143,7 @@ export function seedFrameworkV1(createdBy = null) {
     ...content,
     changelog: 'Seed v1 — Mock2 Framework v1.1 (constitution, four skills, deterministic gate battery, locked design system). Runtime scaffold still placeholder (R8).',
     source: 'in_app',
-    createdBy,
+    createdBy: author,
   });
   console.log('[mock2] framework registry seeded with version 1 (Mock2 Framework v1.1 content; runtime scaffold still placeholder — R8)');
   return row;

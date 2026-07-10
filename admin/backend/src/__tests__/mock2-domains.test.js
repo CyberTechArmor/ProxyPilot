@@ -56,10 +56,11 @@ test('validateDomain: rejects an embedded wildcard, a URL, empty, and a bare lab
 
 // ---- selectable predicate (the M2 gate) ----
 
-test('isSelectable: true only when cert_ok AND enabled', () => {
+test('isSelectable: true when DNS-verified (or legacy cert_ok) AND enabled', () => {
+  assert.equal(isSelectable({ verify_status: 'dns_ok', enabled: 1 }), true);
   assert.equal(isSelectable({ verify_status: 'cert_ok', enabled: 1 }), true);
+  assert.equal(isSelectable({ verify_status: 'dns_ok', enabled: 0 }), false);
   assert.equal(isSelectable({ verify_status: 'cert_ok', enabled: 0 }), false);
-  assert.equal(isSelectable({ verify_status: 'dns_ok', enabled: 1 }), false);
   assert.equal(isSelectable({ verify_status: 'pending', enabled: 1 }), false);
   assert.equal(isSelectable({ verify_status: 'failed', enabled: 1 }), false);
   assert.equal(isSelectable(null), false);
@@ -219,7 +220,27 @@ function recordingHooks() {
   };
 }
 
-test('runVerification: happy path → dns_ok then cert_ok, canary published then cleaned', async () => {
+test('runVerification: default is DNS-only → dns_ok, no canary/Caddy write', async () => {
+  // Operator decision: verification proves the wildcard DNS points here and
+  // stops — the per-slug cert is minted at project-create time, so there is no
+  // canary probe and no Caddy write during registration.
+  const { hooks, calls } = recordingHooks();
+  let siteWritten = false;
+  const status = await runVerification('dev.example.com', hooks, {
+    resolve: async () => ['1.2.3.4'],
+    expectedHostIps: () => ['1.2.3.4'],
+    probe: async () => { throw new Error('probe must not run by default'); },
+    writeSite: async () => { siteWritten = true; },
+    reload: async () => ({ ok: true }),
+  });
+  assert.equal(status, 'dns_ok');
+  assert.deepEqual(calls.progress, ['pending', 'dns_ok']);
+  assert.equal(calls.succeed, 1);
+  assert.equal(calls.fail.length, 0);
+  assert.equal(siteWritten, false);
+});
+
+test('runVerification: opt-in probe → dns_ok then cert_ok, canary published then cleaned', async () => {
   const { hooks, calls } = recordingHooks();
   const siteWrites = [];
   const status = await runVerification('dev.example.com', hooks, {
@@ -231,6 +252,7 @@ test('runVerification: happy path → dns_ok then cert_ok, canary published then
     randHex: () => 'deadbeef',
     probeAttempts: 1,
     probeDelayMs: 0,
+    runProbe: true,
   });
   assert.equal(status, 'cert_ok');
   assert.deepEqual(calls.progress, ['pending', 'dns_ok']);
@@ -268,6 +290,7 @@ test('runVerification: probe never trusts cert → fail after cleanup', async ()
     reload: async () => ({ ok: true }),
     probeAttempts: 2,
     probeDelayMs: 0,
+    runProbe: true,
   });
   assert.equal(status, 'failed');
   assert.equal(calls.succeed, 0);
@@ -284,6 +307,7 @@ test('runVerification: reload failure during probe → fail', async () => {
     probe: async () => ({ status: 200, tlsAuthorized: true }),
     writeSite: async () => {},
     reload: async () => ({ ok: false, stage: 'adapt', error: 'bad config' }),
+    runProbe: true,
   });
   assert.equal(status, 'failed');
   assert.match(calls.fail[0], /reload failed/);

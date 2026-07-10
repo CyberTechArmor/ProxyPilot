@@ -16,6 +16,7 @@ import {
   mintSlugCandidate,
   isReservedSlug,
   isValidSlugShape,
+  slugifyName,
   slugFqdn,
 } from '../mock2/slug.js';
 import {
@@ -52,13 +53,40 @@ test('mintSlugCandidate: pads short randomness so the shape invariant always hol
   assert.ok(isValidSlugShape(slug));
 });
 
-test('isValidSlugShape: only p- + exactly 8 hex', () => {
-  assert.ok(isValidSlugShape('p-0123abcd'));
-  assert.equal(isValidSlugShape('p-0123abc'), false);   // 7 chars
-  assert.equal(isValidSlugShape('p-0123abcde'), false);  // 9 chars
-  assert.equal(isValidSlugShape('p-0123abcg'), false);   // non-hex
-  assert.equal(isValidSlugShape('x-0123abcd'), false);   // wrong prefix
+test('isValidSlugShape: any DNS-safe label (name-derived or legacy p-hex)', () => {
+  assert.ok(isValidSlugShape('p-0123abcd'));   // legacy mint
+  assert.ok(isValidSlugShape('my-app'));       // name-derived
+  assert.ok(isValidSlugShape('app2'));
+  assert.ok(isValidSlugShape('a'));
+  assert.equal(isValidSlugShape('-app'), false);   // leading hyphen
+  assert.equal(isValidSlugShape('app-'), false);   // trailing hyphen
+  assert.equal(isValidSlugShape('My-App'), false); // uppercase
+  assert.equal(isValidSlugShape('a.b'), false);    // dot is not a label char
   assert.equal(isValidSlugShape(''), false);
+});
+
+test('slugifyName: derives a DNS-safe label from a project name', () => {
+  assert.equal(slugifyName('My App'), 'my-app');
+  assert.equal(slugifyName('  Hello, World!  '), 'hello-world');
+  assert.equal(slugifyName('Café Ölü'), 'cafe-olu');       // accent-folded
+  assert.equal(slugifyName('a___b--c'), 'a-b-c');           // runs collapse
+  assert.equal(slugifyName('---trim---'), 'trim');
+  assert.equal(slugifyName('😀 emoji only 🎉'), 'emoji-only');
+  assert.equal(slugifyName('🎉🎉🎉'), '');                    // nothing usable
+  assert.equal(slugifyName(''), '');
+  // Length-capped to a safe label, with no trailing hyphen left by the cut.
+  const long = slugifyName('x'.repeat(80));
+  assert.ok(long.length <= 50 && isValidSlugShape(long));
+});
+
+test('slugifyName output is a valid, non-reserved label for ordinary names', () => {
+  for (const name of ['My App', 'Dashboard', 'client portal 2']) {
+    const s = slugifyName(name);
+    assert.ok(isValidSlugShape(s), `${name} → ${s} should be a valid label`);
+    assert.equal(isReservedSlug(s), false);
+  }
+  // A name that slugifies to a reserved label is caught by isReservedSlug.
+  assert.ok(isReservedSlug(slugifyName('API')));
 });
 
 test('isReservedSlug: blocks the _mock2 namespace and reserved labels', () => {

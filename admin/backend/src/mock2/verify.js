@@ -109,6 +109,10 @@ export async function runVerification(domain, hooks = {}, deps = {}) {
     log = () => {},
     probeAttempts = 12,
     probeDelayMs = 5000,
+    // The canary cert probe is opt-in now — DNS-verified is terminal, and the
+    // real per-slug cert is minted at project-create time. Kept behind a flag
+    // so the probe pipeline (and its tests) survive for diagnostics.
+    runProbe = false,
   } = deps;
 
   const progress = hooks.progress || (() => {});
@@ -137,7 +141,17 @@ export async function runVerification(domain, hooks = {}, deps = {}) {
   }
   progress('dns_ok');
 
-  // ---- Stage 2: probe certificate on the canary FQDN ----
+  // DNS verification is the terminal success state (operator decision): the
+  // per-slug Let's Encrypt certificate is issued when a project is actually
+  // created (publishDomain → Caddy HTTP-01 for `<slug>.<domain>`), NOT by an
+  // up-front canary probe. Verification therefore does no Caddy write and no
+  // ACME during registration — it only proves the wildcard DNS points here.
+  if (!runProbe) {
+    succeed('dns_ok');
+    return 'dns_ok';
+  }
+
+  // ---- Stage 2 (opt-in): probe certificate on the canary FQDN ----
   try {
     // Write the domain file with ONLY the canary block, then reload so Caddy
     // begins HTTP-01 for it. buildMock2SiteBlock is the same template M2 uses.
@@ -179,7 +193,7 @@ export async function runVerification(domain, hooks = {}, deps = {}) {
     return 'failed';
   }
 
-  succeed();
+  succeed('cert_ok');
   return 'cert_ok';
 }
 

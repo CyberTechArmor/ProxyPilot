@@ -32,7 +32,8 @@ import {
   createProject,
   updateProject,
   deleteProject,
-  mintUniqueSlug,
+  deriveProjectSlug,
+  SlugError,
   rotateProjectSlug,
   countEditors,
   countMembersByRole,
@@ -173,9 +174,9 @@ function buildVerifyHooks(row) {
         console.error('[mock2] raiseQueueItem failed:', err?.message);
       }
     },
-    succeed() {
+    succeed(finalStatus = 'dns_ok') {
       updateParentDomain(row.id, {
-        verify_status: 'cert_ok',
+        verify_status: finalStatus,
         verified_at: new Date().toISOString(),
         renewal_error: null,
       });
@@ -396,8 +397,11 @@ export function createMock2Router() {
   router.post('/parent-domains/:id/enable', requireAdmin, async (req, res) => {
     const row = getParentDomain(Number(req.params.id));
     if (!row) return res.status(404).json({ error: 'Parent domain not found' });
-    if (row.verify_status !== 'cert_ok') {
-      return res.status(409).json({ error: 'Domain must pass verification (cert_ok) before it can be enabled' });
+    // DNS-verified is enough to enable (operator decision): the per-slug
+    // Let's Encrypt cert is issued when a project is actually created, not
+    // up front. A legacy cert_ok row still qualifies.
+    if (row.verify_status !== 'dns_ok' && row.verify_status !== 'cert_ok') {
+      return res.status(409).json({ error: 'Domain must pass DNS verification before it can be enabled — run Verify first' });
     }
     const updated = updateParentDomain(row.id, { enabled: 1 });
     // Publish the (steady-state, no-slug in M1) site file and reload so the
@@ -473,9 +477,18 @@ export function createMock2Router() {
       return res.status(400).json({ error: `Parent domain "${parent.domain}" is not verified and enabled — it cannot host a project yet` });
     }
 
+    // The subdomain is derived from the project NAME (e.g. "My App" →
+    // my-app.<domain>); a duplicate name is rejected, not disambiguated.
+    let slug;
+    try {
+      slug = deriveProjectSlug(parentId, name);
+    } catch (err) {
+      if (err instanceof SlugError) return res.status(409).json({ error: err.message });
+      throw err;
+    }
+
     let project;
     try {
-      const slug = mintUniqueSlug(parentId);
       project = createProject({
         name, description, parentDomainId: parentId, slug,
         repoPathFor: repoPathForProject,

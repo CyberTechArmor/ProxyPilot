@@ -33,11 +33,19 @@ import {
 function statusBadge(row) {
   if (row.verifying) return { label: 'Verifying…', tone: 'text-blue-500', Icon: Loader2, spin: true };
   switch (row.verify_status) {
+    // DNS-verified is the terminal success state — the per-slug cert is issued
+    // when a project is created, so a dns_ok domain is ready to enable and use.
+    case 'dns_ok': return { label: 'Verified (DNS)', tone: 'text-emerald-500', Icon: ShieldCheck };
     case 'cert_ok': return { label: 'Verified', tone: 'text-emerald-500', Icon: ShieldCheck };
-    case 'dns_ok': return { label: 'DNS OK (cert pending)', tone: 'text-amber-500', Icon: ShieldQuestion };
     case 'failed': return { label: 'Failed', tone: 'text-red-500', Icon: ShieldAlert };
     default: return { label: 'Pending', tone: 'text-muted-foreground', Icon: ShieldQuestion };
   }
+}
+
+// A domain that has cleared verification (DNS today; a legacy cert_ok still
+// counts) is ready to enable and to host projects.
+function isVerified(row) {
+  return row.verify_status === 'dns_ok' || row.verify_status === 'cert_ok';
 }
 
 export default function ParentDomains() {
@@ -150,8 +158,9 @@ export default function ParentDomains() {
           <CardTitle>Register a domain</CardTitle>
           <CardDescription>
             Point wildcard DNS <code className="text-xs">*.your-domain</code> at this host first.
-            ProxyPilot checks DNS, then issues a probe certificate to confirm Let&apos;s Encrypt
-            works before the domain can host projects.
+            ProxyPilot verifies the wildcard resolves here, then you enable it. Each project gets
+            its own subdomain (<code className="text-xs">&lt;project&gt;.your-domain</code>) and its
+            HTTPS certificate is issued from Let&apos;s Encrypt the moment the project is created.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -217,7 +226,7 @@ export default function ParentDomains() {
                     </div>
                   </div>
                   <div className="flex gap-1 flex-wrap shrink-0">
-                    {row.verify_status !== 'cert_ok' ? (
+                    {!isVerified(row) ? (
                       <Button
                         variant="outline" size="sm" disabled={busy}
                         onClick={() => act(row.id, api.mock2VerifyParentDomain, 'Verification started')}
@@ -225,7 +234,7 @@ export default function ParentDomains() {
                         <RefreshCw className={`h-4 w-4 mr-1 ${busy ? 'animate-spin' : ''}`} />Verify
                       </Button>
                     ) : null}
-                    {row.verify_status === 'cert_ok' && !row.enabled ? (
+                    {isVerified(row) && !row.enabled ? (
                       <Button
                         variant="default" size="sm" disabled={busy}
                         onClick={() => act(row.id, api.mock2EnableParentDomain, `Enabled ${row.domain}`)}

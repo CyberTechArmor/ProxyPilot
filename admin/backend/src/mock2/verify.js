@@ -24,6 +24,7 @@ import {
   canaryLabel,
   evaluateWildcardDns,
   classifyProbe,
+  parseHostIps,
 } from './domain-logic.js';
 import {
   writeMock2DomainSite,
@@ -40,8 +41,7 @@ function sleep(ms) {
 // nothing set we return [] and evaluateWildcardDns downgrades to "resolves but
 // not cross-checked" rather than blocking (ADR-009's pragmatic v1 stance).
 function defaultExpectedHostIps() {
-  const raw = process.env.MOCK2_PUBLIC_IP || '';
-  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return parseHostIps(process.env.MOCK2_PUBLIC_IP);
 }
 
 // Resolve A (and AAAA) records for a hostname; empty array on NXDOMAIN or any

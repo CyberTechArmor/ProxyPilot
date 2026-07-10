@@ -22,6 +22,8 @@ import {
   evaluateWildcardDns,
   classifyProbe,
   nextVerifyStatus,
+  parseHostIps,
+  looksLikeIp,
 } from '../mock2/domain-logic.js';
 import {
   buildMock2SiteBlock,
@@ -104,6 +106,41 @@ test('evaluateWildcardDns: match / mismatch', () => {
   const miss = evaluateWildcardDns({ resolvedIps: ['9.9.9.9'], expectedIps: ['1.2.3.4'] });
   assert.equal(miss.ok, false);
   assert.match(miss.reason, /answers on 1\.2\.3\.4/);
+});
+
+// ---- MOCK2_PUBLIC_IP parsing (defensive against a polluted env value) ----
+
+test('parseHostIps: keeps valid IPv4/IPv6, drops blanks', () => {
+  assert.deepEqual(parseHostIps('1.2.3.4'), ['1.2.3.4']);
+  assert.deepEqual(parseHostIps('1.2.3.4, 5.6.7.8'), ['1.2.3.4', '5.6.7.8']);
+  assert.deepEqual(parseHostIps('2001:db8::1'), ['2001:db8::1']);
+  assert.deepEqual(parseHostIps(''), []);
+  assert.deepEqual(parseHostIps(undefined), []);
+});
+
+test('parseHostIps: drops a stray inline comment left in the env value', () => {
+  // Regression: docker-compose env_file / systemd EnvironmentFile do not strip
+  // an inline `# comment`, so `MOCK2_PUBLIC_IP=  # TODO: review` reached
+  // process.env as the literal string `# TODO: review` and the DNS cross-check
+  // reported "wildcard resolves to X but this host answers on # TODO: review".
+  assert.deepEqual(parseHostIps('# TODO: review'), []);
+  assert.deepEqual(parseHostIps('  # TODO: review'), []);
+  // A real IP with an un-stripped trailing note in the SAME comma-field can't
+  // be safely salvaged, so it is dropped (conservative → "not cross-checked").
+  assert.deepEqual(parseHostIps('96.88.158.118 # TODO: review'), []);
+  // With the garbage filtered out, evaluateWildcardDns downgrades to
+  // "resolves but not cross-checked" (ok) rather than a false mismatch.
+  const v = evaluateWildcardDns({ resolvedIps: ['96.88.158.118'], expectedIps: parseHostIps('# TODO: review') });
+  assert.equal(v.ok, true);
+  assert.equal(v.matched, false);
+});
+
+test('looksLikeIp: basic shape guard', () => {
+  assert.equal(looksLikeIp('10.0.0.1'), true);
+  assert.equal(looksLikeIp('::1'), true);
+  assert.equal(looksLikeIp('999.1.1.1'), false);
+  assert.equal(looksLikeIp('# TODO: review'), false);
+  assert.equal(looksLikeIp('review'), false);
 });
 
 // ---- probe-cert verdict ----

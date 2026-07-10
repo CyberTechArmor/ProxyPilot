@@ -201,14 +201,26 @@ export function renderSquidAcl(plan = []) {
 
 // ---- manifest port-drift (ADR-005 inbound half) ----
 
+// Benign OS-plumbing ports a stock Debian/systemd container binds on all
+// interfaces that are NOT the app's surface, so they must not raise port_drift
+// (they are noise, not an exposed workload — the drift check exists to catch an
+// undeclared APP port, ADR-005). systemd-resolved binds LLMNR on tcp+udp/5355
+// and multicast DNS on udp/5353; the DHCP client holds udp/68 (v4) and the
+// DHCPv6 client udp/546. These are the recurring false positives on the M4
+// scan. An app that genuinely wants one of these must still declare it as `web`,
+// so ignoring them here changes only the noise, never a routed port.
+export const BENIGN_SYSTEM_TCP_PORTS = Object.freeze([5355]);
+export const BENIGN_SYSTEM_UDP_PORTS = Object.freeze([68, 546, 5353, 5355]);
+
 // computePortDrift({ declared, tcpAnyHost, udpAnyHost }) → the exposed ports the
 // manifest does NOT account for. The declared web port is the only allowed
 // publicly-bound TCP listener; every other non-loopback TCP bind is drift, and
 // ANY non-loopback UDP bind is drift (the manifest declares no UDP). Loopback
-// binds (in-container Postgres on 127.0.0.1:5432, ADR-008) never count.
+// binds (in-container Postgres on 127.0.0.1:5432, ADR-008) never count, and the
+// benign OS-plumbing ports above are filtered out as scan noise.
 export function computePortDrift({ declared, tcpAnyHost = [], udpAnyHost = [] }) {
   const w = Number(declared);
-  const tcp = tcpAnyHost.filter((p) => Number(p) !== w);
-  const udp = [...udpAnyHost];
+  const tcp = tcpAnyHost.filter((p) => Number(p) !== w && !BENIGN_SYSTEM_TCP_PORTS.includes(Number(p)));
+  const udp = udpAnyHost.filter((p) => !BENIGN_SYSTEM_UDP_PORTS.includes(Number(p)));
   return { tcp, udp, hasDrift: tcp.length > 0 || udp.length > 0 };
 }

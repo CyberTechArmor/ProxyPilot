@@ -114,6 +114,13 @@ import { publicChatMessageShape } from './concept-logic.js';
 import {
   startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
 } from './audit.js';
+// ---- M9: iteration classifier, adaptive summary, lifecycle polish ----
+import { startIteration, getClassifierJobStatus, classifierReady } from './classifier.js';
+import { summaryReady } from './summary.js';
+import { getLatestSummary, listSummaries, getSummaryVersion } from './summaries.js';
+import { publicSummaryShape, diffSummaries } from './summary-logic.js';
+import { isQuotaExhausted } from './quotas.js';
+import { countRunningCycles } from './cycles.js';
 import {
   getQuestion, listQuestionsForProject, listOpenEditorQuestions,
   countOpenEditorQuestions, countOpenAdminQuestions,
@@ -317,6 +324,14 @@ function shapeProject(project, { isAdmin }) {
   const current = getCurrentFrameworkVersion();
   const frameworkUpdateAvailable = isFrameworkDrifted(project.last_built_framework_version_id, current?.id ?? null);
   const lastBuilt = project.last_built_framework_version_id ? getFrameworkVersion(project.last_built_framework_version_id) : null;
+  // M9 lifecycle-derived inputs (all DERIVED, never stored): a live cycle
+  // (building), a human-held checkout lock (checked out), and budget exhaustion
+  // (quota exhausted). Cheap queries kept in the shaper so the tile list and the
+  // detail page derive identically (one deriveProjectStatus, never a fork).
+  const cycleRunning = countRunningCycles(project.id) > 0;
+  const lock = getLock(project.id);
+  const lockHeldByHuman = !!(lock && lock.holder_user_id != null && lock.holder_cycle_id == null);
+  const quotaExhausted = isQuotaExhausted(project.id);
   return publicProjectShape(project, {
     parentDomain: parent?.domain || null,
     editorCount: counts.editor,
@@ -328,6 +343,9 @@ function shapeProject(project, { isAdmin }) {
     frameworkUpdateAvailable,
     frameworkCurrentVersion: current?.version ?? null,
     frameworkLastBuiltVersion: lastBuilt?.version ?? null,
+    cycleRunning,
+    lockHeldByHuman,
+    quotaExhausted,
   });
 }
 
@@ -349,7 +367,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M8' });
+    res.json({ status: 'ok', enabled: true, phase: 'M9' });
   });
 
   // ---- Parent domains ----
@@ -1250,6 +1268,34 @@ export function createMock2Router() {
     res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
   });
 
+  // ---- Adaptive summary (M9; 03-data-model.md mock2_summaries) ----
+
+  // The project's adaptive summary: the latest version + the version history, and
+  // a clean diff of the latest against the previous (any member). Regenerated
+  // server-side only on qualifying cycles (rules.md / inventory.json / screens±
+  // actions); this endpoint just reads what was generated.
+  router.get('/projects/:id/summary', requireMock2Role('viewer'), (req, res) => {
+    const projectId = req.mock2Project.id;
+    const versions = listSummaries(projectId);
+    const latest = versions[0] || null;
+    const previous = versions[1] || null;
+    const ready = summaryReady();
+    res.json({
+      summary: latest ? publicSummaryShape(latest) : null,
+      versions: versions.map((v) => ({ version: v.version, derived_from_change_seq: v.derived_from_change_seq, created_at: v.created_at })),
+      diff: latest && previous ? diffSummaries(previous.body_md, latest.body_md) : null,
+      summary_ready: ready.ok,
+      summary_ready_reason: ready.ok ? null : ready.reason,
+    });
+  });
+
+  // A specific summary version's body (any member) — for the diffable history.
+  router.get('/projects/:id/summary/:version', requireMock2Role('viewer'), (req, res) => {
+    const row = getSummaryVersion(req.mock2Project.id, Number(req.params.version));
+    if (!row) return res.status(404).json({ error: 'Summary version not found' });
+    res.json({ summary: publicSummaryShape(row) });
+  });
+
   // ============================================================
   // M7 — Stage 1 (Concept): chat, mockup, design approval. A Builder describes an
   // idea in chat; the concept loop (concept_chat + mockup slots, constrained to
@@ -1269,20 +1315,31 @@ export function createMock2Router() {
     const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
     const ready = conceptReady();
     const audit = auditReady();
+    // M9 iteration: after the design is approved, chat messages run the
+    // classifier (its readiness + background job ride alongside the concept ones).
+    const classifier = classifierReady();
+    const summary = getLatestSummary(project.id);
     // Open editor questions (the rule_question rows the chat renders as tappable
-    // choices) — the frontend shows the choice buttons only for OPEN ids (M8).
+    // choices) — the frontend shows the choice buttons only for OPEN ids (M8/M9).
     const openQuestions = listOpenEditorQuestions(project.id);
     res.json({
       messages: listMessages(project.id).map(publicChatMessageShape),
       job: getConceptJobStatus(project.id),
       audit_job: getAuditJobStatus(project.id),
+      // M9 — the classifier job for iteration messages (post-approval chat).
+      classifier_job: getClassifierJobStatus(project.id),
       stage: shaped.stage,
+      // M9 — post-approval chat drives the classifier, not the concept loop.
+      iterating: !!project.design_approved_at,
       current_mockup_id: shaped.current_mockup_id,
       preview_url: shaped.preview_url,
       concept_ready: ready.ok,
       concept_ready_reason: ready.ok ? null : ready.reason,
       audit_ready: audit.ok,
       audit_ready_reason: audit.ok ? null : audit.reason,
+      classifier_ready: classifier.ok,
+      classifier_ready_reason: classifier.ok ? null : classifier.reason,
+      summary_version: summary?.version ?? null,
       open_question_ids: openQuestions.map((q) => q.id),
       open_editor_questions: openQuestions.length,
       open_admin_items: shaped.open_admin_items,
@@ -1297,22 +1354,31 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const parsed = chatMessageSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'message is required (1–4000 chars)' });
+    // M9: after the design is approved, a chat message is an ITERATION message —
+    // it runs the rule-change classifier first (ADR-002). Before approval it is a
+    // Concept turn. Same endpoint, routed by the design-approval sign-off.
+    const iterating = !!project.design_approved_at;
     let result;
     try {
-      result = await startConceptTurn({
-        project, message: parsed.data.message, user: req.user,
-        actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
-      });
+      result = iterating
+        ? await startIteration({
+          project, message: parsed.data.message, user: req.user,
+          actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        })
+        : await startConceptTurn({
+          project, message: parsed.data.message, user: req.user,
+          actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        });
     } catch (err) {
       return res.status(500).json({ error: `Could not send message: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
-    logAudit(req.user.id, 'MOCK2_CHAT_MESSAGE', 'mock2_project', project.id,
+    logAudit(req.user.id, iterating ? 'MOCK2_ITERATION_MESSAGE' : 'MOCK2_CHAT_MESSAGE', 'mock2_project', project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin, status: result.status }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       message: result.userMessage ? publicChatMessageShape(result.userMessage) : null,
       refused: result.status === 'refused', reason: result.error || null,
-      job: getConceptJobStatus(project.id),
+      job: iterating ? getClassifierJobStatus(project.id) : getConceptJobStatus(project.id),
     });
   });
 

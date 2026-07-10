@@ -32,6 +32,7 @@ import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
+  FileText, Plus, Minus,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -354,6 +355,13 @@ export default function ProjectDetail() {
           then the runner. Only appears once the Stage-1 design is approved. */}
       {!isArchived && project.stage?.design_approved ? (
         <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+      ) : null}
+
+      {/* M9: the adaptive summary — a versioned, diffable plain-language
+          description regenerated on qualifying cycles. Appears once the project
+          has been through Concept (a summary can exist). */}
+      {project.stage?.design_approved ? (
+        <SummaryCard projectId={id} />
       ) : null}
 
       {/* Members */}
@@ -765,6 +773,79 @@ function LockBanner({ projectId, canEdit, isAdmin }) {
 // cycle" instruction box starts the runner; the running cycle shows its status,
 // the gate battery going green (the phase-stepper pattern from LxcContainers),
 // interrupt controls, spend, and the hash-chained change history with a live
+// M9 — the adaptive summary card. Shows the latest versioned summary (Markdown
+// rendered as plain text), the change-record high-water mark it was derived from,
+// and a clean diff of what changed vs the previous version. Regenerated
+// server-side only on qualifying cycles; this just reads it.
+function SummaryCard({ projectId }) {
+  const [data, setData] = useState(null); // { summary, versions, diff, summary_ready, ... }
+  const [showDiff, setShowDiff] = useState(false);
+
+  const load = useCallback(async () => {
+    try { setData(await api.mock2GetSummary(projectId)); }
+    catch (err) { if (!(err instanceof ApiError)) console.error('load summary failed:', err); }
+  }, [projectId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const summary = data?.summary || null;
+  const diff = data?.diff || null;
+  const hasDiff = !!(diff && diff.changed);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <CardTitle className="text-base flex items-center gap-2">
+            <FileText className="h-4 w-4" /> Summary
+            {summary ? <span className="text-xs font-normal text-muted-foreground">v{summary.version}</span> : null}
+          </CardTitle>
+          {hasDiff ? (
+            <Button variant="ghost" size="sm" className="h-9" onClick={() => setShowDiff((s) => !s)}>
+              {showDiff ? 'Hide' : 'What changed'}
+            </Button>
+          ) : null}
+        </div>
+        <CardDescription>
+          A plain-language description of the project, regenerated from the confirmed rules and
+          change history when a build or rule change lands.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!summary ? (
+          <p className="text-sm text-muted-foreground">
+            {data && data.summary_ready === false
+              ? (data.summary_ready_reason || 'Assign a summary model slot to generate a summary.')
+              : 'No summary yet — one is generated after the first build or rule confirmation.'}
+          </p>
+        ) : (
+          <>
+            {showDiff && hasDiff ? (
+              <div className="space-y-1 rounded-lg border bg-muted/30 p-3 text-xs">
+                {diff.removed.map((l, i) => (
+                  <p key={`r${i}`} className="flex items-start gap-1.5 text-red-500 break-words">
+                    <Minus className="h-3.5 w-3.5 mt-0.5 shrink-0" /><span className="line-through opacity-80">{l}</span>
+                  </p>
+                ))}
+                {diff.added.map((l, i) => (
+                  <p key={`a${i}`} className="flex items-start gap-1.5 text-emerald-600 break-words">
+                    <Plus className="h-3.5 w-3.5 mt-0.5 shrink-0" /><span>{l}</span>
+                  </p>
+                ))}
+              </div>
+            ) : null}
+            <div className="text-sm whitespace-pre-wrap break-words leading-relaxed">{summary.body_md}</div>
+            <p className="text-[11px] text-muted-foreground">
+              Derived from change #{summary.derived_from_change_seq}
+              {(data?.versions?.length || 0) > 1 ? ` · ${data.versions.length} versions` : ''}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // chain-verification badge. No chat yet (M7). Polls while a cycle is live.
 function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged }) {
   const { toast } = useToast();

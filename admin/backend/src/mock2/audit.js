@@ -45,6 +45,7 @@ import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './que
 import { INVENTORY_PATH } from './concept-logic.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { callModelTurn } from './model-client.js';
+import { maybeRegenerateSummary } from './summary.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
@@ -346,7 +347,11 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework }) {
+//
+// EXPORTED for M9: the iteration classifier (classifier.js) reuses this exact
+// hand-off for its "implements" outcome and its answered-question resume, so the
+// audit and the classifier proceed to a build through ONE implementation (ADR-002).
+export async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
@@ -424,6 +429,12 @@ export async function answerAuditQuestion({ project, question, answer, user, act
     updateProject(projectId, { last_activity_at: nowIso() });
     releaseLock(projectId, holder);
 
+    // A rule confirmation grows state/rules.md — a QUALIFYING change (M9). Kick
+    // the adaptive-summary regeneration in the background (best-effort; the pure
+    // trigger no-ops if nothing new qualifies). Never blocks the answer.
+    maybeRegenerateSummary(projectId, { reason: 'rule confirmed', triggerCycleId: question.cycle_id || null })
+      .catch((e) => console.warn('[mock2] summary after rule confirm failed:', e?.message));
+
     // 4) If that cleared the last blocker, resume the deferred Build.
     const resumed = await maybeResumeBuild({ projectId, auditCycleId: question.cycle_id, actingAsAdmin });
     return { ok: true, question: updated, resumed };
@@ -437,7 +448,11 @@ export async function answerAuditQuestion({ project, question, answer, user, act
 // admin deviation remain open (auditGateCleared — both DERIVED, never a flag).
 // Marks the audit cycle succeeded and hands off to the runner. Returns true when
 // the build was (re)started.
-async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) {
+//
+// EXPORTED for M9: the iteration classifier creates editor questions on the same
+// (define-stage) cycle, so answering them through answerAuditQuestion below
+// resumes the deferred iteration build through this ONE gate (ADR-002).
+export async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) {
   const openEditorQuestions = countOpenEditorQuestions(projectId);
   const openAdminItems = countOpenAdminQuestions(projectId) + countAwaitingAdminItems(projectId);
   const cleared = auditGateCleared({ openEditorQuestions, openAdminItems });

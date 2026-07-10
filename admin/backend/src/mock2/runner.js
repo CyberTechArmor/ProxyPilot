@@ -39,6 +39,8 @@ import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { raiseQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
+import { insertMessage } from './chats.js';
+import { maybeRegenerateSummary } from './summary.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, STALL_NUDGE,
@@ -252,6 +254,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         finishCycle(cycle.id, { status: 'interrupted', error: 'budget buffer crossed mid-cycle — checkpointed and stopped' });
         releaseLock(projectId, holder);
         safeRaise({ kind: 'quota_exhausted', project_id: projectId, dedupe_key: `mock2-quota:${projectId}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail: `${project.name}: budget crossed mid-cycle` });
+        // Report it plainly in the chat (M9 — the mid-cycle buffer stop message).
+        try {
+          insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'The budget for this period was reached partway through this change. I saved a checkpoint of the work so far and stopped — nothing is lost. Raise the budget to continue.' });
+        } catch { /* chat is a side effect, never the load-bearing path */ }
         setJob(cycle.id, { phase: 'stopped', message: 'Budget buffer crossed — checkpointed and stopped' });
         return scheduleJobCleanup(cycle.id);
       }
@@ -314,6 +320,11 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
       setJob(cycle.id, { phase: 'succeeded', message: 'Change complete — gates green, checkpoint recorded.', commit: record?.commit_sha || null });
+      // A green build checkpoint is a QUALIFYING change (M9) — regenerate the
+      // adaptive summary in the background (best-effort; the pure trigger no-ops
+      // if nothing new qualifies). Never blocks the cycle's completion.
+      maybeRegenerateSummary(projectId, { reason: 'build cycle', triggerCycleId: cycle.id })
+        .catch((e) => console.warn('[mock2] summary after build failed:', e?.message));
       return scheduleJobCleanup(cycle.id);
     }
 

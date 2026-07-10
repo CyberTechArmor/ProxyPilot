@@ -61,7 +61,7 @@ export function insertCycle({
 const WRITABLE = new Set([
   'status', 'current_gate', 'gates_json', 'est_tokens', 'est_cost_cents',
   'used_tokens', 'used_cost_cents', 'retries', 'interrupt_request', 'error',
-  'started_at', 'finished_at', 'classifier_outcome',
+  'started_at', 'finished_at', 'classifier_outcome', 'trigger_message_id',
 ]);
 
 export function updateCycle(id, patch = {}) {

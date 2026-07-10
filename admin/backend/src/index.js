@@ -459,10 +459,15 @@ if (mock2Gate.enabled) {
       console.error('[mock2] firewall reconcile failed:', err?.message || err));
     reconcileMock2Egress().catch((err) =>
       console.error('[mock2] egress reconcile failed:', err?.message || err));
-    // Idle-stop sweep (M3 groundwork): stop containers idle past the configured
-    // window. Non-fatal, fire-and-forget; M9 adds the periodic timer.
+    // Idle-stop enforcement (M3 groundwork, M9 enforces): stop containers idle
+    // past the configured window (mock2_settings.idle_stop_days), on boot and
+    // then hourly. A window of 0 disables it entirely (sweepIdleStops no-ops).
+    // Wake is restart-on-visit (POST /projects/:id/wake). Non-fatal, fire-and-forget.
     sweepIdleStops().catch((err) =>
       console.error('[mock2] idle sweep failed:', err?.message || err));
+    setInterval(() => {
+      sweepIdleStops().catch((err) => console.error('[mock2] idle sweep failed:', err?.message || err));
+    }, 3600000).unref();
     // M6 checkout-lock idle sweep (ADR-004): auto-release stale human checkouts,
     // on boot and every 60s. Orphaned CYCLE locks are already released by
     // sweepMock2OnBoot above; this reclaims idle human holds. Non-fatal.

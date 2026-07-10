@@ -43,12 +43,14 @@ export function validateDomain(raw) {
   return { ok: true, domain };
 }
 
-// A parent domain is offerable to project creation only once its certificate
-// path is proven (cert_ok) AND an admin has flipped it on. This is the single
-// gate M2's project-create must consult; keeping it here makes it unit-testable
-// and impossible to drift between the route and the UI.
+// A parent domain is offerable to project creation once its wildcard DNS is
+// verified (dns_ok) AND an admin has flipped it on. The per-slug Let's Encrypt
+// cert is issued when a project is created (publishDomain → Caddy HTTP-01), not
+// up front — so there is no cert-probe gate (operator decision). A legacy
+// cert_ok row still qualifies. Single gate for both the route and the UI.
 export function isSelectable(row) {
-  return !!row && row.verify_status === 'cert_ok' && Number(row.enabled) === 1;
+  return !!row && Number(row.enabled) === 1 &&
+    (row.verify_status === 'dns_ok' || row.verify_status === 'cert_ok');
 }
 
 // Decorate a stored row for API responses: never leak the encrypted DNS

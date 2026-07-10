@@ -32,6 +32,19 @@ import {
 import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
+// Preview the subdomain the backend will derive from a project name (mirrors
+// slugifyName in admin/backend/src/mock2/slug.js — this is display-only; the
+// backend remains authoritative and rejects duplicates/reserved names).
+function previewSlug(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50)
+    .replace(/-+$/g, '');
+}
+
 export default function Projects() {
   const { user } = useAuth();
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
@@ -243,6 +256,20 @@ export default function Projects() {
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                 autoFocus
               />
+              {form.name.trim() && form.parent_domain_id ? (
+                previewSlug(form.name) ? (
+                  <p className="text-xs text-muted-foreground break-all">
+                    URL:{' '}
+                    <code className="text-foreground">
+                      {previewSlug(form.name)}.{domains.find((d) => String(d.id) === form.parent_domain_id)?.domain}
+                    </code>
+                  </p>
+                ) : (
+                  <p className="text-xs text-amber-500">
+                    Add a letter or number to the name to form a URL.
+                  </p>
+                )
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="proj-desc">Description <span className="text-muted-foreground">(optional)</span></Label>

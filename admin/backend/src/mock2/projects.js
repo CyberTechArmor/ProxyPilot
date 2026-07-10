@@ -14,9 +14,36 @@
 import { randomBytes } from 'crypto';
 import { getMock2Db } from './db.js';
 import { getDb } from '../db.js';
-import { mintSlugCandidate } from './slug.js';
+import { mintSlugCandidate, slugifyName, isReservedSlug, isValidSlugShape } from './slug.js';
 
 const nowIso = () => new Date().toISOString();
+
+// A project's URL slug is derived from its NAME (operator decision: the
+// subdomain is `<name-slug>.<parent-domain>`), and duplicate names are REJECTED
+// rather than numerically disambiguated. deriveProjectSlug throws a SlugError
+// whose message is safe to show the user; the route surfaces it as a 409.
+export class SlugError extends Error {
+  constructor(message) { super(message); this.name = 'SlugError'; }
+}
+
+export function deriveProjectSlug(parentDomainId, name) {
+  const slug = slugifyName(name);
+  if (!slug || !isValidSlugShape(slug)) {
+    throw new SlugError('The project name needs at least one letter or number to form a URL — please choose a different name.');
+  }
+  if (isReservedSlug(slug)) {
+    throw new SlugError(`"${slug}" is a reserved name and can't be used in a URL — please choose a different project name.`);
+  }
+  const db = getMock2Db();
+  const usedActive = db.prepare(`SELECT 1 FROM mock2_projects WHERE parent_domain_id = ? AND slug = ?`).get(parentDomainId, slug);
+  // mock2_slug_history is the never-reuse list (ADR-006): a name that once lived
+  // here can't come back, even after its project is deleted.
+  const usedEver = db.prepare(`SELECT 1 FROM mock2_slug_history WHERE parent_domain_id = ? AND slug = ?`).get(parentDomainId, slug);
+  if (usedActive || usedEver) {
+    throw new SlugError(`The URL "${slug}" is already taken on this domain — please choose a different project name.`);
+  }
+  return slug;
+}
 
 // ---- projects ----
 

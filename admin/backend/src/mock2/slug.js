@@ -31,6 +31,28 @@ export const RESERVED_SLUG_LABELS = new Set(['www', 'api', 'admin', 'mail', 'ftp
 // or hand-edited row from ever being published to Caddy.
 export const SLUG_RE = /^p-[0-9a-f]{8}$/;
 
+// Longest a name-derived label may be. DNS labels cap at 63; we stay well under
+// so the full FQDN (`<label>.<parent>`) always fits with headroom. Duplicates
+// are rejected (never numerically suffixed), so no room needs reserving.
+export const MAX_SLUG_LENGTH = 50;
+
+// A DNS-safe label: 1–63 chars, lowercase alphanumeric with internal hyphens,
+// no leading/trailing hyphen. Covers BOTH a name-derived slug and the legacy
+// p-<hex> mint, so it is the single shape guard used before a slug is ever
+// interpolated into a Caddy address.
+const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// slugifyName(name) — turn a human project name into a DNS-safe label, or ''
+// when nothing usable remains (all punctuation / non-latin). Lowercased, accent-
+// folded, every non-alphanumeric run collapsed to a single '-', leading/trailing
+// '-' trimmed, then length-capped (re-trimming any '-' the cut exposed).
+export function slugifyName(name) {
+  let s = String(name || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '');
+  s = s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (s.length > MAX_SLUG_LENGTH) s = s.slice(0, MAX_SLUG_LENGTH).replace(/-+$/g, '');
+  return s;
+}
+
 // isReservedSlug(slug) — true when the label is one the module must never hand
 // out (a reserved prefix or a reserved bare label). Checked both by the mint
 // loop (which re-mints on a hit — astronomically unlikely for random hex, but
@@ -47,7 +69,7 @@ export function isReservedSlug(slug) {
 // reaches a Caddy address (a slug is interpolated into a FQDN, so a malformed
 // value is a config-integrity risk, not just a cosmetic one).
 export function isValidSlugShape(slug) {
-  return SLUG_RE.test(String(slug || ''));
+  return LABEL_RE.test(String(slug || ''));
 }
 
 // mintSlugCandidate(randHex) — turn an injected hex string into a candidate

@@ -691,6 +691,21 @@ else
     # backup state and force --rebuild so the re-exec'd run doesn't
     # bail on LOCAL==REMOTE or duplicate the DB backup.
     if [ -z "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
+        # Decide the docker build cache mode for the re-exec'd run. A from-scratch
+        # (--no-cache) rebuild is only needed when a dependency/toolchain file
+        # changed — the backend package manifest/lockfile or the Dockerfile —
+        # because those invalidate the native better-sqlite3/node-pty compile.
+        # When this pull only touched frontend or backend src, the cached build
+        # reuses the compiled node_modules layer and finishes in seconds (the COPY
+        # layers for the new dist/src are checksum-keyed, so they still refresh).
+        # Computed HERE (in SCRIPT_DIR, the git checkout, with $LOCAL still the
+        # pre-pull commit) and passed to the re-exec; unset ⇒ conservative no-cache.
+        if $GIT_CMD diff --name-only "$LOCAL" HEAD 2>/dev/null \
+            | grep -Eq '^(admin/backend/package\.json|admin/backend/package-lock\.json|admin/Dockerfile)$'; then
+            export PROXYPILOT_DEP_CHANGED=1
+        else
+            export PROXYPILOT_DEP_CHANGED=0
+        fi
         export PROXYPILOT_UPDATE_REEXEC=1
         export PROXYPILOT_DB_BACKUP_FILE="$DB_BACKUP_FILE"
         export PROXYPILOT_DB_BACKUP_SOURCE="$DB_BACKUP_SOURCE"
@@ -1431,8 +1446,21 @@ PYEOF
             exit 1
         fi
 
-        log "Building with --no-cache..."
-        $DC_CMD build --no-cache
+        # Cached vs from-scratch build. PROXYPILOT_DEP_CHANGED is set in the
+        # re-exec block above: 0 = this update touched only frontend/src, so the
+        # cached build reuses the native better-sqlite3/node-pty compile layer
+        # (~seconds); 1 (or unset) = a dependency/Dockerfile change, or we could
+        # not prove otherwise, so recompile from source with --no-cache (minutes).
+        # An operator who wants a guaranteed clean image can still force it:
+        # `sudo ./update.sh --rebuild` on an up-to-date checkout takes the
+        # --no-cache path (no re-exec ⇒ PROXYPILOT_DEP_CHANGED unset).
+        if [ "${PROXYPILOT_DEP_CHANGED:-1}" = "0" ]; then
+            log "No dependency/Dockerfile changes — building with the cache (reuses the native module compile)..."
+            $DC_CMD build
+        else
+            log "Building with --no-cache..."
+            $DC_CMD build --no-cache
+        fi
         $DC_CMD up -d
 
         # docker compose up -d returns 0 once the daemon accepts the

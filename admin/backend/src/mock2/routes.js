@@ -287,6 +287,9 @@ const lockIdleSchema = z.object({
 // ---- M7 Zod schemas ----
 const chatMessageSchema = z.object({
   message: z.string().trim().min(1).max(4000),
+  // Conversation mode (M7): 'plan' talks through requirements without touching
+  // the mockup; 'design' (default) may generate/iterate the mockup.
+  mode: z.enum(['plan', 'design']).optional(),
 });
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
@@ -1338,6 +1341,7 @@ export function createMock2Router() {
       result = await startConceptTurn({
         project, message: parsed.data.message, user: req.user,
         actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        mode: parsed.data.mode || 'design',
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not send message: ${err?.message || 'unknown error'}` });

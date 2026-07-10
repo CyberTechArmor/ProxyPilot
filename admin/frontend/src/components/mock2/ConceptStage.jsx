@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   Loader2, Send, ExternalLink, CheckCircle2, Sparkles, MessageSquare, Lock, HelpCircle,
+  ClipboardList,
 } from 'lucide-react';
 
 // A rule_question body carries { question, choices } as JSON (M8, ADR-002).
@@ -176,6 +177,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
+  const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
   const wasApproved = useRef(!!project?.design_approved_at);
 
@@ -243,7 +245,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
     if (!text) return;
     setBusy(true);
     try {
-      const res = await api.mock2SendChatMessage(projectId, text);
+      const res = await api.mock2SendChatMessage(projectId, text, mode);
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Message not processed', description: res.reason || 'Quota exceeded.' });
       } else {
@@ -362,7 +364,9 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
           <div className="space-y-2">
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-              placeholder={online ? 'Describe a screen, a change, or ask a question…' : 'Project must be online to chat.'}
+              placeholder={online
+                ? (mode === 'plan' ? 'Think through what you want to build…' : 'Describe a screen, a change, or ask a question…')
+                : 'Project must be online to chat.'}
               value={message}
               disabled={composerDisabled}
               onChange={(e) => setMessage(e.target.value)}
@@ -371,8 +375,25 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
               }}
             />
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to send</span>
-              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || !message.trim()} onClick={send}>
+              {/* Plan vs Design — Plan talks through the idea without touching the
+                  mockup; Design generates/iterates it. */}
+              <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Conversation mode">
+                <button
+                  type="button" role="tab" aria-selected={mode === 'plan'} title="Plan — think through the idea without changing the mockup"
+                  onClick={() => setMode('plan')}
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'plan' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                >
+                  <ClipboardList className="h-3.5 w-3.5" /> Plan
+                </button>
+                <button
+                  type="button" role="tab" aria-selected={mode === 'design'} title="Design — generate and iterate the mockup"
+                  onClick={() => setMode('design')}
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'design' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                >
+                  <Sparkles className="h-3.5 w-3.5" /> Design
+                </button>
+              </div>
+              <Button className="h-11 sm:h-10" disabled={composerDisabled || !message.trim()} onClick={send}>
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
                 Send
               </Button>

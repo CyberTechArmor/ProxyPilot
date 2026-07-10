@@ -89,6 +89,25 @@ export function spawnTerminalPty({ kind, target, mode = 'exec', cols = 80, rows 
       cmd = 'incus';
       args = incusArgs;
     }
+  } else if (kind === 'mock2') {
+    // A shell into a Mock2 project container. Unlike kind='lxc', `target` is the
+    // FULLY-RESOLVED instance name (m2-<id>, resolved + authorized upstream in
+    // mock2/terminal.js) — there is no pp- prefix. The seed image is minimal, so
+    // prefer bash when present and fall back to sh; start in the app worktree
+    // (/srv/app) when it exists. The cd/exec run INSIDE the container, so no host
+    // cwd is set for this kind (an incus-exec host cwd would be meaningless).
+    if (!validInstanceName(target)) {
+      throw new Error('Invalid container target');
+    }
+    const shellCmd = 'cd /srv/app 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi';
+    const incusArgs = ['exec', '-t', target, '--', 'sh', '-c', shellCmd];
+    if (isInDocker) {
+      cmd = 'nsenter';
+      args = ['-t', '1', '-m', '-u', '-n', '-i', 'incus', ...incusArgs];
+    } else {
+      cmd = 'incus';
+      args = incusArgs;
+    }
   } else if (kind === 'host') {
     if (isInDocker) {
       cmd = 'nsenter';

@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
+import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -393,6 +394,13 @@ export default function ProjectDetail() {
           then the runner. Only appears once the Stage-1 design is approved. */}
       {!isArchived && project.stage?.design_approved ? (
         <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+      ) : null}
+
+      {/* Project terminal — a shell into the container (m2-<id>). Editors/admins
+          only, and only while the container is online; the backend authorizer
+          enforces the same. Lazily connects on open. */}
+      {!isArchived && canEdit && project.lifecycle === 'active' ? (
+        <ProjectTerminal projectId={id} containerName={project.container_name} />
       ) : null}
 
       {/* Members */}

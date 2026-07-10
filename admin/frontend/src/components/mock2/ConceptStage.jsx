@@ -296,15 +296,26 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
           </div>
         ) : null}
 
-        {/* Preview + approve controls */}
+        {/* Persistent preview link — always one click (or copy) away once a
+            mockup exists (opens in a new tab). Shows the full URL so it's
+            obvious and copyable, not a button that scrolls out of view. */}
+        {previewUrl ? (
+          <div className="flex items-center gap-2 rounded-lg border bg-background/40 px-3 py-2">
+            <ExternalLink className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="min-w-0 flex-1 truncate text-sm font-medium text-primary hover:underline"
+              title={previewUrl}
+            >
+              {previewUrl}
+            </a>
+          </div>
+        ) : null}
+
+        {/* Approve controls */}
         <div className="flex flex-wrap gap-2">
-          {previewUrl && hasMockup ? (
-            <Button asChild variant="outline" size="sm" className="h-10">
-              <a href={previewUrl} target="_blank" rel="noreferrer">
-                <ExternalLink className="h-4 w-4 mr-1" /> Open mockup preview
-              </a>
-            </Button>
-          ) : null}
           {canEdit && !approved && hasMockup && online ? (
             <Button size="sm" className="h-10" disabled={busy || jobActive} onClick={approve}>
               {jobActive && data?.job?.kind === 'approval'

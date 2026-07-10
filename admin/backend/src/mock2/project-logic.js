@@ -62,6 +62,29 @@ export function resolveMock2Access({ user, membership = null, requiredRole = 'vi
   return { allowed: true, actingAsAdmin: false, role: membership.role, reason: 'member' };
 }
 
+// mock2TerminalDecision — the pure verdict for opening a shell terminal into a
+// project's container over the streaming-terminal WS route. A shell is a MUTATE
+// capability (it can change the working tree, run the dev server, etc.), so the
+// caller resolves `access` at the 'editor' role; this layers the not-found
+// masking (mirror requireMock2Role: a non-member gets 404, never a 403 that
+// would confirm the project exists) and the "must be online" guard on top.
+// Returns { ok, status, reason, actingAsAdmin } — status is the HTTP-ish code
+// the WS upgrade rejects with. Pure: the DB lookups + container-name resolution
+// live in terminal.js so this stays unit-testable stub-first (risk R9).
+export function mock2TerminalDecision({ project = null, access = null } = {}) {
+  if (!project) return { ok: false, status: 404, reason: 'Project not found' };
+  if (!access || !access.allowed) {
+    if (!access || access.reason === 'not a project member') {
+      return { ok: false, status: 404, reason: 'Project not found' };
+    }
+    return { ok: false, status: 403, reason: 'Terminal access requires the editor role on this project' };
+  }
+  if (project.lifecycle !== 'active') {
+    return { ok: false, status: 409, reason: `The project container is not online (it is "${project.lifecycle}")` };
+  }
+  return { ok: true, status: 200, reason: access.reason, actingAsAdmin: !!access.actingAsAdmin };
+}
+
 // ---- derived status (single source of truth) ----
 
 // deriveProjectStatus(project, ctx) → one lowercase status token the UI keys

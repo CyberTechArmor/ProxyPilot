@@ -214,6 +214,32 @@ test('computePortDrift: loopback-only ports are the caller\'s concern, not ours'
   assert.equal(d.hasDrift, false);
 });
 
+test('computePortDrift: benign OS-plumbing ports (LLMNR, mDNS, DHCP) are not drift', () => {
+  // systemd/DHCP noise a stock container binds on all interfaces: LLMNR tcp+udp
+  // 5355, mDNS udp 5353, DHCP client udp 68, DHCPv6 client udp 546. None is app
+  // surface, so the scan must stay quiet.
+  const d = computePortDrift({
+    declared: 3000,
+    tcpAnyHost: [3000, 5355],
+    udpAnyHost: [68, 546, 5353, 5355],
+  });
+  assert.deepEqual(d.tcp, []);
+  assert.deepEqual(d.udp, []);
+  assert.equal(d.hasDrift, false);
+});
+
+test('computePortDrift: a real undeclared port still drifts alongside benign noise', () => {
+  // Filtering the OS ports must not mask a genuinely exposed app port.
+  const d = computePortDrift({
+    declared: 3000,
+    tcpAnyHost: [3000, 5355, 8080],
+    udpAnyHost: [68, 9999],
+  });
+  assert.deepEqual(d.tcp, [8080]);
+  assert.deepEqual(d.udp, [9999]);
+  assert.equal(d.hasDrift, true);
+});
+
 // ---- container proxy env injection (template.js, M4) ----
 
 test('buildContainerSetupScript: bakes the egress proxy into the container env', () => {

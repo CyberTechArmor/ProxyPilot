@@ -33,7 +33,7 @@ import { runHost, sh, b64 } from './host.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedFiles, buildContainerSetupScript, buildProxyConfigScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
 import {
   bridgeNameForProject,
   bridgeCidrForProject,
@@ -108,8 +108,17 @@ echo "[mock2] seeded bare repo $REPO"
 }
 
 function setStatus(projectId, patch) {
-  const cur = activeProvisions.get(Number(projectId)) || {};
-  activeProvisions.set(Number(projectId), { ...cur, ...patch, updatedAt: Date.now() });
+  const id = Number(projectId);
+  const cur = activeProvisions.get(id) || {};
+  // Accumulate a step log so the UI can show what actually happened (and the
+  // failing step's error), not just the latest one-line message. Append on each
+  // distinct message; cap the length so a stuck loop can't grow it unbounded.
+  const log = Array.isArray(cur.log) ? cur.log : [];
+  if (patch.message && patch.message !== cur.message) {
+    log.push({ t: Date.now(), phase: patch.phase || cur.phase || '', message: patch.message });
+    if (log.length > 100) log.splice(0, log.length - 100);
+  }
+  activeProvisions.set(id, { ...cur, ...patch, log, updatedAt: Date.now() });
 }
 
 // startProvision(project) — kick off the background job. Returns immediately;
@@ -227,6 +236,22 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // sets this already, but force it so the value is deterministic (M4, ADR-010).
   const gateway = gatewayForCidr(bridgeCidr);
   await sh(`incus exec ${containerName} -- sh -c 'printf "nameserver ${gateway}\\n" > /etc/resolv.conf'`).catch(() => {});
+
+  // ---- Configure the egress proxy BEFORE anything fetches packages ----
+  // The clone step below installs git via apt, and apt/npm/pip later — all of
+  // which must go through the host filtering proxy (the bridge's only egress
+  // path) and over IPv4 (no v6 on the bridge). Writing the apt proxy conf now,
+  // rather than only in the setup script that runs after the clone, is what lets
+  // `apt-get install git` succeed. Non-fatal: a missing proxy just fails apt with
+  // a clear message (and squid must be installed — scripts/mock2-enable-egress.sh).
+  const proxyCfg = buildProxyConfigScript({
+    proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
+    noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
+  });
+  if (proxyCfg) {
+    await sh(`printf '%s' '${b64(proxyCfg)}' | base64 -d | incus exec ${containerName} -- sh`)
+      .catch((e) => console.warn('[mock2] container proxy config failed:', e?.message));
+  }
 
   // ---- Mount the bare repo (ADR-011) + clone the working tree ----
   setStatus(projectId, { phase: 'repo-mount', message: 'Mounting repo and cloning working tree…' });

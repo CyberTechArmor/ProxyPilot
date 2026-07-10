@@ -22,6 +22,7 @@ import {
   LifeBuoy,
   HardDrive,
   FolderGit2,
+  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
@@ -146,6 +147,22 @@ export default function Layout() {
   // production-pinned host the route 404s (ADR-001) and the entry stays
   // hidden — the frontend must reveal nothing a disabled host doesn't have.
   const [mock2Enabled, setMock2Enabled] = useState(false);
+
+  // Discoverability hint for the Mock2 dev/build module. On an upgrading host
+  // the module ships in the build but stays gated OFF (MOCK2_ENABLED=false),
+  // so an admin has no way to know it exists or how to turn it on. This
+  // dismissible, admin-only hint (operator-requested — it deliberately
+  // relaxes the "reveal nothing" note above for discoverability) shows the
+  // exact update.sh command. Kept purely frontend: no new backend route, so a
+  // disabled/pinned host adds no Mock2 API surface (ADR-001). A production pin
+  // still forces the module off even after the command runs — the hint says so.
+  const [mock2HintDismissed, setMock2HintDismissed] = useState(
+    () => localStorage.getItem('mock2HintDismissed') === '1'
+  );
+  const dismissMock2Hint = () => {
+    localStorage.setItem('mock2HintDismissed', '1');
+    setMock2HintDismissed(true);
+  };
 
   useEffect(() => {
     api.getVersion()
@@ -287,6 +304,39 @@ export default function Layout() {
               );
             })}
           </nav>
+
+          {/* Mock2 discoverability hint — admins only, when the module is
+              present in this build but gated off on this host. Dismissible. */}
+          {isAdmin && !mock2Enabled && !mock2HintDismissed && (
+            <div className="mx-4 mb-3 rounded-md border border-dashed border-border bg-muted/40 p-3">
+              <div className="flex items-start gap-2">
+                <FolderGit2 className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-foreground">
+                    Projects / AI dev flow available
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The Mock2 dev/build module ships with this version but is
+                    turned off on this host. To enable it, run:
+                  </p>
+                  <code className="mt-2 block overflow-x-auto rounded bg-background px-2 py-1 font-mono text-[11px] text-foreground">
+                    sudo /opt/proxypilot/update.sh --enable-mock2
+                  </code>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    A production pin keeps it off regardless.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={dismissMock2Hint}
+                  aria-label="Dismiss Mock2 hint"
+                  className="-mr-1.5 -mt-1.5 flex h-11 w-11 md:h-9 md:w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* User section */}
           <div className="px-4 py-4 border-t">

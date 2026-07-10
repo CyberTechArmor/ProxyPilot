@@ -49,7 +49,7 @@ export function insertChangeRecord({
       project_id: Number(projectId),
       cycle_id: cycleId == null ? null : Number(cycleId),
       seq,
-      initiated_by: Number(initiatedBy),
+      initiated_by: initiatedBy ?? null,
       acting_as_admin: actingAsAdmin ? 1 : 0,
       framework_version: Number(frameworkVersion),
       framework_version_id: Number(frameworkVersionId),

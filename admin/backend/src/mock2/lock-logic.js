@@ -25,7 +25,10 @@ export const LOCK_WARN_SECONDS = 120;
 export function lockHolder(lockRow) {
   if (!lockRow) return null;
   if (lockRow.holder_cycle_id != null) return { type: 'cycle', id: Number(lockRow.holder_cycle_id) };
-  if (lockRow.holder_user_id != null) return { type: 'user', id: Number(lockRow.holder_user_id) };
+  // holder_user_id is a UUID (users.id is TEXT), so return it AS-IS — never
+  // Number()-coerce it. Number(uuid) is NaN, which never equalled requester.id,
+  // so every same-holder re-acquire read as "held by another writer".
+  if (lockRow.holder_user_id != null) return { type: 'user', id: lockRow.holder_user_id };
   return null;
 }
 

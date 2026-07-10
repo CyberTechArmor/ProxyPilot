@@ -106,7 +106,7 @@ export function requestTakeover(projectId, userId) {
   if (!lockHolder(cur)) return { ok: false, reason: 'not held' };
   getMock2Db()
     .prepare(`UPDATE mock2_locks SET takeover_requested_by = ?, takeover_requested_at = ? WHERE project_id = ?`)
-    .run(Number(userId), nowIso(), Number(projectId));
+    .run(userId ?? null, nowIso(), Number(projectId));
   return { ok: true, lock: getLock(projectId) };
 }
 

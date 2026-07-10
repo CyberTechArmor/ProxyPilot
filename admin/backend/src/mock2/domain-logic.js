@@ -84,6 +84,29 @@ export function canaryLabel(rand) {
   return `_mock2-verify-${suffix}`;
 }
 
+// Parse MOCK2_PUBLIC_IP (comma-separated) into a clean list of host IPs.
+// Defensive: docker-compose `env_file` and systemd `EnvironmentFile` do NOT
+// strip an inline `# comment` the way dotenv does, so a `.env` line like
+// `MOCK2_PUBLIC_IP=  # TODO: review` (as update.sh's sync_env_keys used to
+// append) can reach process.env verbatim as `# TODO: review`. Keeping only
+// entries that actually look like an IPv4/IPv6 address means a stray comment
+// downgrades to "host IP unknown → resolves but not cross-checked" instead of
+// the nonsensical "wildcard resolves to X but this host answers on # TODO:
+// review". Pure + exported so it is unit-testable and shared by verify.js and
+// the routes' A-record check.
+const IPV4_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const IPV6_RE = /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i;
+export function looksLikeIp(value) {
+  const v = String(value ?? '').trim();
+  return IPV4_RE.test(v) || IPV6_RE.test(v);
+}
+export function parseHostIps(raw) {
+  return String(raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(looksLikeIp);
+}
+
 // evaluateWildcardDns — decide whether a random label under the parent domain
 // resolves to this host. `resolvedIps` is what DNS returned for the random
 // label; `expectedIps` is what we believe this host answers on (may be empty

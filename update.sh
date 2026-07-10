@@ -205,8 +205,16 @@ sync_env_keys() {
                     fi
                     ;;
                 *)
-                    # Non-secret: copy the example line verbatim with a TODO marker.
-                    echo "${default_line}  # TODO: review"
+                    # Non-secret: copy the example line verbatim. The review
+                    # marker goes on its OWN line ABOVE the key — never inline.
+                    # An inline `KEY=value  # note` is stripped by dotenv but
+                    # NOT by docker-compose env_file / systemd EnvironmentFile,
+                    # which load the raw line into the environment first; dotenv
+                    # then leaves the already-set (polluted) value alone. For an
+                    # empty-valued key that turned `MOCK2_PUBLIC_IP=` into a
+                    # literal `# TODO: review` value and broke domain verification.
+                    echo "# TODO: review — appended by update.sh from .env.example"
+                    echo "${default_line}"
                     todo_keys+=("$key")
                     ;;
             esac

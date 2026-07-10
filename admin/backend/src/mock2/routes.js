@@ -22,7 +22,7 @@ import {
   updateParentDomain,
   deleteParentDomain,
 } from './domains.js';
-import { validateDomain, publicDomainShape, isSelectable } from './domain-logic.js';
+import { validateDomain, publicDomainShape, isSelectable, parseHostIps } from './domain-logic.js';
 import { runVerification } from './verify.js';
 import { writeMock2DomainSite, unpublishMock2Domain, reloadMock2Caddy } from './caddy.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
@@ -1440,7 +1440,7 @@ export function createMock2Router() {
 // throws; a mismatch is a warning, not a hard block (the operator may be behind
 // a proxy/CDN the host can't see).
 async function checkARecord(domain) {
-  const expected = (process.env.MOCK2_PUBLIC_IP || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const expected = parseHostIps(process.env.MOCK2_PUBLIC_IP);
   let resolved = [];
   try { resolved = resolved.concat(await dns.resolve4(domain)); } catch { /* no A */ }
   try { resolved = resolved.concat(await dns.resolve6(domain)); } catch { /* no AAAA */ }

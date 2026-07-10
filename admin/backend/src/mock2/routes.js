@@ -43,6 +43,7 @@ import {
   removeMember,
   lookupUser,
   listProjectSlugs,
+  purgeProjectSlugHistory,
 } from './projects.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { requireMock2Role } from './authz.js';
@@ -723,11 +724,12 @@ export function createMock2Router() {
     res.json({ hosts: listAllowlist(project.id), removed, egress });
   });
 
-  // Destroy a project: tear down its container, drop its slug block, delete the
-  // row + memberships. The bare repo AND slug-history reservations are kept so
-  // the slug stays un-reusable forever (ADR-006). Admin + fresh sudo. An
-  // archived project is read-only (Q4) — it cannot be deleted, only rehydrated;
-  // long-term purge policy is deferred (ADR-006 / Q4).
+  // Destroy a project: tear down its container + bridge, drop its slug block,
+  // purge its certs, and delete the row + memberships + bare repo + slug-history
+  // reservations. Delete is a FULL purge (operator decision): the name/URL is
+  // released for reuse and the repo is removed — unlike archive, which stays
+  // read-only and rehydratable and keeps everything. Admin + fresh sudo. An
+  // archived project cannot be deleted, only rehydrated.
   router.delete('/projects/:id', requireAdmin, requireSudo, async (req, res) => {
     const project = getProject(Number(req.params.id));
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -758,10 +760,13 @@ export function createMock2Router() {
         console.error('[mock2] cert cleanup on delete failed:', err?.message);
       }
     }
-    // Destroy the container + its bridge; KEEP the bare repo (ADR-006 —
-    // slug/history live on). The row is already deleted, so the fence + proxy
-    // reconciles below drop this project from both plans (M4).
-    teardownProject({ containerName, projectId: project.id, repoPath: project.repo_path, removeRepo: false })
+    // Release the slug reservations so the name/URL can be reused by a new
+    // project (must run AFTER the cert cleanup above, which reads the history).
+    try { purgeProjectSlugHistory(project.id); } catch (err) { console.error('[mock2] slug-history purge failed:', err?.message); }
+    // Destroy the container + its bridge AND remove the bare repo — delete is a
+    // full purge (see the route comment). The row is already deleted, so the
+    // fence + proxy reconciles below drop this project from both plans (M4).
+    teardownProject({ containerName, projectId: project.id, repoPath: project.repo_path, removeRepo: true })
       .then(() => Promise.all([
         reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (delete) failed:', e?.message)),
         reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (delete) failed:', e?.message)),

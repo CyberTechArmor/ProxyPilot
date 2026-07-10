@@ -87,9 +87,13 @@ function buildSeedScript({ repoPath, files, projectName }) {
   return `set -e
 REPO="${repoPath}"
 mkdir -p "$(dirname "$REPO")"
-if [ ! -d "$REPO" ]; then
-  git init --bare -b main "$REPO"
-fi
+# Seed runs only for a BRAND-NEW project (rehydrate clones the existing repo and
+# never re-seeds), so any repo already at this path is stale — a crashed prior
+# provision, or a reused project id whose predecessor's repo was kept. Start
+# clean, otherwise the seed 'git push main:main' is rejected as a non-fast-
+# forward against the old history ("[rejected] main -> main (fetch first)").
+rm -rf "$REPO"
+git init --bare -b main "$REPO"
 WT="$(mktemp -d)"
 git init -q -b main "$WT"
 ${writes}

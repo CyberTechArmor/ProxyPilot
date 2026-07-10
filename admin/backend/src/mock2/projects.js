@@ -200,6 +200,15 @@ export function listProjectSlugs(projectId) {
     .map((r) => r.slug);
 }
 
+// Release a deleted project's slug reservations so the name/URL can be reused by
+// a new project (operator decision — delete is a full purge, unlike archive
+// which stays rehydratable and keeps its slug). Only call on hard delete.
+export function purgeProjectSlugHistory(projectId) {
+  return getMock2Db()
+    .prepare(`DELETE FROM mock2_slug_history WHERE project_id = ?`)
+    .run(projectId).changes;
+}
+
 // ---- membership (ADR-007) ----
 
 export function listMembers(projectId) {

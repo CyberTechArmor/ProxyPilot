@@ -349,10 +349,11 @@ export default function ProjectDetail() {
         <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
       ) : null}
 
-      {/* M6: build cycle — run a targeted change, watch the gates go green.
-          Build only appears once the Stage-1 design is approved (M7 unlock). */}
+      {/* M6/M8: build cycle — the Build press runs the M8 audit first (rule
+          questions in the chat above, framework deviations to the admin queue),
+          then the runner. Only appears once the Stage-1 design is approved. */}
       {!isArchived && project.stage?.design_approved ? (
-        <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} />
+        <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
       ) : null}
 
       {/* Members */}
@@ -412,12 +413,13 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* Flag overlay (editors) */}
-      {canEdit && !readOnly ? (
+      {/* Flag overlay (any member — editors AND viewers, M8). A viewer who spots
+          something wrong raises the `!` overlay + a queue item, same as an editor. */}
+      {!readOnly ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Flag for admin</CardTitle>
-            <CardDescription>The one manual overlay — raise or clear an admin flag on this project.</CardDescription>
+            <CardDescription>The one manual overlay — raise or clear an admin flag on this project. Any member can flag.</CardDescription>
           </CardHeader>
           <CardContent>
             <Button
@@ -764,7 +766,7 @@ function LockBanner({ projectId, canEdit, isAdmin }) {
 // the gate battery going green (the phase-stepper pattern from LxcContainers),
 // interrupt controls, spend, and the hash-chained change history with a live
 // chain-verification badge. No chat yet (M7). Polls while a cycle is live.
-function CycleCard({ projectId, canEdit, isAdmin, lifecycle }) {
+function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged }) {
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
   const [job, setJob] = useState(null);
@@ -785,31 +787,50 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const active = cycle && ['queued', 'estimating', 'running'].includes(cycle.status);
-  // Poll while a cycle is live so the gates settle on their own.
+  // The whole build ATTEMPT is live while the audit runs (running/estimating) OR
+  // while it is blocked on questions (awaiting_user/awaiting_admin) — poll so the
+  // resumed build cycle appears once the gate clears, and refresh the project so
+  // its derived status chip updates.
+  const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
   useEffect(() => {
     if (!active) return undefined;
-    const t = setInterval(load, 3000);
+    const t = setInterval(() => { load(); if (onChanged) onChanged(); }, 3000);
     return () => clearInterval(t);
-  }, [active, load]);
+  }, [active, load, onChanged]);
 
   const online = lifecycle === 'active';
 
-  const run = async () => {
-    if (!instruction.trim()) return;
+  // Start a build. M8 routes the press through the audit first: the response's
+  // `audit` flag means the audit is running (rule questions may appear in the
+  // chat above; framework deviations go to the admin queue).
+  const startBuild = async (text) => {
+    const body = String(text || '').trim();
+    if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, instruction.trim());
+      const res = await api.mock2StartCycle(projectId, body);
       if (res.refused) {
-        toast({ variant: 'destructive', title: 'Cycle refused', description: res.reason || 'Quota exceeded.' });
+        toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
+      } else if (res.audit) {
+        toast({ title: 'Auditing the build…', description: 'Checking the design against the rules and framework.' });
+        setInstruction('');
       } else {
-        toast({ title: 'Cycle started' });
+        toast({ title: 'Build started' });
         setInstruction('');
       }
       setCycle(res.cycle || null);
+      if (onChanged) onChanged();
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start cycle', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
     } finally { setBusy(false); }
+  };
+  const run = () => startBuild(instruction);
+  // Explicit-consent framework adoption (ADR-003 — Mock2 X → Y). Nothing
+  // auto-remediates; the operator starts this update cycle deliberately.
+  const remediate = () => {
+    const from = project?.framework_last_built_version;
+    const to = project?.framework_current_version;
+    startBuild(`Adopt framework ${from ? `v${from} → ` : ''}v${to}: re-run the full gate battery and reconcile the app with the updated constitution and confirmed rules (Mock2 ${from ? `v${from} → ` : ''}v${to}).`);
   };
 
   const interrupt = async (action) => {
@@ -836,20 +857,43 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle }) {
 
   const statusTone = {
     running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
-    refused_quota: 'text-red-500', awaiting_admin: 'text-amber-500', interrupted: 'text-amber-500',
-    abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
+    refused_quota: 'text-red-500', awaiting_user: 'text-violet-500', awaiting_admin: 'text-amber-500',
+    interrupted: 'text-amber-500', abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
   };
+  const driftAvailable = !!project?.framework_update_available;
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base flex items-center gap-2"><Hammer className="h-4 w-4" /> Build cycle</CardTitle>
         <CardDescription>
-          Run one targeted change through the runner: it edits the code in the fenced container, runs the pinned
-          gate battery, and checkpoints into the repo. Chat arrives later — for now, describe the change directly.
+          Describe a change to build. Pressing Build runs an audit first — it confirms any domain rules with
+          you (in the chat above) and routes framework conflicts to an admin — then the runner edits the code in
+          the fenced container, runs the pinned gate battery, and checkpoints into the repo.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Drift banner (ADR-003) — the framework moved since the last build.
+            Non-blocking; the update cycle is explicit-consent (Mock2 X → Y). */}
+        {driftAvailable ? (
+          <div className="flex flex-col gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-sky-600 flex items-start gap-2">
+              <RefreshCw className="h-4 w-4 mt-0.5 shrink-0" />
+              <span>
+                Framework update available
+                {project?.framework_last_built_version && project?.framework_current_version
+                  ? ` (v${project.framework_last_built_version} → v${project.framework_current_version})` : ''}.
+                Nothing changes until you run an update cycle.
+              </span>
+            </p>
+            {canEdit && online && !active ? (
+              <Button variant="outline" size="sm" className="h-10 shrink-0 self-start sm:self-auto" disabled={busy} onClick={remediate}>
+                Start update cycle
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
         {/* Start control (editors, online only) */}
         {canEdit && !active ? (
           online ? (
@@ -889,6 +933,20 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle }) {
 
             {job?.message ? <p className="text-xs text-muted-foreground">{job.message}</p> : null}
             {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+
+            {/* M8 audit gate (ADR-002) — the build is blocked on a routed question. */}
+            {cycle.status === 'awaiting_user' ? (
+              <p className="text-xs text-violet-500 flex items-start gap-1">
+                <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                Answer the rule question(s) in the chat above — the build starts automatically once every one is confirmed.
+              </p>
+            ) : null}
+            {cycle.status === 'awaiting_admin' ? (
+              <p className="text-xs text-amber-500 flex items-start gap-1">
+                <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.
+              </p>
+            ) : null}
 
             {/* Gate battery — the "gates going green" stepper */}
             {cycle.gates?.length ? (

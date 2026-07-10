@@ -75,15 +75,30 @@ export function resolveMock2Access({ user, membership = null, requiredRole = 'vi
 // container liveness.
 export function deriveProjectStatus(project, ctx = {}) {
   if (!project) return 'unknown';
-  const { editorCount = null, containerState = null } = ctx;
+  const {
+    editorCount = null, containerState = null,
+    openEditorQuestions = 0, openAdminItems = 0, driftOpen = false,
+  } = ctx;
   const lc = project.lifecycle;
 
   if (lc === 'provisioning') return 'provisioning';
   if (lc === 'failed_provisioning') return 'failed';
   if (lc === 'archived') return 'archived';
 
+  // M8 audit gate (ADR-002) — DERIVED from open rows, never a stored flag. An
+  // open editor question means the Builder must confirm a rule (awaiting user);
+  // an open admin deviation/queue item means an admin must clear it (awaiting
+  // admin). Editors act first, so awaiting user wins.
+  if (Number(openEditorQuestions) > 0) return 'awaiting_user';
+  if (Number(openAdminItems) > 0) return 'awaiting_admin';
+
   // Zero editors ⇒ orphaned (ADR-007). Only meaningful for a live project.
   if (editorCount === 0) return 'orphaned';
+
+  // Framework moved since the last build (ADR-003) — an "update available"
+  // condition surfaced as its own status. Non-blocking; remediation is
+  // explicit-consent only.
+  if (driftOpen) return 'drift';
 
   if (lc === 'stopped') return 'stopped';
 
@@ -136,9 +151,18 @@ export function publicProjectShape(project, extra = {}) {
     viewerCount = null,
     containerState = null,
     isAdmin = false,
+    // M8 audit/queue-derived inputs (03-data-model.md — all DERIVED).
+    openEditorQuestions = 0,
+    openAdminItems = 0,
+    driftOpen = false,
+    frameworkUpdateAvailable = false,
+    frameworkCurrentVersion = null,
+    frameworkLastBuiltVersion = null,
   } = extra;
 
-  const status = deriveProjectStatus(project, { editorCount, containerState });
+  const status = deriveProjectStatus(project, {
+    editorCount, containerState, openEditorQuestions, openAdminItems, driftOpen,
+  });
   const host = project.custom_domain
     ? project.custom_domain
     : (project.slug && parentDomain ? slugFqdn(project.slug, parentDomain) : null);
@@ -171,6 +195,14 @@ export function publicProjectShape(project, extra = {}) {
     design_approved_at: project.design_approved_at || null,
     current_mockup_id: project.current_mockup_id || null,
     preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
+    // M8 audit-gate counts (drive the awaiting/drift chips + the in-detail
+    // banners) and the framework-drift "update available" signal (ADR-003).
+    open_editor_questions: Number(openEditorQuestions) || 0,
+    open_admin_items: Number(openAdminItems) || 0,
+    drift: !!driftOpen,
+    framework_update_available: !!frameworkUpdateAvailable,
+    framework_current_version: frameworkCurrentVersion,
+    framework_last_built_version: frameworkLastBuiltVersion,
   };
 
   if (isAdmin) {

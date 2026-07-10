@@ -19,9 +19,22 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
-  Loader2, Send, ExternalLink, CheckCircle2, Sparkles, MessageSquare, Lock,
+  Loader2, Send, ExternalLink, CheckCircle2, Sparkles, MessageSquare, Lock, HelpCircle,
 } from 'lucide-react';
+
+// A rule_question body carries { question, choices } as JSON (M8, ADR-002).
+// Tolerant of a plain-text body (older rows).
+function parseRuleQuestion(body) {
+  try {
+    const j = JSON.parse(body);
+    if (j && typeof j === 'object' && !Array.isArray(j)) {
+      return { question: String(j.question || ''), choices: Array.isArray(j.choices) ? j.choices : [] };
+    }
+  } catch { /* plain text */ }
+  return { question: String(body || ''), choices: [] };
+}
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
 
@@ -56,6 +69,66 @@ function StageIndicator({ stage }) {
   );
 }
 
+// A rule_question rendered in the chat: the plain-language question + tappable
+// choices (≥44px) and a free-text escape hatch (ADR-002). Editors answer; the
+// answer appends to state/rules.md and, when the last one is confirmed, Build
+// starts automatically. Answered questions read as a compact confirmation.
+function RuleQuestion({ m, open, canEdit, busy, onAnswer }) {
+  const { question, choices } = parseRuleQuestion(m.body);
+  const [free, setFree] = useState('');
+  if (!open) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[90%] rounded-xl border border-border bg-muted/40 px-3 py-2 text-sm">
+          <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> Rule confirmed
+          </p>
+          <p className="mt-1 text-foreground/80 break-words">{question}</p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[92%] w-full rounded-xl border border-violet-500/30 bg-violet-500/5 px-3 py-2.5 space-y-2.5">
+        <p className="flex items-center gap-1.5 text-[11px] font-medium text-violet-500">
+          <HelpCircle className="h-3.5 w-3.5" /> Rule question — confirm to continue building
+        </p>
+        <p className="text-sm text-foreground break-words">{question}</p>
+        {canEdit ? (
+          <>
+            {choices.length ? (
+              <div className="flex flex-col gap-2">
+                {choices.map((c) => (
+                  <Button
+                    key={c} variant="outline" size="sm"
+                    className="h-11 justify-start whitespace-normal text-left"
+                    disabled={busy} onClick={() => onAnswer(m.question_id, c)}
+                  >
+                    {c}
+                  </Button>
+                ))}
+              </div>
+            ) : null}
+            <div className="flex items-end gap-2 pt-0.5">
+              <Input
+                className="h-11" placeholder="Or type your own answer…" value={free}
+                disabled={busy} onChange={(e) => setFree(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && free.trim()) { e.preventDefault(); onAnswer(m.question_id, free.trim()); } }}
+              />
+              <Button className="h-11 shrink-0" disabled={busy || !free.trim()} onClick={() => onAnswer(m.question_id, free.trim())}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirm'}
+              </Button>
+            </div>
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">An editor needs to confirm this rule.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChatBubble({ m }) {
   if (m.kind === 'system') {
     return (
@@ -63,6 +136,18 @@ function ChatBubble({ m }) {
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
           {m.body}
         </p>
+      </div>
+    );
+  }
+  if (m.kind === 'rule_answer') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-emerald-500/15 text-foreground px-3 py-2 text-sm break-words">
+          <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600">
+            <CheckCircle2 className="h-3.5 w-3.5" /> Rule confirmed{m.acting_as_admin ? ' (admin)' : ''}
+          </span>
+          <span className="block mt-0.5 whitespace-pre-wrap">{m.body}</span>
+        </div>
       </div>
     );
   }
@@ -87,9 +172,10 @@ function ChatBubble({ m }) {
 
 export default function ConceptStage({ projectId, project, canEdit, onApproved }) {
   const { toast } = useToast();
-  const [data, setData] = useState(null); // { messages, job, stage, preview_url, current_mockup_id, concept_ready, ... }
+  const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [answering, setAnswering] = useState(false);
   const scrollRef = useRef(null);
   const wasApproved = useRef(!!project?.design_approved_at);
 
@@ -110,14 +196,36 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
 
   useEffect(() => { load(); }, [load]);
 
-  // Poll while a background turn/approval job is running so replies + mockup
-  // updates settle on their own.
+  // Poll while a background turn/approval job is running, while the M8 audit is
+  // in flight, or while any rule question is open (so answers + the "starting the
+  // build" transition settle on their own).
   const jobActive = data?.job && !['done', 'approved', 'failed'].includes(data.job.phase);
+  const auditJob = data?.audit_job || null;
+  const auditActive = !!auditJob && !['building', 'awaiting_user', 'awaiting_admin', 'failed', 'done'].includes(auditJob.phase);
+  const openQuestionCount = (data?.open_question_ids || []).length;
+  const shouldPoll = jobActive || auditActive || openQuestionCount > 0;
   useEffect(() => {
-    if (!jobActive) return undefined;
+    if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);
     return () => clearInterval(t);
-  }, [jobActive, load]);
+  }, [shouldPoll, load]);
+
+  const openIds = new Set(data?.open_question_ids || []);
+
+  const answerQuestion = async (questionId, answer) => {
+    if (!questionId || !answer) return;
+    setAnswering(true);
+    try {
+      const res = await api.mock2AnswerQuestion(projectId, questionId, answer);
+      if (res.resumed) toast({ title: 'All rules confirmed', description: 'Starting the build.' });
+      else toast({ title: 'Rule confirmed' });
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not confirm', description: err.message });
+    } finally {
+      setAnswering(false);
+    }
+  };
 
   // Keep the newest message in view.
   useEffect(() => {
@@ -224,12 +332,16 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
                 : 'Bring the project online to start the conversation.'}
             </p>
           ) : (
-            (data.messages || []).map((m) => <ChatBubble key={m.id} m={m} />)
+            (data.messages || []).map((m) => (
+              m.kind === 'rule_question'
+                ? <RuleQuestion key={m.id} m={m} open={openIds.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={answerQuestion} />
+                : <ChatBubble key={m.id} m={m} />
+            ))
           )}
-          {jobActive ? (
+          {jobActive || auditActive ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {data?.job?.message || 'Working…'}
+              {data?.job?.message || auditJob?.message || 'Working…'}
             </div>
           ) : null}
         </div>

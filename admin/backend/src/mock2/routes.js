@@ -65,6 +65,34 @@ import {
 } from './allowlist.js';
 import { reconcileMock2Egress } from './egress.js';
 import { reconcileMock2Firewall } from './firewall.js';
+// ---- M5: connectors, slots, prices, quotas, git connectors, framework ----
+import {
+  listConnectors, getConnector, getConnectorByName, insertConnector, updateConnector,
+  deleteConnector, recordBaaAck, testConnector, shapeConnector,
+  listSlots, getSlot, setSlot, clearSlot,
+  listPrices, upsertPrice, deletePrice,
+} from './connectors.js';
+import {
+  PROVIDERS, MODEL_SLOTS, CAPABILITIES, validateConnectorInput, normalizeCapabilities,
+  defaultCapabilitiesForProvider, parseCapabilities, slotAssignmentError,
+  requiresBaaAck, isCloudProvider,
+} from './connector-logic.js';
+import {
+  listQuotas, getQuota, upsertQuota, deleteQuota, shapeQuota,
+} from './quotas.js';
+import {
+  listGitConnectors, getGitConnector, getGitConnectorByName, insertGitConnector,
+  updateGitConnector, deleteGitConnector, testGitConnector, shapeGitConnector,
+  getProjectRemote, setProjectRemote, clearProjectRemote, shapeProjectRemote, exportProjectZip,
+} from './git-connectors.js';
+import { GIT_PROVIDERS, GIT_AUTH_KINDS, validateGitConnectorInput } from './git-logic.js';
+import {
+  listFrameworkVersions, getFrameworkVersion,
+  getCurrentFrameworkVersion, insertFrameworkVersion,
+} from './framework.js';
+import {
+  validateFrameworkContent, buildRevertContent, publicFrameworkShape,
+} from './framework-logic.js';
 
 // Domains currently mid-verification, so a double-click on "Verify" (or a
 // register+verify race) doesn't run two ACME probes against the same domain.
@@ -156,6 +184,68 @@ const idleDaysSchema = z.object({
     .refine((n) => Number.isInteger(n) && n >= 0 && n <= 3650, 'out of range'),
 });
 
+// ---- M5 Zod schemas ----
+const connectorCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  provider: z.enum(PROVIDERS),
+  base_url: z.string().trim().max(500).optional(),
+  api_key: z.string().max(4000).optional(),
+  capabilities: z.array(z.enum(CAPABILITIES)).optional(),
+  enabled: z.boolean().optional(),
+});
+const connectorUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  base_url: z.string().trim().max(500).optional(),
+  api_key: z.string().max(4000).optional(),
+  capabilities: z.array(z.enum(CAPABILITIES)).optional(),
+  enabled: z.boolean().optional(),
+}).refine((o) => Object.keys(o).length > 0, 'no fields to update');
+const slotAssignSchema = z.object({
+  connector_id: z.union([z.number().int(), z.string()]),
+  model: z.string().trim().min(1).max(200),
+});
+const priceSchema = z.object({
+  model: z.string().trim().min(1).max(200),
+  input_cents_per_mtok: z.number().int().min(0),
+  output_cents_per_mtok: z.number().int().min(0),
+  effective_at: z.string().trim().max(40).optional(),
+});
+const quotaSchema = z.object({
+  scope: z.enum(['global', 'project']),
+  project_id: z.union([z.number().int(), z.string()]).optional(),
+  period: z.enum(['monthly', 'weekly']),
+  budget_cents: z.number().int().min(0).nullable().optional(),
+  budget_wall_clock_min: z.number().int().min(0).nullable().optional(),
+  max_concurrent_cycles: z.number().int().min(0).nullable().optional(),
+  buffer_pct: z.number().int().min(0).max(500).optional(),
+});
+const gitConnectorCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  provider: z.enum(GIT_PROVIDERS),
+  base_url: z.string().trim().max(500).optional(),
+  auth_kind: z.enum(GIT_AUTH_KINDS),
+  credential: z.string().min(1).max(20000),
+});
+const gitConnectorUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  base_url: z.string().trim().max(500).optional(),
+  auth_kind: z.enum(GIT_AUTH_KINDS).optional(),
+  credential: z.string().min(1).max(20000).optional(),
+}).refine((o) => Object.keys(o).length > 0, 'no fields to update');
+const projectRemoteSchema = z.object({
+  git_connector_id: z.union([z.number().int(), z.string()]),
+  remote_repo: z.string().trim().min(1).max(500),
+  push_on_checkpoint: z.boolean().optional(),
+});
+const frameworkContentSchema = z.object({
+  constitution_md: z.string().min(1),
+  skills_json: z.string().min(1),
+  gates_json: z.string().min(1),
+  design_system_md: z.string().min(1),
+  project_template_ref: z.string().trim().min(1).max(500),
+  changelog: z.string().trim().max(2000).optional(),
+});
+
 // Shape a project row for a response, computing the derived inputs M2 has
 // (editor/viewer counts, parent-domain name) and gating the admin debug fields.
 function shapeProject(project, { isAdmin }) {
@@ -187,7 +277,7 @@ export function createMock2Router() {
   // Presence probe (admin-gated). Reaching this handler already implies the
   // module is enabled; the frontend keys its nav entry off a 200 here.
   router.get('/status', requireAdmin, (_req, res) => {
-    res.json({ status: 'ok', enabled: true, phase: 'M4' });
+    res.json({ status: 'ok', enabled: true, phase: 'M5' });
   });
 
   // ---- Parent domains ----
@@ -574,6 +664,371 @@ export function createMock2Router() {
       .catch((err) => console.error('[mock2] teardown failed:', err?.message));
     logAudit(req.user.id, 'MOCK2_PROJECT_DELETE', 'mock2_project', project.id, { name: project.name, slug: project.slug }, req.ip);
     res.json({ ok: true, caddy });
+  });
+
+  // ============================================================
+  // M5 — Model connectors, slots, prices (ADR-003; backup-destinations pattern)
+  // ============================================================
+  // A configured connector's API host becomes reachable from project containers
+  // (the M4 egress seam) — so create/update/delete re-reconcile the squid ACLs.
+  const reReconcileEgress = () => reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
+
+  router.get('/connectors', requireAdmin, (_req, res) => {
+    res.json({ connectors: listConnectors().map(shapeConnector) });
+  });
+
+  router.get('/connectors/:id', requireAdmin, (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    res.json({ connector: shapeConnector(row) });
+  });
+
+  router.post('/connectors', requireAdmin, async (req, res) => {
+    const parsed = connectorCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid connector' });
+    const d = parsed.data;
+    const vErr = validateConnectorInput({ provider: d.provider, base_url: d.base_url });
+    if (vErr) return res.status(400).json({ error: vErr });
+    if (getConnectorByName(d.name)) return res.status(409).json({ error: `A connector named "${d.name}" already exists` });
+    const capabilities = d.capabilities?.length ? normalizeCapabilities(d.capabilities) : defaultCapabilitiesForProvider(d.provider);
+    if (capabilities.length === 0) return res.status(400).json({ error: 'A connector needs at least one capability' });
+    const row = insertConnector({
+      name: d.name, provider: d.provider, baseUrl: d.base_url,
+      apiKey: d.api_key, capabilities, enabled: d.enabled === false ? 0 : 1, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_CONNECTOR_CREATE', 'mock2_model_connector', row.id, { name: d.name, provider: d.provider }, req.ip);
+    const egress = await reReconcileEgress();
+    // BAA acknowledgement (Q7): a cloud connector prompts a one-time ack. Not a
+    // blocker — the connector is already saved; the client shows the ack modal
+    // and POSTs /baa-ack. baa_ack_required tells it whether to.
+    res.status(201).json({
+      connector: shapeConnector(row),
+      baa_ack_required: requiresBaaAck(d.provider, row.baa_ack_at),
+      egress,
+    });
+  });
+
+  router.put('/connectors/:id', requireAdmin, async (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    const parsed = connectorUpdateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid update' });
+    const d = parsed.data;
+    if (d.name && d.name !== row.name && getConnectorByName(d.name)) {
+      return res.status(409).json({ error: `A connector named "${d.name}" already exists` });
+    }
+    const nextBaseUrl = d.base_url !== undefined ? d.base_url : row.base_url;
+    const vErr = validateConnectorInput({ provider: row.provider, base_url: nextBaseUrl });
+    if (vErr) return res.status(400).json({ error: vErr });
+    const fields = {};
+    if (d.name !== undefined) fields.name = d.name;
+    if (d.base_url !== undefined) fields.base_url = d.base_url;
+    if (d.api_key !== undefined) fields.apiKey = d.api_key;
+    if (d.capabilities !== undefined) {
+      const caps = normalizeCapabilities(d.capabilities);
+      if (caps.length === 0) return res.status(400).json({ error: 'A connector needs at least one capability' });
+      fields.capabilities = caps;
+    }
+    if (d.enabled !== undefined) fields.enabled = d.enabled;
+    const updated = updateConnector(row.id, fields);
+    logAudit(req.user.id, 'MOCK2_CONNECTOR_UPDATE', 'mock2_model_connector', row.id,
+      { name: updated.name, secret_rotated: d.api_key !== undefined }, req.ip);
+    const egress = await reReconcileEgress();
+    res.json({ connector: shapeConnector(updated), egress });
+  });
+
+  router.delete('/connectors/:id', requireAdmin, requireSudo, async (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    deleteConnector(row.id);
+    logAudit(req.user.id, 'MOCK2_CONNECTOR_DELETE', 'mock2_model_connector', row.id, { name: row.name }, req.ip);
+    const egress = await reReconcileEgress();
+    res.json({ ok: true, egress });
+  });
+
+  // Test connection — a lightweight "list models" GET that validates the key
+  // without spending generation tokens. Caches the verdict on the row.
+  router.post('/connectors/:id/test', requireAdmin, async (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    const verdict = await testConnector(row);
+    logAudit(req.user.id, 'MOCK2_CONNECTOR_TEST', 'mock2_model_connector', row.id, { ok: verdict.ok }, req.ip);
+    res.json({ ...verdict, connector: shapeConnector(getConnector(row.id)) });
+  });
+
+  // Record the one-time BAA acknowledgement (Q7). Cloud connectors only.
+  router.post('/connectors/:id/baa-ack', requireAdmin, (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    if (!isCloudProvider(row.provider)) return res.status(400).json({ error: 'BAA acknowledgement applies to cloud connectors only' });
+    const updated = recordBaaAck(row.id, req.user.id);
+    logAudit(req.user.id, 'MOCK2_CONNECTOR_BAA_ACK', 'mock2_model_connector', row.id, { provider: row.provider }, req.ip);
+    res.json({ connector: shapeConnector(updated) });
+  });
+
+  // ---- Model slots (the 7 stages) ----
+  router.get('/model-slots', requireAdmin, (_req, res) => {
+    const rows = listSlots();
+    const bySlot = new Map(rows.map((r) => [r.slot, r]));
+    // Return every slot (assigned or not) so the UI can render the full matrix.
+    const slots = MODEL_SLOTS.map((slot) => {
+      const r = bySlot.get(slot) || null;
+      const conn = r ? getConnector(r.connector_id) : null;
+      return {
+        slot,
+        connector_id: r?.connector_id || null,
+        connector_name: conn?.name || null,
+        model: r?.model || null,
+        updated_at: r?.updated_at || null,
+      };
+    });
+    res.json({ slots });
+  });
+
+  router.put('/model-slots/:slot', requireAdmin, (req, res) => {
+    const slot = req.params.slot;
+    if (!MODEL_SLOTS.includes(slot)) return res.status(404).json({ error: 'Unknown slot' });
+    const parsed = slotAssignSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'connector_id and model are required' });
+    const conn = getConnector(parsed.data.connector_id);
+    if (!conn) return res.status(400).json({ error: 'No such connector' });
+    if (!conn.enabled) return res.status(400).json({ error: 'Connector is disabled — enable it before assigning a slot' });
+    // Capability enforcement: build_runner refuses a chat-only model, etc.
+    const capErr = slotAssignmentError(parseCapabilities(conn.capabilities), slot);
+    if (capErr) return res.status(400).json({ error: capErr });
+    const row = setSlot({ slot, connectorId: conn.id, model: parsed.data.model, updatedBy: req.user.id });
+    logAudit(req.user.id, 'MOCK2_SLOT_ASSIGN', 'mock2_model_slot', 0, { slot, connector_id: conn.id, model: row.model }, req.ip);
+    res.json({ slot: { slot, connector_id: conn.id, connector_name: conn.name, model: row.model, updated_at: row.updated_at } });
+  });
+
+  router.delete('/model-slots/:slot', requireAdmin, (req, res) => {
+    const slot = req.params.slot;
+    if (!MODEL_SLOTS.includes(slot)) return res.status(404).json({ error: 'Unknown slot' });
+    const { cleared } = clearSlot(slot);
+    logAudit(req.user.id, 'MOCK2_SLOT_CLEAR', 'mock2_model_slot', 0, { slot }, req.ip);
+    res.json({ ok: true, cleared });
+  });
+
+  // ---- Model prices (per connector+model, effective-dated) ----
+  router.get('/connectors/:id/prices', requireAdmin, (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    res.json({ prices: listPrices(row.id) });
+  });
+
+  router.post('/connectors/:id/prices', requireAdmin, (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    const parsed = priceSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid price' });
+    const d = parsed.data;
+    const prices = upsertPrice({
+      connectorId: row.id, model: d.model,
+      inputCentsPerMtok: d.input_cents_per_mtok, outputCentsPerMtok: d.output_cents_per_mtok,
+      effectiveAt: d.effective_at,
+    });
+    logAudit(req.user.id, 'MOCK2_PRICE_SET', 'mock2_model_connector', row.id, { model: d.model }, req.ip);
+    res.json({ prices });
+  });
+
+  router.delete('/connectors/:id/prices/:priceId', requireAdmin, (req, res) => {
+    const row = getConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Connector not found' });
+    const { deleted } = deletePrice(req.params.priceId);
+    res.json({ ok: true, deleted });
+  });
+
+  // ============================================================
+  // M5 — Quotas (ADR-003 / risk R5). canStartCycle is enforced by M6; here we
+  // manage the budgets + expose live spend from the ledger.
+  // ============================================================
+  router.get('/quotas', requireAdmin, (_req, res) => {
+    res.json({ quotas: listQuotas().map(shapeQuota) });
+  });
+
+  router.post('/quotas', requireAdmin, (req, res) => {
+    const parsed = quotaSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid quota' });
+    const d = parsed.data;
+    if (d.scope === 'project' && d.project_id == null) return res.status(400).json({ error: 'project_id is required for a project-scoped quota' });
+    const row = upsertQuota({
+      scope: d.scope,
+      projectId: d.scope === 'project' ? Number(d.project_id) : null,
+      period: d.period,
+      budgetCents: d.budget_cents ?? null,
+      budgetWallClockMin: d.budget_wall_clock_min ?? null,
+      maxConcurrentCycles: d.max_concurrent_cycles ?? null,
+      bufferPct: d.buffer_pct ?? 15,
+    });
+    logAudit(req.user.id, 'MOCK2_QUOTA_SET', 'mock2_quota', row.id, { scope: d.scope, period: d.period, budget_cents: d.budget_cents ?? null }, req.ip);
+    res.json({ quota: shapeQuota(row) });
+  });
+
+  router.delete('/quotas/:id', requireAdmin, (req, res) => {
+    const row = getQuota(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Quota not found' });
+    deleteQuota(row.id);
+    logAudit(req.user.id, 'MOCK2_QUOTA_DELETE', 'mock2_quota', row.id, { scope: row.scope, period: row.period }, req.ip);
+    res.json({ ok: true });
+  });
+
+  // ============================================================
+  // M5 — Git connectors + project remotes + zip export (ADR-006)
+  // Credentials never enter a container; push runs orchestrator-side.
+  // ============================================================
+  router.get('/git-connectors', requireAdmin, (_req, res) => {
+    res.json({ connectors: listGitConnectors().map(shapeGitConnector) });
+  });
+
+  router.post('/git-connectors', requireAdmin, (req, res) => {
+    const parsed = gitConnectorCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid git connector' });
+    const d = parsed.data;
+    const vErr = validateGitConnectorInput({ provider: d.provider, auth_kind: d.auth_kind, base_url: d.base_url });
+    if (vErr) return res.status(400).json({ error: vErr });
+    if (getGitConnectorByName(d.name)) return res.status(409).json({ error: `A git connector named "${d.name}" already exists` });
+    const row = insertGitConnector({ name: d.name, provider: d.provider, baseUrl: d.base_url, authKind: d.auth_kind, credential: d.credential, createdBy: req.user.id });
+    logAudit(req.user.id, 'MOCK2_GIT_CONNECTOR_CREATE', 'mock2_git_connector', row.id, { name: d.name, provider: d.provider }, req.ip);
+    res.status(201).json({ connector: shapeGitConnector(row) });
+  });
+
+  router.put('/git-connectors/:id', requireAdmin, (req, res) => {
+    const row = getGitConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Git connector not found' });
+    const parsed = gitConnectorUpdateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid update' });
+    const d = parsed.data;
+    if (d.name && d.name !== row.name && getGitConnectorByName(d.name)) {
+      return res.status(409).json({ error: `A git connector named "${d.name}" already exists` });
+    }
+    const nextProvider = row.provider;
+    const nextAuth = d.auth_kind || row.auth_kind;
+    const nextBase = d.base_url !== undefined ? d.base_url : row.base_url;
+    const vErr = validateGitConnectorInput({ provider: nextProvider, auth_kind: nextAuth, base_url: nextBase });
+    if (vErr) return res.status(400).json({ error: vErr });
+    const updated = updateGitConnector(row.id, d);
+    logAudit(req.user.id, 'MOCK2_GIT_CONNECTOR_UPDATE', 'mock2_git_connector', row.id, { name: updated.name, secret_rotated: d.credential !== undefined }, req.ip);
+    res.json({ connector: shapeGitConnector(updated) });
+  });
+
+  router.delete('/git-connectors/:id', requireAdmin, requireSudo, (req, res) => {
+    const row = getGitConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Git connector not found' });
+    deleteGitConnector(row.id);
+    logAudit(req.user.id, 'MOCK2_GIT_CONNECTOR_DELETE', 'mock2_git_connector', row.id, { name: row.name }, req.ip);
+    res.json({ ok: true });
+  });
+
+  router.post('/git-connectors/:id/test', requireAdmin, async (req, res) => {
+    const row = getGitConnector(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Git connector not found' });
+    const verdict = await testGitConnector(row);
+    logAudit(req.user.id, 'MOCK2_GIT_CONNECTOR_TEST', 'mock2_git_connector', row.id, { ok: verdict.ok }, req.ip);
+    res.json({ ...verdict, connector: shapeGitConnector(getGitConnector(row.id)) });
+  });
+
+  // Project remote config (which git connector + remote repo a project pushes
+  // to). Read is viewer; mutate is admin (a push target is a security-relevant
+  // egress). refuseIfArchived on the mutators.
+  router.get('/projects/:id/remote', requireMock2Role('viewer'), (req, res) => {
+    const remote = getProjectRemote(req.mock2Project.id);
+    res.json({ remote: remote ? shapeProjectRemote(remote) : null, editable: isReqAdmin(req) });
+  });
+
+  router.post('/projects/:id/remote', requireAdmin, requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const parsed = projectRemoteSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid remote' });
+    const d = parsed.data;
+    const conn = getGitConnector(d.git_connector_id);
+    if (!conn) return res.status(400).json({ error: 'No such git connector' });
+    const remote = setProjectRemote({ projectId: project.id, gitConnectorId: conn.id, remoteRepo: d.remote_repo, pushOnCheckpoint: d.push_on_checkpoint ? 1 : 0 });
+    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_SET', 'mock2_project', project.id, { git_connector_id: conn.id, remote_repo: d.remote_repo }, req.ip);
+    res.json({ remote: shapeProjectRemote(remote) });
+  });
+
+  router.delete('/projects/:id/remote', requireAdmin, requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const { cleared } = clearProjectRemote(project.id);
+    logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_CLEAR', 'mock2_project', project.id, {}, req.ip);
+    res.json({ ok: true, cleared });
+  });
+
+  // Export as zip = git archive of the bare repo (ADR-006). Any member may
+  // export. Streams application/zip.
+  router.get('/projects/:id/export.zip', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (!project.repo_path) return res.status(409).json({ error: 'Project has no repository to export' });
+    const out = await exportProjectZip(project.repo_path);
+    if (!out.ok) return res.status(500).json({ error: `Export failed: ${out.error}` });
+    logAudit(req.user.id, 'MOCK2_PROJECT_EXPORT_ZIP', 'mock2_project', project.id, { bytes: out.buffer.length }, req.ip);
+    const fname = `${project.slug || `project-${project.id}`}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    res.send(out.buffer);
+  });
+
+  // ============================================================
+  // M5 — Framework registry (ADR-003). Admin-gated editor; content immutable per
+  // version; revert = new version carrying old content; logAudit on publish.
+  // ============================================================
+  router.get('/framework/versions', requireAdmin, (_req, res) => {
+    res.json({ versions: listFrameworkVersions().map((r) => publicFrameworkShape(r)) });
+  });
+
+  router.get('/framework/current', requireAdmin, (_req, res) => {
+    const row = getCurrentFrameworkVersion();
+    res.json({ version: row ? publicFrameworkShape(row, { includeContent: true }) : null });
+  });
+
+  router.get('/framework/versions/:id', requireAdmin, (req, res) => {
+    const row = getFrameworkVersion(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Framework version not found' });
+    res.json({ version: publicFrameworkShape(row, { includeContent: true }) });
+  });
+
+  // Publish a new version (edit → diff → commit is a client-side flow; the
+  // server just validates content and appends the next monotonic version).
+  router.post('/framework/versions', requireAdmin, (req, res) => {
+    const parsed = frameworkContentSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid framework content' });
+    const d = parsed.data;
+    const v = validateFrameworkContent(d);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    const row = insertFrameworkVersion({
+      constitution_md: d.constitution_md,
+      skills_json: d.skills_json,
+      gates_json: d.gates_json,
+      design_system_md: d.design_system_md,
+      project_template_ref: d.project_template_ref,
+      changelog: d.changelog || null,
+      source: 'in_app',
+      createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_FRAMEWORK_PUBLISH', 'mock2_framework_version', row.id, { version: row.version }, req.ip);
+    res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
+  });
+
+  // Revert to an existing version = publish a NEW version carrying that
+  // version's content (content rows are immutable; ADR-003).
+  router.post('/framework/versions/:id/revert', requireAdmin, (req, res) => {
+    const source = getFrameworkVersion(req.params.id);
+    if (!source) return res.status(404).json({ error: 'Framework version not found' });
+    const content = buildRevertContent(source, { changelog: req.body?.changelog || null });
+    const row = insertFrameworkVersion({
+      constitution_md: content.constitution_md,
+      skills_json: content.skills_json,
+      gates_json: content.gates_json,
+      design_system_md: content.design_system_md,
+      project_template_ref: content.project_template_ref,
+      changelog: content.changelog,
+      revertedFromVersion: content.reverted_from_version,
+      source: 'in_app',
+      createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_FRAMEWORK_REVERT', 'mock2_framework_version', row.id,
+      { version: row.version, reverted_from_version: source.version }, req.ip);
+    res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
   });
 
   return router;

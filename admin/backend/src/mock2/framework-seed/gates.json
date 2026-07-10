@@ -1,0 +1,7 @@
+[
+  {
+    "name": "placeholder-noop",
+    "order": 1,
+    "script": "#!/bin/sh\n# PLACEHOLDER gate (risk R8) — the operator's real gate scripts are owed.\n# A green no-op so the M6 runner has a well-formed gate battery to pin and\n# copy into the container at cycle start (ADR-003). Replace before real builds.\necho 'placeholder gate: no checks configured yet'\nexit 0\n"
+  }
+]

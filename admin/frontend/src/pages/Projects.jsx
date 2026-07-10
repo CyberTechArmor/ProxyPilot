@@ -29,7 +29,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import { FolderGit2, Loader2, Globe, Plus, ExternalLink } from 'lucide-react';
+import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
 export default function Projects() {
@@ -153,6 +153,31 @@ export default function Projects() {
           </div>
         </CardHeader>
       </Card>
+
+      {/* M5 admin tooling: model/git connectors, quotas, framework registry.
+          Admin-only, reachable only on an enabled host (each page self-guards). */}
+      {isAdmin && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
+            <Link to="/projects/connectors">
+              <Cpu className="h-5 w-5 shrink-0 text-primary" />
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Connectors</span><span className="text-xs text-muted-foreground">Models · slots · git</span></span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
+            <Link to="/projects/quotas">
+              <Wallet className="h-5 w-5 shrink-0 text-primary" />
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Quotas</span><span className="text-xs text-muted-foreground">Budgets · caps · buffer</span></span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
+            <Link to="/projects/framework">
+              <BookText className="h-5 w-5 shrink-0 text-primary" />
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Framework</span><span className="text-xs text-muted-foreground">Versions · edit · revert</span></span>
+            </Link>
+          </Button>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-12">

@@ -1140,6 +1140,55 @@ export const api = {
   mock2RemoveEgressHost: (id, host) =>
     request(`/mock2/projects/${id}/egress-allowlist/${encodeURIComponent(host)}`, { method: 'DELETE' }),
 
+  // ---- M5: model connectors, slots, prices ----
+  mock2ListConnectors: () => request('/mock2/connectors'),
+  mock2GetConnector: (id) => request(`/mock2/connectors/${id}`),
+  mock2CreateConnector: (body) =>
+    request('/mock2/connectors', { method: 'POST', body: JSON.stringify(body) }),
+  mock2UpdateConnector: (id, body) =>
+    request(`/mock2/connectors/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  mock2DeleteConnector: (id) => request(`/mock2/connectors/${id}`, { method: 'DELETE' }),
+  mock2TestConnector: (id) => request(`/mock2/connectors/${id}/test`, { method: 'POST' }),
+  mock2AckConnectorBaa: (id) => request(`/mock2/connectors/${id}/baa-ack`, { method: 'POST' }),
+  mock2ListModelSlots: () => request('/mock2/model-slots'),
+  mock2AssignModelSlot: (slot, body) =>
+    request(`/mock2/model-slots/${slot}`, { method: 'PUT', body: JSON.stringify(body) }),
+  mock2ClearModelSlot: (slot) => request(`/mock2/model-slots/${slot}`, { method: 'DELETE' }),
+  mock2ListPrices: (id) => request(`/mock2/connectors/${id}/prices`),
+  mock2SetPrice: (id, body) =>
+    request(`/mock2/connectors/${id}/prices`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2DeletePrice: (id, priceId) =>
+    request(`/mock2/connectors/${id}/prices/${priceId}`, { method: 'DELETE' }),
+
+  // ---- M5: quotas ----
+  mock2ListQuotas: () => request('/mock2/quotas'),
+  mock2SetQuota: (body) => request('/mock2/quotas', { method: 'POST', body: JSON.stringify(body) }),
+  mock2DeleteQuota: (id) => request(`/mock2/quotas/${id}`, { method: 'DELETE' }),
+
+  // ---- M5: git connectors + project remotes ----
+  mock2ListGitConnectors: () => request('/mock2/git-connectors'),
+  mock2CreateGitConnector: (body) =>
+    request('/mock2/git-connectors', { method: 'POST', body: JSON.stringify(body) }),
+  mock2UpdateGitConnector: (id, body) =>
+    request(`/mock2/git-connectors/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  mock2DeleteGitConnector: (id) => request(`/mock2/git-connectors/${id}`, { method: 'DELETE' }),
+  mock2TestGitConnector: (id) => request(`/mock2/git-connectors/${id}/test`, { method: 'POST' }),
+  mock2GetProjectRemote: (id) => request(`/mock2/projects/${id}/remote`),
+  mock2SetProjectRemote: (id, body) =>
+    request(`/mock2/projects/${id}/remote`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2ClearProjectRemote: (id) => request(`/mock2/projects/${id}/remote`, { method: 'DELETE' }),
+  // Zip export is a binary GET — link to it directly (cookie auth rides along).
+  mock2ProjectExportZipUrl: (id) => `/api/mock2/projects/${id}/export.zip`,
+
+  // ---- M5: framework registry ----
+  mock2ListFrameworkVersions: () => request('/mock2/framework/versions'),
+  mock2GetFrameworkVersion: (id) => request(`/mock2/framework/versions/${id}`),
+  mock2GetCurrentFramework: () => request('/mock2/framework/current'),
+  mock2PublishFramework: (body) =>
+    request('/mock2/framework/versions', { method: 'POST', body: JSON.stringify(body) }),
+  mock2RevertFramework: (id, changelog) =>
+    request(`/mock2/framework/versions/${id}/revert`, { method: 'POST', body: JSON.stringify({ changelog }) }),
+
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),
   markCveSeen: (cveId) =>

@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
-  Archive, RotateCcw, Play, Lock,
+  Archive, RotateCcw, Play, Lock, Download, GitBranch,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
@@ -493,6 +493,9 @@ export default function ProjectDetail() {
         </Card>
       ) : null}
 
+      {/* M5: repository export (any member) + git push remote (admin). */}
+      <RepoRemoteCard projectId={id} isAdmin={isAdmin} slug={project.slug} />
+
       {isAdmin ? (
         <Card>
           <CardHeader className="pb-3">
@@ -583,5 +586,91 @@ export default function ProjectDetail() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// M5 — repository export (any member) + git push remote config (admin, ADR-006).
+// Export as zip is `git archive` of the bare repo; credentials for a remote never
+// enter a container. Self-contained so ProjectDetail's main loader stays lean.
+function RepoRemoteCard({ projectId, isAdmin, slug }) {
+  const { toast } = useToast();
+  const [remote, setRemote] = useState(null); // { git_connector_id, remote_repo, push_on_checkpoint } | null
+  const [connectors, setConnectors] = useState([]);
+  const [form, setForm] = useState({ git_connector_id: '', remote_repo: '', push_on_checkpoint: false });
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.mock2GetProjectRemote(projectId);
+      setRemote(r.remote || null);
+      if (r.remote) setForm({ git_connector_id: String(r.remote.git_connector_id), remote_repo: r.remote.remote_repo, push_on_checkpoint: !!r.remote.push_on_checkpoint });
+      if (isAdmin) {
+        const g = await api.mock2ListGitConnectors().catch(() => ({ connectors: [] }));
+        setConnectors(g.connectors || []);
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load remote failed:', err);
+    }
+  }, [projectId, isAdmin]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const saveRemote = async () => {
+    if (!form.git_connector_id || !form.remote_repo.trim()) { toast({ variant: 'destructive', title: 'Pick a connector and enter a remote repo' }); return; }
+    setBusy(true);
+    try {
+      await api.mock2SetProjectRemote(projectId, { git_connector_id: Number(form.git_connector_id), remote_repo: form.remote_repo.trim(), push_on_checkpoint: form.push_on_checkpoint });
+      await load(); toast({ title: 'Remote saved' });
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not save remote', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
+  const clearRemote = async () => {
+    setBusy(true);
+    try { await api.mock2ClearProjectRemote(projectId); setRemote(null); setForm({ git_connector_id: '', remote_repo: '', push_on_checkpoint: false }); await load(); toast({ title: 'Remote cleared' }); }
+    catch (err) { toast({ variant: 'destructive', title: 'Could not clear remote', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Repository</CardTitle>
+        <CardDescription>Export the project&apos;s git history, or push it to an external remote (optional — the local bare repo is primary).</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <Button asChild variant="outline" size="sm" className="h-11 sm:h-10">
+          <a href={api.mock2ProjectExportZipUrl(projectId)} download={`${slug || `project-${projectId}`}.zip`}>
+            <Download className="h-4 w-4 mr-1" /> Export as zip
+          </a>
+        </Button>
+
+        {isAdmin ? (
+          <div className="space-y-2 border-t pt-4">
+            <Label className="flex items-center gap-2"><GitBranch className="h-4 w-4" /> Git push remote</Label>
+            {connectors.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No git connectors configured. <Link to="/projects/connectors" className="underline">Add one</Link> to push to GitHub/Gitea.</p>
+            ) : (
+              <div className="space-y-2">
+                <Select value={form.git_connector_id} onValueChange={(v) => setForm({ ...form, git_connector_id: v })}>
+                  <SelectTrigger className="h-11 sm:h-10"><SelectValue placeholder="Git connector" /></SelectTrigger>
+                  <SelectContent>{connectors.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}</SelectContent>
+                </Select>
+                <Input className="h-11 sm:h-10" placeholder="org/name or full URL" value={form.remote_repo} onChange={(e) => setForm({ ...form, remote_repo: e.target.value })} />
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={form.push_on_checkpoint} onChange={(e) => setForm({ ...form, push_on_checkpoint: e.target.checked })} />
+                  Push after each checkpoint
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" className="h-11 sm:h-10" disabled={busy} onClick={saveRemote}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save remote'}</Button>
+                  {remote && <Button size="sm" variant="ghost" className="h-11 sm:h-10" disabled={busy} onClick={clearRemote}>Clear</Button>}
+                </div>
+                {remote?.last_push_error && <p className="text-xs text-red-500">Last push error: {remote.last_push_error}</p>}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

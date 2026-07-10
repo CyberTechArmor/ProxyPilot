@@ -440,9 +440,13 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1 } = await import('./mock2/index.js');
     initMock2Db();
     sweepMock2OnBoot();
+    // Framework registry seed (M5, ADR-003 / risk R8): insert the vendored
+    // placeholder version 1 on first enabled boot. Idempotent — a no-op once any
+    // version exists. Non-fatal (a failed seed just leaves an empty registry).
+    try { seedFrameworkV1(null); } catch (err) { console.error('[mock2] framework seed failed:', err?.message || err); }
     app.use('/api/mock2', authenticateToken, createMock2Router());
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.

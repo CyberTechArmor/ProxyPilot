@@ -275,68 +275,41 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const composerDisabled = busy || jobActive || !online || approved;
 
   return (
-    <Card>
-      <CardHeader className="pb-3 space-y-3">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <CardTitle className="text-base flex items-center gap-2">
-            <MessageSquare className="h-4 w-4" /> Concept
-          </CardTitle>
-          <StageIndicator stage={stage} />
-        </div>
-        <CardDescription>
-          {approved
-            ? 'The design is approved — the inventory is saved to the repository and Build is unlocked. This chat is the record of how you got here.'
-            : 'Describe your app. A live, interactive mockup appears at the preview URL (new tab). Iterate here, then approve the design to lock it in and unlock Build.'}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
+      <CardContent className="flex flex-1 min-h-0 flex-col gap-3 pt-6">
         {/* Model-slot readiness (concept needs the concept_chat + mockup slots). */}
         {data && !data.concept_ready && !approved ? (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm">
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm shrink-0">
             <Lock className="h-4 w-4 mt-0.5 shrink-0" />
             <span>{data.concept_ready_reason || 'Concept model slots are not configured yet.'}</span>
           </div>
         ) : null}
 
-        {/* Persistent preview link — always one click (or copy) away once a
-            mockup exists (opens in a new tab). Shows the full URL so it's
-            obvious and copyable, not a button that scrolls out of view. */}
-        {previewUrl ? (
-          <div className="flex items-center gap-2 rounded-lg border bg-background/40 px-3 py-2">
-            <ExternalLink className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <a
-              href={previewUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="min-w-0 flex-1 truncate text-sm font-medium text-primary hover:underline"
-              title={previewUrl}
+        {/* Plan vs Design — above the chat. Plan talks through the idea without
+            touching the mockup; Design generates/iterates it. */}
+        {canEdit && !approved ? (
+          <div className="inline-flex self-start rounded-md border p-0.5 shrink-0" role="tablist" aria-label="Conversation mode">
+            <button
+              type="button" role="tab" aria-selected={mode === 'plan'} title="Plan — think through the idea without changing the mockup"
+              onClick={() => setMode('plan')}
+              className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'plan' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
             >
-              {previewUrl}
-            </a>
+              <ClipboardList className="h-3.5 w-3.5" /> Plan
+            </button>
+            <button
+              type="button" role="tab" aria-selected={mode === 'design'} title="Design — generate and iterate the mockup"
+              onClick={() => setMode('design')}
+              className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'design' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+            >
+              <Sparkles className="h-3.5 w-3.5" /> Design
+            </button>
           </div>
         ) : null}
 
-        {/* Approve controls */}
-        <div className="flex flex-wrap gap-2">
-          {canEdit && !approved && hasMockup && online ? (
-            <Button size="sm" className="h-10" disabled={busy || jobActive} onClick={approve}>
-              {jobActive && data?.job?.kind === 'approval'
-                ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                : <CheckCircle2 className="h-4 w-4 mr-1" />}
-              Approve design
-            </Button>
-          ) : null}
-          {approved ? (
-            <span className="inline-flex items-center gap-1 text-sm text-emerald-500">
-              <CheckCircle2 className="h-4 w-4" /> Design approved
-            </span>
-          ) : null}
-        </div>
-
-        {/* Conversation */}
+        {/* Conversation — grows to fill the available height */}
         <div
           ref={scrollRef}
-          className="space-y-2 max-h-[24rem] overflow-y-auto rounded-lg border bg-background/40 p-3"
+          className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
         >
           {(data?.messages || []).length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">
@@ -361,7 +334,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
 
         {/* Composer (editors, online, before approval) */}
         {canEdit && !approved ? (
-          <div className="space-y-2">
+          <div className="space-y-2 shrink-0">
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
@@ -375,32 +348,15 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
               }}
             />
             <div className="flex items-center justify-between gap-2">
-              {/* Plan vs Design — Plan talks through the idea without touching the
-                  mockup; Design generates/iterates it. */}
-              <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Conversation mode">
-                <button
-                  type="button" role="tab" aria-selected={mode === 'plan'} title="Plan — think through the idea without changing the mockup"
-                  onClick={() => setMode('plan')}
-                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'plan' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-                >
-                  <ClipboardList className="h-3.5 w-3.5" /> Plan
-                </button>
-                <button
-                  type="button" role="tab" aria-selected={mode === 'design'} title="Design — generate and iterate the mockup"
-                  onClick={() => setMode('design')}
-                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'design' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-                >
-                  <Sparkles className="h-3.5 w-3.5" /> Design
-                </button>
-              </div>
-              <Button className="h-11 sm:h-10" disabled={composerDisabled || !message.trim()} onClick={send}>
+              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to send</span>
+              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || !message.trim()} onClick={send}>
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
                 Send
               </Button>
             </div>
           </div>
         ) : !canEdit && !approved ? (
-          <p className="text-sm text-muted-foreground flex items-center gap-1">
+          <p className="text-sm text-muted-foreground flex items-center gap-1 shrink-0">
             <Sparkles className="h-4 w-4" /> Viewers can follow the conversation; editors drive the design.
           </p>
         ) : null}

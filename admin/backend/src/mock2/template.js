@@ -231,13 +231,14 @@ echo "[mock2] checkpoint pushed to bare repo"
 // noProxy:    NO_PROXY value (localhost + the bridge subnet stay direct).
 // buildProxyConfigScript(opts) → a self-contained shell snippet that points the
 // container's egress at the host filtering proxy (M4/ADR-010) and forces IPv4.
-// It MUST run before anything fetches packages: the project bridge's ONLY egress
-// path is the proxy (direct egress is dropped by the fence), and the bridge has
-// no IPv6 — so the very first `apt-get` (installing git in the clone step) has to
-// be routed through the proxy and off IPv6, or it fails "Network is unreachable".
-// Idempotent (append to /etc/environment is the only non-idempotent bit, benign).
-// Returns '' when no valid proxy is given. Also exported so provision.js can run
-// it standalone (before the clone) — buildContainerSetupScript reuses it.
+// It is baked in for POST-fence runtime use: once the network fence is applied
+// (at activation), the proxy is the container's ONLY egress path, so apt/npm/pip/
+// git must honor it. Bootstrap (git install + clone + runtime install) runs
+// BEFORE the fence with direct IPv4 NAT egress and does NOT use this — routing the
+// very first `apt-get install git` through a proxy that may not be up yet is what
+// broke new-project startup. Idempotent (append to /etc/environment is the only
+// non-idempotent bit, benign). Returns '' when no valid proxy is given; called
+// only by buildContainerSetupScript, near the end of the setup script.
 export function buildProxyConfigScript({ proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
   const safeProxy = proxyUrl && /^https?:\/\/[a-zA-Z0-9.\-]+:\d{1,5}\/?$/.test(proxyUrl) ? proxyUrl : null;
   const safeNoProxy = String(noProxy).replace(/[^a-zA-Z0-9.,:/\-]/g, '');
@@ -275,7 +276,13 @@ APP_DIR="${appDir}"
 WEB_PORT="${webPort}"
 
 export DEBIAN_FRONTEND=noninteractive
-${proxyBlock}
+
+# Bootstrap installs run BEFORE the network fence (provision.js applies it only
+# after this script returns), so they use the container's DIRECT IPv4 NAT egress
+# — no proxy needed. The bridge is IPv4-only (ipv6.address=none), so force apt
+# onto IPv4 or it tries a non-existent v6 route and fails "Network is unreachable".
+mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::ForceIPv4 "true";\\n' > /etc/apt/apt.conf.d/00mock2-ipv4
 
 # Runtime for the placeholder dev server. Postgres is installed per ADR-008 but
 # is best-effort: the placeholder app does not need it to serve, and a base
@@ -288,6 +295,14 @@ apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres 
 if command -v pg_ctlcluster >/dev/null 2>&1; then
   (service postgresql start || pg_ctlcluster "$(ls /etc/postgresql 2>/dev/null | head -n1)" main start || true) 2>/dev/null || true
 fi
+
+# Bake the egress proxy into the container env NOW, for POST-fence runtime: once
+# the fence is applied (provision.js, right after this script), the filtering
+# proxy is the container's only egress path, so apt/npm/pip/git at runtime — and
+# anything the dev server spawns — must honor it. The bootstrap installs above
+# deliberately ran direct (the fence was not up yet); this only takes effect for
+# what runs after activation.
+${proxyBlock}
 
 # Dev server systemd unit — restarts on crash, starts on boot so a container
 # restart (idle-stop lifecycle, M9) brings the app back automatically.

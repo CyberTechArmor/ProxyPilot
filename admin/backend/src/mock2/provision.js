@@ -33,7 +33,7 @@ import { runHost, sh, b64 } from './host.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { buildSeedFiles, buildContainerSetupScript, buildProxyConfigScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
 import {
   bridgeNameForProject,
   bridgeCidrForProject,
@@ -237,21 +237,20 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const gateway = gatewayForCidr(bridgeCidr);
   await sh(`incus exec ${containerName} -- sh -c 'printf "nameserver ${gateway}\\n" > /etc/resolv.conf'`).catch(() => {});
 
-  // ---- Configure the egress proxy BEFORE anything fetches packages ----
-  // The clone step below installs git via apt, and apt/npm/pip later — all of
-  // which must go through the host filtering proxy (the bridge's only egress
-  // path) and over IPv4 (no v6 on the bridge). Writing the apt proxy conf now,
-  // rather than only in the setup script that runs after the clone, is what lets
-  // `apt-get install git` succeed. Non-fatal: a missing proxy just fails apt with
-  // a clear message (and squid must be installed — scripts/mock2-enable-egress.sh).
-  const proxyCfg = buildProxyConfigScript({
-    proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
-    noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
-  });
-  if (proxyCfg) {
-    await sh(`printf '%s' '${b64(proxyCfg)}' | base64 -d | incus exec ${containerName} -- sh`)
-      .catch((e) => console.warn('[mock2] container proxy config failed:', e?.message));
-  }
+  // ---- Force IPv4 for the bootstrap apt BEFORE anything fetches packages ----
+  // The clone step below installs git via apt, and the setup script installs the
+  // runtime — both run BEFORE the network fence is applied (at activation, below),
+  // so the container still has DIRECT IPv4 NAT egress off its bridge and does NOT
+  // need the filtering proxy yet. The bridge is IPv4-only (ipv6.address=none,
+  // network.js), so force apt onto IPv4 or it tries a non-existent v6 route and
+  // fails "Network is unreachable". The egress proxy is baked into the container
+  // env by the setup script instead, for POST-fence runtime use — routing the very
+  // first `apt-get install git` through a proxy that may not be up yet (squid is
+  // optional/best-effort, ADR-010) is exactly what broke new-project startup
+  // ("Unable to connect to <gateway>:3128" → git never installs → clone fails).
+  const aptIpv4 = 'mkdir -p /etc/apt/apt.conf.d\nprintf \'Acquire::ForceIPv4 "true";\\n\' > /etc/apt/apt.conf.d/00mock2-ipv4\n';
+  await sh(`printf '%s' '${b64(aptIpv4)}' | base64 -d | incus exec ${containerName} -- sh`)
+    .catch((e) => console.warn('[mock2] container apt IPv4 config failed:', e?.message));
 
   // ---- Mount the bare repo (ADR-011) + clone the working tree ----
   setStatus(projectId, { phase: 'repo-mount', message: 'Mounting repo and cloning working tree…' });

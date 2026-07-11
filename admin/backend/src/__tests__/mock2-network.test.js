@@ -255,6 +255,23 @@ test('buildContainerSetupScript: bakes the egress proxy into the container env',
   assert.match(s, /EnvironmentFile=-\/etc\/environment/); // dev server inherits it
 });
 
+test('buildContainerSetupScript: forces IPv4 and installs the runtime BEFORE baking the proxy', () => {
+  // Regression: the bootstrap installs run before the network fence, so they use
+  // direct IPv4 NAT egress — the proxy (possibly-down squid) must NOT gate the
+  // very first apt. Force IPv4, install the runtime, THEN bake the proxy for
+  // post-fence runtime. If the proxy block comes first, `apt-get install` routes
+  // through an unreachable proxy and new-project startup fails.
+  const s = buildContainerSetupScript({
+    appDir: '/srv/app', webPort: 3000,
+    proxyUrl: 'http://10.200.6.1:3128', noProxy: 'localhost,127.0.0.1,::1,10.200.6.0/24',
+  });
+  assert.match(s, /Acquire::ForceIPv4 "true"/);           // bootstrap forced onto IPv4
+  const aptIdx = s.indexOf('apt-get install -y --no-install-recommends python3');
+  const proxyIdx = s.indexOf('01mock2proxy');
+  assert.ok(aptIdx !== -1 && proxyIdx !== -1, 'both the runtime install and proxy bake are present');
+  assert.ok(aptIdx < proxyIdx, 'runtime install must precede the proxy bake (bootstrap runs direct)');
+});
+
 test('buildContainerSetupScript: no proxy args -> no proxy block (M2/M3 unchanged)', () => {
   const s = buildContainerSetupScript({ appDir: '/srv/app', webPort: 3000 });
   assert.doesNotMatch(s, /http_proxy=/);

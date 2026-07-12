@@ -51,6 +51,37 @@ export async function egressProxyInstalled() {
   return (r.stdout || '').trim() === 'yes';
 }
 
+// egressProxyReady() — on a host that does not NAT-forward the project bridges,
+// squid is the container's ONLY egress path (ADR-010), so a provision must not
+// depend on it without checking it is actually UP. `command -v squid` says the
+// binary exists; this says the daemon is running. Self-heals: if squid is
+// installed but down (a reboot/update that didn't restart it, a failed restart),
+// start it and re-check. Returns { ok, installed, detail }. When it still can't
+// come up, `detail` carries the host's `systemctl status squid` + `squid -k parse`
+// output so the caller surfaces the REAL reason (bad config, masked unit) instead
+// of the container's generic "Unable to connect to <gateway>:3128" a clone later.
+export async function egressProxyReady() {
+  const installed = await egressProxyInstalled();
+  if (!installed) return { ok: false, installed: false, detail: 'squid not installed (run scripts/mock2-enable-egress.sh)' };
+  // `squid -k check` signals a running instance: exit 0 = up, non-zero = down.
+  // Preferred over an `ss`/`netstat` port probe (not guaranteed on the host).
+  const running = async () => {
+    const r = await sh('squid -k check >/dev/null 2>&1 && echo yes || echo no', { timeoutMs: 8000 });
+    return (r.stdout || '').trim() === 'yes';
+  };
+  if (await running()) return { ok: true, installed: true };
+  // Installed but down — try to (re)start it (reload-or-restart starts a stopped
+  // unit), give it a moment to open its socket, then re-check.
+  await sh('systemctl reload-or-restart squid 2>&1 || systemctl restart squid 2>&1 || service squid restart 2>&1', { timeoutMs: 30000 });
+  await sh('sleep 1', { timeoutMs: 5000 }).catch(() => {});
+  if (await running()) return { ok: true, installed: true, detail: 'squid was down; started by provisioning' };
+  const diag = await sh(
+    '{ echo "# systemctl status squid"; systemctl status squid --no-pager 2>&1 | tail -n 12; echo "# squid -k parse"; squid -k parse 2>&1 | tail -n 12; } 2>&1',
+    { timeoutMs: 15000 },
+  );
+  return { ok: false, installed: true, detail: (diag.stdout || diag.stderr || '').trim().slice(-800) };
+}
+
 // writeSquidAcl(content) — write the drop-in on the host (base64-streamed so the
 // content is shell-safe) and reload squid. Returns { ok, error, installed }.
 // Never throws. A missing squid is not an error — it's the documented

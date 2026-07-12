@@ -67,11 +67,21 @@ export async function writeSquidAcl(content) {
   if (write.code !== 0) {
     return { ok: false, installed: true, error: `${write.stdout || ''}${write.stderr || ''}`.trim().slice(-400) };
   }
-  // Reload (reconfigure) so the new ACLs take effect without dropping live
-  // connections. Fall back to a systemd reload if `squid -k` isn't on PATH.
-  const reload = await sh('squid -k reconfigure 2>&1 || systemctl reload squid 2>&1 || service squid reload 2>&1', { timeoutMs: 20000 });
+  // Apply the new ACLs. `squid -k reconfigure` reloads a RUNNING squid without
+  // dropping live connections — but it (and `systemctl reload` / `service reload`)
+  // is a no-op on a STOPPED unit and never starts it. squid being installed but
+  // down (a reboot/update that didn't bring it back, a failed restart) is exactly
+  // the state that makes every project container fail with "Unable to connect to
+  // <gateway>:3128": the container's only egress path is the proxy, and nothing
+  // was starting it. Use `reload-or-restart` (starts a stopped unit, reloads a
+  // running one) with a restart fallback so reconcile SELF-HEALS a down squid at
+  // boot and on the next provision, not just reloads an already-up one.
+  const reload = await sh(
+    'squid -k reconfigure 2>&1 || systemctl reload-or-restart squid 2>&1 || systemctl restart squid 2>&1 || service squid restart 2>&1',
+    { timeoutMs: 30000 },
+  );
   if (reload.code !== 0) {
-    return { ok: false, installed: true, error: `squid reload failed: ${(reload.stdout || reload.stderr || '').trim().slice(-300)}` };
+    return { ok: false, installed: true, error: `squid reload/start failed: ${(reload.stdout || reload.stderr || '').trim().slice(-300)}` };
   }
   return { ok: true, installed: true };
 }

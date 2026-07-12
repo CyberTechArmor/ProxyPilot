@@ -33,7 +33,7 @@ import { runHost, sh, b64 } from './host.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedFiles, buildContainerSetupScript, buildProxyConfigScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
 import {
   bridgeNameForProject,
   bridgeCidrForProject,
@@ -43,7 +43,7 @@ import {
 } from './network.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { seedDefaultAllowlist } from './allowlist.js';
-import { reconcileMock2Egress, EGRESS_PROXY_PORT } from './egress.js';
+import { reconcileMock2Egress, egressProxyInstalled, EGRESS_PROXY_PORT } from './egress.js';
 import { runPortDriftCheck } from './port-check.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
@@ -237,20 +237,30 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const gateway = gatewayForCidr(bridgeCidr);
   await sh(`incus exec ${containerName} -- sh -c 'printf "nameserver ${gateway}\\n" > /etc/resolv.conf'`).catch(() => {});
 
-  // ---- Force IPv4 for the bootstrap apt BEFORE anything fetches packages ----
+  // ---- Configure bootstrap egress BEFORE anything fetches packages ----
   // The clone step below installs git via apt, and the setup script installs the
-  // runtime — both run BEFORE the network fence is applied (at activation, below),
-  // so the container still has DIRECT IPv4 NAT egress off its bridge and does NOT
-  // need the filtering proxy yet. The bridge is IPv4-only (ipv6.address=none,
-  // network.js), so force apt onto IPv4 or it tries a non-existent v6 route and
-  // fails "Network is unreachable". The egress proxy is baked into the container
-  // env by the setup script instead, for POST-fence runtime use — routing the very
-  // first `apt-get install git` through a proxy that may not be up yet (squid is
-  // optional/best-effort, ADR-010) is exactly what broke new-project startup
-  // ("Unable to connect to <gateway>:3128" → git never installs → clone fails).
-  const aptIpv4 = 'mkdir -p /etc/apt/apt.conf.d\nprintf \'Acquire::ForceIPv4 "true";\\n\' > /etc/apt/apt.conf.d/00mock2-ipv4\n';
-  await sh(`printf '%s' '${b64(aptIpv4)}' | base64 -d | incus exec ${containerName} -- sh`)
-    .catch((e) => console.warn('[mock2] container apt IPv4 config failed:', e?.message));
+  // runtime — both run BEFORE the network fence is applied (at activation, below).
+  // Two host models, chosen per host so the very first `apt-get install git` uses
+  // a path that can actually reach the Debian mirrors:
+  //   * squid IS up on the host — a hardened/proxied host whose bridges have no
+  //     direct route out; bootstrap must go through the filtering proxy. (Routing
+  //     through a proxy that ISN'T up was the original new-project-startup error.)
+  //   * squid is NOT up — a plain host that NATs the bridge straight out; the
+  //     fence isn't applied until activation, so bootstrap uses that direct IPv4
+  //     egress. (Forcing bootstrap through an absent proxy would fail it instead.)
+  // Either way force IPv4 — the bridge is v4-only (ipv6.address=none, network.js),
+  // so apt must not try a v6 route ("Network is unreachable"). buildProxyConfigScript
+  // already sets ForceIPv4; the direct branch sets it standalone. The proxy is
+  // baked into the container env for POST-fence runtime by the setup script.
+  const proxyUp = await egressProxyInstalled();
+  const bootstrapEgress = proxyUp
+    ? buildProxyConfigScript({
+        proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
+        noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
+      })
+    : 'mkdir -p /etc/apt/apt.conf.d\nprintf \'Acquire::ForceIPv4 "true";\\n\' > /etc/apt/apt.conf.d/00mock2-ipv4\n';
+  await sh(`printf '%s' '${b64(bootstrapEgress)}' | base64 -d | incus exec ${containerName} -- sh`)
+    .catch((e) => console.warn('[mock2] container bootstrap egress config failed:', e?.message));
 
   // ---- Mount the bare repo (ADR-011) + clone the working tree ----
   setStatus(projectId, { phase: 'repo-mount', message: 'Mounting repo and cloning working tree…' });
@@ -260,7 +270,20 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
     `incus exec ${containerName} -- sh -c 'command -v git >/dev/null 2>&1 || (apt-get update -y && apt-get install -y --no-install-recommends git); git config --global --add safe.directory ${REPO_MOUNT}; rm -rf ${APP_DIR}; git clone ${REPO_MOUNT} ${APP_DIR}; git config --global --add safe.directory ${APP_DIR}'`,
     { timeoutMs: 180000 },
   );
-  if (clone.code !== 0) return bail(`working clone failed: ${(clone.stderr || clone.stdout || '').trim().slice(-800)}`);
+  if (clone.code !== 0) {
+    // A clone failure is almost always the container failing to install git,
+    // which is really "no working egress to the Debian mirrors". Detect that
+    // signature and turn the cryptic apt/`git: not found` cascade into an
+    // operator-actionable message that names the actual cause and the fix.
+    const out = (clone.stderr || clone.stdout || '').trim();
+    const noEgress = /unable to connect|could not resolve|network is unreachable|failed to fetch|cannot initiate the connection|temporary failure in name resolution/i.test(out);
+    const hint = noEgress
+      ? ` — the project container could not reach the package mirrors to install git. ${proxyUp
+          ? 'The egress proxy (squid) is installed but the container could not reach it, or squid itself has no route to the internet (a host that egresses via an upstream proxy needs squid configured with a cache_peer).'
+          : 'The egress proxy (squid) is NOT installed on this host and the container has no direct internet either.'} Fix on the HOST: run scripts/mock2-enable-egress.sh, or ensure the host provides NAT internet to the m2br* bridges. mock2 containers cannot provision or build without egress (ADR-010).`
+      : '';
+    return bail(`working clone failed: ${out.slice(-600)}${hint}`);
+  }
 
   // ---- Read the DECLARED web port from the repo (ADR-005) ----
   setStatus(projectId, { phase: 'manifest', message: 'Reading declared topology…' });

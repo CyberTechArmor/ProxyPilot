@@ -28,7 +28,7 @@ import { sh, b64 } from './host.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
-import { getSlot, getConnector, decryptConnectorKey, listPrices } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -113,11 +113,8 @@ export function conceptReady() {
 }
 
 // ---- pricing + quota (mirrors runner.js; concept turns spend too, R5) ----
-
-function effectivePrice(connectorId, model) {
-  const now = nowIso();
-  return listPrices(connectorId).find((p) => p.model === model && String(p.effective_at) <= now) || null;
-}
+// Pricing (effectivePrice) is shared from connectors.js so every stage prices the
+// same way, with the built-in default rate as the fallback.
 
 // The buffered $ envelope for a concept turn: chat priced on the concept_chat
 // slot + mockup priced on the mockup slot (they may be different connectors).
@@ -141,12 +138,15 @@ function quotaVerdict(projectId, estCostCents) {
   return { verdict, quota };
 }
 
-// Ledger + cycle usage after a model call.
+// Ledger + cycle usage after a model call. Cache read/write tokens are counted
+// and priced too (they're separate from usage.inputTokens).
 function recordSpend({ projectId, cycleId, connector, model, usage }) {
-  const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }, effectivePrice(connector.id, model));
-  addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0), costCents: cents });
+  const cacheRead = usage.cacheReadInputTokens || 0;
+  const cacheWrite = usage.cacheCreationInputTokens || 0;
+  const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, effectivePrice(connector.id, model));
+  addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0) + cacheRead + cacheWrite, costCents: cents });
   try {
-    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
+    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: (usage.inputTokens || 0) + cacheRead + cacheWrite, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
   } catch (e) { console.warn('[mock2] concept ledger write failed:', e?.message); }
 }
 

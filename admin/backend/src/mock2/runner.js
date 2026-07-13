@@ -23,7 +23,7 @@ import { getMock2Db } from './db.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
-import { getSlot, getConnector, decryptConnectorKey, listPrices } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -96,13 +96,6 @@ export function buildRunnerReady() {
   return { ok: true, connector, model: slot.model, apiKey };
 }
 
-// The effective price row for a connector+model at now (listPrices is model,
-// effective_at DESC). Returns the newest row whose effective_at is in the past,
-// or null (self-hosted / unpriced ⇒ cost 0).
-function effectivePrice(connectorId, model) {
-  const now = nowIso();
-  return listPrices(connectorId).find((p) => p.model === model && String(p.effective_at) <= now) || null;
-}
 
 // The cost ENVELOPE (R5): the buffered token estimate priced at the current rate.
 function estimateCycle(connectorId, model) {
@@ -385,12 +378,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       continue;
     }
 
-    // Ledger + usage after every model call (M5 writer).
-    const costCents = costCentsForUsage({ inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens }, price);
-    const turnTokens = result.usage.inputTokens + result.usage.outputTokens;
+    // Ledger + usage after every model call (M5 writer). Cache reads/writes are
+    // separate token counts (see model-client) — count and price them too, or a
+    // cached build looks near-free when it isn't.
+    const u = result.usage;
+    const cacheRead = u.cacheReadInputTokens || 0;
+    const cacheWrite = u.cacheCreationInputTokens || 0;
+    const costCents = costCentsForUsage({ inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, price);
+    const turnTokens = u.inputTokens + u.outputTokens + cacheRead + cacheWrite;
     usedTokensThisRun += turnTokens;
     addCycleUsage(cycle.id, { tokens: turnTokens, costCents });
-    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens + cacheRead + cacheWrite, outputTokens: u.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
     // calls) serializes to empty message content, which Anthropic/OpenAI reject —

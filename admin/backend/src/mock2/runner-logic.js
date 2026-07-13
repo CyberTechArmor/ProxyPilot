@@ -130,8 +130,12 @@ code, verify it against a fixed gate battery, and stop. You never approve your o
 work and you never deploy — a human reviewer gates production.
 
 You are working inside a sealed, network-fenced container. The project's working
-tree is at ${appDir} and its dev server serves on port ${webPort}. Your only egress
-is a filtering proxy; do not attempt to reach anything else.
+tree is at ${appDir} and its dev server serves on port ${webPort}. The dev server
+serves the ${appDir}/public directory at the site root (/) — its entry document is
+public/index.html — so a change that should be visible on the live site must land
+in public/ (write the built HTML/CSS/JS there, or configure the app's build to
+output into public/). Your only egress is a filtering proxy; do not attempt to
+reach anything else.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -172,6 +176,24 @@ export function classifyTurn(toolCalls = []) {
     return { done: false, finishSummary: null, toolCalls: [], stalled: true };
   }
   return { done: false, finishSummary: null, toolCalls: calls, stalled: false };
+}
+
+// A short, human-readable "what the runner is doing right now" line, derived from
+// the tool calls a turn requested. The frontend polls this (getCycleJobStatus) so
+// the Builder sees task-level progress ("Step 3 · writing public/index.html")
+// instead of a static "running". Pure so it's testable.
+export function describeRunnerStep(turn, toolCalls = []) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const parts = calls.map((c) => {
+    if (c?.name === 'write_file') return `writing ${c.input?.path || 'a file'}`;
+    if (c?.name === 'read_file') return `reading ${c.input?.path || 'a file'}`;
+    if (c?.name === 'exec_in_container') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
+    if (c?.name === 'run_gates') return 'running the gate battery';
+    if (c?.name === 'finish') return 'wrapping up';
+    return c?.name || 'working';
+  });
+  const what = parts.length ? parts.join(', ') : 'thinking through the next step';
+  return `Step ${Number(turn) + 1} · ${what}`;
 }
 
 // The nudge appended when a turn stalls (no tool calls) so the model resumes

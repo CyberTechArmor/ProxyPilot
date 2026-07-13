@@ -451,7 +451,7 @@ export default function ProjectDetail() {
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
                     {designApproved ? (
-                      <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+                     <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} onBuilt={handleMockupChanged} />
                     ) : null}
                   </div>
                 </div>
@@ -461,7 +461,7 @@ export default function ProjectDetail() {
                     <PreviewPlaceholder project={project} />
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
                     {designApproved ? (
-                      <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
+                     <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} onBuilt={handleMockupChanged} />
                     ) : null}
                   </div>
                 </div>
@@ -1150,7 +1150,7 @@ function LockBanner({ projectId, canEdit, isAdmin }) {
 // the gate battery going green (the phase-stepper pattern from LxcContainers),
 // interrupt controls, spend, and the hash-chained change history with a live
 // chain-verification badge. No chat yet (M7). Polls while a cycle is live.
-function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged }) {
+function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged, onBuilt }) {
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
   const [job, setJob] = useState(null);
@@ -1158,6 +1158,7 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged 
   const [busy, setBusy] = useState(false);
   const [changes, setChanges] = useState(null); // { records, verification } | null
   const [showChanges, setShowChanges] = useState(false);
+  const lastBuiltCycleId = useRef(null);
 
   const load = useCallback(async () => {
     try {
@@ -1181,6 +1182,17 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged 
     const t = setInterval(() => { load(); if (onChanged) onChanged(); }, 3000);
     return () => clearInterval(t);
   }, [active, load, onChanged]);
+
+  // When a build cycle finishes successfully, the runner has written the new app
+  // into the container's public/ — reload the preview so the live site shows it
+  // instead of the stale placeholder (the preview URL is stable, so it wouldn't
+  // refresh on its own). Fire once per cycle id.
+  useEffect(() => {
+    if (cycle?.status === 'succeeded' && cycle.id && lastBuiltCycleId.current !== cycle.id) {
+      lastBuiltCycleId.current = cycle.id;
+      if (onBuilt) onBuilt();
+    }
+  }, [cycle?.status, cycle?.id, onBuilt]);
 
   const online = lifecycle === 'active';
 

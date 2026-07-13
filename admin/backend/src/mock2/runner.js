@@ -41,7 +41,7 @@ import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
-  buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, STALL_NUDGE,
+  buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 
@@ -306,6 +306,11 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       transcript.push({ role: 'assistant', text: result.text || '', toolCalls: result.toolCalls || [] });
     }
     const decision = classifyTurn(result.toolCalls);
+
+    // Surface task-level progress for the poll UI ("Step 3 · writing
+    // public/index.html") so the Builder can see what the runner is doing rather
+    // than a static "running". The terminal branches below set their own message.
+    setJob(cycle.id, { phase: 'running', message: describeRunnerStep(turn, result.toolCalls) });
 
     // 4) The model declared finish — verify the gates are actually green before
     //    accepting it (it never approves its own work: we re-run the battery).

@@ -1,48 +1,95 @@
 // ChangeHistory — the project's append-only, hash-chained change history, with a
-// chain-verification badge and per-change troubleshooting detail.
+// chain-verification badge, per-change troubleshooting detail, and a downloadable
+// build transcript.
 //
-// Each record is one build checkpoint. It shows a compact line (seq, commit,
-// summary, and the linked cycle's token/cost spend); expanding it fetches that
-// cycle (mock2GetCycle) for the gate results and pulls the cycle's slice of the
-// chat (mock2GetChat filtered to cycle_id) so you can see the AI interactions,
-// the gates that ran, the commit, and the rules the change touched — everything
-// needed to troubleshoot a single change without leaving the build view.
+// Each record is one build checkpoint. Expanding it loads that cycle's full LOG
+// (mock2GetCycleLog): the durable event transcript — the task text, every AI
+// message, every tool call/result, gate outcomes, the checkpoint and the deploy —
+// plus the linked chat, gate results, commit and rules touched. This is what you
+// review to see what the AI actually did (and why a change may not be reflected in
+// the app). "Download log" saves the whole thing as JSON for later evaluation.
 //
 // MOBILE_FIRST: single column, wrapping rows, 44px expand targets; clean at 360px.
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
+import { Button } from '@/components/ui/button';
 import {
-  ShieldCheck, XCircle, ChevronDown, ChevronRight, GitCommitHorizontal, Loader2, Coins,
+  ShieldCheck, XCircle, ChevronDown, ChevronRight, GitCommitHorizontal, Loader2, Coins, Download,
 } from 'lucide-react';
-import { ChatBubble } from './chat-messages';
 import { fmtUsage } from './ProjectTimeCard';
 
 const GATE_TONE = {
   passed: 'text-green-600', failed: 'text-red-500', running: 'text-cyan-500', pending: 'text-muted-foreground',
 };
 
+// Event kind → a compact label + tone for the transcript view.
+const EVENT_LABEL = {
+  task: { label: 'Task', tone: 'text-primary' },
+  ai_message: { label: 'AI', tone: 'text-cyan-600' },
+  tool_call: { label: 'Tool →', tone: 'text-violet-500' },
+  tool_result: { label: 'Result ←', tone: 'text-muted-foreground' },
+  gate: { label: 'Gates', tone: 'text-amber-600' },
+  checkpoint: { label: 'Checkpoint', tone: 'text-emerald-600' },
+  deploy: { label: 'Deploy', tone: 'text-emerald-600' },
+  note: { label: 'Note', tone: 'text-muted-foreground' },
+};
+
+// Trigger a client-side download of an object as pretty JSON (no server round-trip
+// beyond the fetch that already happened). Self-contained; revokes the blob URL.
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function EventRow({ ev }) {
+  const meta = EVENT_LABEL[ev.kind] || { label: ev.kind, tone: 'text-muted-foreground' };
+  const toolName = ev.meta?.name;
+  const tokens = ev.kind === 'ai_message' && ev.meta
+    ? `${(ev.meta.output_tokens ?? 0)} out · ${(ev.meta.input_tokens ?? 0)} in`
+    : null;
+  const hasBody = ev.content && ev.content.trim().length > 0;
+  return (
+    <div className="rounded-md border bg-background/40 px-2 py-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className={`text-[11px] font-medium ${meta.tone}`}>
+          {meta.label}{toolName ? ` ${toolName}` : ''}
+        </span>
+        {tokens ? <span className="font-mono text-[10px] text-muted-foreground whitespace-nowrap">{tokens}</span> : null}
+      </div>
+      {ev.kind === 'tool_call' && ev.meta?.input ? (
+        <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[11px] text-muted-foreground">{JSON.stringify(ev.meta.input, null, 2)}</pre>
+      ) : null}
+      {hasBody ? (
+        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words text-[11px] text-foreground/90">{ev.content}</pre>
+      ) : null}
+    </div>
+  );
+}
+
 function ChangeDetail({ projectId, record }) {
+  const { toast } = useToast();
   const [loading, setLoading] = useState(true);
-  const [cycle, setCycle] = useState(null);
-  const [messages, setMessages] = useState([]);
+  const [log, setLog] = useState(null); // { cycle, events, messages, ... }
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        // The cycle carries the gate results; the chat carries the AI interactions.
-        // Both are best-effort — a record can pre-date a cycle (e.g. the design
-        // sign-off #1), in which case we simply show what the record itself holds.
-        const [cy, chat] = await Promise.all([
-          record.cycle_id != null ? api.mock2GetCycle(projectId, record.cycle_id).catch(() => null) : Promise.resolve(null),
-          api.mock2GetChat(projectId).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setCycle(cy?.cycle || null);
-        const msgs = (chat?.messages || []).filter((m) => record.cycle_id != null && m.cycle_id === record.cycle_id);
-        setMessages(msgs);
+        // The cycle log carries the full transcript (events) + the linked cycle
+        // (gate results). Best-effort — a record can pre-date a cycle (the design
+        // sign-off #1), in which case we just show what the record itself holds.
+        const l = record.cycle_id != null ? await api.mock2GetCycleLog(projectId, record.cycle_id).catch(() => null) : null;
+        if (!cancelled) setLog(l);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -50,23 +97,38 @@ function ChangeDetail({ projectId, record }) {
     return () => { cancelled = true; };
   }, [projectId, record.cycle_id]);
 
-  const gates = cycle?.gates || [];
+  const gates = log?.cycle?.gates || [];
+  const events = log?.events || [];
   const rules = Array.isArray(record.rules_touched) ? record.rules_touched : [];
+
+  const download = async () => {
+    try {
+      const full = log || (record.cycle_id != null ? await api.mock2GetCycleLog(projectId, record.cycle_id) : { record });
+      downloadJson(`build-log-change-${record.seq}.json`, full);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not build the log', description: err.message });
+    }
+  };
 
   return (
     <div className="mt-2 space-y-3 border-t pt-2.5">
-      {/* Commit + spend */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-        <span className="inline-flex items-center gap-1">
-          <GitCommitHorizontal className="h-3.5 w-3.5" />
-          <span className="font-mono">{record.commit_sha ? record.commit_sha.slice(0, 8) : 'no commit'}</span>
-        </span>
-        {record.used_tokens != null || record.used_cost_cents != null ? (
+      {/* Commit + spend + download */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
           <span className="inline-flex items-center gap-1">
-            <Coins className="h-3.5 w-3.5" />
-            <span className="font-mono">{fmtUsage(record.used_tokens, record.used_cost_cents)}</span>
+            <GitCommitHorizontal className="h-3.5 w-3.5" />
+            <span className="font-mono">{record.commit_sha ? record.commit_sha.slice(0, 8) : 'no commit'}</span>
           </span>
-        ) : null}
+          {record.used_tokens != null || record.used_cost_cents != null ? (
+            <span className="inline-flex items-center gap-1">
+              <Coins className="h-3.5 w-3.5" />
+              <span className="font-mono">{fmtUsage(record.used_tokens, record.used_cost_cents)}</span>
+            </span>
+          ) : null}
+        </div>
+        <Button variant="outline" size="sm" className="h-8" onClick={download}>
+          <Download className="h-3.5 w-3.5 mr-1" /> Download log
+        </Button>
       </div>
 
       {/* Rules touched */}
@@ -104,17 +166,19 @@ function ChangeDetail({ projectId, record }) {
         )}
       </div>
 
-      {/* AI interactions for this cycle */}
+      {/* Full transcript — what the AI actually did */}
       <div className="space-y-1.5">
-        <p className="text-[11px] font-medium text-muted-foreground">AI interactions</p>
+        <p className="text-[11px] font-medium text-muted-foreground">AI interactions &amp; actions</p>
         {loading ? (
           <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Loading…</p>
-        ) : messages.length ? (
-          <div className="space-y-2 rounded-lg border bg-background/40 p-2">
-            {messages.map((m) => <ChatBubble key={m.id} m={m} />)}
+        ) : events.length ? (
+          <div className="space-y-1.5">
+            {events.map((ev, i) => <EventRow key={i} ev={ev} />)}
           </div>
         ) : (
-          <p className="text-[11px] text-muted-foreground">No chat activity linked to this change.</p>
+          <p className="text-[11px] text-muted-foreground">
+            No transcript recorded for this change (it predates transcript logging, or was a non-runner checkpoint).
+          </p>
         )}
       </div>
     </div>
@@ -122,9 +186,11 @@ function ChangeDetail({ projectId, record }) {
 }
 
 export default function ChangeHistory({ projectId }) {
+  const { toast } = useToast();
   const [data, setData] = useState(null); // { records, verification } | null
   const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState(null); // seq of the open row, or null
+  const [downloadingAll, setDownloadingAll] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -138,17 +204,35 @@ export default function ChangeHistory({ projectId }) {
 
   useEffect(() => { load(); }, [load]);
 
+  const downloadAll = async () => {
+    setDownloadingAll(true);
+    try {
+      const full = await api.mock2GetProjectLog(projectId);
+      downloadJson(`build-log-project-${projectId}.json`, full);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not build the full log', description: err.message });
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
   if (error) return <p className="text-sm text-muted-foreground">Could not load the change history.</p>;
   if (!data) return <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading change history…</p>;
 
   const { records = [], verification } = data;
   return (
     <div className="space-y-2">
-      <p className="text-xs flex items-center gap-1">
-        {verification?.ok
-          ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({verification.count} record{verification.count === 1 ? '' : 's'})</span></>
-          : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{verification?.brokenAt}</span></>}
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs flex items-center gap-1">
+          {verification?.ok
+            ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({verification.count} record{verification.count === 1 ? '' : 's'})</span></>
+            : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{verification?.brokenAt}</span></>}
+        </p>
+        <Button variant="outline" size="sm" className="h-8" disabled={downloadingAll} onClick={downloadAll}>
+          {downloadingAll ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
+          Download full log
+        </Button>
+      </div>
       {records.length === 0 ? (
         <p className="text-xs text-muted-foreground">No change records yet.</p>
       ) : (

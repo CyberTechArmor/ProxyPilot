@@ -1216,6 +1216,9 @@ export const api = {
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),
   mock2ForceReleaseLock: (id) => request(`/mock2/projects/${id}/lock/force-release`, { method: 'POST' }),
   mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
+  // Downloadable build transcript: one cycle's full log, or the whole project's.
+  mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
+  mock2GetProjectLog: (id) => request(`/mock2/projects/${id}/log`),
   mock2GetLockIdleMinutes: () => request('/mock2/settings/lock-idle-minutes'),
   mock2SetLockIdleMinutes: (minutes) =>
     request('/mock2/settings/lock-idle-minutes', { method: 'POST', body: JSON.stringify({ minutes }) }),

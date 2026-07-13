@@ -37,6 +37,7 @@ import {
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { insertCycleEvent } from './cycle-events.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
@@ -300,6 +301,12 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   updateCycle(cycle.id, { status: 'running', started_at: nowIso(), gates_json: JSON.stringify(initialGateReports(gateScripts)) });
   setJob(cycle.id, { phase: 'running', message: 'Runner working…' });
 
+  // The durable transcript for this cycle (downloadable later). logEvent is
+  // best-effort — insertCycleEvent already swallows its own errors.
+  const logEvent = (kind, { role = null, content = null, meta = null } = {}) =>
+    insertCycleEvent({ projectId, cycleId: cycle.id, kind, role, content, meta });
+  logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model: ready.model, framework_version: framework.version } });
+
   const skills = parseFrameworkSkills(framework.skills_json);
   const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000 });
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
@@ -397,6 +404,20 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     if (result.text || (result.toolCalls && result.toolCalls.length)) {
       transcript.push({ role: 'assistant', text: result.text || '', toolCalls: result.toolCalls || [] });
     }
+    // Log the AI's turn: its reasoning/text and the tool calls it requested, with
+    // this turn's token/cost so the transcript doubles as a per-step spend trail.
+    logEvent('ai_message', {
+      role: 'assistant',
+      content: result.text || '',
+      meta: {
+        turn, tools: (result.toolCalls || []).map((t) => t.name),
+        input_tokens: u.inputTokens, output_tokens: u.outputTokens,
+        cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, cost_cents: costCents,
+      },
+    });
+    for (const tc of result.toolCalls || []) {
+      logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input || {} } });
+    }
     const decision = classifyTurn(result.toolCalls);
 
     // Surface task-level progress for the poll UI ("Step 3 · writing
@@ -415,9 +436,12 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
         lastGateReports = out.gateReports || lastGateReports;
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
+        logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
+      logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}` });
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       lastGateReports = battery;
+      logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: !gateScripts.length || allGatesGreen(battery) } });
       // A framework with zero gates (placeholder content, risk R8 — parseGateScripts
       // returns []) is vacuously green: there is nothing to fail, so finish is
       // accepted. Only reject finish when there ARE gates and one isn't green.
@@ -429,6 +453,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         continue;
       }
       const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: decision.finishSummary });
+      logEvent('checkpoint', { role: 'system', content: decision.finishSummary || '', meta: { commit_sha: record?.commit_sha || null, seq: record?.seq ?? null } });
 
       // Run phase — deploy the built app so "succeeded" means "serving". Install
       // deps → migrate (in-container Postgres, ADR-008) → build → swap the systemd
@@ -440,12 +465,14 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // the preview on success via onBuilt).
       const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
+        logEvent('deploy', { role: 'system', content: deployed.error || 'deploy failed', meta: { ok: false } });
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });
         releaseLock(projectId, holder);
         setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error, commit: record?.commit_sha || null });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
         return scheduleJobCleanup(cycle.id);
       }
+      logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
       finishCycle(cycle.id, { status: 'succeeded' });
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
@@ -471,6 +498,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
       lastGateReports = out.gateReports || lastGateReports;
       transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
+      logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
     }
     touchLock(projectId, holder); // any exec/write refreshed the idle timer
   }

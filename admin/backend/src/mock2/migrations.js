@@ -35,6 +35,9 @@
 //            time counter for the Details time card) — additive
 //   511 Run — mock2_cycles.pause_reason (why a cycle soft-paused on a token/time
 //            budget: 'budget_tokens' | 'budget_time' — NULL otherwise) — additive
+//   512 Run — mock2_cycle_events (durable per-cycle transcript: task, AI messages,
+//            tool calls/results, gates, checkpoint, deploy — the downloadable
+//            "what happened" log) — additive, new table
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -521,6 +524,33 @@ export const MOCK2_MIGRATIONS = [
     up: (d) => {
       d.exec(`
         ALTER TABLE mock2_cycles ADD COLUMN pause_reason TEXT;
+      `);
+    },
+  },
+  {
+    // Per-cycle event log — the durable transcript of what actually happened in a
+    // build so it can be reviewed and downloaded ("how did it do?"). setJob only
+    // carries ephemeral progress; this records every step: the task text, each AI
+    // message, each tool call + (truncated) result, gate outcomes, the checkpoint,
+    // and the deploy. seq orders events within a cycle. Additive; a disabled host
+    // never writes it.
+    version: 512,
+    name: 'mock2_cycle_events',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_cycle_events (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          seq INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          role TEXT,
+          content TEXT,
+          meta_json TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_cycle_events_cycle ON mock2_cycle_events (cycle_id, seq);
+        CREATE INDEX idx_mock2_cycle_events_project ON mock2_cycle_events (project_id, id);
       `);
     },
   },

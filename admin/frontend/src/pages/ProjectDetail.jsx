@@ -41,6 +41,7 @@ import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog } from '@/components/mock2/ProjectTimeCard';
+import { fireConfetti } from '@/lib/confetti';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -76,6 +77,8 @@ export default function ProjectDetail() {
   const [terminalVisited, setTerminalVisited] = useState(false);
   const [previewReloadNonce, setPreviewReloadNonce] = useState(0); // bump to remount the preview iframe
   const archivedDefaulted = useRef(false);
+  const prevLifecycle = useRef(null);      // last-seen lifecycle, to detect the provisioning→active transition
+  const confettiFired = useRef(false);     // guard the one-time online confetti within this mount
 
   // An archived project has no chat/terminal — land on Details once we know it's
   // archived (only the first time, so a manual tab switch still sticks).
@@ -156,6 +159,27 @@ export default function ProjectDetail() {
     const t = setInterval(poll, 4000);
     return () => { cancelled = true; clearInterval(t); };
   }, [gate, project, pendingJob, id]);
+
+  // Celebrate the project first coming online: fire a one-time confetti burst on
+  // the provisioning → active transition. Guarded twice — a per-mount ref (so a
+  // re-render can't repeat it) and a per-project localStorage key (so it only
+  // ever fires the FIRST time this project comes online, not on later
+  // stop→start or rehydrate cycles).
+  useEffect(() => {
+    const lc = project?.lifecycle || null;
+    const prev = prevLifecycle.current;
+    prevLifecycle.current = lc;
+    if (prev === 'provisioning' && lc === 'active' && !confettiFired.current) {
+      const key = `mock2:onlined:${id}`;
+      let already = false;
+      try { already = localStorage.getItem(key) === '1'; } catch { /* storage blocked */ }
+      if (!already) {
+        confettiFired.current = true;
+        try { localStorage.setItem(key, '1'); } catch { /* storage blocked */ }
+        fireConfetti();
+      }
+    }
+  }, [project?.lifecycle, id]);
 
   // Clear the pending job once the row reaches its target (or fails).
   useEffect(() => {
@@ -403,6 +427,8 @@ export default function ProjectDetail() {
                   isAdmin={isAdmin}
                   previewSrc={previewSrc}
                   previewReloadNonce={previewReloadNonce}
+                  provLog={provStatus?.progress?.log || null}
+                  provMessage={provStatus?.progress?.message || null}
                   onChanged={load}
                   onBuilt={handleMockupChanged}
                 />
@@ -420,7 +446,11 @@ export default function ProjectDetail() {
               ) : (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <div className="mx-auto w-full max-w-3xl space-y-4">
-                    <PreviewPlaceholder project={project} />
+                    <PreviewPlaceholder
+                      project={project}
+                      provLog={provStatus?.progress?.log || null}
+                      provMessage={provStatus?.progress?.message || null}
+                    />
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
                   </div>
                 </div>

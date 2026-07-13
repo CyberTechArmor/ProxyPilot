@@ -46,7 +46,7 @@ import {
   purgeProjectSlugHistory,
   addTypingSeconds,
 } from './projects.js';
-import { computeTimeSummary } from './time-logic.js';
+import { computeTimeSummary, computeUsageSummary } from './time-logic.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
@@ -750,7 +750,10 @@ export function createMock2Router() {
     const project = getProject(req.mock2Project.id);
     const cycles = listCyclesForProject(project.id, { limit: 500 });
     const deviations = listQueueItems({ projectId: project.id, kind: 'framework_deviation', limit: 500 });
-    res.json({ summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }) });
+    res.json({
+      summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }),
+      usage: computeUsageSummary({ cycles }),
+    });
   });
 
   // Destroy a project: tear down its container + bridge, drop its slug block,
@@ -1347,13 +1350,25 @@ export function createMock2Router() {
   // The project's append-only, hash-chained change history + a live verification
   // of the whole chain (any member). The M6 verify checklist asserts this passes.
   router.get('/projects/:id/change-records', requireMock2Role('viewer'), (req, res) => {
+    // Join each record to its cycle's spend so the change history can show a
+    // per-change token/cost counter without a second round-trip (Task 3).
+    const usageByCycle = new Map();
+    for (const c of listCyclesForProject(req.mock2Project.id, { limit: 1000 })) {
+      usageByCycle.set(c.id, { used_tokens: c.used_tokens ?? 0, used_cost_cents: c.used_cost_cents ?? 0 });
+    }
     const records = listChangeRecords(req.mock2Project.id).map((r) => {
       let gates = null;
       try { gates = r.gates_run ? JSON.parse(r.gates_run) : null; } catch { gates = null; }
+      let rules = null;
+      try { rules = r.rules_touched ? JSON.parse(r.rules_touched) : null; } catch { rules = null; }
+      const usage = r.cycle_id != null ? usageByCycle.get(r.cycle_id) : null;
       return {
         seq: r.seq, prev_hash: r.prev_hash, hash: r.hash, summary: r.summary,
-        commit_sha: r.commit_sha, gates_run: gates, framework_version: r.framework_version,
+        commit_sha: r.commit_sha, gates_run: gates, rules_touched: rules,
+        framework_version: r.framework_version,
         cycle_id: r.cycle_id, initiated_by: r.initiated_by,
+        used_tokens: usage ? usage.used_tokens : null,
+        used_cost_cents: usage ? usage.used_cost_cents : null,
         acting_as_admin: Number(r.acting_as_admin) === 1, created_at: r.created_at,
       };
     });

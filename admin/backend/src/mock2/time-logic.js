@@ -92,3 +92,34 @@ export function computeTimeSummary({ project = {}, cycles = [], deviations = [],
     total_tracked_seconds: typingSeconds + ai.total_seconds + adminWaitSeconds,
   };
 }
+
+// computeUsageSummary({ cycles }) → the model spend (tokens + cost) a project has
+// accrued across its cycles, broken out by the same stage buckets the time card
+// uses (mockup / building / adjustments) plus a total. Costs are whole cents (as
+// stored on the cycle); tokens are whole tokens. Pure — same stage classification
+// as computeTimeSummary so the two cards agree on which cycle is "the first build".
+export function computeUsageSummary({ cycles = [] } = {}) {
+  const concept = cycles.filter((c) => c && c.stage === 'concept');
+  const appBuilds = cycles
+    .filter((c) => c && c.stage !== 'concept')
+    .sort((a, b) => (parseTs(a.created_at) || 0) - (parseTs(b.created_at) || 0));
+
+  const bucket = () => ({ tokens: 0, cost_cents: 0 });
+  const mockup = bucket();
+  const building = bucket();
+  const adjustments = bucket();
+
+  const add = (b, c) => {
+    b.tokens += Math.max(0, Math.round(Number(c.used_tokens) || 0));
+    b.cost_cents += Math.max(0, Math.round(Number(c.used_cost_cents) || 0));
+  };
+
+  for (const c of concept) add(mockup, c);
+  appBuilds.forEach((c, i) => add(i === 0 ? building : adjustments, c));
+
+  return {
+    by_stage: { mockup, building, adjustments },
+    total_tokens: mockup.tokens + building.tokens + adjustments.tokens,
+    total_cost_cents: mockup.cost_cents + building.cost_cents + adjustments.cost_cents,
+  };
+}

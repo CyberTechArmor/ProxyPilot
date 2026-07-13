@@ -46,7 +46,7 @@ export function RuleQuestion({ m, open, canEdit, busy, onAnswer }) {
     );
   }
   return (
-    <div className="flex justify-start">
+    <div className="flex justify-start" data-open-question>
       <div className="max-w-[92%] w-full rounded-xl border border-violet-500/30 bg-violet-500/5 px-3 py-2.5 space-y-2.5">
         <p className="flex items-center gap-1.5 text-[11px] font-medium text-violet-500">
           <HelpCircle className="h-3.5 w-3.5" /> Rule question — confirm to continue building

@@ -38,6 +38,8 @@ import {
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
+import BuildMode from '@/components/mock2/BuildMode';
+import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -443,16 +445,29 @@ export default function ProjectDetail() {
           ) : (
             <div className="flex h-full min-h-0 flex-col gap-3">
               <LockBanner projectId={id} canEdit={canEdit} isAdmin={isAdmin} />
-              {previewSrc ? (
+              {designApproved ? (
+                // Build mode — build information on the left, the build/run/
+                // maintenance chat on the right (the design conversation is
+                // archived read-only in the Details tab).
+                <BuildMode
+                  projectId={id}
+                  project={project}
+                  canEdit={canEdit}
+                  isAdmin={isAdmin}
+                  previewSrc={previewSrc}
+                  previewReloadNonce={previewReloadNonce}
+                  onChanged={load}
+                  onBuilt={handleMockupChanged}
+                />
+              ) : previewSrc ? (
+                // Design mode — the live mockup preview on the left, the design
+                // conversation on the right.
                 <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
                   <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
                     <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
-                    {designApproved ? (
-                     <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} onBuilt={handleMockupChanged} />
-                    ) : null}
                   </div>
                 </div>
               ) : (
@@ -460,9 +475,6 @@ export default function ProjectDetail() {
                   <div className="mx-auto w-full max-w-3xl space-y-4">
                     <PreviewPlaceholder project={project} />
                     <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
-                    {designApproved ? (
-                     <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} onBuilt={handleMockupChanged} />
-                    ) : null}
                   </div>
                 </div>
               )}
@@ -578,7 +590,41 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
-      {/* (chat, build cycle, and terminal now live in the Chat/Terminal tabs above) */}
+      {/* (build cycle + build chat now live in the Chat tab above) */}
+
+      {/* Design archive — where the design started. Once the design is approved
+          the Chat tab becomes the build/run/maintenance chat, so the original
+          design conversation + the mockup that kicked it all off are preserved
+          here, read-only, so anyone can revisit them. */}
+      {designApproved ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4" /> Design archive</CardTitle>
+            <CardDescription>
+              The original design mockup and the conversation that shaped it — kept read-only so you can always see
+              where the design started.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {project.mockup_archive_url ? (
+              <a
+                href={project.mockup_archive_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
+              >
+                Open the original design mockup
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+              </a>
+            ) : (
+              <p className="text-sm text-muted-foreground">The archived mockup preview is available once the project is online.</p>
+            )}
+            <div className="h-[24rem]">
+              <ConceptStage projectId={id} project={project} canEdit={false} archived />
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {/* Members */}
       <Card>
@@ -903,96 +949,6 @@ export default function ProjectDetail() {
   );
 }
 
-// PreviewPanel — the Chat tab's centerpiece: the project's live mockup (or the
-// built app, once the design is approved) in an embedded iframe with a
-// Desktop/Mobile width toggle and an open-in-new-tab. The framed doc is a
-// different origin (the project's own HTTPS host), so it renders sandboxed with
-// its own origin's privileges — the mock2 dev server sets no X-Frame-Options, so
-// it embeds cleanly. MOBILE_FIRST: full-width, toggle labels collapse to icons.
-function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
-  const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
-  const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
-  return (
-    <div className="flex flex-col h-full min-h-0 rounded-lg border overflow-hidden bg-muted/20">
-      <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2 shrink-0">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="hidden sm:flex items-center gap-1.5 shrink-0">
-            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
-            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
-            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
-          </span>
-          <span className="truncate text-xs font-mono text-muted-foreground">{src}</span>
-          <Button
-            variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-            onClick={() => setReloadNonce((n) => n + 1)}
-            aria-label="Reload preview" title="Reload preview"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <div className="flex rounded-md border p-0.5">
-            <button
-              type="button" aria-pressed={width === 'desktop'} onClick={() => setWidth('desktop')}
-              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'desktop' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-            >
-              <Monitor className="h-3.5 w-3.5" /><span className="hidden sm:inline">Desktop</span>
-            </button>
-            <button
-              type="button" aria-pressed={width === 'mobile'} onClick={() => setWidth('mobile')}
-              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${width === 'mobile' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
-            >
-              <Smartphone className="h-3.5 w-3.5" /><span className="hidden sm:inline">Mobile</span>
-            </button>
-          </div>
-          <Button asChild variant="ghost" size="icon" className="h-9 w-9">
-            <a href={src} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab">
-              <ExternalLink className="h-4 w-4" />
-            </a>
-          </Button>
-        </div>
-      </div>
-      <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">
-        <iframe
-          key={`${reloadKey}-${reloadNonce}`}
-          title={`${title || 'Project'} preview`}
-          src={src}
-          className="h-full border-0 bg-white"
-          style={{ width: width === 'mobile' ? 390 : '100%', maxWidth: '100%' }}
-          sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-modals"
-        />
-      </div>
-      {!approved ? (
-        <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground shrink-0">
-          Non-functional mockup preview — approve the design in the chat to build the working app.
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-// PreviewPlaceholder — shown in the Chat tab when there is no preview yet (no
-// mockup, or the project is still provisioning). Keeps the chat centered as the
-// focus while explaining what will appear here.
-function PreviewPlaceholder({ project }) {
-  const building = project.lifecycle === 'provisioning';
-  return (
-    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed bg-muted/10 px-6 py-10 text-center">
-      {building
-        ? <Loader2 className="mb-3 h-6 w-6 animate-spin text-muted-foreground" />
-        : <Sparkles className="mb-3 h-6 w-6 text-muted-foreground" />}
-      <p className="text-sm font-medium">
-        {building ? 'Setting up your project…' : 'Your live preview will appear here'}
-      </p>
-      <p className="mt-1 max-w-sm text-xs text-muted-foreground">
-        {building
-          ? 'The container, repository, and URL are being provisioned.'
-          : 'Describe your app in the chat below. As soon as a mockup is generated it shows up here — and once you approve the design and build, the working app replaces it.'}
-      </p>
-    </div>
-  );
-}
-
 // M5 — repository export (any member) + git push remote config (admin, ADR-006).
 // Export as zip is `git archive` of the bare repo; credentials for a remote never
 // enter a container. Self-contained so ProjectDetail's main loader stays lean.
@@ -1145,324 +1101,3 @@ function LockBanner({ projectId, canEdit, isAdmin }) {
   );
 }
 
-// M6 — the build-cycle control + the "gates going green" view. A canned "run a
-// cycle" instruction box starts the runner; the running cycle shows its status,
-// the gate battery going green (the phase-stepper pattern from LxcContainers),
-// interrupt controls, spend, and the hash-chained change history with a live
-// chain-verification badge. No chat yet (M7). Polls while a cycle is live.
-function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged, onBuilt }) {
-  const { toast } = useToast();
-  const [cycle, setCycle] = useState(null);
-  const [job, setJob] = useState(null);
-  const [instruction, setInstruction] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [changes, setChanges] = useState(null); // { records, verification } | null
-  const [showChanges, setShowChanges] = useState(false);
-  const lastBuiltCycleId = useRef(null);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api.mock2GetLatestCycle(projectId);
-      setCycle(r.cycle || null);
-      setJob(r.job || null);
-    } catch (err) {
-      if (!(err instanceof ApiError)) console.error('load cycle failed:', err);
-    }
-  }, [projectId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  // The whole build ATTEMPT is live while the audit runs (running/estimating) OR
-  // while it is blocked on questions (awaiting_user/awaiting_admin) — poll so the
-  // resumed build cycle appears once the gate clears, and refresh the project so
-  // its derived status chip updates.
-  const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
-  useEffect(() => {
-    if (!active) return undefined;
-    const t = setInterval(() => { load(); if (onChanged) onChanged(); }, 3000);
-    return () => clearInterval(t);
-  }, [active, load, onChanged]);
-
-  // When a build cycle finishes successfully, the runner has written the new app
-  // into the container's public/ — reload the preview so the live site shows it
-  // instead of the stale placeholder (the preview URL is stable, so it wouldn't
-  // refresh on its own). Fire once per cycle id.
-  useEffect(() => {
-    if (cycle?.status === 'succeeded' && cycle.id && lastBuiltCycleId.current !== cycle.id) {
-      lastBuiltCycleId.current = cycle.id;
-      if (onBuilt) onBuilt();
-    }
-  }, [cycle?.status, cycle?.id, onBuilt]);
-
-  const online = lifecycle === 'active';
-
-  // Start a build. M8 routes the press through the audit first: the response's
-  // `audit` flag means the audit is running (rule questions may appear in the
-  // chat above; framework deviations go to the admin queue).
-  const startBuild = async (text) => {
-    const body = String(text || '').trim();
-    if (!body) return;
-    setBusy(true);
-    try {
-      const res = await api.mock2StartCycle(projectId, body);
-      if (res.refused) {
-        toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
-      } else if (res.audit) {
-        toast({ title: 'Auditing the build…', description: 'Checking the design against the rules and framework.' });
-        setInstruction('');
-      } else {
-        toast({ title: 'Build started' });
-        setInstruction('');
-      }
-      setCycle(res.cycle || null);
-      if (onChanged) onChanged();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
-    } finally { setBusy(false); }
-  };
-  const run = () => startBuild(instruction);
-  // Explicit-consent framework adoption (ADR-003 — Mock2 X → Y). Nothing
-  // auto-remediates; the operator starts this update cycle deliberately.
-  const remediate = () => {
-    const from = project?.framework_last_built_version;
-    const to = project?.framework_current_version;
-    startBuild(`Adopt framework ${from ? `v${from} → ` : ''}v${to}: re-run the full gate battery and reconcile the app with the updated constitution and confirmed rules (Mock2 ${from ? `v${from} → ` : ''}v${to}).`);
-  };
-
-  const interrupt = async (action) => {
-    if (!cycle) return;
-    setBusy(true);
-    try { await api.mock2InterruptCycle(projectId, cycle.id, action); toast({ title: `Cycle: ${action.replace(/_/g, ' ')}` }); await load(); }
-    catch (err) { toast({ variant: 'destructive', title: 'Could not interrupt', description: err.message }); }
-    finally { setBusy(false); }
-  };
-
-  // Resume a cycle that stalled on a transient failure (e.g. a rate limit). Starts
-  // a fresh cycle with the same instruction, continuing from the checkpointed WIP.
-  const retry = async () => {
-    if (!cycle) return;
-    setBusy(true);
-    try {
-      const res = await api.mock2RetryCycle(projectId, cycle.id);
-      if (res.refused) toast({ variant: 'destructive', title: 'Retry refused', description: res.reason || 'Quota exceeded.' });
-      else toast({ title: 'Retrying the build', description: 'Continuing from where it stopped.' });
-      await load();
-      if (onChanged) onChanged();
-    } catch (err) { toast({ variant: 'destructive', title: 'Could not retry', description: err.message }); }
-    finally { setBusy(false); }
-  };
-
-  const loadChanges = async () => {
-    setShowChanges((s) => !s);
-    if (changes) return;
-    try { setChanges(await api.mock2GetChangeRecords(projectId)); }
-    catch (err) { if (!(err instanceof ApiError)) console.error('load change records failed:', err); }
-  };
-
-  const gateIcon = (status) => {
-    if (status === 'passed') return <CheckCircle2 className="h-4 w-4 text-green-500" />;
-    if (status === 'failed') return <XCircle className="h-4 w-4 text-red-500" />;
-    if (status === 'running') return <Loader2 className="h-4 w-4 animate-spin text-cyan-500" />;
-    return <Circle className="h-4 w-4 text-muted-foreground/40" />;
-  };
-
-  const statusTone = {
-    running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
-    refused_quota: 'text-red-500', awaiting_user: 'text-violet-500', awaiting_admin: 'text-amber-500',
-    interrupted: 'text-amber-500', abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
-  };
-  const driftAvailable = !!project?.framework_update_available;
-
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2"><Hammer className="h-4 w-4" /> Build cycle</CardTitle>
-        <CardDescription>
-          Describe a change to build. Pressing Build runs an audit first — it confirms any domain rules with
-          you (in the chat above) and routes framework conflicts to an admin — then the runner edits the code in
-          the fenced container, runs the pinned gate battery, and checkpoints into the repo.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Drift banner (ADR-003) — the framework moved since the last build.
-            Non-blocking; the update cycle is explicit-consent (Mock2 X → Y). */}
-        {driftAvailable ? (
-          <div className="flex flex-col gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-sky-600 flex items-start gap-2">
-              <RefreshCw className="h-4 w-4 mt-0.5 shrink-0" />
-              <span>
-                Framework update available
-                {project?.framework_last_built_version && project?.framework_current_version
-                  ? ` (v${project.framework_last_built_version} → v${project.framework_current_version})` : ''}.
-                Nothing changes until you run an update cycle.
-              </span>
-            </p>
-            {canEdit && online && !active ? (
-              <Button variant="outline" size="sm" className="h-10 shrink-0 self-start sm:self-auto" disabled={busy} onClick={remediate}>
-                Start update cycle
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {/* Start control (editors, online only) */}
-        {canEdit && !active ? (
-          online ? (
-            <div className="space-y-2">
-              <Label htmlFor="cycle-instruction">Change to make</Label>
-              <textarea
-                id="cycle-instruction"
-                className="flex min-h-[64px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="e.g. Add a /health endpoint that returns 200 OK"
-                value={instruction}
-                onChange={(e) => setInstruction(e.target.value)}
-              />
-              <Button className="h-11 sm:h-10" disabled={busy || !instruction.trim()} onClick={run}>
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
-                Run a cycle
-              </Button>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">Bring the project online to run a cycle.</p>
-          )
-        ) : null}
-
-        {/* Live / last cycle */}
-        {cycle ? (
-          <div className="space-y-3 border-t pt-3">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <div className="min-w-0">
-                <p className="text-sm font-medium truncate">{cycle.instruction || '(cycle)'}</p>
-                <p className={`text-xs font-medium ${statusTone[cycle.status] || 'text-muted-foreground'}`}>
-                  {cycle.status.replace(/_/g, ' ')}{cycle.current_gate ? ` · ${cycle.current_gate}` : ''}
-                </p>
-              </div>
-              <div className="text-xs text-muted-foreground whitespace-nowrap">
-                {cycle.used_cost_cents ? `$${(cycle.used_cost_cents / 100).toFixed(2)}` : '$0.00'} · {cycle.used_tokens || 0} tok
-              </div>
-            </div>
-
-            {job?.message ? <p className="text-xs text-muted-foreground">{job.message}</p> : null}
-            {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
-
-            {/* Run phase — the deploy step is running after the gates passed:
-                install → migrate → build → start the real app on the live URL. */}
-            {cycle.status === 'running' && cycle.deploy_status === 'deploying' ? (
-              <p className="text-xs text-cyan-500 flex items-start gap-1">
-                <Loader2 className="h-3.5 w-3.5 mt-0.5 shrink-0 animate-spin" />
-                Deploying the built app — installing dependencies, running migrations, and starting it on the live URL.
-              </p>
-            ) : null}
-            {/* A deploy that failed (install/migrate/build/start error, or egress
-                unreachable) — a distinct, retryable state, not a silent success. */}
-            {cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed' ? (
-              <p className="text-xs text-red-500 flex items-start gap-1">
-                <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                The change passed its gates but the app did not deploy. Fix the cause if it is code, then retry — the build resumes from the checkpoint.
-              </p>
-            ) : null}
-
-            {/* M8 audit gate (ADR-002) — the build is blocked on a routed question. */}
-            {cycle.status === 'awaiting_user' ? (
-              <p className="text-xs text-violet-500 flex items-start gap-1">
-                <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                Answer the rule question(s) in the chat above — the build starts automatically once every one is confirmed.
-              </p>
-            ) : null}
-            {cycle.status === 'awaiting_admin' ? (
-              <p className="text-xs text-amber-500 flex items-start gap-1">
-                <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                {cycle.error
-                  ? 'The build stalled on a transient error — once you’ve fixed the cause (e.g. added billing or raised your model rate limit), retry to continue where it stopped.'
-                  : 'A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.'}
-              </p>
-            ) : null}
-
-            {/* Retry (editors) — resume a cycle that stalled on a transient
-                failure (rate limit, runner error). Not shown for a framework
-                deviation (no cycle.error) — that resumes when an admin resolves
-                it. Starts a fresh cycle from the checkpointed WIP. */}
-            {canEdit && online && (cycle.status === 'failed' || (cycle.status === 'awaiting_admin' && cycle.error)) ? (
-              <Button size="sm" className="h-9" disabled={busy} onClick={retry}>
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
-                Retry build
-              </Button>
-            ) : null}
-
-            {/* Gate battery — the "gates going green" stepper */}
-            {cycle.gates?.length ? (
-              <ul className="space-y-1.5">
-                {cycle.gates.map((g) => (
-                  <li key={g.name} className="flex items-center gap-2 text-sm">
-                    <span className="shrink-0">{gateIcon(g.status)}</span>
-                    <span className="min-w-0 truncate">{g.name}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{g.status}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-
-            {/* Interrupts (editors) while running */}
-            {canEdit && active && cycle.status === 'running' ? (
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" className="h-9" disabled={busy} onClick={() => interrupt('stop_after_step')}>
-                  <Square className="h-4 w-4 mr-1" />Stop after step
-                </Button>
-                <Button variant="ghost" size="sm" className="h-9 text-red-500" disabled={busy} onClick={() => interrupt('abandon')}>
-                  Abandon
-                </Button>
-                {isAdmin ? (
-                  <Button variant="ghost" size="sm" className="h-9" disabled={busy} onClick={() => api.mock2StopAllCycles().then(() => load())}>
-                    Stop all
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
-
-            {cycle.status === 'succeeded' ? (
-              <p className="text-xs text-green-600 flex items-start gap-1">
-                <ShieldCheck className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                {cycle.deploy_status === 'serving'
-                  ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
-                  : 'Gates green — change checkpointed into the repo.'}
-              </p>
-            ) : null}
-          </div>
-        ) : (
-          !canEdit ? <p className="text-sm text-muted-foreground">No cycles yet.</p> : null
-        )}
-
-        {/* Change history + chain verification */}
-        <div className="border-t pt-3">
-          <Button variant="ghost" size="sm" className="h-9 px-0" onClick={loadChanges}>
-            <GitBranch className="h-4 w-4 mr-1" />{showChanges ? 'Hide' : 'Show'} change history
-          </Button>
-          {showChanges && changes ? (
-            <div className="mt-2 space-y-2">
-              <p className="text-xs flex items-center gap-1">
-                {changes.verification?.ok
-                  ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({changes.verification.count} record{changes.verification.count === 1 ? '' : 's'})</span></>
-                  : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{changes.verification?.brokenAt}</span></>}
-              </p>
-              {(changes.records || []).length === 0 ? (
-                <p className="text-xs text-muted-foreground">No change records yet.</p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {changes.records.map((r) => (
-                    <li key={r.seq} className="text-xs border rounded-md px-2 py-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono">#{r.seq}</span>
-                        <span className="font-mono text-muted-foreground truncate">{r.commit_sha ? r.commit_sha.slice(0, 8) : '—'}</span>
-                      </div>
-                      <p className="truncate">{r.summary}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ) : null}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}

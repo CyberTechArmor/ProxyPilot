@@ -120,8 +120,9 @@ const WRITABLE = new Set([
   'name', 'description', 'slug', 'custom_domain', 'container_name', 'bridge_name',
   'bridge_cidr', 'lifecycle', 'flagged', 'flagged_by', 'flagged_reason',
   'last_activity_at', 'web_port', 'container_ip', 'provision_error', 'archived_at',
-  // M7 concept-stage exit (migration 507).
-  'design_approved_at', 'design_inventory_seq', 'current_mockup_id',
+  // M7 concept-stage exit (migration 507); the archived mockup id (509) keeps
+  // the approved design's mockup reachable at /_preview/ after approval.
+  'design_approved_at', 'design_inventory_seq', 'current_mockup_id', 'mockup_archived_id',
   // M8 drift comparison input — the framework a build last pinned (ADR-003).
   'last_built_framework_version_id',
 ]);

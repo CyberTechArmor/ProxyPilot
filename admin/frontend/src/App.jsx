@@ -19,6 +19,7 @@ import ModelConnectors from '@/pages/ModelConnectors';
 import Quotas from '@/pages/Quotas';
 import FrameworkVersions from '@/pages/FrameworkVersions';
 import AdminQueue from '@/pages/AdminQueue';
+import Notifications from '@/pages/Notifications';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
@@ -79,6 +80,7 @@ function App() {
         <Route path="cves" element={<CVEs />} />
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
+        <Route path="notifications" element={<Notifications />} />
         {/* Mock2 dev/build module. The page self-guards: on a disabled or
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}

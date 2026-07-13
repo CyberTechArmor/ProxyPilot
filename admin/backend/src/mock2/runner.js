@@ -45,6 +45,7 @@ import {
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { deployProject, readRunContract } from './deploy.js';
+import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
 const APP_DIR = '/srv/app';
 const GATES_DIR = '/srv/gates';
@@ -352,6 +353,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });
         releaseLock(projectId, holder);
         setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error, commit: record?.commit_sha || null });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
         return scheduleJobCleanup(cycle.id);
       }
       finishCycle(cycle.id, { status: 'succeeded' });
@@ -364,6 +366,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           : 'Deployed — gates green and the app is live on its URL.',
         commit: record?.commit_sha || null,
       });
+      void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -387,6 +390,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   finishCycle(cycle.id, { status: 'failed', error: `runner exceeded ${MAX_TURNS} turns without finishing` });
   releaseLock(projectId, holder);
   setJob(cycle.id, { phase: 'failed', message: `Exceeded ${MAX_TURNS} turns without a green finish.` });
+  void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'failed' });
   scheduleJobCleanup(cycle.id);
 }
 

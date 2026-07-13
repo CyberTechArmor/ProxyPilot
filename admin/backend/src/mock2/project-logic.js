@@ -239,6 +239,15 @@ export function publicProjectShape(project, extra = {}) {
     design_approved_at: project.design_approved_at || null,
     current_mockup_id: project.current_mockup_id || null,
     preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
+    // The archived design mockup — the record of where the design started. Set
+    // once the design is approved (the live mockup pointer is cleared but the
+    // mockup HTML is kept at /_preview/). Surfaced in the Details tab so anyone
+    // can revisit the original design. Falls back to the live mockup pre-approval
+    // so callers always have "the design preview" regardless of stage.
+    mockup_archive_url: mockupPreviewUrl(
+      host ? `https://${host}` : null,
+      !!(project.mockup_archived_id || project.current_mockup_id),
+    ),
     // M8 audit-gate counts (drive the awaiting/drift chips + the in-detail
     // banners) and the framework-drift "update available" signal (ADR-003).
     open_editor_questions: Number(openEditorQuestions) || 0,

@@ -302,11 +302,11 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // With container_ip + web_port known and lifecycle 'active', this project is
   // now included in the fence plan: default-deny egress off the bridge, DNS +
   // egress-proxy to its gateway only, inbound only to the declared web port.
-  // Applied HERE (not during setup) so bootstrap apt/clone had direct egress;
-  // from this point the container's only way out is the filtering proxy.
+  // Applied HERE (not during setup) so bootstrap apt/clone had direct egress.
+  // From this point the fence logs + contains egress (it never blocks the
+  // internet path — the bridge NATs out).
   setStatus(projectId, { phase: 'fence', message: 'Applying network isolation…' });
   await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (provision) failed:', e?.message));
-  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (provision) failed:', e?.message));
   // Verify declared vs live ports (ADR-005 inbound half). A listener the
   // manifest does not declare raises a port_drift queue item (bell until M8).
   await runPortDriftCheck({ ...project, container_name: containerName, web_port: declaredPort })
@@ -466,9 +466,8 @@ async function archiveProjectJob(project) {
     container_ip: null,
   });
 
-  // Drop this project from the fence + proxy plans now it is no longer active.
+  // Drop this project from the fence plan now it is no longer active.
   await reconcileMock2Firewall().catch((e) => console.error('[mock2] firewall reconcile (archive) failed:', e?.message));
-  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (archive) failed:', e?.message));
 
   // 4. Republish — drops this project's slug block (an archived project has no
   //    upstream, so projectActiveFqdns returns nothing). The slug STAYS

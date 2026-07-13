@@ -178,6 +178,16 @@ the mockup used. Do not invent a different visual style. If the files are absent
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
 
+# Administrator-approved exceptions (override the constitution for THIS project)
+Your task may contain a section headed "Administrator decisions on framework
+deviations". Those are AUTHORITATIVE: an administrator has explicitly signed off
+on them for this project. An APPROVED item OVERRIDES the pinned constitution and
+you MUST implement it exactly as requested — build the login page, auth flow, or
+whatever was approved, even though the constitution would otherwise forbid it. A
+DENIED item must NOT be built. When an approved exception conflicts with the
+constitution, the approved exception WINS. Do not refuse or silently skip an
+approved exception; implementing it is the required work for this build.
+
 # Available skills
 ${skillLines}
 

@@ -1604,7 +1604,7 @@ export function createMock2Router() {
     if (item.kind === 'framework_deviation' && item.ref_table === 'mock2_audit_questions' && item.ref_id
         && (status === 'resolved' || status === 'dismissed')) {
       try {
-        const r = await resolveFrameworkDeviation({ questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}` });
+        const r = await resolveFrameworkDeviation({ questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}`, approved: status === 'resolved' });
         resumed = !!r.resumed;
       } catch (err) { console.warn('[mock2] deviation resolve follow-through failed:', err?.message); }
     }

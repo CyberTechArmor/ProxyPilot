@@ -1138,22 +1138,9 @@ export const api = {
   mock2SetChatMaxChars: (maxChars) =>
     request('/mock2/settings/chat-max-chars', { method: 'POST', body: JSON.stringify({ max_chars: maxChars }) }),
 
-  // Mock2 per-project egress allowlist (Phase M4). Read is member-visible; add/
-  // remove are admin-only (audit-logged) and regenerate the squid ACL.
-  mock2GetEgressAllowlist: (id) => request(`/mock2/projects/${id}/egress-allowlist`),
-  mock2AddEgressHost: (id, host) =>
-    request(`/mock2/projects/${id}/egress-allowlist`, { method: 'POST', body: JSON.stringify({ host }) }),
-  mock2RemoveEgressHost: (id, host) =>
-    request(`/mock2/projects/${id}/egress-allowlist/${encodeURIComponent(host)}`, { method: 'DELETE' }),
-
-  // Mock2 egress policy mode (admin). 'allow-all' (monitor) opens every project
-  // bridge to any host but still logs via squid; 'allowlist' enforces per-project
-  // hosts. Changing it re-renders the squid ACL for all projects.
-  mock2GetEgressMode: () => request('/mock2/settings/egress-mode'),
-  mock2SetEgressMode: (mode) =>
-    request('/mock2/settings/egress-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
-  // Mock2 per-project egress traffic log (what the container actually reached, as
-  // squid saw it). Read-only, member-visible; pairs with monitor mode.
+  // Mock2 per-project egress traffic log — where the container's traffic went, as
+  // the FIREWALL recorded it (nftables logs each new outbound connection; squid
+  // was removed). Read-only, member-visible. Entries are destination IP:port.
   mock2GetEgressLog: (id, limit = 200) => request(`/mock2/projects/${id}/egress-log?limit=${limit}`),
 
   // ---- M5: model connectors, slots, prices ----

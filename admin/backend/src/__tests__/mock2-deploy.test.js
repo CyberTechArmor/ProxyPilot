@@ -135,11 +135,11 @@ test('deployProjectStatus maps cycle deploy_status to the derived token', () => 
 });
 
 test('deployFailureMessage names the failed step and hints egress on install failures', () => {
-  const msg = deployFailureMessage('install', 'npm ERR! ECONNREFUSED 10.200.1.1:3128');
+  const msg = deployFailureMessage('install', 'npm ERR! ECONNREFUSED registry.npmjs.org');
   assert.match(msg, /Dependency install failed/);
-  assert.match(msg, /egress proxy|squid|allowlist/i);
+  assert.match(msg, /egress|NAT|npm registry/i);
   // A build failure is not blamed on egress.
-  assert.doesNotMatch(deployFailureMessage('build', 'TS2304: cannot find name'), /squid/i);
+  assert.doesNotMatch(deployFailureMessage('build', 'TS2304: cannot find name'), /egress|NAT/i);
 });
 
 // ---- derived project status (Run phase additions) ----

@@ -312,6 +312,18 @@ columns exist for it and stay NULL in v1.
 
 ## ADR-010 — Egress control: default-deny bridge + filtering proxy
 
+> **SUPERSEDED (2026-07-13): squid removed.** The filtering proxy was
+> unreliable — a single malformed `http_port` line failed every provision (its
+> ready-check was a hard gate), and it exceeded the complexity guardrail below
+> in practice. It has been removed. Egress is now the project bridge's own Incus
+> NAT (`ipv4.nat=true`); the nftables fence (a) blocks + logs lateral movement to
+> RFC1918 / link-local ranges (other bridges, the host LAN, the control plane)
+> and (b) LOGS every new outbound connection to the kernel log, which the backend
+> parses into the per-project "egress traffic" view. Consequence: hostname
+> allowlisting is gone (it is not enforceable at the IP layer) — egress is
+> monitor-style (log, don't block by host), and the firewall log replaces
+> squid's access log. The rest of this ADR is retained as historical context.
+
 **Status:** **Accepted with a complexity guardrail** (operator, 2026-07-09:
 "squid is only fine if it doesn't add that much complexity"). The intended
 weight is: one apt package, one systemd service, and one ProxyPilot-generated

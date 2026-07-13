@@ -1,24 +1,43 @@
 // Mock2 network isolation — the PURE decision layer (Phase M4, ADR-010).
 //
-// Every M4 decision that can be made without better-sqlite3, Incus, nftables, or
-// squid lives here so it is unit-testable at the module boundary (stub-first,
-// risk R9) — the same split the module already uses for domain-logic.js /
-// project-logic.js / slug.js. This file imports NOTHING native; the host-acting
-// shells (network.js, firewall.js, egress.js, allowlist.js, port-check.js) each
-// import their pure helpers from here.
+// Every M4 decision that can be made without better-sqlite3, Incus, or nftables
+// lives here so it is unit-testable at the module boundary (stub-first, risk R9)
+// — the same split the module already uses for domain-logic.js / project-logic.js
+// / slug.js. This file imports NOTHING native; the host-acting shells
+// (network.js, firewall.js, egress.js, port-check.js) each import their pure
+// helpers from here.
 //
 // Contents:
 //   * per-project bridge naming + /24 subnet derivation + gateway
 //   * the nftables fence renderer (`table inet mock2`) + its plan builder
-//   * the squid ACL renderer + its plan builder + allowlist host validation
+//   * the firewall egress-log parser (what each bridge reached)
 //   * the manifest port-drift comparator
+//
+// EGRESS MODEL (post-squid): each project bridge reaches the internet directly
+// via the bridge's own Incus NAT (ipv4.nat=true, network.js). The nftables fence
+// (a) blocks lateral movement to RFC1918 / link-local ranges (other bridges, the
+// host LAN, the control plane) and (b) LOGS every new outbound connection to the
+// kernel log so operators can still see where each container's traffic goes. The
+// old squid filtering proxy — which enforced a per-project HOSTNAME allowlist and
+// sourced the traffic log — was removed (it was unreliable and heavy). Hostname
+// allowlisting is not enforceable at the IP layer, so egress is now monitor-style
+// (log, don't block by host); the firewall log replaces squid's access log.
 //
 // Terminology (risk R7): nothing here is named "agent".
 
-// The egress proxy port containers point HTTP(S)_PROXY at (squid default). The
-// enable script guarantees squid listens here and the fence allows the bridge
-// to reach the gateway on it. Overridable at deploy time.
-export const EGRESS_PROXY_PORT = Number(process.env.MOCK2_EGRESS_PROXY_PORT || 3128);
+// Private / link-local destination ranges a project bridge must NOT reach: this
+// is what preserves isolation now that egress is NAT'd — a container may reach
+// the public internet but not other project bridges, the host's LAN, or the
+// control plane. Blocked (and logged) in the forward chain before the general
+// egress accept.
+export const PRIVATE_DEST_RANGES = Object.freeze([
+  '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
+]);
+
+// Kernel-log prefixes the fence stamps on egress connections. The traffic-log
+// parser keys off these; keep them short (the kernel truncates long prefixes).
+export const EGRESS_LOG_PREFIX_OK = 'mock2-egress-ok';
+export const EGRESS_LOG_PREFIX_DENY = 'mock2-egress-deny';
 
 // ---- per-project bridge naming + subnet ----
 
@@ -64,26 +83,37 @@ export function buildFenceEntries(projects = []) {
   return entries;
 }
 
-// renderMock2Nft(entries, { proxyPort }) — the full nft ruleset for
-// `table inet mock2`. The add+flush pair makes `nft -f -` idempotent, scoped to
-// OUR table so nothing else is flushed (see firewall.js for why a dedicated
-// table). forward hook: established pass, inbound only to each declared web
-// port, deny every other inbound to a container (Postgres 5432 etc. stay
-// internal), deny all egress off a bridge. input hook: each bridge may reach
-// ONLY its own gateway for DNS / DHCP-renew / the proxy port, deny the rest
-// (the control plane — host :3001, the main bridge, every other host IP).
-export function renderMock2Nft(entries = [], { proxyPort = EGRESS_PROXY_PORT } = {}) {
+// renderMock2Nft(entries) — the full nft ruleset for `table inet mock2`. The
+// add+flush pair makes `nft -f -` idempotent, scoped to OUR table so nothing
+// else is flushed (see firewall.js for why a dedicated table).
+//
+// forward hook: established pass, inbound only to each declared web port, deny
+// every other inbound to a container (Postgres 5432 etc. stay internal); then
+// egress — block (and log) any attempt to reach a private/link-local range
+// (other bridges, host LAN, control plane), and LOG + accept everything else so
+// the bridge's Incus NAT carries it to the internet. input hook: each bridge may
+// reach ONLY its own gateway for DNS / DHCP-renew, deny the rest (the control
+// plane — host :3001, the main bridge, every other host IP).
+export function renderMock2Nft(entries = []) {
   const fwd = [];
   const inp = [];
+  const privateSet = `{ ${PRIVATE_DEST_RANGES.join(', ')} }`;
   for (const e of entries) {
     const tag = `mock2 p${e.id}`;
+    // Inbound to the container: only the declared web port.
     fwd.push(`    ip daddr ${e.containerIp} tcp dport ${e.webPort} accept comment "${tag} web"`);
     fwd.push(`    ip daddr ${e.containerIp} drop comment "${tag} deny-inbound"`);
-    fwd.push(`    ip saddr ${e.cidr} drop comment "${tag} deny-egress"`);
+    // Egress: block + log lateral movement to private ranges, then log + allow
+    // internet egress (Incus NAT masquerades it). The log rules match only
+    // ct state new so a connection is recorded once, not per packet.
+    fwd.push(`    ip saddr ${e.cidr} ip daddr ${privateSet} ct state new log prefix "${EGRESS_LOG_PREFIX_DENY} p${e.id}: " comment "${tag} deny-private-log"`);
+    fwd.push(`    ip saddr ${e.cidr} ip daddr ${privateSet} drop comment "${tag} deny-private"`);
+    fwd.push(`    ip saddr ${e.cidr} ct state new log prefix "${EGRESS_LOG_PREFIX_OK} p${e.id}: " comment "${tag} egress-log"`);
+    fwd.push(`    ip saddr ${e.cidr} accept comment "${tag} egress"`);
+    // Host-bound: only the bridge's own gateway, only for DNS + DHCP renew.
     inp.push(`    ip saddr ${e.cidr} ip daddr ${e.gateway} udp dport 53 accept comment "${tag} dns"`);
     inp.push(`    ip saddr ${e.cidr} ip daddr ${e.gateway} tcp dport 53 accept comment "${tag} dns"`);
     inp.push(`    ip saddr ${e.cidr} ip daddr ${e.gateway} udp dport 67 accept comment "${tag} dhcp"`);
-    inp.push(`    ip saddr ${e.cidr} ip daddr ${e.gateway} tcp dport ${proxyPort} accept comment "${tag} proxy"`);
     inp.push(`    ip saddr ${e.cidr} drop comment "${tag} deny-host"`);
   }
   const fwdBody = fwd.length ? fwd.join('\n') : '    # (no active project bridges)';
@@ -111,143 +141,49 @@ ${inpBody}
 `;
 }
 
-// ---- squid egress ACL ----
-
-// The default allowlist a project is born with (ADR-010). apt/pypi are included
-// because the template installs its runtime over the proxy (setup bakes
-// HTTP(S)_PROXY), so a fresh container must reach the Debian + Python mirrors.
-// The model-API hosts are the static seed M5 replaces with connector-driven
-// entries (ADR-003). In M4 the bare repo is a local disk mount (ADR-011), so no
-// git-remote host is needed yet (M5 adds external remotes).
-export const DEFAULT_EGRESS_ALLOWLIST = Object.freeze([
-  'registry.npmjs.org',
-  'deb.debian.org',
-  'security.debian.org',
-  'pypi.org',
-  'files.pythonhosted.org',
-  'api.anthropic.com',
-  'api.openai.com',
-  'generativelanguage.googleapis.com',
-]);
-
-// isAllowlistHost(host) — a conservative validator. A squid dstdomain entry is a
-// bare hostname or a domain suffix (leading dot allowed, squid's subdomain
-// form); reject anything with a scheme, path, port, whitespace, or out-of-set
-// character so a bad value can't smuggle a squid directive into the ACL file.
-export function isAllowlistHost(host) {
-  const h = String(host || '').trim().toLowerCase();
-  if (h.length === 0 || h.length > 253) return false;
-  // Reject bare IPv4 literals: squid `dstdomain` matches the request's Host
-  // header domain, so an IP belongs in a `dst` ACL, not here. Rejecting it keeps
-  // the allowlist meaning "hostnames only" and avoids a silently-ineffective row.
-  if (/^\.?\d{1,3}(\.\d{1,3}){3}$/.test(h)) return false;
-  return /^\.?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/.test(h);
-}
-
-export function normalizeAllowlistHost(host) {
-  return String(host || '').trim().toLowerCase();
-}
-
-// buildEgressPlan(projects, allowlists) — one entry per project whose bridge
-// exists (bridge_cidr set or derivable, not archived/failed). Provisioning
-// projects ARE included: the container's setup installs its runtime over the
-// proxy, so the ACL must be live before setup runs. `allowlists` is a
-// Map(projectId → host[]).
-export function buildEgressPlan(projects = [], allowlists = new Map()) {
-  const plan = [];
-  for (const p of projects) {
-    if (!p) continue;
-    if (p.lifecycle === 'archived' || p.lifecycle === 'failed_provisioning') continue;
-    const cidr = p.bridge_cidr || (p.id ? bridgeCidrForProject(p.id) : null);
-    if (!cidr) continue;
-    const hosts = allowlists.get(Number(p.id)) || allowlists.get(p.id) || [];
-    plan.push({ id: Number(p.id), cidr, hosts: [...hosts] });
-  }
-  return plan;
-}
-
-// renderSquidAcl(plan, { allowAll }) — the ACL-only squid drop-in. Per project: a
-// src ACL for its bridge subnet, then either
-//   * allowlist mode (default): a dstdomain ACL for its allowlist and an allow
-//     pairing the two, plus a trailing deny for the union of mock2 subnets as
-//     defence in depth (squid's default deny-all backstops it). An empty
-//     allowlist emits no allow line, so that project is denied by default.
-//   * allow-all mode (monitor): an allow for the subnet to ANY destination. Every
-//     request is still logged by squid's access.log, and squid's own default
-//     `http_access deny all` (after this include) still denies non-mock2 sources,
-//     so this opens the mock2 bridges only — never the public interface.
-export function renderSquidAcl(plan = [], { allowAll = false } = {}) {
-  const lines = allowAll
-    ? [
-        '# Generated by ProxyPilot Mock2 (Phase M4, ADR-010). Do not edit by hand.',
-        '# EGRESS MODE: allow-all (monitor). Each project bridge may reach ANY host;',
-        '# egress is still funneled through squid (the bridge fence blocks bypass),',
-        '# so access.log records every destination. Switch back to allowlist mode to',
-        '# enforce per-project hosts again.',
-        '',
-      ]
-    : [
-        '# Generated by ProxyPilot Mock2 (Phase M4, ADR-010). Do not edit by hand.',
-        '# Per-project egress allowlist. Each bridge subnet may reach ONLY its',
-        '# allowlisted hosts; the bridge default-deny (nftables) blocks any bypass.',
-        '',
-      ];
-  const allSrc = [];
-  for (const e of plan) {
-    allSrc.push(e.cidr);
-    lines.push(`acl mock2_p${e.id}_src src ${e.cidr}`);
-    if (allowAll) {
-      // Monitor mode: allow this bridge to reach anything; squid still logs it.
-      lines.push(`http_access allow mock2_p${e.id}_src`);
-    } else if (e.hosts.length > 0) {
-      lines.push(`acl mock2_p${e.id}_dst dstdomain ${e.hosts.join(' ')}`);
-      lines.push(`http_access allow mock2_p${e.id}_src mock2_p${e.id}_dst`);
-    } else {
-      lines.push(`# project ${e.id}: empty allowlist — all egress denied`);
-    }
-    lines.push('');
-  }
-  if (!allowAll && allSrc.length > 0) {
-    lines.push('# Defence in depth: deny anything else originating from a Mock2 bridge.');
-    lines.push(`acl mock2_all_src src ${allSrc.join(' ')}`);
-    lines.push('http_access deny mock2_all_src');
-    lines.push('');
-  }
-  return lines.join('\n');
-}
+// ---- firewall egress log (what each bridge reached) ----
 
 // subnetPrefixForCidr('10.200.1.0/24') -> '10.200.1.' — the client-IP prefix used
-// to pick a project's own rows out of the shared squid access log. Null on a
+// to pick a project's own rows out of the shared kernel egress log. Null on a
 // malformed cidr.
 export function subnetPrefixForCidr(cidr) {
   const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\/\d{1,2}$/.exec(String(cidr || ''));
   return m ? `${m[1]}.` : null;
 }
 
-// parseEgressLog(text, subnetPrefix, limit) — PURE parser for squid's native
-// access.log (stub-first testable, risk R9). Each line is
-//   "ts elapsed client action/code size method url ident hierarchy type".
-// Keep only lines whose client IP is in the project's /24 (subnetPrefix like
-// '10.200.1.') so a project sees only its own container's egress, newest last,
-// capped at limit. A line squid wrote in a non-default format just won't match
-// the field shape and is skipped (best-effort, never throws).
-export function parseEgressLog(text, subnetPrefix, limit = 200) {
+// parseNftEgressLog(text, subnetPrefix, limit) — PURE parser for the kernel log
+// lines the nftables fence emits (stub-first testable, risk R9). Each matching
+// line carries our prefix (EGRESS_LOG_PREFIX_OK / _DENY) followed by the packet
+// fields nft's `log` statement prints, e.g.
+//   "1700000000.123 host kernel: mock2-egress-ok p7: IN=m2br7 OUT=eth0 \
+//    SRC=10.200.6.15 DST=140.82.112.3 ... PROTO=TCP SPT=51000 DPT=443 ..."
+// We keep only lines whose SRC is in the project's /24 (subnetPrefix like
+// '10.200.1.'), map each to the same {ts, client, action, method, url, denied}
+// shape the UI already renders, newest last, capped at limit. The firewall only
+// sees IP:port (no Host/SNI), so `url` is the destination "IP:port". Best-effort:
+// a line that doesn't match the field shape is skipped, never throws.
+export function parseNftEgressLog(text, subnetPrefix, limit = 200) {
   const out = [];
   if (!subnetPrefix) return out;
   for (const line of String(text || '').split('\n')) {
-    const f = line.trim().split(/\s+/);
-    if (f.length < 7) continue;
-    const client = f[2];
-    if (!client.startsWith(subnetPrefix)) continue;
-    const [action, status] = String(f[3] || '').split('/');
+    if (line.indexOf(EGRESS_LOG_PREFIX_OK) === -1 && line.indexOf(EGRESS_LOG_PREFIX_DENY) === -1) continue;
+    const src = /\bSRC=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/.exec(line);
+    if (!src || !src[1].startsWith(subnetPrefix)) continue;
+    const dst = /\bDST=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/.exec(line);
+    const dpt = /\bDPT=(\d+)/.exec(line);
+    const proto = /\bPROTO=(\w+)/.exec(line);
+    const denied = line.indexOf(EGRESS_LOG_PREFIX_DENY) !== -1;
+    // A leading "<seconds>.<micros>" from `journalctl -o short-unix`; may be absent.
+    const tsM = /^\s*(\d{9,}(?:\.\d+)?)/.exec(line);
+    const dest = dst ? dst[1] : '';
     out.push({
-      ts: Number(f[0]) || null,
-      client,
-      action: action || '',              // TCP_MISS, TCP_DENIED, TCP_TUNNEL, …
-      status: Number(status) || null,    // HTTP status squid returned
-      method: f[5] || '',
-      url: f[6] || '',
-      denied: /DENIED/i.test(String(f[3] || '')),
+      ts: tsM ? Number(tsM[1]) : null,
+      client: src[1],
+      action: denied ? 'BLOCK' : 'OUT',
+      status: null,
+      method: proto ? proto[1] : '',            // TCP / UDP
+      url: dest ? `${dest}${dpt ? `:${dpt[1]}` : ''}` : '',
+      denied,
     });
   }
   const n = Number(limit) > 0 ? Number(limit) : 200;

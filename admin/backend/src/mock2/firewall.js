@@ -41,7 +41,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { dirname } from 'path';
 import { sh, runHost } from './host.js';
 import { listProjects } from './projects.js';
-import { buildFenceEntries, renderMock2Nft, EGRESS_PROXY_PORT } from './network-logic.js';
+import { buildFenceEntries, renderMock2Nft } from './network-logic.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 const FIREWALL_STATE_FILE = `${MOCK2_DATA_DIR}/firewall.json`;
@@ -95,7 +95,7 @@ export async function reconcileMock2Firewall() {
   const applied = await applyMock2Nft(ruleset, { hasEntries: entries.length > 0 });
   writeState({
     updated_at: new Date().toISOString(),
-    proxy_port: EGRESS_PROXY_PORT,
+    egress: 'nat+log',
     entries,
     applied_ok: applied.ok,
     error: applied.error || null,

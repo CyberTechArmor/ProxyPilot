@@ -12,11 +12,10 @@
 // a holder of the checkout lock (ADR-004 — the runner cycle, or the rehydrate
 // job that owns the container), so it does not take the lock itself.
 //
-// The install/migrate/build commands are run with the baked egress proxy env
-// sourced from /etc/environment (an ad-hoc `incus exec -- sh` does NOT get the
-// PAM-loaded environment, so npm would miss http_proxy and hang against the
-// fence) — do NOT punch the fence; if the registry is unreachable the deploy
-// fails loudly (ADR-010).
+// The install/migrate/build commands reach the internet over the bridge's Incus
+// NAT (squid was removed). We still source /etc/environment so any operator-set
+// env is honored, but there is no proxy to configure; if the registry is
+// unreachable the deploy fails loudly.
 //
 // Terminology (risk R7): nothing here is named "agent".
 
@@ -34,9 +33,9 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
-// Run a deploy command in the app dir WITH the baked proxy env sourced. Sourcing
-// /etc/environment exports http_proxy/https_proxy so npm honors the fence's only
-// egress path; `set -a` makes the `KEY=VALUE` lines exported.
+// Run a deploy command in the app dir. Sources /etc/environment (so any
+// operator-set env is present) then runs the command; egress is the bridge NAT.
+// `set -a` makes the `KEY=VALUE` lines exported.
 function runInApp(containerName, appDir, command, timeoutMs) {
   const script = `set -a\n. /etc/environment 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`;
   return containerSh(containerName, script, { timeoutMs });

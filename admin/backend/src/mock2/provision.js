@@ -33,7 +33,7 @@ import { runHost, sh, b64 } from './host.js';
 import { updateProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { buildSeedFiles, buildContainerSetupScript, buildProxyConfigScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
+import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
 import {
   bridgeNameForProject,
   bridgeCidrForProject,
@@ -42,8 +42,6 @@ import {
   deleteProjectBridge,
 } from './network.js';
 import { reconcileMock2Firewall } from './firewall.js';
-import { seedDefaultAllowlist } from './allowlist.js';
-import { reconcileMock2Egress, egressProxyReady, EGRESS_PROXY_PORT } from './egress.js';
 import { runPortDriftCheck } from './port-check.js';
 import { deployProject } from './deploy.js';
 import { projectHasBeenDeployed } from './cycles.js';
@@ -213,28 +211,10 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const bridge = await createProjectBridge({ name: bridgeName, cidr: bridgeCidr });
   if (!bridge.ok) return bail(`project bridge create failed: ${bridge.error}`);
   updateProject(projectId, { bridge_name: bridgeName, bridge_cidr: bridgeCidr });
-  // Seed the egress allowlist on CREATE only (a rehydrate keeps whatever the
-  // admin curated). Then write the squid ACL so the container's setup step can
-  // reach the package registries through the proxy.
-  if (!rehydrate) {
-    try { seedDefaultAllowlist(projectId, project.created_by); } catch (e) { console.warn('[mock2] allowlist seed failed:', e?.message); }
-  }
-  await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (provision) failed:', e?.message));
-
-  // ---- Egress-proxy preflight (fail fast + self-heal + real diagnostics) ----
-  // On this host model the project bridge is not NAT-forwarded, so squid is the
-  // container's ONLY way out. If squid is installed but DOWN, provisioning would
-  // otherwise launch, wait for network, then die deep in the clone with the
-  // opaque "Unable to connect to <gateway>:3128". Check it NOW: egressProxyReady()
-  // (re)starts a stopped squid and, when it truly can't come up, returns the
-  // host's squid status so the failure names the real cause here — before the
-  // expensive launch — instead of a generic connect timeout two minutes later.
-  // squid absent (proxyReady.installed === false) is NOT fatal: that's the plain
-  // host that NATs the bridge directly, handled by the bootstrap-egress branch.
-  const proxyReady = await egressProxyReady();
-  if (proxyReady.installed && !proxyReady.ok) {
-    return bail(`egress proxy (squid) is installed on the host but could not be started, so the project container has no way out — its bridge is not NAT-forwarded and squid is the only egress path (ADR-010). Host squid diagnostics:\n${proxyReady.detail || '(none)'}\nFix on the HOST: run scripts/mock2-enable-egress.sh, then check 'systemctl status squid' and 'squid -k parse'.`);
-  }
+  // Egress is the bridge's own Incus NAT (ipv4.nat=true) — there is no host-side
+  // proxy to install, configure, or keep alive, so no preflight can fail here.
+  // The nftables fence (applied at activation, below) logs and contains egress;
+  // it never blocks the internet path, so a container always has a way out.
 
   // ---- Launch the container, NIC pinned to the project bridge ----
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
@@ -254,30 +234,11 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const gateway = gatewayForCidr(bridgeCidr);
   await sh(`incus exec ${containerName} -- sh -c 'printf "nameserver ${gateway}\\n" > /etc/resolv.conf'`).catch(() => {});
 
-  // ---- Configure bootstrap egress BEFORE anything fetches packages ----
-  // The clone step below installs git via apt, and the setup script installs the
-  // runtime — both run BEFORE the network fence is applied (at activation, below).
-  // Two host models, chosen per host so the very first `apt-get install git` uses
-  // a path that can actually reach the Debian mirrors:
-  //   * squid IS up on the host — a hardened/proxied host whose bridges have no
-  //     direct route out; bootstrap must go through the filtering proxy. (Routing
-  //     through a proxy that ISN'T up was the original new-project-startup error.)
-  //   * squid is NOT up — a plain host that NATs the bridge straight out; the
-  //     fence isn't applied until activation, so bootstrap uses that direct IPv4
-  //     egress. (Forcing bootstrap through an absent proxy would fail it instead.)
-  // Either way force IPv4 — the bridge is v4-only (ipv6.address=none, network.js),
-  // so apt must not try a v6 route ("Network is unreachable"). buildProxyConfigScript
-  // already sets ForceIPv4; the direct branch sets it standalone. The proxy is
-  // baked into the container env for POST-fence runtime by the setup script.
-  // squid verified UP by the preflight → route bootstrap through it; otherwise
-  // (squid not installed) fall to the direct-NAT path for a plain host.
-  const proxyUp = proxyReady.ok;
-  const bootstrapEgress = proxyUp
-    ? buildProxyConfigScript({
-        proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
-        noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
-      })
-    : 'mkdir -p /etc/apt/apt.conf.d\nprintf \'Acquire::ForceIPv4 "true";\\n\' > /etc/apt/apt.conf.d/00mock2-ipv4\n';
+  // ---- Force apt onto IPv4 before anything fetches packages ----
+  // The clone + setup below reach the Debian mirrors over the bridge's Incus NAT.
+  // The bridge is v4-only (ipv6.address=none, network.js), so apt must not try a
+  // v6 route ("Network is unreachable"). No proxy — squid was removed.
+  const bootstrapEgress = 'mkdir -p /etc/apt/apt.conf.d\nprintf \'Acquire::ForceIPv4 "true";\\n\' > /etc/apt/apt.conf.d/00mock2-ipv4\n';
   await sh(`printf '%s' '${b64(bootstrapEgress)}' | base64 -d | incus exec ${containerName} -- sh`)
     .catch((e) => console.warn('[mock2] container bootstrap egress config failed:', e?.message));
 
@@ -297,9 +258,7 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
     const out = (clone.stderr || clone.stdout || '').trim();
     const noEgress = /unable to connect|could not resolve|network is unreachable|failed to fetch|cannot initiate the connection|temporary failure in name resolution/i.test(out);
     const hint = noEgress
-      ? ` — the project container could not reach the package mirrors to install git. ${proxyUp
-          ? `The egress proxy (squid) is confirmed running on the host, so the container reached it OR squid could not reach the mirror. Check: (1) the host firewall allows the m2br* bridge to the gateway on tcp/${EGRESS_PROXY_PORT} (DHCP worked, so input is likely open); (2) squid's allowlist includes the mirror (see /etc/squid/conf.d/mock2.conf); (3) if the host itself only reaches the internet via an upstream HTTP proxy, squid needs a cache_peer to that upstream — plain squid connects directly and will fail the same way the host's own outbound filter does.`
-          : 'The egress proxy (squid) is NOT installed on this host and the container has no direct internet either.'} Fix on the HOST: run scripts/mock2-enable-egress.sh, or ensure the host provides NAT internet to the m2br* bridges. mock2 containers cannot provision or build without egress (ADR-010).`
+      ? ' — the project container could not reach the package mirrors to install git. Egress is the bridge\'s Incus NAT: check that the HOST itself has working internet and that the m2br* bridge has ipv4.nat=true (incus network show m2br<id>). If the host reaches the internet only via an upstream HTTP proxy, the container needs that proxy too. mock2 containers cannot provision or build without egress.'
       : '';
     return bail(`working clone failed: ${out.slice(-600)}${hint}`);
   }
@@ -310,15 +269,11 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const declaredPort = parseManifestWebPort(manifest.stdout) || project.web_port || DEFAULT_WEB_PORT;
 
   // ---- Run the container setup script (runtime + Postgres + dev server) ----
-  // Bake the egress proxy into the container's environment (M4): once the fence
-  // is applied at activation, HTTP(S)_PROXY is the only way out, and NO_PROXY
-  // keeps in-container + gateway traffic direct. apt/npm/pip/git all honor these.
+  // Egress is the bridge's Incus NAT — no proxy env to bake in (squid removed).
   setStatus(projectId, { phase: 'setup', message: 'Installing runtime and starting dev server…' });
   const setupScript = buildContainerSetupScript({
     appDir: APP_DIR,
     webPort: declaredPort,
-    proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
-    noProxy: `localhost,127.0.0.1,::1,${bridgeCidr}`,
   });
   const pushSetup = await sh(
     `printf '%s' '${b64(setupScript)}' | base64 -d | incus exec ${containerName} -- tee /tmp/mock2-setup.sh >/dev/null && incus exec ${containerName} -- sh /tmp/mock2-setup.sh`,

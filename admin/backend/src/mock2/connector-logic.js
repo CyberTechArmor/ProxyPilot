@@ -153,9 +153,8 @@ export function hostFromBaseUrl(base_url) {
   if (!m) return null;
   const host = m[1].toLowerCase();
   if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') return null;
-  // A bare IP is reachable directly (no DNS) — squid dstdomain wants names, and
-  // the fence already allows the gateway; skip IPs here (isAllowlistHost also
-  // rejects them). Hostname-only egress entries.
+  // A bare IP needs no DNS and reaches directly over the bridge NAT — skip it,
+  // this helper only surfaces hostnames worth recording.
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return null;
   return host;
 }

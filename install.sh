@@ -1304,11 +1304,10 @@ main() {
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
 
-    # Copy the operator scripts (scripts/mock2-enable-egress.sh, patch helpers,
-    # …) into the install root so they exist where every log/error message tells
-    # the operator to run them ("run scripts/mock2-enable-egress.sh"). Before
-    # this they lived only in the source checkout, so a `/opt/proxypilot/scripts`
-    # path did not exist and the guidance was un-followable on a deployed host.
+    # Copy the operator scripts (patch helpers, the squid cleanup, …) into the
+    # install root so they exist where log/error messages tell the operator to
+    # run them. Before this they lived only in the source checkout, so a
+    # `/opt/proxypilot/scripts` path did not exist on a deployed host.
     if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
         cp -r "${SCRIPT_DIR}/scripts" "$INSTALL_DIR/"
         chmod +x "$INSTALL_DIR"/scripts/*.sh 2>/dev/null || true
@@ -1329,19 +1328,18 @@ main() {
     # root writes. Engine systemd units run as root.
     install -d -m 0755 /var/lib/proxypilot/cve-inbox
 
-    # Mock2 filtering egress proxy (Phase M4, ADR-010). Installed ONLY when
-    # Mock2 is enabled (absence-by-installation): a disabled/pinned host gets no
-    # squid, no data dir, nothing. The backend generates the per-project ACL
-    # file at runtime; this makes squid present + listening on the fence port.
-    # Best-effort — a failure leaves the bridge default-deny in force (no
-    # egress, the safe direction); re-run scripts/mock2-enable-egress.sh to fix.
+    # Mock2 egress (Phase M4, ADR-010 — post-squid). Project containers now reach
+    # the internet via their bridge's Incus NAT; the backend's nftables fence logs
+    # every new outbound connection and blocks lateral movement to private ranges.
+    # There is no host-side proxy to install. We only ensure the data dir and run
+    # the squid cleanup (a no-op on a fresh host; on an upgraded host it retires a
+    # leftover/broken squid the old build installed). Best-effort.
     if [ "${MOCK2_ENABLED:-false}" = "true" ]; then
         install -d -m 0700 "${MOCK2_DATA_DIR:-/var/lib/proxypilot/mock2}"
-        if [[ -f "${SCRIPT_DIR}/scripts/mock2-enable-egress.sh" ]]; then
-            log_info "Enabling Mock2 filtering egress proxy (squid)..."
-            MOCK2_EGRESS_PROXY_PORT="${MOCK2_EGRESS_PROXY_PORT:-3128}" \
-                bash "${SCRIPT_DIR}/scripts/mock2-enable-egress.sh" \
-                || log_warn "Mock2 egress proxy setup failed — run scripts/mock2-enable-egress.sh on the host (bridge stays default-deny until then)"
+        if [[ -f "${SCRIPT_DIR}/scripts/mock2-egress-cleanup.sh" ]]; then
+            log_info "Retiring the legacy Mock2 egress proxy (squid), if present..."
+            bash "${SCRIPT_DIR}/scripts/mock2-egress-cleanup.sh" \
+                || log_warn "Mock2 squid cleanup reported an issue (non-fatal) — see scripts/mock2-egress-cleanup.sh"
         fi
     fi
 

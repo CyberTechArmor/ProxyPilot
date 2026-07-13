@@ -271,8 +271,11 @@ const projectRemoteSchema = z.object({
   push_on_checkpoint: z.boolean().optional(),
 });
 // ---- M6 Zod schemas ----
+// The instruction ceiling is the same operator-configurable chat_max_chars the
+// design chat uses (getChatMaxChars) — the length bound is applied in the handler,
+// not baked in here, so raising the limit carries over to Build too.
 const cycleStartSchema = z.object({
-  instruction: z.string().trim().min(1).max(2000),
+  instruction: z.string().trim().min(1),
 });
 const interruptSchema = z.object({
   action: z.enum(INTERRUPTS),
@@ -293,7 +296,9 @@ const chatMessageSchema = z.object({
 });
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
-  answer: z.string().trim().min(1).max(2000),
+  // Length bound applied in the handler against getChatMaxChars() (same ceiling
+  // as the design + build chat), so a raised limit carries over here too.
+  answer: z.string().trim().min(1),
 });
 const queueStatusSchema = z.object({
   status: z.enum(['open', 'in_progress', 'resolved', 'dismissed']),
@@ -1188,8 +1193,12 @@ export function createMock2Router() {
   // gates → run in the background. 202 + poll (or 200 refused_quota).
   router.post('/projects/:id/cycles', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
+    const maxChars = getChatMaxChars();
     const parsed = cycleStartSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'instruction is required (1–2000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: `instruction is required (1–${maxChars} chars)` });
+    if (parsed.data.instruction.length > maxChars) {
+      return res.status(400).json({ error: `instruction is too long (max ${maxChars} chars)` });
+    }
     // M8 (ADR-002): the Build press runs the AUDIT first. It compares the
     // approved inventory + rules.md + the pinned framework and either asks
     // editor/admin questions (blocking the build) or, when clear, hands off to
@@ -1493,8 +1502,12 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const question = getQuestion(req.params.qid);
     if (!question || question.project_id !== project.id) return res.status(404).json({ error: 'Question not found' });
+    const maxChars = getChatMaxChars();
     const parsed = answerQuestionSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'answer is required (1–2000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: `answer is required (1–${maxChars} chars)` });
+    if (parsed.data.answer.length > maxChars) {
+      return res.status(400).json({ error: `answer is too long (max ${maxChars} chars)` });
+    }
     let result;
     try {
       result = await answerAuditQuestion({

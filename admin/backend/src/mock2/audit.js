@@ -43,6 +43,7 @@ import {
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
+import { getChatMaxChars } from './settings.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { callModelTurn } from './model-client.js';
 import {
@@ -227,7 +228,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   const { verdict } = quotaVerdict(projectId, estCostCents);
   if (!verdict.ok) {
     const refused = insertCycle({
-      projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, 2000),
+      projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
       initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'refused_quota',
     });
     finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
@@ -239,7 +240,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // It holds the questions (cycle_id NOT NULL) and remembers the Build instruction
   // to resume with once the gate clears.
   const cycle = insertCycle({
-    projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, 2000),
+    projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
     initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'running',
   });
   updateCycle(cycle.id, { started_at: nowIso() });

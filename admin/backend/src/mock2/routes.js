@@ -98,7 +98,7 @@ import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle } from './runner.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt,
 } from './cycles.js';
@@ -1264,6 +1264,32 @@ export function createMock2Router() {
     setInterrupt(cycle.id, parsed.data.action);
     logAudit(req.user.id, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { action: parsed.data.action }, req.ip);
     res.json({ cycle: publicCycleShape(getCycle(cycle.id)) });
+  });
+
+  // Retry a stalled cycle (editor). When the runner exhausts its retries on a
+  // transient failure (e.g. an upstream 429 rate limit) the cycle lands in
+  // awaiting_admin/failed with no way forward from the chat. Once the cause is
+  // fixed, this resolves the handoff queue item and starts a fresh cycle with the
+  // same instruction, continuing from the checkpointed WIP. 202 + poll.
+  router.post('/projects/:id/cycles/:cycleId/retry', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    let result;
+    try {
+      result = await retryCycle({
+        project, cycle,
+        initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_CYCLE_RETRY', 'mock2_cycle', result.cycle?.id || cycle.id,
+      { from_cycle: cycle.id, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(result.status === 'refused' ? 200 : 202).json({
+      cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
+    });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets

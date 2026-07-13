@@ -1213,6 +1213,8 @@ export const api = {
   mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
   mock2InterruptCycle: (id, cycleId, action) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/interrupt`, { method: 'POST', body: JSON.stringify({ action }) }),
+  mock2RetryCycle: (id, cycleId) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST' }),
   mock2StopAllCycles: () => request('/mock2/cycles/stop-all', { method: 'POST' }),
   mock2GetLock: (id) => request(`/mock2/projects/${id}/lock`),
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),

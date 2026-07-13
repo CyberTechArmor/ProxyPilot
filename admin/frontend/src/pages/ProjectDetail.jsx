@@ -1225,6 +1225,21 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged 
     finally { setBusy(false); }
   };
 
+  // Resume a cycle that stalled on a transient failure (e.g. a rate limit). Starts
+  // a fresh cycle with the same instruction, continuing from the checkpointed WIP.
+  const retry = async () => {
+    if (!cycle) return;
+    setBusy(true);
+    try {
+      const res = await api.mock2RetryCycle(projectId, cycle.id);
+      if (res.refused) toast({ variant: 'destructive', title: 'Retry refused', description: res.reason || 'Quota exceeded.' });
+      else toast({ title: 'Retrying the build', description: 'Continuing from where it stopped.' });
+      await load();
+      if (onChanged) onChanged();
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not retry', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
   const loadChanges = async () => {
     setShowChanges((s) => !s);
     if (changes) return;
@@ -1328,8 +1343,21 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged 
             {cycle.status === 'awaiting_admin' ? (
               <p className="text-xs text-amber-500 flex items-start gap-1">
                 <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.
+                {cycle.error
+                  ? 'The build stalled on a transient error — once you’ve fixed the cause (e.g. added billing or raised your model rate limit), retry to continue where it stopped.'
+                  : 'A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.'}
               </p>
+            ) : null}
+
+            {/* Retry (editors) — resume a cycle that stalled on a transient
+                failure (rate limit, runner error). Not shown for a framework
+                deviation (no cycle.error) — that resumes when an admin resolves
+                it. Starts a fresh cycle from the checkpointed WIP. */}
+            {canEdit && online && (cycle.status === 'failed' || (cycle.status === 'awaiting_admin' && cycle.error)) ? (
+              <Button size="sm" className="h-9" disabled={busy} onClick={retry}>
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                Retry build
+              </Button>
             ) : null}
 
             {/* Gate battery — the "gates going green" stepper */}

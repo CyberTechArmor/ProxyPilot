@@ -63,15 +63,27 @@ if [ -f "$SQUID_CONF" ] && ! grep -qE '^\s*include\s+/etc/squid/conf\.d/' "$SQUI
   printf '\n# Added by ProxyPilot Mock2 (M4)\ninclude /etc/squid/conf.d/*.conf\n' >> "$SQUID_CONF"
 fi
 
-# 3. Pin the listen port when it differs from squid's built-in default (3128),
-#    so the backend's fence (which allows the bridge to reach the gateway on
-#    MOCK2_EGRESS_PROXY_PORT) and squid agree. The 00- prefix sorts it before the
-#    generated ACL file. When the port IS 3128 we leave squid's default alone.
-if [ "$PROXY_PORT" != "3128" ]; then
-  log "pinning squid http_port to ${PROXY_PORT}"
-  printf '# Added by ProxyPilot Mock2 (M4) — keep in sync with MOCK2_EGRESS_PROXY_PORT\nhttp_port %s\n' "$PROXY_PORT" > "$PORT_FILE"
-else
-  rm -f "$PORT_FILE" 2>/dev/null || true
+# 3. Pin squid's listen socket to the IPv4 wildcard for PROXY_PORT. squid's stock
+#    `http_port 3128` can end up bound to localhost only, or IPv6-only when the
+#    host has net.ipv6.bindv6only=1 — and the project bridges (10.200.x.0/24) are
+#    IPv4-only, so they then CANNOT reach the proxy on their gateway and every
+#    container fails "Unable to connect to <gateway>:3128". Rewrite the http_port
+#    in squid.conf to an explicit 0.0.0.0 bind. This is safe: the host firewall
+#    (table inet proxypilot, input policy drop) only admits the m2br* bridges to
+#    this port, so 0.0.0.0 does NOT expose an open proxy on the public interface.
+#    Idempotent — a line already bound to 0.0.0.0:PORT is left untouched. Retire
+#    the old port-only drop-in (superseded by editing the real http_port line).
+rm -f "$PORT_FILE" 2>/dev/null || true
+if [ -f "$SQUID_CONF" ]; then
+  if grep -qE "^[[:space:]]*http_port[[:space:]]+0\.0\.0\.0:${PROXY_PORT}([[:space:]]|\$)" "$SQUID_CONF"; then
+    log "squid http_port already pinned to 0.0.0.0:${PROXY_PORT}"
+  elif grep -qE "^[[:space:]]*http_port[[:space:]]+(\[::\]:|127\.0\.0\.1:)?${PROXY_PORT}([[:space:]]|\$)" "$SQUID_CONF"; then
+    log "pinning squid http_port to 0.0.0.0:${PROXY_PORT}"
+    sed -i -E "s|^([[:space:]]*)http_port[[:space:]]+(\[::\]:|127\.0\.0\.1:)?${PROXY_PORT}([[:space:]]*)\$|\1http_port 0.0.0.0:${PROXY_PORT}|" "$SQUID_CONF"
+  else
+    log "adding http_port 0.0.0.0:${PROXY_PORT} to squid.conf"
+    printf '\n# Added by ProxyPilot Mock2 (M4)\nhttp_port 0.0.0.0:%s\n' "$PROXY_PORT" >> "$SQUID_CONF"
+  fi
 fi
 
 # 4. Seed an empty ACL file if the backend hasn't generated one yet, so a

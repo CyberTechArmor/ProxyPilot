@@ -206,7 +206,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const auditJob = data?.audit_job || null;
   const auditActive = !!auditJob && !['building', 'awaiting_user', 'awaiting_admin', 'failed', 'done'].includes(auditJob.phase);
   const openQuestionCount = (data?.open_question_ids || []).length;
-  const shouldPoll = jobActive || auditActive || openQuestionCount > 0;
+  // A build cycle started AFTER design approval (from the Build-cycle panel, or
+  // auto-started on approval) runs its audit outside this component. We stop
+  // polling once the concept turn settles, so without this we'd never re-fetch
+  // to surface the rule questions it raises — the parent's project count is the
+  // durable signal that pulls us back in (it refreshes from the cycle's own poll)
+  // so the questions appear here with their inline answer controls.
+  const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
+  const shouldPoll = jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);

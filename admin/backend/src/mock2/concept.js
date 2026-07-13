@@ -49,9 +49,17 @@ import {
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
 } from './concept-logic.js';
 import { callModelTurn } from './model-client.js';
+import { startBuild } from './audit.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
+
+// The instruction the auto-started initial build runs with. Approving the design
+// (the "Are you ready to build?" gesture) both locks the design AND kicks off the
+// first build — so the working app replaces the placeholder without the Builder
+// having to describe a change. The Build-cycle panel is for adjustments AFTER
+// this initial build. The audit still runs first (it may raise rule questions).
+const INITIAL_BUILD_INSTRUCTION = 'Build the working application from the approved design inventory: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder.';
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.
@@ -468,4 +476,25 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   setJob(projectId, { phase: 'approved', message: 'Design approved — Build unlocked.', kind: 'approval', cycleId: cycle.id, changeSeq: record?.seq || null });
   console.log(`[mock2] project ${projectId} design approved (inventory ${counts.screens} screens, change record ${record?.seq ?? '—'})`);
   scheduleJobCleanup(projectId);
+
+  // 7) Auto-start the initial build. Approval both locks the design AND begins
+  //    building the working app (the "Are you ready to build?" dialog promises
+  //    exactly this), so the Builder doesn't have to describe a change to get the
+  //    real app. The lock was just released, so startBuild can take it as the
+  //    cycle holder. The audit runs first: if it raises rule questions they show
+  //    in the chat to confirm and the build resumes once answered; if the build
+  //    can't start (no runner model, quota, …) we say so and leave Build unlocked
+  //    for a manual press.
+  try {
+    const res = await startBuild({ project: getProject(projectId), instruction: INITIAL_BUILD_INSTRUCTION, user, actingAsAdmin });
+    if (res.status === 'started') {
+      insertMessage({ projectId, kind: 'system', body: 'Starting the initial build from the approved design — auditing it against the rules and framework first.' });
+    } else if (res.status !== 'refused') {
+      // 'refused' already posts its own "Build not started — …" message.
+      insertMessage({ projectId, kind: 'system', body: `Design is locked in, but the initial build didn't start automatically — ${res.error} Start it from the Build cycle panel below.` });
+    }
+  } catch (e) {
+    console.warn(`[mock2] auto-build after approval failed for project ${projectId}:`, e?.message || e);
+    insertMessage({ projectId, kind: 'system', body: 'Design is locked in, but the initial build didn’t start automatically. Start it from the Build cycle panel below.' });
+  }
 }

@@ -63,3 +63,20 @@ export function getIdleStopDays() {
   if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_STOP_DAYS;
   return n;
 }
+
+// ---- Concept chat message limit (max characters per chat message) ----
+export const CHAT_MAX_CHARS_KEY = 'chat_max_chars';
+// The selectable ceilings the operator may choose from. Bounded at 32k so a
+// single chat turn can't blow past the concept model's input budget.
+export const CHAT_MAX_CHARS_OPTIONS = [4000, 8000, 16000, 32000];
+const DEFAULT_CHAT_MAX_CHARS = 16000;
+
+// The configured per-message character ceiling for the concept chat composer.
+// Only the discrete CHAT_MAX_CHARS_OPTIONS are honoured; any stored/env value
+// outside that set falls back to the default. Precedence: stored setting →
+// MOCK2_CHAT_MAX_CHARS env → built-in default.
+export function getChatMaxChars() {
+  const raw = getMock2Setting(CHAT_MAX_CHARS_KEY, process.env.MOCK2_CHAT_MAX_CHARS || String(DEFAULT_CHAT_MAX_CHARS));
+  const n = Number(raw);
+  return CHAT_MAX_CHARS_OPTIONS.includes(n) ? n : DEFAULT_CHAT_MAX_CHARS;
+}

@@ -58,7 +58,7 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getEgressMode, EGRESS_MODE_KEY, EGRESS_MODE_ALLOWLIST, EGRESS_MODE_ALLOW_ALL } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getEgressMode, EGRESS_MODE_KEY, EGRESS_MODE_ALLOWLIST, EGRESS_MODE_ALLOW_ALL, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS } from './settings.js';
 import {
   listAllowlist,
   addAllowlistHost,
@@ -286,8 +286,11 @@ const lockIdleSchema = z.object({
     .refine((n) => Number.isInteger(n) && n >= 1 && n <= 1440, 'out of range'),
 });
 // ---- M7 Zod schemas ----
+// The message ceiling is operator-configurable (mock2_settings.chat_max_chars),
+// so the length bound is applied in the handler against getChatMaxChars() rather
+// than baked into this static schema.
 const chatMessageSchema = z.object({
-  message: z.string().trim().min(1).max(4000),
+  message: z.string().trim().min(1),
   // Conversation mode (M7): 'plan' talks through requirements without touching
   // the mockup; 'design' (default) may generate/iterate the mockup.
   mode: z.enum(['plan', 'design']).optional(),
@@ -693,6 +696,25 @@ export function createMock2Router() {
     setMock2Setting(IDLE_STOP_DAYS_KEY, parsed.data.days, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_IDLE_STOP_DAYS', 'mock2_setting', 0, { days: parsed.data.days }, req.ip);
     res.json({ idle_stop_days: getIdleStopDays() });
+  });
+
+  // Concept chat message limit. Admin-gated read/write of the
+  // mock2_settings.chat_max_chars value the chat POST handler enforces. Only the
+  // discrete CHAT_MAX_CHARS_OPTIONS (4k/8k/16k/32k) are accepted.
+  router.get('/settings/chat-max-chars', requireAdmin, (_req, res) => {
+    res.json({ max_chars: getChatMaxChars(), options: CHAT_MAX_CHARS_OPTIONS });
+  });
+  router.post('/settings/chat-max-chars', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      max_chars: z.union([z.number(), z.string()]).transform((v) => Number(v))
+        .refine((n) => CHAT_MAX_CHARS_OPTIONS.includes(n), 'unsupported value'),
+    }).safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: `max_chars must be one of ${CHAT_MAX_CHARS_OPTIONS.join(', ')}` });
+    }
+    setMock2Setting(CHAT_MAX_CHARS_KEY, parsed.data.max_chars, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_CHAT_MAX_CHARS', 'mock2_setting', 0, { max_chars: parsed.data.max_chars }, req.ip);
+    res.json({ max_chars: getChatMaxChars(), options: CHAT_MAX_CHARS_OPTIONS });
   });
 
   // Egress policy mode (M4/ADR-010 monitor mode). Admin-gated read/write of the
@@ -1364,8 +1386,12 @@ export function createMock2Router() {
   // assistant reply + any mockup update arrive on the background turn.
   router.post('/projects/:id/chat', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
+    const maxChars = getChatMaxChars();
     const parsed = chatMessageSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'message is required (1–4000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: `message is required (1–${maxChars} chars)` });
+    if (parsed.data.message.length > maxChars) {
+      return res.status(400).json({ error: `message is too long (max ${maxChars} chars)` });
+    }
     let result;
     try {
       result = await startConceptTurn({

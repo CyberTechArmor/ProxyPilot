@@ -44,7 +44,9 @@ import {
   lookupUser,
   listProjectSlugs,
   purgeProjectSlugHistory,
+  addTypingSeconds,
 } from './projects.js';
+import { computeTimeSummary } from './time-logic.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
@@ -729,6 +731,26 @@ export function createMock2Router() {
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
     const log = await readEgressLog(cidr, { limit }).catch((e) => ({ ok: false, error: e?.message, entries: [] }));
     res.json(log);
+  });
+
+  // ---- Time tracking ----
+  // Accumulate active-typing seconds (the client measures spans of typing in the
+  // design/build chats and flushes increments here). Editors only; a viewer isn't
+  // driving the build.
+  router.post('/projects/:id/typing', requireMock2Role('editor'), (req, res) => {
+    const seconds = Number(req.body?.seconds);
+    const total = addTypingSeconds(req.mock2Project.id, seconds);
+    res.json({ ok: true, chat_typing_seconds: total });
+  });
+
+  // Time summary — project start + AI time (mockup / building / adjustments,
+  // derived from cycle durations) + admin-wait (framework-deviation open→resolved)
+  // + active-typing. Any member can see it.
+  router.get('/projects/:id/time-summary', requireMock2Role('viewer'), (req, res) => {
+    const project = getProject(req.mock2Project.id);
+    const cycles = listCyclesForProject(project.id, { limit: 500 });
+    const deviations = listQueueItems({ projectId: project.id, kind: 'framework_deviation', limit: 500 });
+    res.json({ summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }) });
   });
 
   // Destroy a project: tear down its container + bridge, drop its slug block,

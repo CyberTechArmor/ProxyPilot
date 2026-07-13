@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Loader2, Zap, Hammer } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
+import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 export default function BuildChat({ projectId, project, canEdit, online, active, job, onStarted }) {
   const { toast } = useToast();
@@ -25,6 +26,7 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const scrollRef = useRef(null);
+  const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
 
   const load = useCallback(async () => {
@@ -127,7 +129,7 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
                 : 'Project must be online to run a build.'}
               value={instruction}
               disabled={composerDisabled}
-              onChange={(e) => setInstruction(e.target.value)}
+              onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); startBuild(); }
               }}

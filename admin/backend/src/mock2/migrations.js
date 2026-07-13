@@ -488,4 +488,18 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Time tracking: accumulated seconds a user spent ACTIVELY typing in the
+    // project's chats (design + build). The client measures active-typing spans
+    // and flushes increments here; the rest of the time buckets (AI time, admin
+    // wait) are derived from cycle + queue timestamps, so only this one needs a
+    // stored counter. Additive, defaults 0, harmless on every pre-existing row.
+    version: 510,
+    name: 'mock2_chat_typing_seconds',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN chat_typing_seconds INTEGER NOT NULL DEFAULT 0;
+      `);
+    },
+  },
 ];

@@ -23,6 +23,7 @@ import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion } from './chat-messages';
+import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
 
@@ -65,6 +66,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const [answering, setAnswering] = useState(false);
   const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
+  const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
   const lastMockupId = useRef(project?.current_mockup_id || null);
 
@@ -270,7 +272,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                 : 'Project must be online to chat.'}
               value={message}
               disabled={composerDisabled}
-              onChange={(e) => setMessage(e.target.value)}
+              onChange={(e) => { setMessage(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
               }}

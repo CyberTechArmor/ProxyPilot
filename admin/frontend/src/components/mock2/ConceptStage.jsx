@@ -171,7 +171,7 @@ function ChatBubble({ m }) {
   );
 }
 
-export default function ConceptStage({ projectId, project, canEdit, onApproved }) {
+export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
@@ -180,6 +180,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
   const wasApproved = useRef(!!project?.design_approved_at);
+  const lastMockupId = useRef(project?.current_mockup_id || null);
 
   const load = useCallback(async () => {
     try {
@@ -239,6 +240,20 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const online = project?.lifecycle === 'active';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
+
+  // The mockup preview is owned by the parent (ProjectDetail), but WE are the
+  // one polling the chat, so we're the first to learn a new mockup was rendered
+  // (or discarded on approval). The preview URL is a stable path — same URL, new
+  // content — so tell the parent to reload the project (surfacing preview_url the
+  // first time) and remount the iframe. Fires only on an actual id transition.
+  useEffect(() => {
+    if (!data) return; // wait for the first chat load before comparing
+    const mockupId = data.current_mockup_id ?? null;
+    if (mockupId !== lastMockupId.current) {
+      lastMockupId.current = mockupId;
+      if (onMockupChanged) onMockupChanged(mockupId);
+    }
+  }, [data, onMockupChanged]);
 
   const send = async () => {
     const text = message.trim();

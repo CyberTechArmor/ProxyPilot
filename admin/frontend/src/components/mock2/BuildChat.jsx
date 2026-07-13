@@ -47,9 +47,20 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
     return () => clearInterval(t);
   }, [shouldPoll, load]);
 
+  // Land on the work, not the bottom: while rule questions are open, bring the
+  // first still-open one into view (answering one then lands on the next); once
+  // none are open, fall back to keeping the newest message in view. Keyed on the
+  // open-question set so it re-runs as each question is confirmed.
+  const openQuestionKey = (data?.open_question_ids || []).join(',');
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [data?.messages?.length, active]);
+    const el = scrollRef.current;
+    if (!el) return;
+    if (openQuestionKey) {
+      const firstOpen = el.querySelector('[data-open-question]');
+      if (firstOpen) { firstOpen.scrollIntoView({ block: 'start' }); return; }
+    }
+    el.scrollTop = el.scrollHeight;
+  }, [data?.messages?.length, active, openQuestionKey]);
 
   const openIds = new Set(data?.open_question_ids || []);
   // Only the post-approval slice of the conversation belongs here (the design

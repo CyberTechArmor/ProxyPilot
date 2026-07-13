@@ -22,7 +22,7 @@ import { deriveBuildTasks } from '@/lib/build-tasks';
 import { ensureNotifyPermission, notifyBrowser } from '@/lib/browser-notify';
 
 export default function BuildMode({
-  projectId, project, canEdit, isAdmin, previewSrc, onChanged, onBuilt,
+  projectId, project, canEdit, isAdmin, previewSrc, provLog, provMessage, onChanged, onBuilt,
 }) {
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
@@ -151,7 +151,7 @@ export default function BuildMode({
         {online ? (
           <LiveAppBar url={project.url || previewSrc || null} />
         ) : (
-          <PreviewPlaceholder project={project} />
+          <PreviewPlaceholder project={project} provLog={provLog} provMessage={provMessage} />
         )}
         <BuildStatus
           projectId={projectId}

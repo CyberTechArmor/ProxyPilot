@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTs, computeTimeSummary } from '../mock2/time-logic.js';
+import { parseTs, computeTimeSummary, computeUsageSummary } from '../mock2/time-logic.js';
 
 test('parseTs handles ISO and SQLite-UTC, treating the bare form as UTC', () => {
   assert.equal(parseTs('2026-07-13T18:00:00.000Z'), Date.UTC(2026, 6, 13, 18, 0, 0));
@@ -63,4 +63,41 @@ test('computeTimeSummary: empty inputs are all zero, no throw', () => {
   assert.equal(s.total_tracked_seconds, 0);
   assert.equal(s.project_start, null);
   assert.equal(s.elapsed_seconds, null);
+});
+
+test('computeUsageSummary: tokens+cost sum by stage (concept→mockup, first build→building, rest→adjustments)', () => {
+  const base = Date.UTC(2026, 6, 13, 18, 0, 0);
+  const iso = (ms) => new Date(ms).toISOString();
+  const cycles = [
+    { stage: 'concept', created_at: iso(base), used_tokens: 1000, used_cost_cents: 5 },
+    { stage: 'concept', created_at: iso(base + 100_000), used_tokens: 500, used_cost_cents: 3 },
+    { stage: 'build', created_at: iso(base + 200_000), used_tokens: 8000, used_cost_cents: 40 }, // first build
+    { stage: 'build', created_at: iso(base + 400_000), used_tokens: 2000, used_cost_cents: 9 },  // adjustment
+    { stage: 'remediation', created_at: iso(base + 500_000), used_tokens: 480, used_cost_cents: 1 }, // adjustment
+  ];
+  const u = computeUsageSummary({ cycles });
+  assert.equal(u.by_stage.mockup.tokens, 1500);
+  assert.equal(u.by_stage.mockup.cost_cents, 8);
+  assert.equal(u.by_stage.building.tokens, 8000);
+  assert.equal(u.by_stage.building.cost_cents, 40);
+  assert.equal(u.by_stage.adjustments.tokens, 2480);   // 2000 + 480
+  assert.equal(u.by_stage.adjustments.cost_cents, 10);  // 9 + 1
+  assert.equal(u.total_tokens, 11_980);
+  assert.equal(u.total_cost_cents, 58);
+});
+
+test('computeUsageSummary: missing/negative usage coerces to zero; empty is all zero', () => {
+  const empty = computeUsageSummary({ cycles: [] });
+  assert.equal(empty.total_tokens, 0);
+  assert.equal(empty.total_cost_cents, 0);
+
+  const iso = (ms) => new Date(ms).toISOString();
+  const u = computeUsageSummary({
+    cycles: [
+      { stage: 'build', created_at: iso(1), used_tokens: null, used_cost_cents: undefined },
+      { stage: 'build', created_at: iso(2), used_tokens: -50, used_cost_cents: -3 },
+    ],
+  });
+  assert.equal(u.total_tokens, 0);
+  assert.equal(u.total_cost_cents, 0);
 });

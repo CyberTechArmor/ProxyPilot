@@ -16,9 +16,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  XCircle, CheckCircle2, Ban,
+  CheckCircle2, Ban,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
+import ChangeHistory from './ChangeHistory';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
@@ -31,8 +32,7 @@ export default function BuildStatus({
   onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll, onRefresh,
 }) {
   const { toast } = useToast();
-  const [changes, setChanges] = useState(null); // { records, verification } | null
-  const [showChanges, setShowChanges] = useState(false);
+  const [view, setView] = useState('build'); // 'build' | 'changes'
   const [deviations, setDeviations] = useState([]); // open framework_deviation queue items (admin)
   const [devBusy, setDevBusy] = useState(false);
 
@@ -74,13 +74,6 @@ export default function BuildStatus({
     } finally { setDevBusy(false); }
   };
 
-  const loadChanges = async () => {
-    setShowChanges((s) => !s);
-    if (changes) return;
-    try { setChanges(await api.mock2GetChangeRecords(projectId)); }
-    catch (err) { if (!(err instanceof ApiError)) console.error('load change records failed:', err); }
-  };
-
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -89,8 +82,27 @@ export default function BuildStatus({
           Describe a change in the build chat. Each build audits the change against the rules and framework, edits
           the code in the fenced container, runs the pinned gate battery, and checkpoints into the repo.
         </CardDescription>
+        {/* Build panel OR the change history — one at a time (pill toggle). */}
+        <div className="inline-flex self-start rounded-md border p-0.5 mt-1" role="tablist" aria-label="Build view">
+          <button
+            type="button" role="tab" aria-selected={view === 'build'}
+            onClick={() => setView('build')}
+            className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${view === 'build' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+          >
+            <Hammer className="h-3.5 w-3.5" /> Build
+          </button>
+          <button
+            type="button" role="tab" aria-selected={view === 'changes'}
+            onClick={() => setView('changes')}
+            className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${view === 'changes' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+          >
+            <GitBranch className="h-3.5 w-3.5" /> Change history
+          </button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {view === 'changes' ? <ChangeHistory projectId={projectId} /> : (
+        <>{/* ---- Build panel ---- */}
         {/* Drift banner (ADR-003) — the framework moved since the last build. */}
         {driftAvailable ? (
           <div className="flex flex-col gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -237,37 +249,8 @@ export default function BuildStatus({
         ) : (
           online ? <p className="text-sm text-muted-foreground">No builds yet. Describe a change in the build chat to start one.</p> : null
         )}
-
-        {/* Change history + chain verification */}
-        <div className="border-t pt-3">
-          <Button variant="ghost" size="sm" className="h-9 px-0" onClick={loadChanges}>
-            <GitBranch className="h-4 w-4 mr-1" />{showChanges ? 'Hide' : 'Show'} change history
-          </Button>
-          {showChanges && changes ? (
-            <div className="mt-2 space-y-2">
-              <p className="text-xs flex items-center gap-1">
-                {changes.verification?.ok
-                  ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({changes.verification.count} record{changes.verification.count === 1 ? '' : 's'})</span></>
-                  : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{changes.verification?.brokenAt}</span></>}
-              </p>
-              {(changes.records || []).length === 0 ? (
-                <p className="text-xs text-muted-foreground">No change records yet.</p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {changes.records.map((r) => (
-                    <li key={r.seq} className="text-xs border rounded-md px-2 py-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono">#{r.seq}</span>
-                        <span className="font-mono text-muted-foreground truncate">{r.commit_sha ? r.commit_sha.slice(0, 8) : '—'}</span>
-                      </div>
-                      <p className="truncate">{r.summary}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ) : null}
-        </div>
+        </>
+        )}
       </CardContent>
     </Card>
   );

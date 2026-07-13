@@ -27,7 +27,7 @@ const STATUS_TONE = {
 
 export default function BuildStatus({
   projectId, canEdit, isAdmin, online, project, cycle, job, busy,
-  onRetry, onInterrupt, onRemediate, onStopAll,
+  onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll,
 }) {
   const [changes, setChanges] = useState(null); // { records, verification } | null
   const [showChanges, setShowChanges] = useState(false);
@@ -96,12 +96,28 @@ export default function BuildStatus({
 
             {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
 
-            {/* Deploy that failed — distinct, retryable. */}
+            {/* Deploy that failed — distinct, retryable. Offer a deploy-only
+                retry (redeploy the existing checkpoint — no rebuild) alongside
+                the full build retry. */}
             {cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed' ? (
-              <p className="text-xs text-red-500 flex items-start gap-1">
-                <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                The change passed its gates but the app did not deploy. Fix the cause if it is code, then retry — the build resumes from the checkpoint.
-              </p>
+              <div className="space-y-2">
+                <p className="text-xs text-red-500 flex items-start gap-1">
+                  <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  The change passed its gates but the app did not deploy. Retry the deploy to redeploy the existing
+                  build, or fix the cause in the build chat and run a new build.
+                </p>
+                {canEdit && online ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" className="h-9" disabled={busy} onClick={onRetryDeploy}>
+                      {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                      Retry deploy
+                    </Button>
+                    <Button variant="outline" size="sm" className="h-9" disabled={busy} onClick={onRetry}>
+                      <Hammer className="h-4 w-4 mr-1" />Rebuild
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {/* Audit gate (ADR-002) — blocked on a routed question. */}
@@ -120,13 +136,16 @@ export default function BuildStatus({
               </p>
             ) : null}
 
-            {/* Retry (editors) — resume a cycle that stalled on a transient failure. */}
-            {canEdit && online && (cycle.status === 'failed' || (cycle.status === 'awaiting_admin' && cycle.error)) ? (
-              <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
-                Retry build
-              </Button>
-            ) : null}
+            {/* Retry (editors) — resume a cycle that stalled on a transient
+                failure. A deploy failure has its own Retry deploy / Rebuild
+                controls above, so exclude it here. */}
+            {canEdit && online && cycle.deploy_status !== 'deploy_failed'
+              && (cycle.status === 'failed' || (cycle.status === 'awaiting_admin' && cycle.error)) ? (
+                <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
+                  {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                  Retry build
+                </Button>
+              ) : null}
 
             {/* Interrupts (editors) while running */}
             {canEdit && active && cycle.status === 'running' ? (

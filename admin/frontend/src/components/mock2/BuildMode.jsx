@@ -104,6 +104,17 @@ export default function BuildMode({
     finally { setBusy(false); }
   };
 
+  const retryDeploy = async () => {
+    if (!cycle) return;
+    setBusy(true);
+    try {
+      await api.mock2RetryDeploy(projectId, cycle.id);
+      toast({ title: 'Retrying the deploy', description: 'Redeploying the existing build — no rebuild.' });
+      refresh();
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not retry the deploy', description: err.message }); }
+    finally { setBusy(false); }
+  };
+
   const interrupt = async (action) => {
     if (!cycle) return;
     setBusy(true);
@@ -153,6 +164,7 @@ export default function BuildMode({
           job={job}
           busy={busy}
           onRetry={retry}
+          onRetryDeploy={retryDeploy}
           onInterrupt={interrupt}
           onRemediate={remediate}
           onStopAll={stopAll}

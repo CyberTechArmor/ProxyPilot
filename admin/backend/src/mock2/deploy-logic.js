@@ -97,6 +97,12 @@ After=network.target
 Type=simple
 WorkingDirectory=${appDir}
 Environment=PORT=${webPort}
+# A dev-plane app should log an unhandled promise rejection and keep serving, not
+# hard-exit and crash-loop (Node's default since v15 is to exit the process). One
+# unhandled async error in a route would otherwise take the whole app down and
+# fail the deploy health check. This makes the app resilient without touching its
+# code (applies to any Node ExecStart; ignored by non-Node ExecStart like serve.py).
+Environment=NODE_OPTIONS=--unhandled-rejections=warn
 # Inherit any operator-set container env. The leading '-' makes it optional.
 EnvironmentFile=-/etc/environment
 ExecStart=${execStart}
@@ -164,7 +170,7 @@ export function deployFailureMessage(step, detail = '') {
     migrate: 'Database migration failed',
     build: 'Build failed',
     start: 'The app did not start',
-    health: 'The app started but is not serving on its web port',
+    health: 'The app is not serving on its web port — it most likely started, then crashed (see the app output below; a repeating restart / exit-code means a crash loop, usually an unhandled error thrown after it began listening)',
   }[step] || 'Deploy failed';
   const egressHint = looksLikeEgress && (step === 'install')
     ? ' — the container could not reach the npm registry. Egress is the bridge\'s Incus NAT: confirm the host has working internet and the m2br* bridge has ipv4.nat=true (the firewall logs egress but never blocks the internet path).'

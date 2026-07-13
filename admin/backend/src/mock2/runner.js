@@ -42,6 +42,7 @@ import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
+  softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { deployProject, readRunContract } from './deploy.js';
@@ -211,7 +212,12 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
 // won't offer Retry). Returns the same shape as startCycle.
 export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0 }) {
   if (!cycle) return { status: 'error', error: 'No cycle to retry.' };
-  if (!['awaiting_admin', 'failed'].includes(cycle.status)) {
+  // A soft-paused cycle (interrupted + pause_reason) resumes here too: same
+  // instruction → a fresh cycle continuing from the checkpoint, with a fresh
+  // token/time budget. A plain user-interrupted cycle carries no pause_reason and
+  // isn't offered Resume, so it never reaches this.
+  const resumablePaused = cycle.status === 'interrupted' && !!cycle.pause_reason;
+  if (!['awaiting_admin', 'failed'].includes(cycle.status) && !resumablePaused) {
     return { status: 'error', error: `This cycle is "${cycle.status}" — there is nothing to retry.` };
   }
   // Clear the retries/quota handoff so it stops nagging in the admin queue (both
@@ -302,6 +308,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
 
   let lastGateReports = initialGateReports(gateScripts);
+  // Soft-pause accounting for THIS run (a resume is a fresh cycle, so its own
+  // clock + token count start at zero — each resume gets a fresh budget window).
+  const runStartMs = Date.now();
+  let usedTokensThisRun = 0;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -337,6 +347,26 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       }
     }
 
+    // 2b) Soft budget pause (token / wall-clock). A long build isn't a failure —
+    //     when this run crosses a ceiling we checkpoint the WIP and PAUSE it,
+    //     resumable in one click (retryCycle continues from the checkpoint with a
+    //     fresh budget). Stored as 'interrupted' + pause_reason so it reads as a
+    //     Pause, not a stop, and the editor can Resume without an admin.
+    const pauseReason = softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs: Date.now() - runStartMs });
+    if (pauseReason) {
+      const mins = Math.round((Date.now() - runStartMs) / 60000);
+      const detail = pauseReason === 'budget_tokens'
+        ? `token budget reached (~${Math.round(usedTokensThisRun / 1000)}k tokens this run)`
+        : `time budget reached (~${mins} min this run)`;
+      await checkpointAndRecord({ cycle: fresh, project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: paused — ${detail}` });
+      updateCycle(cycle.id, { pause_reason: pauseReason });
+      finishCycle(cycle.id, { status: 'interrupted', error: `Paused — ${detail}. Resume to continue where it stopped.` });
+      releaseLock(projectId, holder);
+      setJob(cycle.id, { phase: 'paused', message: `Paused — ${detail}. Resume to continue.`, commit: null });
+      void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'paused' });
+      return scheduleJobCleanup(cycle.id);
+    }
+
     // 3) Call the build_runner model for the next step.
     const result = await callModelTurn({ connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: 8000 });
     if (!result.ok) {
@@ -353,7 +383,9 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
 
     // Ledger + usage after every model call (M5 writer).
     const costCents = costCentsForUsage({ inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens }, price);
-    addCycleUsage(cycle.id, { tokens: result.usage.inputTokens + result.usage.outputTokens, costCents });
+    const turnTokens = result.usage.inputTokens + result.usage.outputTokens;
+    usedTokensThisRun += turnTokens;
+    addCycleUsage(cycle.id, { tokens: turnTokens, costCents });
     try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
@@ -441,12 +473,15 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     touchLock(projectId, holder); // any exec/write refreshed the idle timer
   }
 
-  // Loop ceiling hit — checkpoint WIP, fail, release.
+  // Runaway backstop hit (the soft token/time pause normally trips first). This
+  // is a genuine dead-loop — checkpoint WIP and PAUSE it (resumable) rather than
+  // fail, so an editor can inspect and continue instead of losing the work.
   await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: 'checkpoint: max turns reached' });
-  finishCycle(cycle.id, { status: 'failed', error: `runner exceeded ${MAX_TURNS} turns without finishing` });
+  updateCycle(cycle.id, { pause_reason: 'max_turns' });
+  finishCycle(cycle.id, { status: 'interrupted', error: `Paused — reached ${MAX_TURNS} steps without finishing. Resume to continue where it stopped.` });
   releaseLock(projectId, holder);
-  setJob(cycle.id, { phase: 'failed', message: `Exceeded ${MAX_TURNS} turns without a green finish.` });
-  void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'failed' });
+  setJob(cycle.id, { phase: 'paused', message: `Paused at the ${MAX_TURNS}-step ceiling. Resume to continue.` });
+  void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'paused' });
   scheduleJobCleanup(cycle.id);
 }
 

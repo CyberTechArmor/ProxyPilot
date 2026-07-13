@@ -42,7 +42,7 @@ function currentOrdinal({ status, phase, gates, deploy }) {
 
 // deriveBuildTasks(cycle, job) → { tasks, done, total, remaining, terminal, headline }
 //   tasks: [{ key, label, state, detail, sub? }]   state ∈ pending|active|done|failed|blocked
-//   terminal: 'succeeded' | 'failed' | 'deploy_failed' | null
+//   terminal: 'succeeded' | 'failed' | 'deploy_failed' | 'paused' | null
 export function deriveBuildTasks(cycle, job) {
   if (!cycle) {
     return { tasks: [], done: 0, total: BUILD_PHASES.length, remaining: BUILD_PHASES.length, terminal: null, headline: null };
@@ -52,14 +52,19 @@ export function deriveBuildTasks(cycle, job) {
   const gates = Array.isArray(cycle.gates) ? cycle.gates : [];
   const deploy = cycle.deploy_status || null;
 
+  // A soft-paused cycle is 'interrupted' + pause_reason: a resumable checkpoint,
+  // NOT a failure — so it doesn't paint the task list red; its current step reads
+  // as blocked (paused), waiting on a Resume.
+  const paused = status === 'interrupted' && !!cycle.pause_reason;
   const succeeded = status === 'succeeded';
-  const failed = FAILED_STATUSES.includes(status);
-  const blocked = BLOCKED_STATUSES.includes(status);
+  const failed = FAILED_STATUSES.includes(status) && !paused;
+  const blocked = BLOCKED_STATUSES.includes(status) || paused;
   const deployFailed = deploy === 'deploy_failed';
   const terminal = succeeded
     ? 'succeeded'
     : deployFailed ? 'deploy_failed'
-      : failed ? 'failed' : null;
+      : paused ? 'paused'
+        : failed ? 'failed' : null;
 
   const cur = currentOrdinal({ status, phase, gates, deploy });
 
@@ -87,9 +92,11 @@ export function deriveBuildTasks(cycle, job) {
         : (p.key === 'deploy' && job?.message) ? job.message
           : p.active;
     } else if (state === 'blocked') {
-      detail = status === 'awaiting_admin'
-        ? 'Waiting on an admin to resolve a framework deviation'
-        : 'Waiting on you to confirm a rule question in the chat';
+      detail = paused
+        ? 'Paused on a token/time budget — resume to continue'
+        : status === 'awaiting_admin'
+          ? 'Waiting on an admin to resolve a framework deviation'
+          : 'Waiting on you to confirm a rule question in the chat';
     }
 
     // The verify phase expands into the individual gates so the user watches
@@ -112,8 +119,9 @@ export function deriveBuildTasks(cycle, job) {
   const headline = succeeded
     ? 'Build complete'
     : deployFailed ? 'Deploy failed'
-      : failed ? 'Build stopped'
-        : activeTask ? activeTask.label : 'Starting…';
+      : paused ? 'Build paused'
+        : failed ? 'Build stopped'
+          : activeTask ? activeTask.label : 'Starting…';
 
   return { tasks, done, total, remaining, terminal, headline };
 }

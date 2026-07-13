@@ -191,6 +191,9 @@ export function publicCycleShape(row) {
     // Run phase — whether the built app was deployed and is serving on the live
     // URL: null | 'deploying' | 'serving' | 'deploy_failed'.
     deploy_status: row.deploy_status || null,
+    // Why an 'interrupted' cycle soft-paused on a budget: 'budget_tokens' |
+    // 'budget_time' | null. Set → the cycle is a resumable Pause, not a stop.
+    pause_reason: row.pause_reason || null,
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

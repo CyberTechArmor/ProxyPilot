@@ -132,13 +132,19 @@ export default function ProjectDetail() {
     return () => { cancelled = true; };
   }, [load, isAdmin]);
 
-  // Poll while provisioning OR while a background lifecycle job is in flight so
-  // the status + URL settle on their own (provisioning also covers rehydrate,
-  // which flips the row to 'provisioning' server-side).
+  // Keep the project row live so EVERY server-side transition surfaces on its own
+  // — no manual refresh. Fast (4s) while provisioning or a lifecycle job is in
+  // flight (status + URL are actively changing); gentler (6s) while the project
+  // is simply active, which is what makes the stage switches automatic: design
+  // approval unlocking Build, a newly raised rule question, a framework-drift
+  // banner, or the container being idled to 'stopped' all reflect within seconds.
+  // A terminal/stopped/archived project changes only by user action, so we idle.
   useEffect(() => {
     if (gate !== 'enabled') return undefined;
-    if (project?.lifecycle !== 'provisioning' && !pendingJob) return undefined;
-    const t = setInterval(load, 4000);
+    const transitioning = project?.lifecycle === 'provisioning' || !!pendingJob;
+    const live = project?.lifecycle === 'active';
+    if (!transitioning && !live) return undefined;
+    const t = setInterval(load, transitioning ? 4000 : 6000);
     return () => clearInterval(t);
   }, [gate, project, pendingJob, load]);
 

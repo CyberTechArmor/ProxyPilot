@@ -29,6 +29,12 @@
 //   508 Run — deploy step: mock2_cycles.deploy_status (NULL/'deploying'/'serving'
 //            /'deploy_failed') — whether the built app was installed, migrated,
 //            built and started so the live URL serves it (Run phase) — additive
+//   509 M7 — mock2_projects.mockup_archived_id (preserve the mockup after
+//            approval so the design preview stays reachable) — additive
+//   510 M7 — mock2_projects.chat_typing_seconds (client-measured active-typing
+//            time counter for the Details time card) — additive
+//   511 Run — mock2_cycles.pause_reason (why a cycle soft-paused on a token/time
+//            budget: 'budget_tokens' | 'budget_time' — NULL otherwise) — additive
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -499,6 +505,22 @@ export const MOCK2_MIGRATIONS = [
     up: (d) => {
       d.exec(`
         ALTER TABLE mock2_projects ADD COLUMN chat_typing_seconds INTEGER NOT NULL DEFAULT 0;
+      `);
+    },
+  },
+  {
+    // Soft-pause reason. A build cycle that crosses a token or wall-clock budget
+    // is checkpointed and PAUSED (resumable) rather than failed — stored as an
+    // 'interrupted' status (an allowed value, so no CHECK-constraint rebuild)
+    // tagged with WHY it paused: 'budget_tokens' | 'budget_time'. NULL for every
+    // other interrupted cycle (a user stop_after_step / queue_after_step) and for
+    // every pre-existing row, so today's interrupt semantics are unchanged; the UI
+    // only offers one-click Resume when this reason is set. Additive.
+    version: 511,
+    name: 'mock2_cycle_pause_reason',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN pause_reason TEXT;
       `);
     },
   },

@@ -26,6 +26,9 @@
 //            unlock), design_inventory_seq (the change-record seq of the
 //            approval), current_mockup_id (the latest served mockup id, NULLed
 //            on approval when the mockup code is discarded) — all additive
+//   508 Run — deploy step: mock2_cycles.deploy_status (NULL/'deploying'/'serving'
+//            /'deploy_failed') — whether the built app was installed, migrated,
+//            built and started so the live URL serves it (Run phase) — additive
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -449,6 +452,23 @@ export const MOCK2_MIGRATIONS = [
         ALTER TABLE mock2_projects ADD COLUMN design_approved_at TEXT;
         ALTER TABLE mock2_projects ADD COLUMN design_inventory_seq INTEGER;
         ALTER TABLE mock2_projects ADD COLUMN current_mockup_id TEXT;
+      `);
+    },
+  },
+  {
+    // Run phase — the deploy step. mock2_cycles already exists (block 502); the
+    // Run phase adds one column recording whether the built app was actually
+    // deployed and is serving on the live URL: NULL (no deploy — a placeholder
+    // project, or a cycle that never reached deploy), 'deploying', 'serving', or
+    // 'deploy_failed'. It is the input to the derived project statuses
+    // deploying/serving/deploy_failed (deriveProjectStatus / deploy-logic.js).
+    // Additive and NULL on every pre-existing row, so harmless on a disabled host
+    // that never ran it.
+    version: 508,
+    name: 'mock2_cycle_deploy_status',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN deploy_status TEXT;
       `);
     },
   },

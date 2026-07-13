@@ -1,0 +1,122 @@
+// Mock2 deploy step (Run phase) — the host/exec half. After a build cycle's
+// gates pass (or on rehydrate of an already-built project), this runs INSIDE the
+// fenced container, through host.js (R3 — never a raw exec): install deps →
+// migrate against the in-container Postgres (ADR-008) → build → rewrite the
+// mock2-dev.service ExecStart to the manifest `start` command → daemon-reload +
+// restart → verify the app is actually serving. "Succeeded" means "running": a
+// failure at any step is returned as a distinct, actionable result (deploy-logic
+// deployFailureMessage), never a silent success.
+//
+// The DECISIONS (run-contract parse, unit string, step plan) are the pure
+// deploy-logic.js; this module is the exec orchestration. It is always called by
+// a holder of the checkout lock (ADR-004 — the runner cycle, or the rehydrate
+// job that owns the container), so it does not take the lock itself.
+//
+// The install/migrate/build commands are run with the baked egress proxy env
+// sourced from /etc/environment (an ad-hoc `incus exec -- sh` does NOT get the
+// PAM-loaded environment, so npm would miss http_proxy and hang against the
+// fence) — do NOT punch the fence; if the registry is unreachable the deploy
+// fails loudly (ADR-010).
+//
+// Terminology (risk R7): nothing here is named "agent".
+
+import { sh, b64 } from './host.js';
+import {
+  parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
+  execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
+} from './deploy-logic.js';
+
+const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
+
+// Run a script inside the container (base64-streamed to `incus exec -- sh`, so
+// no quoting hazard). Always resolves { code, stdout, stderr }.
+function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
+  return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
+}
+
+// Run a deploy command in the app dir WITH the baked proxy env sourced. Sourcing
+// /etc/environment exports http_proxy/https_proxy so npm honors the fence's only
+// egress path; `set -a` makes the `KEY=VALUE` lines exported.
+function runInApp(containerName, appDir, command, timeoutMs) {
+  const script = `set -a\n. /etc/environment 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`;
+  return containerSh(containerName, script, { timeoutMs });
+}
+
+function tail(r) {
+  return `${r?.stdout || ''}${r?.stderr ? `\n${r.stderr}` : ''}`.trim().slice(-800);
+}
+
+// readRunContract(containerName, appDir) → parse the deployed app's mock2.yaml
+// run contract from the working tree (declared, not discovered — ADR-005).
+export async function readRunContract(containerName, appDir = '/srv/app') {
+  const r = await containerSh(containerName, `cat '${appDir}/mock2.yaml' 2>/dev/null`);
+  return parseRunContract(r.stdout || '');
+}
+
+// deployProject({ containerName, appDir, webPort, runContract, onStep }) →
+// { ok, step, error }. Runs the ordered plan, then swaps the unit and restarts,
+// then health-checks the web port. onStep(key, label) reports progress (wired to
+// setJob so the CycleCard shows "Installing dependencies…" etc.).
+export async function deployProject({
+  containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null,
+}) {
+  const contract = runContract && runContract.hasContract
+    ? runContract
+    : await readRunContract(containerName, appDir);
+
+  // No run contract (an old placeholder project) — nothing to deploy; the
+  // placeholder serve.py keeps serving. Not a failure.
+  if (!contract.hasContract) {
+    return { ok: true, skipped: true };
+  }
+
+  const report = (key) => { if (onStep) onStep(key, deployStepLabel(key)); };
+
+  // 1) install → migrate → build (each bounded, proxy env sourced).
+  for (const step of deployPlan(contract)) {
+    report(step.key);
+    const r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
+    if (r.code !== 0) {
+      return { ok: false, step: step.key, error: deployFailureMessage(step.key, tail(r)) };
+    }
+  }
+
+  // 2) Rewrite the systemd unit's ExecStart to the manifest `start` command,
+  //    reload, and restart. WantedBy=multi-user.target already persists, so a
+  //    later container restart brings the built app back (idempotency point 5).
+  report('start');
+  const execStart = execStartForStartCommand(contract.start, { appDir });
+  const unit = buildDevServiceUnit({ appDir, webPort, execStart });
+  const swap = await containerSh(
+    containerName,
+    `printf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\n`
+      + `systemctl daemon-reload\n`
+      + `systemctl enable mock2-dev.service >/dev/null 2>&1 || true\n`
+      + `systemctl restart mock2-dev.service\n`,
+    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
+  );
+  if (swap.code !== 0) {
+    return { ok: false, step: 'start', error: deployFailureMessage('start', tail(swap)) };
+  }
+
+  // 3) Health-check: the app must actually be serving on the declared web port
+  //    before we call the cycle "succeeded" ("succeeded" ⇒ running). Poll the
+  //    port a few times (the app needs a moment to bind).
+  report('health');
+  const health = await containerSh(
+    containerName,
+    `i=0\nwhile [ $i -lt 12 ]; do\n`
+      + `  if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null; then echo MOCK2_SERVING; exit 0; fi\n`
+      + `  i=$((i+1)); sleep 2\n`
+      + `done\n`
+      + `echo "MOCK2_NOT_SERVING"\n`
+      + `systemctl is-active mock2-dev.service 2>&1 || true\n`
+      + `journalctl -u mock2-dev.service --no-pager -n 20 2>/dev/null || true\n`,
+    { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },
+  );
+  if (!/MOCK2_SERVING/.test(health.stdout || '')) {
+    return { ok: false, step: 'health', error: deployFailureMessage('health', tail(health)) };
+  }
+
+  return { ok: true, step: 'serving' };
+}

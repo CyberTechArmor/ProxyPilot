@@ -1345,6 +1345,23 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged,
             {job?.message ? <p className="text-xs text-muted-foreground">{job.message}</p> : null}
             {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
 
+            {/* Run phase — the deploy step is running after the gates passed:
+                install → migrate → build → start the real app on the live URL. */}
+            {cycle.status === 'running' && cycle.deploy_status === 'deploying' ? (
+              <p className="text-xs text-cyan-500 flex items-start gap-1">
+                <Loader2 className="h-3.5 w-3.5 mt-0.5 shrink-0 animate-spin" />
+                Deploying the built app — installing dependencies, running migrations, and starting it on the live URL.
+              </p>
+            ) : null}
+            {/* A deploy that failed (install/migrate/build/start error, or egress
+                unreachable) — a distinct, retryable state, not a silent success. */}
+            {cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed' ? (
+              <p className="text-xs text-red-500 flex items-start gap-1">
+                <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                The change passed its gates but the app did not deploy. Fix the cause if it is code, then retry — the build resumes from the checkpoint.
+              </p>
+            ) : null}
+
             {/* M8 audit gate (ADR-002) — the build is blocked on a routed question. */}
             {cycle.status === 'awaiting_user' ? (
               <p className="text-xs text-violet-500 flex items-start gap-1">
@@ -1403,7 +1420,12 @@ function CycleCard({ projectId, canEdit, isAdmin, lifecycle, project, onChanged,
             ) : null}
 
             {cycle.status === 'succeeded' ? (
-              <p className="text-xs text-green-600 flex items-center gap-1"><ShieldCheck className="h-3.5 w-3.5" /> Gates green — change checkpointed into the repo.</p>
+              <p className="text-xs text-green-600 flex items-start gap-1">
+                <ShieldCheck className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                {cycle.deploy_status === 'serving'
+                  ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
+                  : 'Gates green — change checkpointed into the repo.'}
+              </p>
             ) : null}
           </div>
         ) : (

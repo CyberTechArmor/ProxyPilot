@@ -45,6 +45,8 @@ import { reconcileMock2Firewall } from './firewall.js';
 import { seedDefaultAllowlist } from './allowlist.js';
 import { reconcileMock2Egress, egressProxyReady, EGRESS_PROXY_PORT } from './egress.js';
 import { runPortDriftCheck } from './port-check.js';
+import { deployProject } from './deploy.js';
+import { projectHasBeenDeployed } from './cycles.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 // Base image for project containers. Overridable for hosts that mirror images
@@ -351,6 +353,18 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   await runPortDriftCheck({ ...project, container_name: containerName, web_port: declaredPort })
     .catch((e) => console.warn('[mock2] port-drift check failed:', e?.message));
 
+  // ---- Run-phase rehydrate idempotency (deploy the built app) ----
+  // The setup script just re-seeded the PLACEHOLDER serve.py unit; a rehydrated
+  // container has no node_modules/dist (gitignored) and lost the deploy-rewritten
+  // unit. If this project had been built and serving before archive, re-run the
+  // deploy step through the now-active fence so the REAL app comes back, not the
+  // placeholder (Run-phase idempotency). Only on rehydrate, and only if it was
+  // previously deployed; a Concept-stage project stays on the placeholder.
+  if (rehydrate) {
+    await redeployIfBuilt(project, { containerName, webPort: declaredPort })
+      .catch((e) => console.warn('[mock2] rehydrate re-deploy failed:', e?.message));
+  }
+
   // ---- Register the slug's FQDN block in the parent-domain Caddy file ----
   setStatus(projectId, { phase: 'caddy', message: 'Publishing route…' });
   const reload = await publishDomain(project.parent_domain_id);
@@ -377,6 +391,33 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 
   console.log(`[mock2] project ${projectId} ${rehydrate ? 'rehydrated' : 'provisioned'}: ${containerName} @ ${ip}:${declaredPort}`);
   scheduleCleanup(projectId);
+}
+
+// redeployIfBuilt — restore a previously-built app after a rehydrate rebuilds
+// the container from the repo. deployProject reads the run contract from the
+// working tree (declared, not discovered), installs deps + runs migrations
+// against the fresh in-container Postgres (ADR-008; dev data is disposable) +
+// builds + swaps the systemd unit to the app's start command + restarts. Runs
+// AFTER the fence so npm install exercises the same egress path a build does.
+// Best-effort: a failure leaves the container up on the placeholder and is
+// surfaced on the progress map — the operator can retry a build to redeploy.
+async function redeployIfBuilt(project, { containerName, webPort }) {
+  const projectId = Number(project.id);
+  let built = false;
+  try { built = projectHasBeenDeployed(projectId); } catch (e) { console.warn('[mock2] rehydrate deploy check failed:', e?.message); }
+  if (!built) return;
+  setStatus(projectId, { phase: 'deploy', message: 'Restoring the built app (install, migrate, build, start)…' });
+  const result = await deployProject({
+    containerName, appDir: APP_DIR, webPort,
+    onStep: (_key, label) => setStatus(projectId, { phase: 'deploy', message: label }),
+  });
+  if (!result.ok) {
+    setStatus(projectId, { phase: 'deploy', message: `Rehydrated on the placeholder — restoring the built app failed at "${result.step}": ${result.error}` });
+    console.warn(`[mock2] rehydrate re-deploy failed for ${projectId}: ${result.step} — ${result.error}`);
+  } else if (!result.skipped) {
+    setStatus(projectId, { phase: 'deploy', message: 'Built app restored — serving on the live URL.' });
+    console.log(`[mock2] project ${projectId} re-deployed on rehydrate`);
+  }
 }
 
 // ---- Rehydrate (M3): rebuild an archived project from the bare repo ----

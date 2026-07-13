@@ -101,6 +101,11 @@ export function deriveProjectStatus(project, ctx = {}) {
   const {
     editorCount = null, containerState = null,
     openEditorQuestions = 0, openAdminItems = 0, driftOpen = false,
+    // Run phase — the deploy signal from the project's latest cycle
+    // (deploy-logic.deployProjectStatus): 'deploying' | 'serving' |
+    // 'deploy_failed' | null. Derived from the cycle row, never a stored project
+    // flag, so this stays the single source of truth for the UI.
+    deployState = null,
   } = ctx;
   const lc = project.lifecycle;
 
@@ -118,6 +123,14 @@ export function deriveProjectStatus(project, ctx = {}) {
   // Zero editors ⇒ orphaned (ADR-007). Only meaningful for a live project.
   if (editorCount === 0) return 'orphaned';
 
+  // Run phase (deploy) — a build's gates passed but installing/migrating/
+  // building/starting the app on the live URL failed: a distinct, actionable
+  // state, never a silent success. Shown ahead of drift/liveness so the operator
+  // sees the deploy needs attention.
+  if (deployState === 'deploy_failed') return 'deploy_failed';
+  // A deploy in progress (install/migrate/build/restart running).
+  if (deployState === 'deploying') return 'deploying';
+
   // Framework moved since the last build (ADR-003) — an "update available"
   // condition surfaced as its own status. Non-blocking; remediation is
   // explicit-consent only.
@@ -125,13 +138,15 @@ export function deriveProjectStatus(project, ctx = {}) {
 
   if (lc === 'stopped') return 'stopped';
 
-  // lifecycle === 'active' — refine by container liveness when we know it.
+  // lifecycle === 'active' — refine by container liveness when we know it. A
+  // running container whose latest build deployed is 'serving' the real app;
+  // otherwise it is 'online' (placeholder / pre-build).
   if (containerState) {
     const s = String(containerState).toLowerCase();
-    if (s === 'running') return 'online';
+    if (s === 'running') return deployState === 'serving' ? 'serving' : 'online';
     if (s === 'stopped' || s === 'frozen') return 'idle';
   }
-  return 'online';
+  return deployState === 'serving' ? 'serving' : 'online';
 }
 
 // ---- archived read-only + idle-stop (M3) ----
@@ -181,10 +196,13 @@ export function publicProjectShape(project, extra = {}) {
     frameworkUpdateAvailable = false,
     frameworkCurrentVersion = null,
     frameworkLastBuiltVersion = null,
+    // Run phase — derived deploy signal (deploy-logic.deployProjectStatus of the
+    // latest cycle's deploy_status).
+    deployState = null,
   } = extra;
 
   const status = deriveProjectStatus(project, {
-    editorCount, containerState, openEditorQuestions, openAdminItems, driftOpen,
+    editorCount, containerState, openEditorQuestions, openAdminItems, driftOpen, deployState,
   });
   const host = project.custom_domain
     ? project.custom_domain
@@ -201,6 +219,9 @@ export function publicProjectShape(project, extra = {}) {
     url: host ? `https://${host}` : null,
     lifecycle: project.lifecycle,
     status,
+    // Run phase — the derived deploy signal, surfaced so the tile/detail can
+    // show "serving"/"deploying"/"deploy failed" without re-deriving.
+    deploy_state: deployState,
     flagged: Number(project.flagged) === 1,
     flagged_reason: project.flagged_reason || null,
     editor_count: editorCount,

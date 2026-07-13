@@ -1136,6 +1136,15 @@ else
                 rm -rf "${INSTALL_DIR}/proxypilot"
                 cp -r "${SCRIPT_DIR}/proxypilot" "${INSTALL_DIR}/"
             fi
+            # Operator scripts (scripts/mock2-enable-egress.sh, patch helpers) —
+            # deploy them to the install root so the `run scripts/…` guidance in
+            # logs/UI errors resolves on the host. Refresh so a re-run picks up
+            # fixes (e.g. the http_port sanitizer).
+            if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
+                rm -rf "${INSTALL_DIR}/scripts"
+                cp -r "${SCRIPT_DIR}/scripts" "${INSTALL_DIR}/"
+                chmod +x "${INSTALL_DIR}"/scripts/*.sh 2>/dev/null || true
+            fi
         fi
 
         # In-place migration of the deployed docker-compose.yml: the

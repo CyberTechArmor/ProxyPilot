@@ -222,6 +222,62 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
   return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin });
 }
 
+// retryDeploy — re-run ONLY the deploy (install → migrate → build → start →
+// health) for a cycle whose gates passed but whose DEPLOY failed (status
+// 'failed', deploy_status 'deploy_failed'). Much cheaper than retryCycle: no
+// model calls and no gate battery — it redeploys the existing checkpoint in the
+// container. Use it for a transient deploy failure, or after the cause is fixed
+// (e.g. the unit now sets NODE_OPTIONS so an unhandled rejection no longer
+// crash-loops the app). Fire-and-forget like startCycle; returns { status, cycle }.
+export async function retryDeploy({ project, cycle }) {
+  if (!cycle) return { status: 'error', error: 'No cycle to redeploy.' };
+  if (!(cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed')) {
+    return { status: 'error', error: 'This build has no failed deploy to retry.' };
+  }
+  const projectId = Number(project.id);
+  if (project.lifecycle !== 'active') {
+    return { status: 'error', error: 'Bring the project online to redeploy.' };
+  }
+  const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
+  if (!lock.ok) return { status: 'error', error: `Could not acquire the checkout lock: ${lock.reason}` };
+  const holder = { type: 'cycle', id: cycle.id };
+  const containerName = project.container_name || containerNameForProject(projectId);
+
+  // Reopen the finished cycle as running so the task list shows deploy progress.
+  updateCycle(cycle.id, { status: 'running', error: null, deploy_status: 'deploying' });
+  setJob(cycle.id, { phase: 'deploying', message: 'Retrying the deploy…', startedAt: Date.now() });
+
+  // Fire-and-forget; always lands terminal + releases the lock.
+  (async () => {
+    try {
+      const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+      if (!deployed.ok) {
+        finishCycle(cycle.id, { status: 'failed', error: deployed.error });
+        setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
+      } else {
+        finishCycle(cycle.id, { status: 'succeeded' });
+        updateProject(projectId, { last_activity_at: nowIso() });
+        setJob(cycle.id, {
+          phase: deployed.skipped ? 'succeeded' : 'serving',
+          message: deployed.skipped
+            ? 'Nothing to deploy — the placeholder is still serving.'
+            : 'Deployed — the app is live on its URL.',
+        });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });
+      }
+    } catch (err) {
+      finishCycle(cycle.id, { status: 'failed', error: `deploy retry crashed: ${err?.message || err}` });
+      setJob(cycle.id, { phase: 'deploy_failed', message: `deploy retry crashed: ${err?.message || err}` });
+    } finally {
+      releaseLock(projectId, holder);
+      scheduleJobCleanup(cycle.id);
+    }
+  })();
+
+  return { status: 'started', cycle: getCycle(cycle.id) };
+}
+
 // ---- the agentic loop ----
 
 async function runCycle({ cycle, project, containerName, framework, gateScripts, ready }) {

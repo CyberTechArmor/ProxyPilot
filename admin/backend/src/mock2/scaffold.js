@@ -143,6 +143,14 @@ import { config } from '../config.js';
 import * as schema from './schema.js';
 
 export const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
+// A pg Pool emits 'error' when an IDLE backend connection drops (Postgres
+// restart, network blip). With no listener Node treats it as an unhandled
+// 'error' event and crashes the process — so a transient DB blip would take the
+// whole dev server down. Log and keep serving instead.
+pool.on('error', (err) => {
+  // eslint-disable-next-line no-console
+  console.error('[db] idle pool client error (kept serving):', err.message);
+});
 export const db = drizzle(pool, { schema });
 export { schema };
 `;

@@ -1202,6 +1202,10 @@ export const api = {
     request(`/mock2/projects/${id}/cycles/${cycleId}/interrupt`, { method: 'POST', body: JSON.stringify({ action }) }),
   mock2RetryCycle: (id, cycleId) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST' }),
+  // Retry only the deploy (from the existing checkpoint) for a gates-passed cycle
+  // whose deploy failed — no model calls, no gate battery.
+  mock2RetryDeploy: (id, cycleId) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/retry-deploy`, { method: 'POST' }),
   mock2StopAllCycles: () => request('/mock2/cycles/stop-all', { method: 'POST' }),
   mock2GetLock: (id) => request(`/mock2/projects/${id}/lock`),
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),

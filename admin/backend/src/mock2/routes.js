@@ -92,7 +92,7 @@ import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt,
 } from './cycles.js';
@@ -1242,6 +1242,25 @@ export function createMock2Router() {
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });
+  });
+
+  // Retry the DEPLOY only (install → migrate → build → start → health) for a
+  // cycle whose gates passed but whose deploy failed. No model calls, no gate
+  // battery — redeploys the existing checkpoint. Cheaper than /retry.
+  router.post('/projects/:id/cycles/:cycleId/retry-deploy', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    let result;
+    try {
+      result = await retryDeploy({ project, cycle });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not retry the deploy: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_CYCLE_RETRY_DEPLOY', 'mock2_cycle', cycle.id,
+      { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(202).json({ cycle: publicCycleShape(result.cycle) });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets

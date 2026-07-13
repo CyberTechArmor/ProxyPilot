@@ -100,21 +100,29 @@ export async function deployProject({
 
   // 3) Health-check: the app must actually be serving on the declared web port
   //    before we call the cycle "succeeded" ("succeeded" ⇒ running). Poll the
-  //    port a few times (the app needs a moment to bind).
+  //    port a few times (the app needs a moment to bind). We accept ANY HTTP
+  //    response (no `-f`): a 404/500 means the server IS up and answering on the
+  //    port — that is "serving"; the app's own routes are the app's concern, not
+  //    the deploy's. Only a refused/failed CONNECTION means not serving.
   report('health');
   const health = await containerSh(
     containerName,
     `i=0\nwhile [ $i -lt 12 ]; do\n`
-      + `  if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null; then echo MOCK2_SERVING; exit 0; fi\n`
+      + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
+      + `  if [ -n "$code" ] && [ "$code" != "000" ]; then echo MOCK2_SERVING; exit 0; fi\n`
       + `  i=$((i+1)); sleep 2\n`
       + `done\n`
       + `echo "MOCK2_NOT_SERVING"\n`
-      + `systemctl is-active mock2-dev.service 2>&1 || true\n`
-      + `journalctl -u mock2-dev.service --no-pager -n 20 2>/dev/null || true\n`,
+      + `echo "# service state:"; systemctl is-active mock2-dev.service 2>&1 || true\n`
+      + `echo "# recent app output (this is the crash reason if it exits after starting):"\n`
+      + `journalctl -u mock2-dev.service --no-pager -n 60 2>/dev/null || true\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },
   );
   if (!/MOCK2_SERVING/.test(health.stdout || '')) {
-    return { ok: false, step: 'health', error: deployFailureMessage('health', tail(health)) };
+    // Give the crash log more room than the generic 800-char tail — the reason
+    // the app exits after "listening" is what the operator needs to see.
+    const detail = `${health?.stdout || ''}${health?.stderr ? `\n${health.stderr}` : ''}`.trim().slice(-2000);
+    return { ok: false, step: 'health', error: deployFailureMessage('health', detail) };
   }
 
   return { ok: true, step: 'serving' };

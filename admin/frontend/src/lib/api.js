@@ -1140,6 +1140,16 @@ export const api = {
   mock2RemoveEgressHost: (id, host) =>
     request(`/mock2/projects/${id}/egress-allowlist/${encodeURIComponent(host)}`, { method: 'DELETE' }),
 
+  // Mock2 egress policy mode (admin). 'allow-all' (monitor) opens every project
+  // bridge to any host but still logs via squid; 'allowlist' enforces per-project
+  // hosts. Changing it re-renders the squid ACL for all projects.
+  mock2GetEgressMode: () => request('/mock2/settings/egress-mode'),
+  mock2SetEgressMode: (mode) =>
+    request('/mock2/settings/egress-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
+  // Mock2 per-project egress traffic log (what the container actually reached, as
+  // squid saw it). Read-only, member-visible; pairs with monitor mode.
+  mock2GetEgressLog: (id, limit = 200) => request(`/mock2/projects/${id}/egress-log?limit=${limit}`),
+
   // ---- M5: model connectors, slots, prices ----
   mock2ListConnectors: () => request('/mock2/connectors'),
   mock2GetConnector: (id) => request(`/mock2/connectors/${id}`),

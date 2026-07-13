@@ -36,6 +36,24 @@ export function setMock2Setting(key, value, updatedBy = null) {
   return getMock2Setting(key);
 }
 
+// ---- Egress policy mode (M4/ADR-010 monitor mode) ----
+export const EGRESS_MODE_KEY = 'egress_mode';
+export const EGRESS_MODE_ALLOWLIST = 'allowlist';
+export const EGRESS_MODE_ALLOW_ALL = 'allow-all';
+
+// The egress policy mode:
+//   'allowlist' (default) — each project container may reach ONLY its
+//     per-project allowlisted hosts (the ADR-010 containment posture).
+//   'allow-all' (monitor) — the proxy permits EVERY destination for the project
+//     bridges, but egress is STILL funneled through squid (the bridge fence
+//     blocks any bypass), so squid's access log records every host each container
+//     reaches. Use it to discover what to allowlist, then switch back to enforce.
+// Precedence: stored setting → MOCK2_EGRESS_MODE env → 'allowlist'.
+export function getEgressMode() {
+  const raw = String(getMock2Setting(EGRESS_MODE_KEY, process.env.MOCK2_EGRESS_MODE || EGRESS_MODE_ALLOWLIST)).trim();
+  return raw === EGRESS_MODE_ALLOW_ALL ? EGRESS_MODE_ALLOW_ALL : EGRESS_MODE_ALLOWLIST;
+}
+
 // The configured idle-stop window in days. 0 (or an unparseable value) disables
 // idle-stop entirely. Precedence: stored setting → MOCK2_IDLE_STOP_DAYS env →
 // built-in default.

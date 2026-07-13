@@ -62,6 +62,8 @@ export default function ProjectDetail() {
   const [customDomain, setCustomDomain] = useState('');
   const [allowlist, setAllowlist] = useState(null); // null = not loaded; [] = empty
   const [newHost, setNewHost] = useState('');
+  const [egressMode, setEgressMode] = useState(null); // 'allowlist' | 'allow-all'
+  const [egressLog, setEgressLog] = useState(null);   // null = not loaded; [] = empty
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmBuild, setConfirmBuild] = useState(false);
@@ -109,7 +111,10 @@ export default function ProjectDetail() {
         setGate('enabled');
         load();
         loadAllowlist();
-        if (isAdmin) api.getUsers().then((r) => setUsers(r.users || r || [])).catch(() => {});
+        if (isAdmin) {
+          api.getUsers().then((r) => setUsers(r.users || r || [])).catch(() => {});
+          api.mock2GetEgressMode().then((r) => setEgressMode(r.mode)).catch(() => {});
+        }
       })
       .catch((err) => {
         if (!cancelled) setGate('disabled');
@@ -205,6 +210,36 @@ export default function ProjectDetail() {
       toast({ title: 'Host removed' });
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not remove host', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Egress mode is GLOBAL (all projects). 'allow-all' = monitor: reach any host,
+  // still logged through squid; 'allowlist' re-enforces the per-project lists.
+  const toggleEgressMode = async () => {
+    const next = egressMode === 'allow-all' ? 'allowlist' : 'allow-all';
+    setBusy(true);
+    try {
+      const res = await api.mock2SetEgressMode(next);
+      setEgressMode(res.mode);
+      toast({ title: res.mode === 'allow-all' ? 'Monitor mode on — all egress allowed and logged' : 'Allowlist enforced' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not change egress mode', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadEgressLog = async () => {
+    setBusy(true);
+    try {
+      const res = await api.mock2GetEgressLog(id, 200);
+      setEgressLog(res.entries || []);
+      if (res.mode) setEgressMode(res.mode);
+    } catch (err) {
+      setEgressLog([]);
+      toast({ variant: 'destructive', title: 'Could not load traffic log', description: err.message });
     } finally {
       setBusy(false);
     }
@@ -645,6 +680,26 @@ export default function ProjectDetail() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
+            {/* Global egress mode: allowlist (enforced) vs allow-all (monitor). */}
+            <div className="flex flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">
+                  Mode: {egressMode === 'allow-all' ? 'Allow all (monitor)' : 'Allowlist (enforced)'}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {egressMode === 'allow-all'
+                    ? 'Every project can reach any host; traffic is still routed through the proxy and logged. The list below is not enforced while monitoring.'
+                    : 'Only the hosts below are reachable. This setting applies to all projects.'}
+                </div>
+              </div>
+              <Button
+                variant="outline" size="sm" className="h-10 shrink-0"
+                disabled={busy || egressMode === null} onClick={toggleEgressMode}
+              >
+                {egressMode === 'allow-all' ? 'Enforce allowlist' : 'Allow all + log'}
+              </Button>
+            </div>
+
             <ul className="space-y-1.5">
               {allowlist.length === 0 ? (
                 <li className="text-sm text-muted-foreground">No hosts allowed — all egress is blocked.</li>
@@ -678,6 +733,35 @@ export default function ProjectDetail() {
                 </Button>
               </div>
             ) : null}
+
+            {/* Traffic log — what the container actually reached, as squid saw it. */}
+            <div className="space-y-2 border-t pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <Label>Traffic log</Label>
+                <Button variant="ghost" size="sm" className="h-9" disabled={busy} onClick={loadEgressLog}>
+                  {egressLog === null ? 'Load' : 'Refresh'}
+                </Button>
+              </div>
+              {egressLog === null ? (
+                <p className="text-xs text-muted-foreground">What this container reached through the proxy. Use with monitor mode to discover hosts to allow.</p>
+              ) : egressLog.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No traffic logged yet (or the squid access log isn’t available on this host).</p>
+              ) : (
+                <div className="max-h-64 overflow-auto rounded-md border">
+                  <ul className="divide-y text-xs">
+                    {egressLog.slice().reverse().map((e, i) => (
+                      <li key={i} className="flex items-center gap-2 px-2 py-1.5">
+                        <span className={`shrink-0 font-mono font-medium ${e.denied ? 'text-destructive' : 'text-emerald-600'}`}>
+                          {e.denied ? 'DENY' : 'OK'}
+                        </span>
+                        <span className="shrink-0 font-mono text-muted-foreground">{e.method}</span>
+                        <span className="min-w-0 break-all font-mono">{e.url}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
       ) : null}

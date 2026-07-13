@@ -34,8 +34,14 @@
 import { sh, b64 } from './host.js';
 import { listProjects } from './projects.js';
 import { allAllowlists } from './allowlist.js';
-import { buildEgressPlan, renderSquidAcl, EGRESS_PROXY_PORT } from './network-logic.js';
+import { buildEgressPlan, renderSquidAcl, subnetPrefixForCidr, parseEgressLog, EGRESS_PROXY_PORT } from './network-logic.js';
 import { configuredConnectorEgressHosts } from './connectors.js';
+import { getEgressMode, EGRESS_MODE_ALLOW_ALL } from './settings.js';
+
+// squid's native access log — every request each container makes flows through
+// squid, so this is the single source of truth for "what did projects reach".
+// Overridable for non-Debian squid layouts.
+const SQUID_ACCESS_LOG = process.env.MOCK2_EGRESS_ACCESS_LOG || '/var/log/squid/access.log';
 
 export { EGRESS_PROXY_PORT };
 
@@ -49,6 +55,37 @@ const SQUID_CONF_FILE = `${SQUID_CONF_DIR}/mock2.conf`;
 export async function egressProxyInstalled() {
   const r = await sh('command -v squid >/dev/null 2>&1 && echo yes || echo no', { timeoutMs: 8000 });
   return (r.stdout || '').trim() === 'yes';
+}
+
+// egressProxyReady() — on a host that does not NAT-forward the project bridges,
+// squid is the container's ONLY egress path (ADR-010), so a provision must not
+// depend on it without checking it is actually UP. `command -v squid` says the
+// binary exists; this says the daemon is running. Self-heals: if squid is
+// installed but down (a reboot/update that didn't restart it, a failed restart),
+// start it and re-check. Returns { ok, installed, detail }. When it still can't
+// come up, `detail` carries the host's `systemctl status squid` + `squid -k parse`
+// output so the caller surfaces the REAL reason (bad config, masked unit) instead
+// of the container's generic "Unable to connect to <gateway>:3128" a clone later.
+export async function egressProxyReady() {
+  const installed = await egressProxyInstalled();
+  if (!installed) return { ok: false, installed: false, detail: 'squid not installed (run scripts/mock2-enable-egress.sh)' };
+  // `squid -k check` signals a running instance: exit 0 = up, non-zero = down.
+  // Preferred over an `ss`/`netstat` port probe (not guaranteed on the host).
+  const running = async () => {
+    const r = await sh('squid -k check >/dev/null 2>&1 && echo yes || echo no', { timeoutMs: 8000 });
+    return (r.stdout || '').trim() === 'yes';
+  };
+  if (await running()) return { ok: true, installed: true };
+  // Installed but down — try to (re)start it (reload-or-restart starts a stopped
+  // unit), give it a moment to open its socket, then re-check.
+  await sh('systemctl reload-or-restart squid 2>&1 || systemctl restart squid 2>&1 || service squid restart 2>&1', { timeoutMs: 30000 });
+  await sh('sleep 1', { timeoutMs: 5000 }).catch(() => {});
+  if (await running()) return { ok: true, installed: true, detail: 'squid was down; started by provisioning' };
+  const diag = await sh(
+    '{ echo "# systemctl status squid"; systemctl status squid --no-pager 2>&1 | tail -n 12; echo "# squid -k parse"; squid -k parse 2>&1 | tail -n 12; } 2>&1',
+    { timeoutMs: 15000 },
+  );
+  return { ok: false, installed: true, detail: (diag.stdout || diag.stderr || '').trim().slice(-800) };
 }
 
 // writeSquidAcl(content) — write the drop-in on the host (base64-streamed so the
@@ -118,14 +155,29 @@ export async function reconcileMock2Egress() {
       }
     }
   }
-  const content = renderSquidAcl(plan);
+  const allowAll = getEgressMode() === EGRESS_MODE_ALLOW_ALL;
+  const content = renderSquidAcl(plan, { allowAll });
   const r = await writeSquidAcl(content);
   if (!r.ok && r.installed === false) {
     console.warn('[mock2] egress reconcile: squid not installed — bridge default-deny still blocks all egress');
   } else if (!r.ok) {
     console.error(`[mock2] egress reconcile: ${r.error}`);
   } else {
-    console.log(`[mock2] egress reconcile: allowlist ACLs for ${plan.length} project(s)`);
+    console.log(`[mock2] egress reconcile: ${allowAll ? 'allow-all (monitor)' : 'allowlist'} ACLs for ${plan.length} project(s)`);
   }
-  return r;
+  return { ...r, mode: allowAll ? EGRESS_MODE_ALLOW_ALL : 'allowlist' };
+}
+
+// readEgressLog(cidr, { limit }) — a project's recent egress as squid saw it.
+// Reads a bounded tail of the shared access log on the host and keeps only the
+// rows whose client IP is in the project's /24. Read-only + best-effort: a
+// missing/unreadable log (squid not logging, custom format, not installed)
+// returns an empty list rather than throwing, so the UI degrades gracefully.
+export async function readEgressLog(cidr, { limit = 200 } = {}) {
+  const prefix = subnetPrefixForCidr(cidr);
+  if (!prefix) return { ok: false, error: 'bad cidr', mode: getEgressMode(), entries: [] };
+  // tail a bounded window (the log can be huge) then let the pure parser filter.
+  const r = await sh(`tail -n 8000 ${SQUID_ACCESS_LOG} 2>/dev/null || true`, { timeoutMs: 10000 });
+  const entries = parseEgressLog(r.stdout || '', prefix, limit);
+  return { ok: true, mode: getEgressMode(), logPath: SQUID_ACCESS_LOG, entries };
 }

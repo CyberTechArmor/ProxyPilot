@@ -43,7 +43,7 @@ import {
 } from './network.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { seedDefaultAllowlist } from './allowlist.js';
-import { reconcileMock2Egress, egressProxyInstalled, EGRESS_PROXY_PORT } from './egress.js';
+import { reconcileMock2Egress, egressProxyReady, EGRESS_PROXY_PORT } from './egress.js';
 import { runPortDriftCheck } from './port-check.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
@@ -219,6 +219,21 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   }
   await reconcileMock2Egress().catch((e) => console.warn('[mock2] egress reconcile (provision) failed:', e?.message));
 
+  // ---- Egress-proxy preflight (fail fast + self-heal + real diagnostics) ----
+  // On this host model the project bridge is not NAT-forwarded, so squid is the
+  // container's ONLY way out. If squid is installed but DOWN, provisioning would
+  // otherwise launch, wait for network, then die deep in the clone with the
+  // opaque "Unable to connect to <gateway>:3128". Check it NOW: egressProxyReady()
+  // (re)starts a stopped squid and, when it truly can't come up, returns the
+  // host's squid status so the failure names the real cause here — before the
+  // expensive launch — instead of a generic connect timeout two minutes later.
+  // squid absent (proxyReady.installed === false) is NOT fatal: that's the plain
+  // host that NATs the bridge directly, handled by the bootstrap-egress branch.
+  const proxyReady = await egressProxyReady();
+  if (proxyReady.installed && !proxyReady.ok) {
+    return bail(`egress proxy (squid) is installed on the host but could not be started, so the project container has no way out — its bridge is not NAT-forwarded and squid is the only egress path (ADR-010). Host squid diagnostics:\n${proxyReady.detail || '(none)'}\nFix on the HOST: run scripts/mock2-enable-egress.sh, then check 'systemctl status squid' and 'squid -k parse'.`);
+  }
+
   // ---- Launch the container, NIC pinned to the project bridge ----
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
   const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}`, { timeoutMs: 300000 });
@@ -252,7 +267,9 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // so apt must not try a v6 route ("Network is unreachable"). buildProxyConfigScript
   // already sets ForceIPv4; the direct branch sets it standalone. The proxy is
   // baked into the container env for POST-fence runtime by the setup script.
-  const proxyUp = await egressProxyInstalled();
+  // squid verified UP by the preflight → route bootstrap through it; otherwise
+  // (squid not installed) fall to the direct-NAT path for a plain host.
+  const proxyUp = proxyReady.ok;
   const bootstrapEgress = proxyUp
     ? buildProxyConfigScript({
         proxyUrl: `http://${gateway}:${EGRESS_PROXY_PORT}`,
@@ -279,7 +296,7 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
     const noEgress = /unable to connect|could not resolve|network is unreachable|failed to fetch|cannot initiate the connection|temporary failure in name resolution/i.test(out);
     const hint = noEgress
       ? ` — the project container could not reach the package mirrors to install git. ${proxyUp
-          ? 'The egress proxy (squid) is installed but the container could not reach it, or squid itself has no route to the internet (a host that egresses via an upstream proxy needs squid configured with a cache_peer).'
+          ? `The egress proxy (squid) is confirmed running on the host, so the container reached it OR squid could not reach the mirror. Check: (1) the host firewall allows the m2br* bridge to the gateway on tcp/${EGRESS_PROXY_PORT} (DHCP worked, so input is likely open); (2) squid's allowlist includes the mirror (see /etc/squid/conf.d/mock2.conf); (3) if the host itself only reaches the internet via an upstream HTTP proxy, squid needs a cache_peer to that upstream — plain squid connects directly and will fail the same way the host's own outbound filter does.`
           : 'The egress proxy (squid) is NOT installed on this host and the container has no direct internet either.'} Fix on the HOST: run scripts/mock2-enable-egress.sh, or ensure the host provides NAT internet to the m2br* bridges. mock2 containers cannot provision or build without egress (ADR-010).`
       : '';
     return bail(`working clone failed: ${out.slice(-600)}${hint}`);

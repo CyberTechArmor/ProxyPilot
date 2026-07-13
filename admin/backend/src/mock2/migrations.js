@@ -472,4 +472,20 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Preserve the design mockup after approval. current_mockup_id is nulled on
+    // approval so the build-mode preview shows the working app, not the mockup —
+    // but we no longer physically discard the mockup HTML. This column records
+    // the id of the mockup that was archived so the design preview URL
+    // (/_preview/, served from the still-present state/mockups/current.html)
+    // stays reachable as a record of where the design started. Additive and NULL
+    // on every pre-existing row, so harmless on a disabled host that never ran it.
+    version: 509,
+    name: 'mock2_mockup_archived_id',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN mockup_archived_id TEXT;
+      `);
+    },
+  },
 ];

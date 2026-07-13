@@ -9,6 +9,11 @@ import { requireAdmin } from '../middleware/auth.js';
 import {
   listNotifications, unreadCount, markRead, markAllRead, dismiss,
 } from '../lib/notifications.js';
+import {
+  listChannelsPublic, getChannelPublic, upsertChannel, deleteChannel,
+} from '../lib/notification-channels.js';
+import { testChannel } from '../lib/notification-dispatch.js';
+import { CHANNEL_KINDS } from '../lib/notification-logic.js';
 
 export const notificationsRouter = Router();
 
@@ -61,4 +66,51 @@ notificationsRouter.delete('/:id', requireAdmin, (req, res) => {
   const ok = dismiss(req.params.id);
   if (!ok) return res.status(404).json({ error: 'notification not found' });
   res.json({ ok: true });
+});
+
+// ---- Out-of-band notification channels (SMTP + SMS) ----
+//
+// The admin-configurable "standard connections" that fan build-complete alerts
+// (and any future producer) beyond the in-app bell. All admin-gated. Secrets are
+// never returned — the public shape only reports whether one is stored.
+
+function assertKind(req, res) {
+  const kind = String(req.params.kind || '');
+  if (!CHANNEL_KINDS.includes(kind)) {
+    res.status(404).json({ error: `unknown channel kind ${JSON.stringify(kind)}` });
+    return null;
+  }
+  return kind;
+}
+
+notificationsRouter.get('/channels', requireAdmin, (_req, res) => {
+  res.json({ channels: listChannelsPublic() });
+});
+
+// Create/replace a channel's config. Body: { enabled, config, secret? }. Omitting
+// `secret` keeps the stored one; '' clears it. A save always clears the cached
+// test verdict (the new config must be re-tested).
+notificationsRouter.put('/channels/:kind', requireAdmin, (req, res) => {
+  const kind = assertKind(req, res);
+  if (!kind) return undefined;
+  const { enabled = false, config = {}, secret } = req.body || {};
+  const r = upsertChannel(kind, { enabled, config, secret });
+  if (!r.ok) return res.status(400).json({ error: r.error });
+  return res.json({ channel: r.channel });
+});
+
+notificationsRouter.delete('/channels/:kind', requireAdmin, (req, res) => {
+  const kind = assertKind(req, res);
+  if (!kind) return undefined;
+  deleteChannel(kind);
+  return res.json({ ok: true, channel: getChannelPublic(kind) });
+});
+
+// Send a live test through a channel and report the verdict (also cached on the
+// channel row so the list reflects it).
+notificationsRouter.post('/channels/:kind/test', requireAdmin, async (req, res) => {
+  const kind = assertKind(req, res);
+  if (!kind) return undefined;
+  const r = await testChannel(kind);
+  return res.json({ ok: !!r.ok, error: r.ok ? null : (r.error || 'test failed'), channel: getChannelPublic(kind) });
 });

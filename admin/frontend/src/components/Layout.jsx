@@ -223,6 +223,7 @@ export default function Layout() {
     { name: 'CVEs', href: '/cves', icon: BugPlay, adminOnly: true, badge: cveUnread },
     { name: 'Troubleshooting', href: '/troubleshooting', icon: LifeBuoy, adminOnly: true },
     { name: 'Housekeeping', href: '/housekeeping', icon: HardDrive, adminOnly: true },
+    { name: 'Notifications', href: '/notifications', icon: Bell, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
     ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true }] : []),

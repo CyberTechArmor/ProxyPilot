@@ -19,23 +19,10 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import {
-  Loader2, Send, ExternalLink, CheckCircle2, Sparkles, MessageSquare, Lock, HelpCircle,
-  ClipboardList,
+  Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList,
 } from 'lucide-react';
-
-// A rule_question body carries { question, choices } as JSON (M8, ADR-002).
-// Tolerant of a plain-text body (older rows).
-function parseRuleQuestion(body) {
-  try {
-    const j = JSON.parse(body);
-    if (j && typeof j === 'object' && !Array.isArray(j)) {
-      return { question: String(j.question || ''), choices: Array.isArray(j.choices) ? j.choices : [] };
-    }
-  } catch { /* plain text */ }
-  return { question: String(body || ''), choices: [] };
-}
+import { ChatBubble, RuleQuestion } from './chat-messages';
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
 
@@ -70,108 +57,7 @@ function StageIndicator({ stage }) {
   );
 }
 
-// A rule_question rendered in the chat: the plain-language question + tappable
-// choices (≥44px) and a free-text escape hatch (ADR-002). Editors answer; the
-// answer appends to state/rules.md and, when the last one is confirmed, Build
-// starts automatically. Answered questions read as a compact confirmation.
-function RuleQuestion({ m, open, canEdit, busy, onAnswer }) {
-  const { question, choices } = parseRuleQuestion(m.body);
-  const [free, setFree] = useState('');
-  if (!open) {
-    return (
-      <div className="flex justify-start">
-        <div className="max-w-[90%] rounded-xl border border-border bg-muted/40 px-3 py-2 text-sm">
-          <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> Rule confirmed
-          </p>
-          <p className="mt-1 text-foreground/80 break-words">{question}</p>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[92%] w-full rounded-xl border border-violet-500/30 bg-violet-500/5 px-3 py-2.5 space-y-2.5">
-        <p className="flex items-center gap-1.5 text-[11px] font-medium text-violet-500">
-          <HelpCircle className="h-3.5 w-3.5" /> Rule question — confirm to continue building
-        </p>
-        <p className="text-sm text-foreground break-words">{question}</p>
-        {canEdit ? (
-          <>
-            {choices.length ? (
-              <div className="flex flex-col gap-2">
-                {choices.map((c) => (
-                  <Button
-                    key={c} variant="outline" size="sm"
-                    className="h-11 justify-start whitespace-normal text-left"
-                    disabled={busy} onClick={() => onAnswer(m.question_id, c)}
-                  >
-                    {c}
-                  </Button>
-                ))}
-              </div>
-            ) : null}
-            <div className="flex items-end gap-2 pt-0.5">
-              <Input
-                className="h-11" placeholder="Or type your own answer…" value={free}
-                disabled={busy} onChange={(e) => setFree(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && free.trim()) { e.preventDefault(); onAnswer(m.question_id, free.trim()); } }}
-              />
-              <Button className="h-11 shrink-0" disabled={busy || !free.trim()} onClick={() => onAnswer(m.question_id, free.trim())}>
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirm'}
-              </Button>
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">An editor needs to confirm this rule.</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ChatBubble({ m }) {
-  if (m.kind === 'system') {
-    return (
-      <div className="flex justify-center">
-        <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
-          {m.body}
-        </p>
-      </div>
-    );
-  }
-  if (m.kind === 'rule_answer') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-emerald-500/15 text-foreground px-3 py-2 text-sm break-words">
-          <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600">
-            <CheckCircle2 className="h-3.5 w-3.5" /> Rule confirmed{m.acting_as_admin ? ' (admin)' : ''}
-          </span>
-          <span className="block mt-0.5 whitespace-pre-wrap">{m.body}</span>
-        </div>
-      </div>
-    );
-  }
-  const mine = m.kind === 'user';
-  return (
-    <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap break-words ${
-          mine ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm'
-        }`}
-      >
-        {m.body}
-        {m.acting_as_admin ? (
-          <span className={`block mt-1 text-[10px] ${mine ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
-            (admin)
-          </span>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged }) {
+export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged, archived = false }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
@@ -213,7 +99,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // durable signal that pulls us back in (it refreshes from the cycle's own poll)
   // so the questions appear here with their inline answer controls.
   const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
-  const shouldPoll = jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0;
+  // In the read-only Details archive nothing is live and nothing is editable —
+  // it's pure history of how the design was decided, no polling, no composer.
+  const editable = canEdit && !archived;
+  const shouldPoll = !archived && (jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0);
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);
@@ -221,6 +110,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   }, [shouldPoll, load]);
 
   const openIds = new Set(data?.open_question_ids || []);
+  // In the read-only Details archive, show only the design conversation — the
+  // part up to approval. The post-approval build/run chat lives in BuildChat.
+  // created_at + design_approved_at are both ISO from nowIso(), so a lexical
+  // compare is correct.
+  const approvedAt = project?.design_approved_at || null;
+  const shownMessages = (archived && approvedAt)
+    ? (data?.messages || []).filter((m) => !m.created_at || m.created_at < approvedAt)
+    : (data?.messages || []);
 
   const answerQuestion = async (questionId, answer) => {
     if (!questionId || !answer) return;
@@ -299,8 +196,15 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3 pt-6">
+        {/* Read-only archive header (Details tab, post-approval). */}
+        {archived ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+            <ClipboardList className="h-3.5 w-3.5" /> Design conversation — read-only history of how the design was decided.
+          </p>
+        ) : null}
+
         {/* Model-slot readiness (concept needs the concept_chat + mockup slots). */}
-        {data && !data.concept_ready && !approved ? (
+        {!archived && data && !data.concept_ready && !approved ? (
           <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 text-amber-600 text-sm shrink-0">
             <Lock className="h-4 w-4 mt-0.5 shrink-0" />
             <span>{data.concept_ready_reason || 'Concept model slots are not configured yet.'}</span>
@@ -309,7 +213,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
 
         {/* Plan vs Design — above the chat. Plan talks through the idea without
             touching the mockup; Design generates/iterates it. */}
-        {canEdit && !approved ? (
+        {editable && !approved ? (
           <div className="inline-flex self-start rounded-md border p-0.5 shrink-0" role="tablist" aria-label="Conversation mode">
             <button
               type="button" role="tab" aria-selected={mode === 'plan'} title="Plan — think through the idea without changing the mockup"
@@ -333,20 +237,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           ref={scrollRef}
           className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
         >
-          {(data?.messages || []).length === 0 ? (
+          {shownMessages.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">
-              {online
-                ? 'No messages yet. Tell the design partner what you want to build.'
-                : 'Bring the project online to start the conversation.'}
+              {archived
+                ? 'No design conversation was recorded.'
+                : online
+                  ? 'No messages yet. Tell the design partner what you want to build.'
+                  : 'Bring the project online to start the conversation.'}
             </p>
           ) : (
-            (data.messages || []).map((m) => (
+            shownMessages.map((m) => (
               m.kind === 'rule_question'
-                ? <RuleQuestion key={m.id} m={m} open={openIds.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={answerQuestion} />
+                ? <RuleQuestion key={m.id} m={m} open={openIds.has(m.question_id)} canEdit={editable} busy={answering} onAnswer={answerQuestion} />
                 : <ChatBubble key={m.id} m={m} />
             ))
           )}
-          {jobActive || auditActive ? (
+          {!archived && (jobActive || auditActive) ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               {data?.job?.message || auditJob?.message || 'Working…'}
@@ -355,7 +261,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
         </div>
 
         {/* Composer (editors, online, before approval) */}
-        {canEdit && !approved ? (
+        {editable && !approved ? (
           <div className="space-y-2 shrink-0">
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
@@ -377,7 +283,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               </Button>
             </div>
           </div>
-        ) : !canEdit && !approved ? (
+        ) : !canEdit && !approved && !archived ? (
           <p className="text-sm text-muted-foreground flex items-center gap-1 shrink-0">
             <Sparkles className="h-4 w-4" /> Viewers can follow the conversation; editors drive the design.
           </p>

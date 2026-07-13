@@ -1407,6 +1407,19 @@ export const api = {
   notificationsDismiss: (id) =>
     request(`/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  // Out-of-band notification channels (SMTP + SMS) — admin "standard
+  // connections" that fan alerts beyond the in-app bell. Secrets are write-only:
+  // the list never echoes them, so a save omits `secret` to keep the stored one.
+  notificationChannelsList: () => request('/notifications/channels'),
+  notificationChannelSave: (kind, { enabled, config, secret }) =>
+    request(`/notifications/channels/${encodeURIComponent(kind)}`, {
+      method: 'PUT', body: JSON.stringify({ enabled, config, secret }),
+    }),
+  notificationChannelDelete: (kind) =>
+    request(`/notifications/channels/${encodeURIComponent(kind)}`, { method: 'DELETE' }),
+  notificationChannelTest: (kind) =>
+    request(`/notifications/channels/${encodeURIComponent(kind)}/test`, { method: 'POST' }),
+
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');
     const formData = new FormData();

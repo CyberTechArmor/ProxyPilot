@@ -170,10 +170,15 @@ async function readWorkingFile(containerName, relPath) {
   return { ok: true, content: r.stdout || '' };
 }
 
-// Discard the mockup code on approval: remove the served + history HTML, keep the
-// dir (via .gitkeep) so the preview path and the repo layout survive.
-async function discardMockups(containerName) {
-  const script = `cd "${APP_DIR}/state/mockups" 2>/dev/null || exit 0; rm -f ./*.html 2>/dev/null; echo ok`;
+// Archive the mockup on approval: KEEP the served current.html so the design
+// preview at /_preview/ still resolves (this is where the design started, and we
+// want everyone to be able to revisit it), but prune the per-id history files so
+// the dir doesn't grow unbounded. The dir + current.html stay committed in the
+// repo, so the archived mockup survives rehydrate and the post-build app (its
+// scaffold serves /_preview from state/mockups too).
+async function archiveMockups(containerName) {
+  const script = `cd "${APP_DIR}/state/mockups" 2>/dev/null || exit 0; `
+    + `for f in ./*.html; do [ "$f" = "./current.html" ] || rm -f "$f"; done 2>/dev/null; echo ok`;
   return containerSh(containerName, script);
 }
 
@@ -421,9 +426,12 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   }
   const counts = inventoryCounts(parsed.inventory);
 
-  // 2) Write state/inventory.json (the concept-stage exit artifact) and DISCARD
-  //    the mockup code (the inventory, not the mockup, is the UI spec).
-  setJob(projectId, { phase: 'approving', message: 'Writing inventory and discarding the mockup…', kind: 'approval', cycleId: cycle.id });
+  // 2) Write state/inventory.json (the concept-stage exit artifact) and ARCHIVE
+  //    the mockup code — the inventory is the UI spec the build works from, but
+  //    the mockup itself is preserved at /_preview/ as a record of where the
+  //    design started.
+  const archivedMockupId = project.current_mockup_id || null;
+  setJob(projectId, { phase: 'approving', message: 'Writing inventory and archiving the mockup…', kind: 'approval', cycleId: cycle.id });
   const invJson = JSON.stringify({ ...parsed.inventory, approved_at: nowIso(), approved_by: user.id }, null, 2);
   const wInv = await writeWorkingFile(containerName, INVENTORY_PATH, invJson);
   if (!wInv.ok) {
@@ -432,11 +440,11 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     setJob(projectId, { phase: 'failed', message: wInv.error });
     return scheduleJobCleanup(projectId);
   }
-  await discardMockups(containerName);
+  await archiveMockups(containerName);
   touchLock(projectId, holder);
 
   // 3) Commit the checkpoint and read its sha.
-  const summary = `Design approved — inventory extracted (${counts.screens} screen${counts.screens === 1 ? '' : 's'}, ${counts.fields} field${counts.fields === 1 ? '' : 's'}, ${counts.actions} action${counts.actions === 1 ? '' : 's'}); mockup discarded.`;
+  const summary = `Design approved — inventory extracted (${counts.screens} screen${counts.screens === 1 ? '' : 's'}, ${counts.fields} field${counts.fields === 1 ? '' : 's'}, ${counts.actions} action${counts.actions === 1 ? '' : 's'}); mockup archived at the design preview.`;
   const sha = await checkpoint(containerName, `mock2: ${summary}`);
 
   // 4) The hash-chained change record (sign-off #1). The chain must keep verifying.
@@ -461,18 +469,22 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   }
   await maybePushRemote(projectId);
 
-  // 6) Stamp the sign-off, discard the served mockup pointer, unlock Build, and
-  //    RELEASE the human lock (approval ends the concept editing session).
+  // 6) Stamp the sign-off, clear the LIVE mockup pointer (so the build-mode
+  //    preview shows the working app, not the mockup) while recording the
+  //    archived mockup id (so /_preview/ stays reachable as the design record),
+  //    unlock Build, and RELEASE the human lock (approval ends the concept
+  //    editing session).
   updateProject(projectId, {
     design_approved_at: nowIso(),
     design_inventory_seq: record ? record.seq : null,
     current_mockup_id: null,
+    mockup_archived_id: archivedMockupId,
     last_activity_at: nowIso(),
   });
   finishCycle(cycle.id, { status: 'succeeded' });
   releaseLock(projectId, holder);
 
-  insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approved — the design inventory (${counts.screens} screen${counts.screens === 1 ? '' : 's'}) is saved to the repository and Build is now unlocked. The mockup has served its purpose and has been discarded.` });
+  insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approved — the design inventory (${counts.screens} screen${counts.screens === 1 ? '' : 's'}) is saved to the repository and Build is now unlocked. The original mockup is archived at the design preview so you can always see where the design started.` });
   setJob(projectId, { phase: 'approved', message: 'Design approved — Build unlocked.', kind: 'approval', cycleId: cycle.id, changeSeq: record?.seq || null });
   console.log(`[mock2] project ${projectId} design approved (inventory ${counts.screens} screens, change record ${record?.seq ?? '—'})`);
   scheduleJobCleanup(projectId);

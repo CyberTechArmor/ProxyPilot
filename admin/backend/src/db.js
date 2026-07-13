@@ -1322,6 +1322,27 @@ export function initDatabase() {
       ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   });
 
+  // Notification channels — the admin-configurable "standard connections" that
+  // fan a notification out beyond the in-app bell: an SMTP email channel and a
+  // provider-agnostic SMS-over-HTTP channel. One row per kind. The secret (SMTP
+  // password / SMS auth token) is stored encrypted at rest (lib/secrets.js);
+  // config_json holds only non-secret settings. test_status caches the last
+  // send-a-test verdict for the admin UI.
+  runMigration(db, 301, 'notification_channels', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        kind        TEXT PRIMARY KEY CHECK(kind IN ('smtp', 'sms')),
+        enabled     INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT,
+        secret_enc  TEXT,
+        test_status TEXT CHECK(test_status IN ('ok', 'fail') OR test_status IS NULL),
+        test_error  TEXT,
+        test_at     TEXT,
+        updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  });
+
   // Cert mounts — TLS cert bind-mount intent. ProxyPilot stores intent
   // only; Incus owns the live device. Same source-of-truth split as
   // service_l4_forwards: lib/cert-mount-reconciler reads this table on

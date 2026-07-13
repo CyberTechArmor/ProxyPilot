@@ -104,6 +104,7 @@ import {
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain } from './change-records.js';
+import { listCycleEvents, listProjectCycleEvents } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages } from './chats.js';
 import {
@@ -1382,6 +1383,43 @@ export function createMock2Router() {
       };
     });
     res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
+  });
+
+  // ---- Build log (downloadable transcript — "what actually happened") ----
+
+  // One cycle's full transcript: the cycle row, its change record (if it
+  // checkpointed), the chat messages tied to it (the user request + framework
+  // rule questions/answers + system events), and the durable event log (every AI
+  // message, tool call/result, gate, checkpoint, deploy). Assembled for review /
+  // download so a Builder can evaluate how a build went. Viewer-gated.
+  router.get('/projects/:id/cycles/:cycleId/log', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const cid = Number(cycle.id);
+    const record = listChangeRecords(req.mock2Project.id).find((r) => Number(r.cycle_id) === cid) || null;
+    const messages = listMessages(req.mock2Project.id).map(publicChatMessageShape).filter((m) => Number(m.cycle_id) === cid);
+    res.json({
+      project: { id: req.mock2Project.id, name: req.mock2Project.name },
+      cycle: publicCycleShape(cycle),
+      change_record: record ? { seq: record.seq, commit_sha: record.commit_sha, summary: record.summary } : null,
+      messages,
+      events: listCycleEvents(cid),
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  // The whole project's build log — every cycle's events + every chat message +
+  // every change record, in one downloadable document, for end-to-end evaluation.
+  router.get('/projects/:id/log', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    res.json({
+      project: { id: pid, name: req.mock2Project.name },
+      cycles: listCyclesForProject(pid, { limit: 1000 }).map(publicCycleShape),
+      change_records: listChangeRecords(pid).map((r) => ({ seq: r.seq, cycle_id: r.cycle_id, commit_sha: r.commit_sha, summary: r.summary, created_at: r.created_at })),
+      messages: listMessages(pid).map(publicChatMessageShape),
+      events: listProjectCycleEvents(pid),
+      generated_at: new Date().toISOString(),
+    });
   });
 
   // ============================================================

@@ -39,7 +39,7 @@ import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
 import {
   insertQuestion, getQuestion, answerQuestion, dismissQuestion,
-  countOpenEditorQuestions, countOpenAdminQuestions,
+  countOpenEditorQuestions, countOpenAdminQuestions, listQuestionsForCycle,
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
@@ -50,6 +50,7 @@ import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
   isFrameworkDrifted, driftLabel, estimateAuditTokens,
+  buildAdminDecisionsBlock, markDeviationDecision,
 } from './audit-logic.js';
 
 const APP_DIR = '/srv/app';
@@ -346,13 +347,18 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '' }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
+  // Carry the admin's deviation decisions INTO the build instruction (so they
+  // persist on the cycle and survive a resume) — the runner honors an approved
+  // exception as an override of the constitution. Without this the runner never
+  // learns the admin approved the deviation and silently builds nothing.
+  const fullInstruction = adminDecisions ? `${instruction}\n\n${adminDecisions}` : instruction;
   let result;
   try {
-    result = await startCycle({ project: getProject(projectId), instruction, initiatedBy, actingAsAdmin });
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };
@@ -459,11 +465,15 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   const framework = getCurrentFrameworkVersion();
   const project = getProject(projectId);
   if (!framework || !project) return false;
+  // Fold the admin's decisions on this build's framework deviations into the
+  // runner's task so an APPROVED deviation is actually implemented (it overrides
+  // the constitution) and a DENIED one is skipped.
+  const adminDecisions = auditCycle ? buildAdminDecisionsBlock(listQuestionsForCycle(auditCycle.id)) : '';
   insertMessage({ projectId, kind: 'system', cycleId: auditCycle?.id || null, body: 'All rules confirmed — starting the build.' });
   setJob(projectId, { phase: 'building', message: 'Rules confirmed — starting the build.', cycleId: auditCycle?.id || null });
   await proceedToBuild({
     project, instruction: auditCycle?.instruction || 'Build the app from the approved inventory and confirmed rules.',
-    initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework,
+    initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework, adminDecisions,
   });
   scheduleJobCleanup(projectId);
   return true;
@@ -476,11 +486,15 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
 // the framework — the admin either amends the framework via the registry or
 // accepts the deviation for this project), then resume the build if this was the
 // last blocker. Returns { resumed }.
-export async function resolveFrameworkDeviation({ questionId, user, resolution = null }) {
+export async function resolveFrameworkDeviation({ questionId, user, resolution = null, approved = false }) {
   const question = getQuestion(questionId);
   if (!question) return { resumed: false };
+  // Record the decision with an APPROVED/DENIED marker so the resume path can
+  // build the authoritative decisions block for the runner (an approved deviation
+  // overrides the constitution; a denied one is skipped). Marker-prefixed answer
+  // rather than a free-text note so the parse can't be fooled.
   if (question.status === 'open') {
-    dismissQuestion(question.id, { by: user?.id ?? null, answer: resolution });
+    dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(approved, resolution) });
   }
   const resumed = await maybeResumeBuild({ projectId: question.project_id, auditCycleId: question.cycle_id, actingAsAdmin: 1 });
   return { resumed };

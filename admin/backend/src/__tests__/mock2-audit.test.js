@@ -20,6 +20,7 @@ import {
   auditGateCleared, blockedBuildStatus,
   isFrameworkDrifted, driftLabel,
   publicQuestionShape, publicQueueItemShape, estimateAuditTokens,
+  markDeviationDecision, buildAdminDecisionsBlock,
 } from '../mock2/audit-logic.js';
 
 // ---- routing (ADR-002 — route by kind, never by convenience) ----
@@ -211,4 +212,33 @@ test('publicQueueItemShape: joins the project name, keeps status/resolution', ()
 test('estimateAuditTokens: a credible non-zero reservation', () => {
   const e = estimateAuditTokens();
   assert.ok(e.inputTokens > 0 && e.outputTokens > 0);
+});
+
+// ---- admin deviation decisions reach the runner (approved overrides constitution) ----
+
+test('markDeviationDecision: tags approve vs deny with a parseable marker', () => {
+  assert.equal(markDeviationDecision(true, 'ok from admin'), 'APPROVED: ok from admin');
+  assert.equal(markDeviationDecision(false, 'no'), 'DENIED: no');
+  assert.equal(markDeviationDecision(true), 'APPROVED');
+});
+
+test('buildAdminDecisionsBlock: approved deviations become MUST-implement, denied become do-NOT', () => {
+  const questions = [
+    { route: 'editor', question: 'Which roles?', answer: 'Admin/Manager/Viewer' }, // ignored (not a deviation)
+    { route: 'admin', question: 'Force an LDAP login page (deviates from SSO+MFA)', answer: markDeviationDecision(true, 'approved from project') },
+    { route: 'admin', question: 'Auto-provision external users to admin', answer: markDeviationDecision(false) },
+    { route: 'admin', question: 'Still open deviation', answer: null }, // undecided → excluded
+  ];
+  const block = buildAdminDecisionsBlock(questions);
+  assert.match(block, /Administrator decisions on framework deviations/);
+  assert.match(block, /APPROVED — you MUST implement this.*LDAP login page/);
+  assert.match(block, /DENIED — do NOT implement this.*Auto-provision/);
+  assert.doesNotMatch(block, /Which roles/);        // editor answers are not deviations
+  assert.doesNotMatch(block, /Still open deviation/); // undecided is not included
+});
+
+test('buildAdminDecisionsBlock: no decided deviations → empty string (instruction unchanged)', () => {
+  assert.equal(buildAdminDecisionsBlock([]), '');
+  assert.equal(buildAdminDecisionsBlock([{ route: 'editor', question: 'x', answer: 'y' }]), '');
+  assert.equal(buildAdminDecisionsBlock([{ route: 'admin', question: 'x', answer: null }]), '');
 });

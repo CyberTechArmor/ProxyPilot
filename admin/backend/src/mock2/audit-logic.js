@@ -290,6 +290,46 @@ export function blockedBuildStatus({ openEditorQuestions = 0, openAdminItems = 0
   return null;
 }
 
+// The marker prefix an admin decision writes into a deviation question's answer,
+// so the resume path can tell an approval from a denial reliably (not by parsing
+// free-text resolution notes).
+export const DEVIATION_APPROVED = 'APPROVED';
+export const DEVIATION_DENIED = 'DENIED';
+export function markDeviationDecision(approved, resolution = '') {
+  return `${approved ? DEVIATION_APPROVED : DEVIATION_DENIED}${resolution ? `: ${resolution}` : ''}`;
+}
+
+// buildAdminDecisionsBlock — the AUTHORITATIVE block the runner is handed once an
+// admin has decided the framework deviations for a build. An APPROVED deviation
+// OVERRIDES the pinned constitution for this project and MUST be implemented (this
+// is the whole point of the admin gate — a human signed off on the exception); a
+// DENIED one must not be built. Without this the runner never learns the admin
+// approved anything and keeps obeying the constitution, so the requested change
+// (e.g. a login page) is silently never built. Pure; unit-tested. `questions` are
+// the audit cycle's rows (route + question + answer). Returns '' when there are no
+// decided deviations.
+export function buildAdminDecisionsBlock(questions = []) {
+  const decided = (questions || [])
+    .filter((q) => q && q.route === 'admin')
+    .map((q) => {
+      const ans = String(q.answer || '').trim();
+      const approved = ans.toUpperCase().startsWith(DEVIATION_APPROVED);
+      const denied = ans.toUpperCase().startsWith(DEVIATION_DENIED);
+      return { text: String(q.question || '').trim(), approved, denied };
+    })
+    .filter((d) => d.text && (d.approved || d.denied));
+  if (!decided.length) return '';
+  const lines = decided.map((d) => (d.approved
+    ? `- APPROVED — you MUST implement this even though it deviates from the constitution: ${d.text}`
+    : `- DENIED — do NOT implement this; build the compliant remainder instead: ${d.text}`));
+  return [
+    'Administrator decisions on framework deviations (AUTHORITATIVE for this project —',
+    'an administrator has signed these off. An APPROVED item OVERRIDES the pinned',
+    'constitution and MUST be built exactly as requested; a DENIED item must not be built):',
+    ...lines,
+  ].join('\n');
+}
+
 // ---- drift (ADR-003 — pinned-at-last-build vs current) ----
 
 // isFrameworkDrifted — has the framework moved since this project last built?

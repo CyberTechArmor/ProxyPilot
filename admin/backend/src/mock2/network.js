@@ -53,6 +53,49 @@ export async function createProjectBridge({ name, cidr }) {
   return { ok: false, error: out.trim().slice(-400) };
 }
 
+// ensureHostEgress() — make the host actually forward + NAT the mock2 bridges
+// out to the internet.
+//
+// Incus's ipv4.nat=true masquerades the bridge subnet, but two host-level things
+// must also be true for a container's packets to reach the internet, and neither
+// is guaranteed:
+//   1. IPv4 forwarding must be enabled (net.ipv4.ip_forward=1). Incus usually
+//      sets this, but a reboot / hardened sysctl can leave it off.
+//   2. When ProxyPilot runs in Docker, dockerd sets the filter FORWARD chain
+//      policy to DROP and only accepts its OWN bridges — so a non-Docker bridge
+//      like m2br* is dropped when it tries to route out (this is the classic
+//      "libvirt/incus bridge can't reach the internet on a Docker host"). Docker
+//      provides the DOCKER-USER chain, evaluated BEFORE its drop, specifically
+//      for user rules; an ACCEPT there for the m2br* interfaces lets them
+//      forward. It does not weaken Docker's isolation of its own containers.
+//
+// Previously egress went to a host-side proxy (squid) that the container reached
+// on the gateway (an INPUT to the host), so the FORWARD path never mattered.
+// Now that egress is direct NAT it does. Idempotent + best-effort: everything is
+// guarded (`-C` before `-I`, `|| true`) and a host without iptables/Docker just
+// gets the sysctl. Never throws.
+export async function ensureHostEgress() {
+  // 1) IPv4 forwarding (runtime + persist so a reboot keeps it).
+  await sh(
+    'sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; '
+    + "printf 'net.ipv4.ip_forward=1\\n' > /etc/sysctl.d/99-proxypilot-mock2.conf 2>/dev/null || true",
+    { timeoutMs: 8000 },
+  ).catch(() => {});
+
+  // 2) If Docker's FORWARD drop is in play, allow the m2br* bridges through the
+  //    DOCKER-USER hook. -i (traffic FROM a bridge, i.e. egress) is the one that
+  //    matters; -o (return path) is added for completeness. Idempotent.
+  const dockerUser = `
+    if command -v iptables >/dev/null 2>&1 && iptables -t filter -L DOCKER-USER >/dev/null 2>&1; then
+      iptables -C DOCKER-USER -i m2br+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i m2br+ -j ACCEPT
+      iptables -C DOCKER-USER -o m2br+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o m2br+ -j ACCEPT
+      echo docker-user-applied
+    fi
+  `;
+  const r = await sh(dockerUser, { timeoutMs: 12000 }).catch(() => ({ stdout: '' }));
+  return { ok: true, dockerUser: /docker-user-applied/.test(r.stdout || '') };
+}
+
 // deleteProjectBridge — tear the bridge down (archive + delete). Tolerant: a
 // missing bridge is success. The container MUST be gone first (Incus refuses to
 // delete a network with instances attached) — the callers destroy it before

@@ -42,6 +42,7 @@ import { dirname } from 'path';
 import { sh, runHost } from './host.js';
 import { listProjects } from './projects.js';
 import { buildFenceEntries, renderMock2Nft } from './network-logic.js';
+import { ensureHostEgress } from './network.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 const FIREWALL_STATE_FILE = `${MOCK2_DATA_DIR}/firewall.json`;
@@ -90,6 +91,12 @@ export async function reconcileMock2Firewall() {
     console.error('[mock2] firewall reconcile: could not read projects:', err?.message);
     return { ok: false, error: err?.message };
   }
+  // Ensure the host forwards + NATs the bridges out (IPv4 forwarding + the
+  // DOCKER-USER allowance on a Docker host). Self-heals a host that lost the
+  // sysctl on reboot or never had the Docker rule. Best-effort, independent of
+  // the nft apply below.
+  await ensureHostEgress().catch((e) => console.warn('[mock2] ensureHostEgress (reconcile) failed:', e?.message));
+
   const entries = buildFenceEntries(projects);
   const ruleset = renderMock2Nft(entries);
   const applied = await applyMock2Nft(ruleset, { hasEntries: entries.length > 0 });

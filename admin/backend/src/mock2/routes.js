@@ -287,7 +287,7 @@ const lockIdleSchema = z.object({
 });
 // ---- M7 Zod schemas ----
 const chatMessageSchema = z.object({
-  message: z.string().trim().min(1).max(4000),
+  message: z.string().trim().min(1).max(16000),
   // Conversation mode (M7): 'plan' talks through requirements without touching
   // the mockup; 'design' (default) may generate/iterate the mockup.
   mode: z.enum(['plan', 'design']).optional(),
@@ -1365,7 +1365,7 @@ export function createMock2Router() {
   router.post('/projects/:id/chat', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
     const parsed = chatMessageSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'message is required (1–4000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: 'message is required (1–16000 chars)' });
     let result;
     try {
       result = await startConceptTurn({

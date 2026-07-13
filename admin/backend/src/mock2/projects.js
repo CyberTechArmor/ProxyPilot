@@ -135,6 +135,15 @@ export function updateProject(id, patch = {}) {
   return getProject(id);
 }
 
+// Accumulate active-typing seconds (time tracking). Clamped to a sane per-call
+// max so a bad client can't inject huge values. Best-effort; returns the new total.
+export function addTypingSeconds(id, seconds) {
+  const s = Math.max(0, Math.min(3600, Math.floor(Number(seconds) || 0)));
+  if (s === 0) return null;
+  getMock2Db().prepare('UPDATE mock2_projects SET chat_typing_seconds = chat_typing_seconds + ? WHERE id = ?').run(s, id);
+  return getProject(id)?.chat_typing_seconds ?? null;
+}
+
 // Hard-delete a project and its membership + slug-history reservations are NOT
 // removed: history rows must survive so the slug stays un-reusable (ADR-006).
 // Only the project + its members go. (Archive, not delete, is the normal

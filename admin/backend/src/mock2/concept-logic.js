@@ -304,6 +304,144 @@ export function inventoryCounts(inventory) {
   return { screens: screens.length, fields, actions };
 }
 
+// ---- design tokens (carry the approved mockup's look into the build) ----
+//
+// The inventory captures WHAT the app does (screens/fields/actions); these tokens
+// capture how it LOOKS. On approval we extract the mockup's design tokens and
+// render a concrete stylesheet so the build runner reproduces the approved look
+// instead of re-styling from generic defaults. Both are written to state/ and
+// committed, alongside inventory.json.
+export const DESIGN_TOKENS_PATH = 'state/design-tokens.json';
+export const DESIGN_CSS_PATH = 'state/design.css';
+
+export function buildDesignTokenExtractionPrompt() {
+  return `You extract the DESIGN TOKENS from an approved product mockup so the built app
+can reproduce its exact look — colors, typography, spacing, corner radius,
+shadows. Read the mockup's CSS and rendered styling, not just its structure.
+
+Output ONLY a JSON object (no markdown, no code fences, no commentary) with this shape:
+
+{
+  "colors": {
+    "background": "#RRGGBB", "surface": "#RRGGBB", "text": "#RRGGBB",
+    "muted": "#RRGGBB", "border": "#RRGGBB", "primary": "#RRGGBB",
+    "primaryText": "#RRGGBB", "accent": "#RRGGBB", "danger": "#RRGGBB", "success": "#RRGGBB"
+  },
+  "typography": { "fontFamily": "a CSS font stack", "headingFamily": "a CSS font stack", "baseSize": "16px" },
+  "radius": { "sm": "6px", "md": "10px", "lg": "16px" },
+  "spacing": { "unit": "8px" },
+  "shadow": { "card": "a CSS box-shadow value" }
+}
+
+Rules:
+- Every color is a #RRGGBB hex. Read the ACTUAL values from the mockup's CSS; if a
+  value isn't present, pick the closest sensible token consistent with the rest.
+- Sizes are a number + a CSS unit (px/rem). Font families are valid CSS font stacks.
+- Return the JSON object only.`;
+}
+
+export function buildDesignTokenExtractionTask({ html = '', projectName = 'the app' } = {}) {
+  return `Project: ${projectName}\n\nApproved mockup HTML (with its styling):\n\n${html}\n\nExtract the design tokens as the JSON object described.`;
+}
+
+// Sanitisers so a model-authored token can never inject arbitrary CSS into the
+// generated stylesheet. Anything that fails validation falls back to a default.
+const HEX = /^#[0-9a-fA-F]{6}$/;
+function safeHex(v, fallback) { const s = String(v || '').trim(); return HEX.test(s) ? s.toLowerCase() : fallback; }
+function safeSize(v, fallback) { const s = String(v || '').trim(); return /^-?\d{1,4}(\.\d{1,3})?(px|rem|em|%)$/.test(s) ? s : fallback; }
+function safeFont(v, fallback) { const s = String(v || '').trim(); return /^[a-zA-Z0-9 ,"'\-]{1,120}$/.test(s) ? s : fallback; }
+function safeShadow(v, fallback) { const s = String(v || '').trim(); return /^[a-zA-Z0-9 ,.()#%\-]{1,120}$/.test(s) ? s : fallback; }
+
+const DEFAULT_TOKENS = Object.freeze({
+  colors: {
+    background: '#ffffff', surface: '#f8fafc', text: '#0f172a', muted: '#64748b',
+    border: '#e2e8f0', primary: '#4f46e5', primaryText: '#ffffff', accent: '#6366f1',
+    danger: '#dc2626', success: '#16a34a',
+  },
+  typography: { fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', headingFamily: 'system-ui, sans-serif', baseSize: '16px' },
+  radius: { sm: '6px', md: '10px', lg: '16px' },
+  spacing: { unit: '8px' },
+  shadow: { card: '0 1px 3px rgba(0,0,0,0.1)' },
+});
+
+// parseDesignTokens — parse + sanitise the extractor's output. Tolerant of fences
+// / prose; always returns a complete, safe token set (defaults fill any gap), so
+// renderDesignTokensCss can never fail. { ok, tokens, error }.
+export function parseDesignTokens(text) {
+  let s = String(text || '').trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1]) s = fence[1].trim();
+  else { const a = s.indexOf('{'); const b = s.lastIndexOf('}'); if (a >= 0 && b > a) s = s.slice(a, b + 1); }
+  let doc = null;
+  try { doc = JSON.parse(s); } catch { doc = null; }
+  const d = DEFAULT_TOKENS;
+  const c = (doc && typeof doc === 'object' && doc.colors) || {};
+  const t = (doc && typeof doc === 'object' && doc.typography) || {};
+  const r = (doc && typeof doc === 'object' && doc.radius) || {};
+  const sp = (doc && typeof doc === 'object' && doc.spacing) || {};
+  const sh = (doc && typeof doc === 'object' && doc.shadow) || {};
+  const tokens = {
+    colors: {
+      background: safeHex(c.background, d.colors.background),
+      surface: safeHex(c.surface, d.colors.surface),
+      text: safeHex(c.text, d.colors.text),
+      muted: safeHex(c.muted, d.colors.muted),
+      border: safeHex(c.border, d.colors.border),
+      primary: safeHex(c.primary, d.colors.primary),
+      primaryText: safeHex(c.primaryText, d.colors.primaryText),
+      accent: safeHex(c.accent, d.colors.accent),
+      danger: safeHex(c.danger, d.colors.danger),
+      success: safeHex(c.success, d.colors.success),
+    },
+    typography: {
+      fontFamily: safeFont(t.fontFamily, d.typography.fontFamily),
+      headingFamily: safeFont(t.headingFamily, d.typography.headingFamily),
+      baseSize: safeSize(t.baseSize, d.typography.baseSize),
+    },
+    radius: { sm: safeSize(r.sm, d.radius.sm), md: safeSize(r.md, d.radius.md), lg: safeSize(r.lg, d.radius.lg) },
+    spacing: { unit: safeSize(sp.unit, d.spacing.unit) },
+    shadow: { card: safeShadow(sh.card, d.shadow.card) },
+  };
+  return { ok: !!doc, tokens, error: doc ? null : 'design tokens were not valid JSON — using defaults' };
+}
+
+// renderDesignTokensCss — a concrete stylesheet (CSS variables + base element +
+// component styles) built from the tokens. The runner imports/serves this so the
+// app matches the approved mockup. Pure + safe (values pre-sanitised).
+export function renderDesignTokensCss(tokens = DEFAULT_TOKENS) {
+  const c = tokens.colors; const t = tokens.typography; const r = tokens.radius; const sh = tokens.shadow;
+  return `/* Generated from the approved mockup on design approval. The built app MUST
+   reproduce this look — these are the design tokens the mockup used. */
+:root {
+  --app-bg: ${c.background};
+  --app-surface: ${c.surface};
+  --app-text: ${c.text};
+  --app-muted: ${c.muted};
+  --app-border: ${c.border};
+  --app-primary: ${c.primary};
+  --app-primary-text: ${c.primaryText};
+  --app-accent: ${c.accent};
+  --app-danger: ${c.danger};
+  --app-success: ${c.success};
+  --app-font: ${t.fontFamily};
+  --app-heading-font: ${t.headingFamily};
+  --app-base-size: ${t.baseSize};
+  --app-radius-sm: ${r.sm};
+  --app-radius-md: ${r.md};
+  --app-radius-lg: ${r.lg};
+  --app-shadow-card: ${sh.card};
+}
+body { background: var(--app-bg); color: var(--app-text); font-family: var(--app-font); font-size: var(--app-base-size); }
+h1, h2, h3, h4 { font-family: var(--app-heading-font); color: var(--app-text); }
+a { color: var(--app-primary); }
+button, .btn, [type="submit"] { background: var(--app-primary); color: var(--app-primary-text); border: 0; border-radius: var(--app-radius-md); padding: 0.6em 1em; cursor: pointer; }
+button.secondary, .btn-secondary { background: var(--app-surface); color: var(--app-text); border: 1px solid var(--app-border); }
+.card, .panel { background: var(--app-surface); border: 1px solid var(--app-border); border-radius: var(--app-radius-lg); box-shadow: var(--app-shadow-card); }
+input, select, textarea { background: var(--app-bg); color: var(--app-text); border: 1px solid var(--app-border); border-radius: var(--app-radius-sm); padding: 0.5em 0.7em; }
+.muted { color: var(--app-muted); }
+`;
+}
+
 // ---- chat → model transcript ----
 
 // classifyConceptTurn — what a concept_chat turn asked for. Given the assistant

@@ -47,6 +47,8 @@ import {
   classifyConceptTurn, buildConceptTranscript, conversationRecap,
   estimateConceptTurnTokens, estimateInventoryTokens,
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
+  buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
+  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH,
 } from './concept-logic.js';
 import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
@@ -59,7 +61,7 @@ const nowIso = () => new Date().toISOString();
 // first build — so the working app replaces the placeholder without the Builder
 // having to describe a change. The Build-cycle panel is for adjustments AFTER
 // this initial build. The audit still runs first (it may raise rule questions).
-const INITIAL_BUILD_INSTRUCTION = 'Build the working application from the approved design inventory: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder.';
+const INITIAL_BUILD_INSTRUCTION = 'Build the working application from the approved design inventory: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder. Reproduce the approved design\'s look — load state/design.css and match the tokens in state/design-tokens.json (colors, fonts, spacing, radii, component styling); do not fall back to a generic style.';
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.
@@ -440,6 +442,26 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     setJob(projectId, { phase: 'failed', message: wInv.error });
     return scheduleJobCleanup(projectId);
   }
+  // Carry the mockup's LOOK into the build: extract its design tokens and render
+  // a concrete stylesheet so the runner reproduces the approved design instead of
+  // re-styling from generic defaults. Best-effort — on any failure we fall back
+  // to the framework defaults (parseDesignTokens always returns a safe token set),
+  // so this never blocks approval.
+  try {
+    const tokRes = await callModelTurn({
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+      system: buildDesignTokenExtractionPrompt(), tools: [],
+      transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
+      maxTokens: 2000,
+    });
+    if (tokRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: tokRes.usage });
+    const { tokens } = parseDesignTokens(tokRes.ok ? tokRes.text : '');
+    await writeWorkingFile(containerName, DESIGN_TOKENS_PATH, JSON.stringify(tokens, null, 2));
+    await writeWorkingFile(containerName, DESIGN_CSS_PATH, renderDesignTokensCss(tokens));
+  } catch (e) {
+    console.warn('[mock2] design-token extraction failed (build falls back to framework defaults):', e?.message);
+  }
+
   await archiveMockups(containerName);
   touchLock(projectId, holder);
 

@@ -167,6 +167,7 @@ export default function BuildMode({
           onInterrupt={interrupt}
           onRemediate={remediate}
           onStopAll={stopAll}
+          onRefresh={refresh}
         />
       </div>
 

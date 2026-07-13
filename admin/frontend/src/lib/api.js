@@ -1143,6 +1143,11 @@ export const api = {
   // was removed). Read-only, member-visible. Entries are destination IP:port.
   mock2GetEgressLog: (id, limit = 200) => request(`/mock2/projects/${id}/egress-log?limit=${limit}`),
 
+  // Time tracking: flush accumulated active-typing seconds; read the derived summary.
+  mock2AddTyping: (id, seconds) =>
+    request(`/mock2/projects/${id}/typing`, { method: 'POST', body: JSON.stringify({ seconds }) }),
+  mock2GetTimeSummary: (id) => request(`/mock2/projects/${id}/time-summary`),
+
   // ---- M5: model connectors, slots, prices ----
   mock2ListConnectors: () => request('/mock2/connectors'),
   mock2GetConnector: (id) => request(`/mock2/connectors/${id}`),

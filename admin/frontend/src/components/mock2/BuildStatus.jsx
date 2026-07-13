@@ -9,13 +9,14 @@
 //
 // MOBILE_FIRST: single column, wrapping button rows, 44px targets; clean at 360px.
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  XCircle,
+  XCircle, CheckCircle2, Ban,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 
@@ -27,13 +28,51 @@ const STATUS_TONE = {
 
 export default function BuildStatus({
   projectId, canEdit, isAdmin, online, project, cycle, job, busy,
-  onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll,
+  onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll, onRefresh,
 }) {
+  const { toast } = useToast();
   const [changes, setChanges] = useState(null); // { records, verification } | null
   const [showChanges, setShowChanges] = useState(false);
+  const [deviations, setDeviations] = useState([]); // open framework_deviation queue items (admin)
+  const [devBusy, setDevBusy] = useState(false);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
   const driftAvailable = !!project?.framework_update_available;
+
+  // Admins can approve/deny a framework deviation right here (no trip to the
+  // admin queue). Load the project's OPEN deviations while the build is blocked
+  // on one. mock2ListQueue + mock2SetQueueItemStatus are the existing admin-gated,
+  // audit-logged endpoints — the queue rows are themselves the durable log.
+  const blockedOnDeviation = cycle?.status === 'awaiting_admin' && !cycle?.error;
+  const loadDeviations = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const r = await api.mock2ListQueue({ project_id: projectId, status: 'open', kind: 'framework_deviation' });
+      setDeviations(r.items || []);
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load deviations failed:', err);
+    }
+  }, [isAdmin, projectId]);
+
+  useEffect(() => {
+    if (isAdmin && blockedOnDeviation) loadDeviations();
+    else setDeviations([]);
+  }, [isAdmin, blockedOnDeviation, loadDeviations]);
+
+  const decideDeviation = async (item, status) => {
+    setDevBusy(true);
+    try {
+      const res = await api.mock2SetQueueItemStatus(item.id, status, status === 'resolved' ? 'approved from project' : 'denied from project');
+      toast({
+        title: status === 'resolved' ? 'Deviation approved' : 'Deviation denied',
+        description: res?.resumed ? 'The build resumes now.' : undefined,
+      });
+      await loadDeviations();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not update the deviation', description: err.message });
+    } finally { setDevBusy(false); }
+  };
 
   const loadChanges = async () => {
     setShowChanges((s) => !s);
@@ -132,8 +171,30 @@ export default function BuildStatus({
                 <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                 {cycle.error
                   ? 'The build stalled on a transient error — once you’ve fixed the cause (e.g. added billing or raised your model rate limit), retry to continue where it stopped.'
-                  : 'A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.'}
+                  : isAdmin
+                    ? 'A framework deviation needs an admin decision. Approve it to unblock the build, or deny it — either way it’s logged.'
+                    : 'A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.'}
               </p>
+            ) : null}
+
+            {/* Admin: approve/deny the blocking framework deviation in-place. */}
+            {isAdmin && blockedOnDeviation && deviations.length ? (
+              <div className="space-y-2">
+                {deviations.map((d) => (
+                  <div key={d.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
+                    <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" className="h-9" disabled={devBusy} onClick={() => decideDeviation(d, 'resolved')}>
+                        {devBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1" />}
+                        Allow
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-9 text-red-500" disabled={devBusy} onClick={() => decideDeviation(d, 'dismissed')}>
+                        <Ban className="h-4 w-4 mr-1" />Deny
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             ) : null}
 
             {/* Retry (editors) — resume a cycle that stalled on a transient

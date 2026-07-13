@@ -40,6 +40,7 @@ import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
+import { ProjectTimeCard, FrameworkDecisionsLog } from '@/components/mock2/ProjectTimeCard';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -541,6 +542,12 @@ export default function ProjectDetail() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Time tracking — project start + where the time went (live). */}
+      <ProjectTimeCard projectId={id} />
+
+      {/* Framework decisions log (admin) — every deviation request + how it was decided. */}
+      {isAdmin ? <FrameworkDecisionsLog projectId={id} /> : null}
 
       {/* (build cycle + build chat now live in the Chat tab above) */}
 

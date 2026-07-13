@@ -143,6 +143,16 @@ so the live URL on port ${webPort} serves the real app — so make the change in
 TypeScript source, keep it type-clean, and keep the run contract in \`mock2.yaml\`
 accurate. Your only egress is a filtering proxy; do not attempt to reach anything else.
 
+# Design fidelity (binding — reproduce the approved look)
+The approved design's visual language is captured in \`state/design-tokens.json\`
+(colors, typography, corner radius, spacing, shadow) with a ready stylesheet
+rendered from it at \`state/design.css\`. Read both. The app MUST reproduce that
+look, not a generic default: make the app load that stylesheet (serve it as a
+static asset and link it, or import its tokens into the app's CSS) and style every
+screen with those tokens — the same colors, fonts, radii, and component styling
+the mockup used. Do not invent a different visual style. If the files are absent
+(an older project), fall back to a clean, consistent look.
+
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
 

@@ -100,15 +100,35 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
       try { fit.fit(); } catch { return; }
       const cols = term.cols;
       const rows = term.rows;
+      // Skip a degenerate size: when the terminal is kept mounted but HIDDEN (a
+      // tab switch — the session stays alive), the container measures 0×0 and a
+      // fit would shrink the PTY to 1 row, wrecking a full-screen app like nano.
+      // Ignore it; the refit fires again with the real size when it's shown.
+      if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 2 || rows < 2) return;
       try {
         ws.send(JSON.stringify({ type: 'resize', cols, rows }));
       } catch { /* socket closing */ }
+    };
+
+    // Refit again after layout settles. On first open (and when returning to the
+    // tab) the container's final height isn't known on the synchronous frame, so
+    // the initial fit can undercount rows — which is why nano/vim would only use
+    // part of the screen. Two rAFs + a short timeout capture the settled layout.
+    let refitRaf1 = 0;
+    let refitRaf2 = 0;
+    let refitTimer = 0;
+    const scheduleSettledRefit = () => {
+      refitRaf1 = requestAnimationFrame(() => {
+        refitRaf2 = requestAnimationFrame(sendResize);
+      });
+      refitTimer = setTimeout(sendResize, 250);
     };
 
     ws.onopen = () => {
       setStatus('connected');
       setErrorText('');
       sendResize();
+      scheduleSettledRefit();
       term.focus();
     };
 
@@ -168,6 +188,9 @@ const InteractiveTerminal = forwardRef(function InteractiveTerminal({ wsPath, in
     return () => {
       try { ro.disconnect(); } catch { /* ignore */ }
       cancelAnimationFrame(resizeRaf);
+      cancelAnimationFrame(refitRaf1);
+      cancelAnimationFrame(refitRaf2);
+      clearTimeout(refitTimer);
       try { onDataDisp.dispose(); } catch { /* ignore */ }
       try { ws.close(); } catch { /* ignore */ }
       try { term.dispose(); } catch { /* ignore */ }

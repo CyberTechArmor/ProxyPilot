@@ -162,8 +162,24 @@ function securityMiddlewareTs() {
 
 // Required security headers on every response (constitution §5). HSTS is added
 // by the reverse proxy (Caddy) in production; the app sets the rest.
+//
+// The CSP allows inline styles + scripts and data: images/fonts: a generated app
+// commonly ships a <style> block, inline style= attributes, small inline scripts,
+// and data-URI assets, and a strict default-src 'self' silently blocks all of
+// them (which renders the app completely unstyled). Same-origin is still the only
+// external source, and frame-ancestors 'self' keeps clickjacking protection. This
+// is the dev-plane default; tighten it per app if you serve only external assets.
 export function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
-  res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'self'");
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+      "style-src 'self' 'unsafe-inline'; " +
+      "script-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data:; " +
+      "font-src 'self' data:; " +
+      "connect-src 'self'; " +
+      "frame-ancestors 'self'",
+  );
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
@@ -229,13 +245,19 @@ import healthRoutes from './health/routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // src/app.ts -> dist/app.js at runtime; either way this file sits one dir under
-// the project root, so state/mockups is at ../state/mockups.
+// the project root, so state/mockups is at ../state/mockups and public at ../public.
 const MOCKUPS_DIR = path.resolve(__dirname, '..', 'state', 'mockups');
+const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 
 export function createApp(): express.Express {
   const app = express();
   app.use(express.json());
   app.use(securityHeaders);
+
+  // Static assets — CSS / JS / images the app ships under public/ are served at
+  // the root (so <link href="/styles.css"> resolves). index:false so a stray
+  // public/index.html never shadows the app's own routes below.
+  app.use(express.static(PUBLIC_DIR, { index: false }));
 
   // Concept-stage mockup preview (coexists with the app) — same contract as the
   // placeholder dev server: /_preview serves state/mockups, default current.html.

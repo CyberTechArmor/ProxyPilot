@@ -69,6 +69,10 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  // Once the Terminal tab has been opened we keep it mounted (forceMount below)
+  // so its shell session survives switching to other tabs — the PTY only starts
+  // on the first visit, not on page load.
+  const [terminalVisited, setTerminalVisited] = useState(false);
   const [previewReloadNonce, setPreviewReloadNonce] = useState(0); // bump to remount the preview iframe
   const archivedDefaulted = useRef(false);
 
@@ -80,6 +84,9 @@ export default function ProjectDetail() {
       setTab('details');
     }
   }, [project?.lifecycle]);
+
+  // Remember once the Terminal tab has been opened so we keep its session mounted.
+  useEffect(() => { if (tab === 'terminal') setTerminalVisited(true); }, [tab]);
 
   const load = useCallback(async () => {
     try {
@@ -421,10 +428,16 @@ export default function ProjectDetail() {
           )}
         </TabsContent>
 
-        {/* TERMINAL — a shell into the project container (m2-<id>), filling the tab. */}
-        <TabsContent value="terminal" className="mt-3 flex-1 min-h-0 overflow-hidden">
+        {/* TERMINAL — a shell into the project container (m2-<id>), filling the
+            tab. forceMount keeps it in the DOM when another tab is active (Radix
+            just sets `hidden`), so the WS + PTY session stays alive across tab
+            switches; it only mounts after the first visit (terminalVisited), so
+            the page never opens a shell it isn't asked for. */}
+        <TabsContent value="terminal" forceMount className="mt-3 flex-1 min-h-0 overflow-hidden data-[state=inactive]:hidden">
           {terminalAvailable ? (
-            <ProjectTerminal projectId={id} containerName={project.container_name} defaultOpen fill />
+            terminalVisited ? (
+              <ProjectTerminal projectId={id} containerName={project.container_name} defaultOpen fill />
+            ) : null
           ) : (
             <Card>
               <CardHeader className="pb-3">

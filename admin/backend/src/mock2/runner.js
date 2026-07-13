@@ -210,14 +210,18 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
 // it is NOT a bypass for an audit-stage framework deviation (that clears only when
 // an admin resolves the deviation, so those cycles carry no `error` and the UI
 // won't offer Retry). Returns the same shape as startCycle.
+// Any non-successful terminal cycle can be continued — retryCycle starts a fresh
+// cycle with the same instruction, which continues from the checkpoint/working
+// tree already in the container (no work lost). Covers a hard failure, a stall
+// handed to an admin, a soft budget pause, a user abandon/interrupt, and a quota
+// refusal (a resume re-checks quota and refuses cleanly if still over).
+const RESUMABLE_CYCLE_STATUSES = Object.freeze([
+  'failed', 'awaiting_admin', 'interrupted', 'abandoned', 'refused_quota',
+]);
+
 export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0 }) {
   if (!cycle) return { status: 'error', error: 'No cycle to retry.' };
-  // A soft-paused cycle (interrupted + pause_reason) resumes here too: same
-  // instruction → a fresh cycle continuing from the checkpoint, with a fresh
-  // token/time budget. A plain user-interrupted cycle carries no pause_reason and
-  // isn't offered Resume, so it never reaches this.
-  const resumablePaused = cycle.status === 'interrupted' && !!cycle.pause_reason;
-  if (!['awaiting_admin', 'failed'].includes(cycle.status) && !resumablePaused) {
+  if (!RESUMABLE_CYCLE_STATUSES.includes(cycle.status)) {
     return { status: 'error', error: `This cycle is "${cycle.status}" — there is nothing to retry.` };
   }
   // Clear the retries/quota handoff so it stops nagging in the admin queue (both

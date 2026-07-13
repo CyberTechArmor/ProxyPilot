@@ -26,6 +26,17 @@ test('costCentsForUsage: cents per mtok, rounded', () => {
   assert.equal(costCentsForUsage({ inputTokens: 100, outputTokens: 100 }, null), 0); // self-hosted: no price → 0
 });
 
+test('costCentsForUsage: sub-cent per-call costs are NOT floored to 0 (they accumulate)', () => {
+  // A single build turn is a fraction of a cent — it must survive as a fraction so
+  // 40 of them add up to a real cost instead of rounding to 0 each time.
+  const price = { input_cents_per_mtok: 300, output_cents_per_mtok: 1500 };
+  const perTurn = costCentsForUsage({ inputTokens: 800, outputTokens: 200 }, price); // 0.24 + 0.30 = 0.54¢
+  assert.ok(perTurn > 0 && perTurn < 1, `expected a sub-cent fraction, got ${perTurn}`);
+  assert.ok(Math.abs(perTurn - 0.54) < 1e-9);
+  // 40 such turns ≈ 21.6¢ — a real cost, not $0.
+  assert.ok(Math.abs(perTurn * 40 - 21.6) < 1e-6);
+});
+
 test('sumLedger: totals across rows', () => {
   const rows = [
     { input_tokens: 100, output_tokens: 50, cost_cents: 10, wall_clock_ms: 1000 },

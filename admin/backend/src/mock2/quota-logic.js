@@ -10,13 +10,16 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
-// Round-half-up cents for a token spend against an effective-dated price row.
-// Prices are cents per million tokens (mtok). Self-hosted models price at 0.
+// Cents for a token spend against an effective-dated price row. Prices are cents
+// per million tokens (mtok). Self-hosted / unpriced models price at 0. Returns
+// FRACTIONAL cents on purpose: a single build turn is often a fraction of a cent,
+// so rounding here (and again on every accumulation) used to floor each call to
+// 0 and lose the whole cost — the accumulated total is rounded only for display.
 export function costCentsForUsage({ inputTokens = 0, outputTokens = 0 }, price) {
   if (!price) return 0;
   const inC = (Number(inputTokens) / 1_000_000) * Number(price.input_cents_per_mtok || 0);
   const outC = (Number(outputTokens) / 1_000_000) * Number(price.output_cents_per_mtok || 0);
-  return Math.round(inC + outC);
+  return inC + outC;
 }
 
 // Sum a set of ledger rows into totals. Pure over plain objects, so the DB layer

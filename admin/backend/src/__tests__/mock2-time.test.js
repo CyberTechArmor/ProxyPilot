@@ -86,6 +86,18 @@ test('computeUsageSummary: tokens+cost sum by stage (concept→mockup, first bui
   assert.equal(u.total_cost_cents, 58);
 });
 
+test('computeUsageSummary: fractional (sub-cent) cost survives summing, not floored to 0', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const u = computeUsageSummary({
+    cycles: [
+      { stage: 'concept', created_at: iso(1), used_tokens: 800, used_cost_cents: 0.54 },
+      { stage: 'build', created_at: iso(2), used_tokens: 800, used_cost_cents: 0.54 },
+    ],
+  });
+  assert.ok(Math.abs(u.by_stage.mockup.cost_cents - 0.54) < 1e-9);
+  assert.ok(Math.abs(u.total_cost_cents - 1.08) < 1e-9); // would be 0 if it rounded per-cycle
+});
+
 test('computeUsageSummary: missing/negative usage coerces to zero; empty is all zero', () => {
   const empty = computeUsageSummary({ cycles: [] });
   assert.equal(empty.total_tokens, 0);

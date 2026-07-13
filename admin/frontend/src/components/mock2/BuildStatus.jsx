@@ -42,6 +42,13 @@ export default function BuildStatus({
   // plain user interrupt.
   const paused = cycle?.status === 'interrupted' && !!cycle?.pause_reason;
   const statusLabel = paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
+  // Any non-successful terminal build can be continued (soft retry — it resumes
+  // from the checkpoint/working tree in the container, no work lost). A soft
+  // pause has its own Resume block and a deploy failure its own Retry deploy /
+  // Rebuild controls, so both are excluded here.
+  const FAILED_TERMINAL = ['failed', 'abandoned', 'refused_quota', 'interrupted'];
+  const canContinueFailed = !!cycle && !paused && cycle.deploy_status !== 'deploy_failed'
+    && (FAILED_TERMINAL.includes(cycle.status) || (cycle.status === 'awaiting_admin' && cycle.error));
   const driftAvailable = !!project?.framework_update_available;
 
   // Admins can approve/deny a framework deviation right here (no trip to the
@@ -233,16 +240,20 @@ export default function BuildStatus({
               </div>
             ) : null}
 
-            {/* Retry (editors) — resume a cycle that stalled on a transient
-                failure. A deploy failure has its own Retry deploy / Rebuild
-                controls above, so exclude it here. */}
-            {canEdit && online && cycle.deploy_status !== 'deploy_failed'
-              && (cycle.status === 'failed' || (cycle.status === 'awaiting_admin' && cycle.error)) ? (
+            {/* Continue (editors) — soft-retry ANY non-successful terminal build.
+                It resumes from the last checkpoint / the working tree still in the
+                container, so nothing done so far is lost. */}
+            {canEdit && online && canContinueFailed ? (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  Continues from the last checkpoint — your work so far isn&apos;t lost.
+                </p>
                 <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
                   {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
-                  Retry build
+                  Continue build
                 </Button>
-              ) : null}
+              </div>
+            ) : null}
 
             {/* Interrupts (editors) while running */}
             {canEdit && active && cycle.status === 'running' ? (

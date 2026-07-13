@@ -105,8 +105,8 @@ export default function BuildMode({
     setBusy(true);
     try {
       const res = await api.mock2RetryCycle(projectId, cycle.id);
-      if (res.refused) toast({ variant: 'destructive', title: resuming ? 'Resume refused' : 'Retry refused', description: res.reason || 'Quota exceeded.' });
-      else toast({ title: resuming ? 'Resuming the build' : 'Retrying the build', description: 'Continuing from where it stopped.' });
+      if (res.refused) toast({ variant: 'destructive', title: resuming ? 'Resume refused' : 'Continue refused', description: res.reason || 'Quota exceeded.' });
+      else toast({ title: resuming ? 'Resuming the build' : 'Continuing the build', description: 'Continuing from where it stopped.' });
       refresh();
     } catch (err) { toast({ variant: 'destructive', title: 'Could not resume', description: err.message }); }
     finally { setBusy(false); }

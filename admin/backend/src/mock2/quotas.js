@@ -79,7 +79,7 @@ export function insertLedgerEntry({ projectId, cycleId = null, connectorId = nul
          (project_id, cycle_id, connector_id, model, input_tokens, output_tokens, cost_cents, wall_clock_ms, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(Number(projectId), cycleId, connectorId, model, Math.round(inputTokens), Math.round(outputTokens), Math.round(costCents), Math.round(wallClockMs), nowIso());
+    .run(Number(projectId), cycleId, connectorId, model, Math.round(inputTokens), Math.round(outputTokens), Number(costCents) || 0, Math.round(wallClockMs), nowIso());
   return getMock2Db().prepare(`SELECT * FROM mock2_quota_ledger WHERE id = ?`).get(info.lastInsertRowid);
 }
 

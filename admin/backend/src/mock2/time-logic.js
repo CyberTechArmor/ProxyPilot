@@ -111,7 +111,9 @@ export function computeUsageSummary({ cycles = [] } = {}) {
 
   const add = (b, c) => {
     b.tokens += Math.max(0, Math.round(Number(c.used_tokens) || 0));
-    b.cost_cents += Math.max(0, Math.round(Number(c.used_cost_cents) || 0));
+    // Cost stays fractional here (rounding per-cycle would re-introduce the
+    // sub-cent floor); the client rounds the total for display.
+    b.cost_cents += Math.max(0, Number(c.used_cost_cents) || 0);
   };
 
   for (const c of concept) add(mockup, c);

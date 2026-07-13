@@ -88,9 +88,11 @@ export function updateCycle(id, patch = {}) {
 // write). Kept a dedicated increment so concurrent-safe += stays a single
 // statement (risk R4 — short transactions).
 export function addCycleUsage(id, { tokens = 0, costCents = 0 }) {
+  // Tokens are whole; cost accumulates as FRACTIONAL cents (rounding each sub-cent
+  // per-call cost to 0 here would zero out the whole build's cost). Display rounds.
   getMock2Db()
     .prepare(`UPDATE mock2_cycles SET used_tokens = used_tokens + ?, used_cost_cents = used_cost_cents + ? WHERE id = ?`)
-    .run(Math.round(tokens), Math.round(costCents), Number(id));
+    .run(Math.round(tokens), Number(costCents) || 0, Number(id));
   return getCycle(id);
 }
 

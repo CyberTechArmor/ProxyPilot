@@ -16,7 +16,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban,
+  CheckCircle2, Ban, PauseCircle, Play,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
@@ -37,6 +37,11 @@ export default function BuildStatus({
   const [devBusy, setDevBusy] = useState(false);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
+  // A soft-paused cycle ('interrupted' + pause_reason) is a resumable checkpoint,
+  // not a failure — it gets its own label + one-click Resume, distinct from a
+  // plain user interrupt.
+  const paused = cycle?.status === 'interrupted' && !!cycle?.pause_reason;
+  const statusLabel = paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
   const driftAvailable = !!project?.framework_update_available;
 
   // Admins can approve/deny a framework deviation right here (no trip to the
@@ -133,8 +138,8 @@ export default function BuildStatus({
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="min-w-0">
                 <p className="text-sm font-medium truncate">{cycle.instruction || '(cycle)'}</p>
-                <p className={`text-xs font-medium ${STATUS_TONE[cycle.status] || 'text-muted-foreground'}`}>
-                  {cycle.status.replace(/_/g, ' ')}{cycle.current_gate ? ` · ${cycle.current_gate}` : ''}
+                <p className={`text-xs font-medium ${paused ? 'text-amber-500' : STATUS_TONE[cycle.status] || 'text-muted-foreground'}`}>
+                  {statusLabel}{cycle.current_gate ? ` · ${cycle.current_gate}` : ''}
                 </p>
               </div>
               <div className="text-xs text-muted-foreground whitespace-nowrap">
@@ -145,7 +150,26 @@ export default function BuildStatus({
             {/* The Claude-Code-style task list — what's running and how many steps are left. */}
             <BuildTaskList cycle={cycle} job={job} />
 
-            {cycle.error ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+            {cycle.error && !paused ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+
+            {/* Soft-paused on a token/time budget — a resumable checkpoint, not a
+                failure. One-click Resume continues from where it stopped with a
+                fresh budget window. */}
+            {paused ? (
+              <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                <p className="text-xs text-amber-600 flex items-start gap-1">
+                  <PauseCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  {cycle.error || 'Build paused on a token/time budget.'} Your work so far is checkpointed —
+                  resuming continues from there with a fresh budget.
+                </p>
+                {canEdit && online ? (
+                  <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                    Resume build
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
 
             {/* Deploy that failed — distinct, retryable. Offer a deploy-only
                 retry (redeploy the existing checkpoint — no rebuild) alongside

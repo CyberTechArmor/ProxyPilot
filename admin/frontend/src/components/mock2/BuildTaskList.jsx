@@ -8,7 +8,7 @@
 //
 // MOBILE_FIRST: single column, wraps, no fixed widths; renders clean at 360px.
 
-import { CheckCircle2, XCircle, Loader2, Circle, Clock } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Circle, Clock, PauseCircle } from 'lucide-react';
 import { deriveBuildTasks } from '@/lib/build-tasks';
 
 function StateIcon({ state, className = 'h-4 w-4' }) {
@@ -30,7 +30,9 @@ export default function BuildTaskList({ cycle, job }) {
           {!terminal ? <Loader2 className="h-4 w-4 animate-spin text-cyan-500" /> : (
             terminal === 'succeeded'
               ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-              : <XCircle className="h-4 w-4 text-red-500" />
+              : terminal === 'paused'
+                ? <PauseCircle className="h-4 w-4 text-amber-500" />
+                : <XCircle className="h-4 w-4 text-red-500" />
           )}
           {headline}
         </p>
@@ -44,7 +46,7 @@ export default function BuildTaskList({ cycle, job }) {
       {/* Thin progress bar — approximate, since exact timing is unknown. */}
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div
-          className={`h-full rounded-full transition-all ${terminal === 'succeeded' ? 'bg-green-500' : terminal ? 'bg-red-500' : 'bg-cyan-500'}`}
+          className={`h-full rounded-full transition-all ${terminal === 'succeeded' ? 'bg-green-500' : terminal === 'paused' ? 'bg-amber-500' : terminal ? 'bg-red-500' : 'bg-cyan-500'}`}
           style={{ width: `${total ? Math.round((done / total) * 100) : 0}%` }}
         />
       </div>

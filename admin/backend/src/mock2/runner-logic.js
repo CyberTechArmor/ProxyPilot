@@ -80,11 +80,33 @@ export const RUNNER_TOOLS = Object.freeze([
 
 export const RUNNER_TOOL_NAMES = Object.freeze(RUNNER_TOOLS.map((t) => t.name));
 
-// Hard ceilings so a misbehaving model can't loop forever. The runner counts
-// model turns and stops with an error at MAX_TURNS; a single tool result is
-// truncated to MAX_TOOL_RESULT_CHARS so a huge exec output can't blow the
-// context (and the token envelope, R5).
-export const MAX_TURNS = 40;
+// Soft budget ceilings — the PRIMARY stop for a long build. A real build (every
+// screen + field + action, then the whole gate battery) legitimately needs many
+// model turns, so we don't fail on a turn count; instead the runner checkpoints
+// its work-in-progress and PAUSES (resumable) once a cycle crosses a token or
+// wall-clock budget. Each resume starts a fresh cycle continuing from the
+// checkpoint, so it gets a fresh budget window. Tuned generously — a pause is a
+// "this is taking a lot; continue?" checkpoint, not an error.
+export const SOFT_PAUSE_TOKENS = 1_000_000;      // ~1M tokens of model spend in one run
+export const SOFT_PAUSE_MS = 45 * 60 * 1000;     // ~45 minutes of wall-clock in one run
+
+// softPauseReason — pure decision for the runner's step-boundary check. Returns
+// 'budget_tokens' | 'budget_time' when this run has crossed a soft ceiling, or
+// null to keep going. Unit-tested so the thresholds can't silently drift.
+export function softPauseReason({
+  usedTokens = 0, elapsedMs = 0, tokenLimit = SOFT_PAUSE_TOKENS, timeLimitMs = SOFT_PAUSE_MS,
+} = {}) {
+  if (Number(usedTokens) >= tokenLimit) return 'budget_tokens';
+  if (Number(elapsedMs) >= timeLimitMs) return 'budget_time';
+  return null;
+}
+
+// Hard runaway backstop — far above any real build. The soft pause above almost
+// always trips first (a build burning tokens/time hits those long before this);
+// this exists only so a pathological cheap-fast loop (no tool calls, tiny turns)
+// still can't spin forever. A single tool result is truncated to
+// MAX_TOOL_RESULT_CHARS so a huge exec output can't blow the context (R5).
+export const MAX_TURNS = 300;
 export const MAX_TOOL_RESULT_CHARS = 12000;
 
 export function truncateToolResult(text) {

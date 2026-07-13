@@ -83,6 +83,11 @@ export default function BuildMode({
       const deployed = cycle.deploy_status === 'serving';
       notifyBrowser(`Build finished — ${name}`, deployed ? 'The app is live on its URL.' : 'Gates passed and the change was checkpointed.', { url: project?.url || undefined });
       toast({ title: 'Build finished', description: deployed ? 'The app is live on its URL.' : 'Gates passed — change checkpointed.' });
+    } else if (terminal === 'paused') {
+      // A soft pause is not a failure — checkpointed and resumable in one click.
+      const desc = cycle.error ? String(cycle.error).slice(0, 140) : 'Checkpointed on a token/time budget — resume to continue.';
+      notifyBrowser(`Build paused — ${name}`, desc);
+      toast({ title: 'Build paused', description: desc });
     } else {
       const label = terminal === 'deploy_failed' ? 'Deploy failed' : 'Build failed';
       notifyBrowser(`${label} — ${name}`, cycle.error ? String(cycle.error).slice(0, 140) : 'See the build panel for details.');
@@ -96,13 +101,14 @@ export default function BuildMode({
 
   const retry = async () => {
     if (!cycle) return;
+    const resuming = cycle.status === 'interrupted' && !!cycle.pause_reason;
     setBusy(true);
     try {
       const res = await api.mock2RetryCycle(projectId, cycle.id);
-      if (res.refused) toast({ variant: 'destructive', title: 'Retry refused', description: res.reason || 'Quota exceeded.' });
-      else toast({ title: 'Retrying the build', description: 'Continuing from where it stopped.' });
+      if (res.refused) toast({ variant: 'destructive', title: resuming ? 'Resume refused' : 'Retry refused', description: res.reason || 'Quota exceeded.' });
+      else toast({ title: resuming ? 'Resuming the build' : 'Retrying the build', description: 'Continuing from where it stopped.' });
       refresh();
-    } catch (err) { toast({ variant: 'destructive', title: 'Could not retry', description: err.message }); }
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not resume', description: err.message }); }
     finally { setBusy(false); }
   };
 

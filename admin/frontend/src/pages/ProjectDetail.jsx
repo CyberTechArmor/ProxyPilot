@@ -70,6 +70,7 @@ export default function ProjectDetail() {
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
+  const [previewReloadNonce, setPreviewReloadNonce] = useState(0); // bump to remount the preview iframe
   const archivedDefaulted = useRef(false);
 
   // An archived project has no chat/terminal — land on Details once we know it's
@@ -92,6 +93,16 @@ export default function ProjectDetail() {
       setLoading(false);
     }
   }, [id]);
+
+  // The concept chat (which polls) tells us when the mockup changed — a new one
+  // was rendered, or it was discarded on approval. Reload the project so
+  // preview_url appears (or falls back to the built app), and bump the nonce so
+  // the preview iframe remounts: the mockup URL is stable, so the same src would
+  // otherwise show stale content until a manual refresh.
+  const handleMockupChanged = useCallback(() => {
+    setPreviewReloadNonce((n) => n + 1);
+    load();
+  }, [load]);
 
   const loadAllowlist = useCallback(async () => {
     try {
@@ -388,15 +399,24 @@ export default function ProjectDetail() {
           <MessageSquare className="h-4 w-4" /> Chat to App
         </button>
         <span className="text-muted-foreground/40" aria-hidden>→</span>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 border-dashed"
-          title="Build — lock in the design and start building the working app"
-          onClick={() => setConfirmBuild(true)}
-        >
-          <Hammer className="h-4 w-4 mr-1" /> Build
-        </Button>
+        {designApproved ? (
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-500 whitespace-nowrap"
+            title="Design locked in — use “Run a cycle” in the chat to build changes"
+          >
+            <CheckCircle2 className="h-4 w-4" /> Build
+          </span>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 border-dashed"
+            title="Build — lock in the design and start building the working app"
+            onClick={() => setConfirmBuild(true)}
+          >
+            <Hammer className="h-4 w-4 mr-1" /> Build
+          </Button>
+        )}
         <span className="text-muted-foreground/40" aria-hidden>→</span>
         <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-muted-foreground whitespace-nowrap">
           <Play className="h-4 w-4" /> Run
@@ -426,10 +446,10 @@ export default function ProjectDetail() {
               {previewSrc ? (
                 <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
                   <div className="min-w-0 h-[55vh] lg:h-auto lg:flex-[1.55] lg:min-h-0">
-                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} />
+                    <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} />
                   </div>
                   <div className="min-w-0 flex flex-col gap-4 lg:flex-1 lg:min-h-0">
-                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
                     {designApproved ? (
                       <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
                     ) : null}
@@ -439,7 +459,7 @@ export default function ProjectDetail() {
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <div className="mx-auto w-full max-w-3xl space-y-4">
                     <PreviewPlaceholder project={project} />
-                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} />
+                    <ConceptStage projectId={id} project={project} canEdit={canEdit} onApproved={load} onMockupChanged={handleMockupChanged} />
                     {designApproved ? (
                       <CycleCard projectId={id} canEdit={canEdit} isAdmin={isAdmin} lifecycle={project.lifecycle} project={project} onChanged={load} />
                     ) : null}
@@ -889,7 +909,7 @@ export default function ProjectDetail() {
 // different origin (the project's own HTTPS host), so it renders sandboxed with
 // its own origin's privileges — the mock2 dev server sets no X-Frame-Options, so
 // it embeds cleanly. MOBILE_FIRST: full-width, toggle labels collapse to icons.
-function PreviewPanel({ src, title, approved }) {
+function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
   const [width, setWidth] = useState('desktop'); // 'desktop' | 'mobile'
   const [reloadNonce, setReloadNonce] = useState(0); // bump to remount (reload) the iframe
   return (
@@ -934,7 +954,7 @@ function PreviewPanel({ src, title, approved }) {
       </div>
       <div className="flex flex-1 min-h-0 justify-center overflow-auto bg-white">
         <iframe
-          key={reloadNonce}
+          key={`${reloadKey}-${reloadNonce}`}
           title={`${title || 'Project'} preview`}
           src={src}
           className="h-full border-0 bg-white"

@@ -171,7 +171,7 @@ function ChatBubble({ m }) {
   );
 }
 
-export default function ConceptStage({ projectId, project, canEdit, onApproved }) {
+export default function ConceptStage({ projectId, project, canEdit, onApproved, onMockupChanged }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { messages, job, audit_job, stage, preview_url, open_question_ids, ... }
   const [message, setMessage] = useState('');
@@ -180,6 +180,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
   const wasApproved = useRef(!!project?.design_approved_at);
+  const lastMockupId = useRef(project?.current_mockup_id || null);
 
   const load = useCallback(async () => {
     try {
@@ -205,7 +206,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const auditJob = data?.audit_job || null;
   const auditActive = !!auditJob && !['building', 'awaiting_user', 'awaiting_admin', 'failed', 'done'].includes(auditJob.phase);
   const openQuestionCount = (data?.open_question_ids || []).length;
-  const shouldPoll = jobActive || auditActive || openQuestionCount > 0;
+  // A build cycle started AFTER design approval (from the Build-cycle panel, or
+  // auto-started on approval) runs its audit outside this component. We stop
+  // polling once the concept turn settles, so without this we'd never re-fetch
+  // to surface the rule questions it raises — the parent's project count is the
+  // durable signal that pulls us back in (it refreshes from the cycle's own poll)
+  // so the questions appear here with their inline answer controls.
+  const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
+  const shouldPoll = jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);
@@ -239,6 +247,20 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved }
   const online = project?.lifecycle === 'active';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
+
+  // The mockup preview is owned by the parent (ProjectDetail), but WE are the
+  // one polling the chat, so we're the first to learn a new mockup was rendered
+  // (or discarded on approval). The preview URL is a stable path — same URL, new
+  // content — so tell the parent to reload the project (surfacing preview_url the
+  // first time) and remount the iframe. Fires only on an actual id transition.
+  useEffect(() => {
+    if (!data) return; // wait for the first chat load before comparing
+    const mockupId = data.current_mockup_id ?? null;
+    if (mockupId !== lastMockupId.current) {
+      lastMockupId.current = mockupId;
+      if (onMockupChanged) onMockupChanged(mockupId);
+    }
+  }, [data, onMockupChanged]);
 
   const send = async () => {
     const text = message.trim();

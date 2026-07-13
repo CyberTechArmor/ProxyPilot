@@ -253,52 +253,10 @@ echo "[mock2] checkpoint pushed to bare repo"
 // repoMount:  where the bare repo is mounted read into the container
 // appDir:     the working clone path
 // webPort:    declared web port
-// proxyUrl:   the host egress proxy URL (http://<gateway>:<port>) baked into the
-//             container env so apt/npm/pip/git honor it (M4, ADR-010). When the
-//             bridge fence is up, this is the ONLY way out; omit (M2/M3 default)
-//             and no proxy env is written.
-// noProxy:    NO_PROXY value (localhost + the bridge subnet stay direct).
-// buildProxyConfigScript(opts) → a self-contained shell snippet that points the
-// container's egress at the host filtering proxy (M4/ADR-010) and forces IPv4.
-// It is baked in for POST-fence runtime use: once the network fence is applied
-// (at activation), the proxy is the container's ONLY egress path, so apt/npm/pip/
-// git must honor it. Bootstrap (git install + clone + runtime install) runs
-// BEFORE the fence with direct IPv4 NAT egress and does NOT use this — routing the
-// very first `apt-get install git` through a proxy that may not be up yet is what
-// broke new-project startup. Idempotent (append to /etc/environment is the only
-// non-idempotent bit, benign). Returns '' when no valid proxy is given; called
-// only by buildContainerSetupScript, near the end of the setup script.
-export function buildProxyConfigScript({ proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
-  const safeProxy = proxyUrl && /^https?:\/\/[a-zA-Z0-9.\-]+:\d{1,5}\/?$/.test(proxyUrl) ? proxyUrl : null;
-  const safeNoProxy = String(noProxy).replace(/[^a-zA-Z0-9.,:/\-]/g, '');
-  if (!safeProxy) return '';
-  return `# ---- Egress proxy (M4, ADR-010) ----
-# The bridge default-deny fence forces all egress through the host filtering
-# proxy; bake it into the container env so apt/npm/pip/git use it. NO_PROXY keeps
-# in-container + gateway traffic direct.
-PROXY_URL="${safeProxy}"
-NO_PROXY_VAL="${safeNoProxy}"
-{
-  echo "http_proxy=$PROXY_URL"
-  echo "https_proxy=$PROXY_URL"
-  echo "HTTP_PROXY=$PROXY_URL"
-  echo "HTTPS_PROXY=$PROXY_URL"
-  echo "no_proxy=$NO_PROXY_VAL"
-  echo "NO_PROXY=$NO_PROXY_VAL"
-} >> /etc/environment
-cat > /etc/apt/apt.conf.d/01mock2proxy <<APTPROXY
-Acquire::http::Proxy "$PROXY_URL";
-Acquire::https::Proxy "$PROXY_URL";
-Acquire::ForceIPv4 "true";
-APTPROXY
-export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
-export no_proxy="$NO_PROXY_VAL" NO_PROXY="$NO_PROXY_VAL"
-`;
-}
-
-export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
-  // Reuse the shared proxy-config builder (also run standalone before the clone).
-  const proxyBlock = buildProxyConfigScript({ proxyUrl, noProxy });
+// The container reaches the internet via the bridge's Incus NAT — no egress proxy
+// env is written (squid was removed). The nftables fence still logs every new
+// outbound connection and blocks lateral movement to private ranges.
+export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT } = {}) {
   // The pre-build placeholder unit (serve.py). Same builder the deploy step uses
   // to rewrite ExecStart to the real app, so the two units differ ONLY in ExecStart.
   const devServiceUnit = buildDevServiceUnit({
@@ -323,20 +281,18 @@ printf 'Acquire::ForceIPv4 "true";\\n' > /etc/apt/apt.conf.d/00mock2-ipv4
 # image without it must still come online.
 apt-get update -y || true
 apt-get install -y --no-install-recommends python3 || true
-# Operator/runner toolbox baked in at bootstrap (pre-fence, direct egress) so it
-# is on EVERY container: a shell into the box has an editor, git works for the
-# runner's checkpoints, curl is there for health checks, and sudo exists for the
-# rare privileged step. Installing here (not at runtime) is deliberate — once the
-# network fence is applied below, apt can only reach the filtering proxy, so a
-# runtime "apt-get install" fails if the proxy is down or the host isn't allowed.
+# Operator/runner toolbox baked in at bootstrap so it is on EVERY container: a
+# shell into the box has an editor, git works for the runner's checkpoints, curl
+# is there for health checks, and sudo exists for the rare privileged step.
+# Installing here keeps a container self-contained without depending on runtime
+# apt reachability.
 apt-get install -y --no-install-recommends git curl nano sudo ca-certificates || echo "[mock2] toolbox install skipped/failed (non-fatal)"
 apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"
-# Node.js + npm for the runtime scaffold (R8). Installed at BOOTSTRAP (pre-fence,
-# direct NAT egress) because once the fence is up apt can only reach the filtering
-# proxy — so the Node RUNTIME must be here before then. The npm PACKAGES the app
-# needs (npm install) are fetched at DEPLOY, post-fence, through squid to
-# registry.npmjs.org (in the default allowlist). Non-fatal: a project that never
-# builds still comes online on the placeholder dev server.
+# Node.js + npm for the runtime scaffold (R8). Installed at BOOTSTRAP so the Node
+# RUNTIME is present before first use. The npm PACKAGES the app needs (npm
+# install) are fetched at DEPLOY over the bridge's NAT egress to
+# registry.npmjs.org. Non-fatal: a project that never builds still comes online
+# on the placeholder dev server.
 apt-get install -y --no-install-recommends nodejs npm || echo "[mock2] nodejs/npm install skipped/failed (non-fatal; the app cannot deploy without it)"
 
 # Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.
@@ -354,13 +310,11 @@ if command -v psql >/dev/null 2>&1; then
   su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_database WHERE datname='app'\\" | grep -q 1 || psql -c \\"CREATE DATABASE app OWNER app\\"" 2>/dev/null || echo "[mock2] app database create skipped/failed (non-fatal)"
 fi
 
-# Bake the egress proxy into the container env NOW, for POST-fence runtime: once
-# the fence is applied (provision.js, right after this script), the filtering
-# proxy is the container's only egress path, so apt/npm/pip/git at runtime — and
-# anything the dev server spawns — must honor it. The bootstrap installs above
-# deliberately ran direct (the fence was not up yet); this only takes effect for
-# what runs after activation.
-${proxyBlock}
+# No egress proxy: the bridge NATs straight out (Incus ipv4.nat). Once the fence
+# is applied (provision.js, right after this script) egress is still NAT'd — the
+# fence only blocks lateral movement to private ranges and LOGS each new outbound
+# connection so operators can see where traffic goes. apt/npm/pip/git at runtime
+# need no proxy env.
 
 # Dev server systemd unit — restarts on crash, starts on boot so a container
 # restart (idle-stop lifecycle, M9) brings the app back automatically. This is

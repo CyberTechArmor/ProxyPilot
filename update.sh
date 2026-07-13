@@ -267,8 +267,8 @@ set_env_key() {
 # ensure_mock2_infra: make the host-side prerequisites for the Mock2 module
 # present + correct. Idempotent, best-effort. Called on EVERY update when Mock2
 # is enabled (self-healing), and by --enable-mock2. Covers the two things that
-# live outside the container image: the /etc/caddy/mock2 bind-mount and the
-# filtering egress proxy (squid).
+# live outside the container image: the /etc/caddy/mock2 bind-mount and retiring
+# the legacy squid egress proxy (Mock2 now uses the bridge NAT + nftables logging).
 ensure_mock2_infra() {
     local deployed="$1"
     [ -n "$deployed" ] || return 0
@@ -289,16 +289,17 @@ ensure_mock2_infra() {
         fi
     fi
 
-    # Filtering egress proxy (squid): a project container's ONLY internet path
-    # (M4/ADR-010). Idempotent — mock2-enable-egress.sh no-ops if already present.
-    local egress_script="${SCRIPT_DIR}/scripts/mock2-enable-egress.sh"
+    # Mock2 egress (M4/ADR-010 — post-squid): project containers reach the
+    # internet via their bridge's Incus NAT; the nftables fence logs + contains
+    # egress. squid is no longer used — retire a leftover/broken squid the old
+    # build installed. Idempotent; a no-op on a host that never had squid.
+    local egress_script="${SCRIPT_DIR}/scripts/mock2-egress-cleanup.sh"
     if [ -f "$egress_script" ]; then
         install -d -m 0700 /var/lib/proxypilot/mock2 2>/dev/null || true
-        if MOCK2_EGRESS_PROXY_PORT="$(grep -E '^[[:space:]]*MOCK2_EGRESS_PROXY_PORT=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')" \
-           bash "$egress_script" >>"$LOG_FILE" 2>&1; then
-            log_verbose "Mock2 egress proxy (squid) present + listening."
+        if bash "$egress_script" >>"$LOG_FILE" 2>&1; then
+            log_verbose "Mock2 legacy squid retired (or already absent)."
         else
-            log "${YELLOW}Mock2 egress proxy (squid) not ready. Run: sudo bash ${egress_script}${NC}"
+            log "${YELLOW}Mock2 squid cleanup reported an issue (non-fatal). See: sudo bash ${egress_script}${NC}"
         fi
     fi
 }
@@ -721,7 +722,7 @@ sync_env_keys
 
 # Honor --enable-mock2 (after sync_env_keys, so the key exists to flip).
 maybe_enable_mock2
-# Keep an already-enabled host's Mock2 host-side infra (squid + Caddy mount) in
+# Keep an already-enabled host's Mock2 host-side infra (Caddy mount + squid cleanup) in
 # sync on every update, so it self-heals without needing --enable-mock2.
 sync_mock2_infra
 

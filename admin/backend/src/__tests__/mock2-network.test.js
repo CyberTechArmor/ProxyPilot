@@ -1,10 +1,13 @@
 // Mock2 Phase M4 tests — the network-isolation pure decision layer.
 //
 // Stub-first (risk R9 / docs/known-issues.md): imports ONLY network-logic.js,
-// which has NO native (better-sqlite3), Express, Incus, nftables, or squid
-// imports. The real bridge/fence/proxy host round-trip and the cross-table
-// nftables matrix (risk R2) are exercised by scripts/mock2-m4-verify.sh on an
-// enabled host — see docs/mock2/README.md.
+// which has NO native (better-sqlite3), Express, Incus, or nftables imports. The
+// real bridge/fence host round-trip and the cross-table nftables matrix (risk R2)
+// are exercised by scripts/mock2-m4-verify.sh on an enabled host — see
+// docs/mock2/README.md.
+//
+// Egress model (post-squid): the bridge NATs out; the fence logs each new
+// outbound connection and blocks lateral movement to private ranges.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,15 +18,12 @@ import {
   gatewayForCidr,
   buildFenceEntries,
   renderMock2Nft,
-  DEFAULT_EGRESS_ALLOWLIST,
-  isAllowlistHost,
-  normalizeAllowlistHost,
-  buildEgressPlan,
-  renderSquidAcl,
   subnetPrefixForCidr,
-  parseEgressLog,
+  parseNftEgressLog,
   computePortDrift,
-  EGRESS_PROXY_PORT,
+  PRIVATE_DEST_RANGES,
+  EGRESS_LOG_PREFIX_OK,
+  EGRESS_LOG_PREFIX_DENY,
 } from '../mock2/network-logic.js';
 import { buildContainerSetupScript } from '../mock2/template.js';
 
@@ -94,7 +94,7 @@ test('buildFenceEntries: derives the subnet when bridge_cidr is not stored', () 
   assert.equal(entries[0].gateway, '10.200.2.1');
 });
 
-test('renderMock2Nft: dedicated table, default-deny egress, web-port-only inbound, gateway-only host access', () => {
+test('renderMock2Nft: dedicated table, NAT+logged egress, web-port-only inbound, gateway-only host access', () => {
   const nft = renderMock2Nft(buildFenceEntries([activeProject()]));
   // Dedicated table (not inet proxypilot) with the idempotent add+flush pair.
   assert.match(nft, /add table inet mock2/);
@@ -104,13 +104,16 @@ test('renderMock2Nft: dedicated table, default-deny egress, web-port-only inboun
   // container is dropped (Postgres 5432 etc. stay internal).
   assert.match(nft, /ip daddr 10\.200\.6\.15 tcp dport 3000 accept/);
   assert.match(nft, /ip daddr 10\.200\.6\.15 drop/);
-  // Egress off the bridge is dropped (must use the proxy).
-  assert.match(nft, /ip saddr 10\.200\.6\.0\/24 drop comment "mock2 p7 deny-egress"/);
-  // Host access limited to DNS + DHCP + the proxy port on the OWN gateway.
+  // Egress: lateral movement to private ranges is blocked + logged, then the rest
+  // is logged and accepted (the bridge NAT carries it out). No proxy hole.
+  assert.match(nft, new RegExp(`ip saddr 10\\.200\\.6\\.0\\/24 ip daddr \\{ ${PRIVATE_DEST_RANGES.join(', ').replace(/[.]/g, '\\.')} \\} ct state new log prefix "${EGRESS_LOG_PREFIX_DENY} p7: "`));
+  assert.match(nft, /ip saddr 10\.200\.6\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p7 deny-private"/);
+  assert.match(nft, new RegExp(`ip saddr 10\\.200\\.6\\.0\\/24 ct state new log prefix "${EGRESS_LOG_PREFIX_OK} p7: "`));
+  assert.match(nft, /ip saddr 10\.200\.6\.0\/24 accept comment "mock2 p7 egress"/);
+  assert.doesNotMatch(nft, /3128/);   // squid proxy hole is gone
+  // Host access limited to DNS + DHCP on the OWN gateway; the control plane is
+  // denied (no rule permits :3001, and a catch-all host-deny closes the subnet).
   assert.match(nft, /ip saddr 10\.200\.6\.0\/24 ip daddr 10\.200\.6\.1 udp dport 53 accept/);
-  assert.match(nft, new RegExp(`ip daddr 10\\.200\\.6\\.1 tcp dport ${EGRESS_PROXY_PORT} accept`));
-  // Control plane denied: no rule permits the host's :3001, and a catch-all
-  // host-deny closes the subnet.
   assert.match(nft, /ip saddr 10\.200\.6\.0\/24 drop comment "mock2 p7 deny-host"/);
   assert.doesNotMatch(nft, /3001/);
 });
@@ -127,109 +130,47 @@ test('renderMock2Nft: no active bridges renders a placeholder, not an empty rule
   assert.match(nft, /table inet mock2/);
 });
 
-test('renderMock2Nft: two projects cannot reach each other (each bridge egress-denied)', () => {
+test('renderMock2Nft: two projects cannot reach each other (private-range block + container drop)', () => {
   const a = activeProject({ id: 1, bridge_cidr: '10.200.0.0/24', container_ip: '10.200.0.5' });
   const b = activeProject({ id: 2, bridge_cidr: '10.200.1.0/24', container_ip: '10.200.1.5' });
   const nft = renderMock2Nft(buildFenceEntries([a, b]));
-  assert.match(nft, /ip saddr 10\.200\.0\.0\/24 drop comment "mock2 p1 deny-egress"/);
-  assert.match(nft, /ip saddr 10\.200\.1\.0\/24 drop comment "mock2 p2 deny-egress"/);
-  // Project A cannot reach B's container port either — B's daddr-drop covers it.
+  // Each bridge's egress to any private range (which includes the OTHER bridge's
+  // 10.200.x.0/24, inside 10.0.0.0/8) is dropped — so A can never reach B.
+  assert.match(nft, /ip saddr 10\.200\.0\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p1 deny-private"/);
+  assert.match(nft, /ip saddr 10\.200\.1\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p2 deny-private"/);
+  // And B's container port is doubly covered by B's daddr-drop.
   assert.match(nft, /ip daddr 10\.200\.1\.5 drop/);
 });
 
-// ---- egress allowlist + squid ACL ----
+// ---- firewall egress log parser ----
 
-test('isAllowlistHost: accepts hostnames + leading-dot suffixes, rejects junk', () => {
-  for (const ok of ['registry.npmjs.org', '.npmjs.org', 'api.anthropic.com', 'a.b.c.d']) {
-    assert.equal(isAllowlistHost(ok), true, ok);
-  }
-  for (const bad of ['', 'localhost', 'http://x.com', 'x.com/path', 'x.com:443', 'a b', 'x.com;evil', '10.0.0.1']) {
-    assert.equal(isAllowlistHost(bad), false, bad);
-  }
-});
-
-test('normalizeAllowlistHost: trims + lowercases', () => {
-  assert.equal(normalizeAllowlistHost('  Registry.NPMJS.org '), 'registry.npmjs.org');
-});
-
-test('DEFAULT_EGRESS_ALLOWLIST: seeds npm + model APIs, all valid', () => {
-  assert.ok(DEFAULT_EGRESS_ALLOWLIST.includes('registry.npmjs.org'));
-  assert.ok(DEFAULT_EGRESS_ALLOWLIST.includes('api.anthropic.com'));
-  for (const h of DEFAULT_EGRESS_ALLOWLIST) assert.equal(isAllowlistHost(h), true, h);
-});
-
-test('buildEgressPlan: skips archived/failed, includes provisioning (setup needs the proxy)', () => {
-  const allow = new Map([[1, ['registry.npmjs.org']]]);
-  const plan = buildEgressPlan([
-    { id: 1, lifecycle: 'active', bridge_cidr: '10.200.0.0/24' },
-    { id: 2, lifecycle: 'provisioning', bridge_cidr: '10.200.1.0/24' },
-    { id: 3, lifecycle: 'archived', bridge_cidr: '10.200.2.0/24' },
-    { id: 4, lifecycle: 'failed_provisioning', bridge_cidr: '10.200.3.0/24' },
-  ], allow);
-  assert.deepEqual(plan.map((p) => p.id), [1, 2]);
-  assert.deepEqual(plan[0].hosts, ['registry.npmjs.org']);
-  assert.deepEqual(plan[1].hosts, []);
-});
-
-test('renderSquidAcl: per-project src+dstdomain allow, union deny tail', () => {
-  const acl = renderSquidAcl([
-    { id: 1, cidr: '10.200.0.0/24', hosts: ['registry.npmjs.org', '.anthropic.com'] },
-    { id: 2, cidr: '10.200.1.0/24', hosts: [] },
-  ]);
-  assert.match(acl, /acl mock2_p1_src src 10\.200\.0\.0\/24/);
-  assert.match(acl, /acl mock2_p1_dst dstdomain registry\.npmjs\.org \.anthropic\.com/);
-  assert.match(acl, /http_access allow mock2_p1_src mock2_p1_dst/);
-  // Empty allowlist -> no allow line for project 2 (denied by default).
-  assert.doesNotMatch(acl, /http_access allow mock2_p2_src/);
-  assert.match(acl, /project 2: empty allowlist — all egress denied/);
-  // Defence-in-depth deny across both subnets.
-  assert.match(acl, /acl mock2_all_src src 10\.200\.0\.0\/24 10\.200\.1\.0\/24/);
-  assert.match(acl, /http_access deny mock2_all_src/);
-});
-
-test('renderSquidAcl: empty plan -> header only, no deny tail', () => {
-  const acl = renderSquidAcl([]);
-  assert.match(acl, /Generated by ProxyPilot Mock2/);
-  assert.doesNotMatch(acl, /http_access/);
-});
-
-test('renderSquidAcl: allow-all mode allows each subnet to anything, no dst/deny', () => {
-  const acl = renderSquidAcl([
-    { id: 1, cidr: '10.200.0.0/24', hosts: ['registry.npmjs.org'] },
-    { id: 2, cidr: '10.200.1.0/24', hosts: [] },   // empty allowlist is irrelevant in monitor mode
-  ], { allowAll: true });
-  assert.match(acl, /EGRESS MODE: allow-all/);
-  assert.match(acl, /acl mock2_p1_src src 10\.200\.0\.0\/24/);
-  assert.match(acl, /http_access allow mock2_p1_src\b/);      // subnet -> any host
-  assert.match(acl, /http_access allow mock2_p2_src\b/);      // even the empty-allowlist project
-  assert.doesNotMatch(acl, /dstdomain/);                       // no per-host restriction
-  assert.doesNotMatch(acl, /http_access deny/);                // no defence-in-depth deny tail
-});
-
-test('parseEgressLog: keeps only this subnet, parses squid native fields', () => {
+test('parseNftEgressLog: keeps only this subnet, parses SRC/DST/DPT/PROTO + denied', () => {
   const prefix = subnetPrefixForCidr('10.200.1.0/24');
   assert.equal(prefix, '10.200.1.');
   const log = [
-    '1700000000.123 45 10.200.1.5 TCP_MISS/200 5312 GET http://deb.debian.org/pool/x.deb - HIER_DIRECT/1.2.3.4 application/octet-stream',
-    '1700000001.000 12 10.200.1.5 TCP_DENIED/403 210 CONNECT evil.example.com:443 - HIER_NONE/- text/html',
-    '1700000002.000 30 10.200.9.9 TCP_MISS/200 100 GET http://other.project/ - HIER_DIRECT/- text/html', // different subnet
-    'garbage line',
+    '1700000000.123 host kernel: mock2-egress-ok p2: IN=m2br2 OUT=eth0 SRC=10.200.1.5 DST=140.82.112.3 LEN=60 PROTO=TCP SPT=51000 DPT=443 WINDOW=1',
+    '1700000001.000 host kernel: mock2-egress-deny p2: IN=m2br2 OUT= SRC=10.200.1.5 DST=192.168.1.10 LEN=60 PROTO=TCP SPT=51001 DPT=22 WINDOW=1',
+    '1700000002.000 host kernel: mock2-egress-ok p9: IN=m2br9 OUT=eth0 SRC=10.200.9.9 DST=1.1.1.1 PROTO=UDP SPT=5 DPT=53', // different subnet
+    'some unrelated kernel line',
   ].join('\n');
-  const entries = parseEgressLog(log, prefix, 100);
-  assert.equal(entries.length, 2);                             // the 10.200.9.9 row + garbage dropped
+  const entries = parseNftEgressLog(log, prefix, 100);
+  assert.equal(entries.length, 2);                    // the 10.200.9.9 row + unrelated dropped
   assert.equal(entries[0].client, '10.200.1.5');
-  assert.equal(entries[0].method, 'GET');
-  assert.equal(entries[0].url, 'http://deb.debian.org/pool/x.deb');
+  assert.equal(entries[0].method, 'TCP');
+  assert.equal(entries[0].url, '140.82.112.3:443');
+  assert.equal(entries[0].action, 'OUT');
   assert.equal(entries[0].denied, false);
-  assert.equal(entries[1].action, 'TCP_DENIED');
+  assert.equal(entries[0].ts, 1700000000.123);
   assert.equal(entries[1].denied, true);
-  assert.equal(entries[1].method, 'CONNECT');
-  assert.equal(entries[1].url, 'evil.example.com:443');   // CONNECT target host:port
+  assert.equal(entries[1].action, 'BLOCK');
+  assert.equal(entries[1].url, '192.168.1.10:22');
 });
 
-test('parseEgressLog: bad cidr / empty prefix -> no entries', () => {
+test('parseNftEgressLog: non-egress lines and empty prefix -> no entries', () => {
   assert.equal(subnetPrefixForCidr('not-a-cidr'), null);
-  assert.deepEqual(parseEgressLog('1700000000.0 1 10.0.0.1 TCP_MISS/200 1 GET http://x/ - - -', null), []);
+  assert.deepEqual(parseNftEgressLog('kernel: something SRC=10.0.0.1 DST=8.8.8.8', null), []);
+  // A line without our prefix is skipped even if it has SRC/DST.
+  assert.deepEqual(parseNftEgressLog('kernel: OTHER SRC=10.200.1.5 DST=8.8.8.8', '10.200.1.'), []);
 });
 
 // ---- manifest port-drift ----
@@ -281,50 +222,16 @@ test('computePortDrift: a real undeclared port still drifts alongside benign noi
   assert.equal(d.hasDrift, true);
 });
 
-// ---- container proxy env injection (template.js, M4) ----
+// ---- container setup script (template.js, post-squid) ----
 
-test('buildContainerSetupScript: bakes the egress proxy into the container env', () => {
-  const s = buildContainerSetupScript({
-    appDir: '/srv/app', webPort: 3000,
-    proxyUrl: 'http://10.200.6.1:3128', noProxy: 'localhost,127.0.0.1,::1,10.200.6.0/24',
-  });
-  assert.match(s, /http_proxy=\$PROXY_URL/);
-  assert.match(s, /PROXY_URL="http:\/\/10\.200\.6\.1:3128"/);
-  assert.match(s, /01mock2proxy/);                 // apt proxy drop-in
-  assert.match(s, /Acquire::https::Proxy/);
-  assert.match(s, /NO_PROXY_VAL="localhost,127\.0\.0\.1,::1,10\.200\.6\.0\/24"/);
-  assert.match(s, /EnvironmentFile=-\/etc\/environment/); // dev server inherits it
-});
-
-test('buildContainerSetupScript: forces IPv4 and installs the runtime BEFORE baking the proxy', () => {
-  // Regression: the bootstrap installs run before the network fence, so they use
-  // direct IPv4 NAT egress — the proxy (possibly-down squid) must NOT gate the
-  // very first apt. Force IPv4, install the runtime, THEN bake the proxy for
-  // post-fence runtime. If the proxy block comes first, `apt-get install` routes
-  // through an unreachable proxy and new-project startup fails.
-  const s = buildContainerSetupScript({
-    appDir: '/srv/app', webPort: 3000,
-    proxyUrl: 'http://10.200.6.1:3128', noProxy: 'localhost,127.0.0.1,::1,10.200.6.0/24',
-  });
-  assert.match(s, /Acquire::ForceIPv4 "true"/);           // bootstrap forced onto IPv4
-  const aptIdx = s.indexOf('apt-get install -y --no-install-recommends python3');
-  const proxyIdx = s.indexOf('01mock2proxy');
-  assert.ok(aptIdx !== -1 && proxyIdx !== -1, 'both the runtime install and proxy bake are present');
-  assert.ok(aptIdx < proxyIdx, 'runtime install must precede the proxy bake (bootstrap runs direct)');
-});
-
-test('buildContainerSetupScript: no proxy args -> no proxy block (M2/M3 unchanged)', () => {
+test('buildContainerSetupScript: no proxy env — egress is the bridge NAT, apt forced onto IPv4', () => {
   const s = buildContainerSetupScript({ appDir: '/srv/app', webPort: 3000 });
+  // No egress proxy is baked in (squid was removed).
   assert.doesNotMatch(s, /http_proxy=/);
   assert.doesNotMatch(s, /01mock2proxy/);
-});
-
-test('buildContainerSetupScript: rejects a malformed proxy URL (no injection)', () => {
-  const s = buildContainerSetupScript({
-    appDir: '/srv/app', webPort: 3000,
-    proxyUrl: 'http://evil"; rm -rf /; echo "', noProxy: 'localhost',
-  });
-  // A non-matching URL is dropped entirely rather than interpolated.
-  assert.doesNotMatch(s, /rm -rf/);
-  assert.doesNotMatch(s, /http_proxy=/);
+  assert.doesNotMatch(s, /Acquire::http::Proxy/);
+  // The bridge is IPv4-only, so apt is still forced onto IPv4.
+  assert.match(s, /Acquire::ForceIPv4 "true"/);
+  // The dev server unit still inherits any operator-set env.
+  assert.match(s, /EnvironmentFile=-\/etc\/environment/);
 });

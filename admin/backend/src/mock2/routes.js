@@ -59,14 +59,7 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getEgressMode, EGRESS_MODE_KEY, EGRESS_MODE_ALLOWLIST, EGRESS_MODE_ALLOW_ALL, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS } from './settings.js';
-import {
-  listAllowlist,
-  addAllowlistHost,
-  removeAllowlistHost,
-  isAllowlistHost,
-  normalizeAllowlistHost,
-} from './allowlist.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS } from './settings.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
 import { reconcileMock2Firewall } from './firewall.js';
@@ -724,60 +717,12 @@ export function createMock2Router() {
     res.json({ max_chars: getChatMaxChars(), options: CHAT_MAX_CHARS_OPTIONS });
   });
 
-  // Egress policy mode (M4/ADR-010 monitor mode). Admin-gated read/write of the
-  // mock2_settings.egress_mode value the egress reconcile keys off. 'allow-all'
-  // (monitor) opens every project bridge to any host but keeps egress funneled
-  // through squid so access.log records it; 'allowlist' re-enforces per-project
-  // hosts. Changing it re-renders the squid ACL immediately for all projects.
-  router.get('/settings/egress-mode', requireAdmin, (_req, res) => {
-    res.json({ mode: getEgressMode() });
-  });
-  router.post('/settings/egress-mode', requireAdmin, async (req, res) => {
-    const parsed = z.object({ mode: z.enum([EGRESS_MODE_ALLOWLIST, EGRESS_MODE_ALLOW_ALL]) }).safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: `mode must be "${EGRESS_MODE_ALLOWLIST}" or "${EGRESS_MODE_ALLOW_ALL}"` });
-    setMock2Setting(EGRESS_MODE_KEY, parsed.data.mode, req.user.id);
-    logAudit(req.user.id, 'MOCK2_SETTING_EGRESS_MODE', 'mock2_setting', 0, { mode: parsed.data.mode }, req.ip);
-    const egress = await reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
-    res.json({ mode: getEgressMode(), egress });
-  });
-
-  // ---- Egress allowlist (M4, ADR-010) ----
-  // The per-project filtering-proxy allowlist. Admin-gated + audit-logged (an
-  // allowlist edit widens what a container can reach — a security-relevant
-  // change). Read is allowed to any project member so editors/viewers can SEE
-  // the fence; only admins mutate it. refuseIfArchived on the mutators (an
-  // archived project is read-only, Q4). Every edit re-renders the squid ACL.
-  router.get('/projects/:id/egress-allowlist', requireMock2Role('viewer'), (req, res) => {
-    res.json({ hosts: listAllowlist(req.mock2Project.id), editable: isReqAdmin(req) });
-  });
-
-  router.post('/projects/:id/egress-allowlist', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
-    const project = req.mock2Project;
-    const host = normalizeAllowlistHost(req.body?.host);
-    if (!isAllowlistHost(host)) {
-      return res.status(400).json({ error: 'host must be a bare hostname or domain (e.g. registry.npmjs.org or .npmjs.org)' });
-    }
-    const { added } = addAllowlistHost(project.id, host, req.user.id);
-    // Regenerate the squid ACL so the change is live. Non-fatal (a squid that is
-    // absent leaves the fence denying — safe direction).
-    const egress = await reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
-    logAudit(req.user.id, 'MOCK2_EGRESS_ALLOW_ADD', 'mock2_project', project.id, { host, added }, req.ip);
-    res.json({ hosts: listAllowlist(project.id), added, egress });
-  });
-
-  router.delete('/projects/:id/egress-allowlist/:host', requireAdmin, requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
-    const project = req.mock2Project;
-    const host = normalizeAllowlistHost(decodeURIComponent(req.params.host || ''));
-    const { removed } = removeAllowlistHost(project.id, host);
-    const egress = await reconcileMock2Egress().catch((e) => ({ ok: false, error: e?.message }));
-    logAudit(req.user.id, 'MOCK2_EGRESS_ALLOW_REMOVE', 'mock2_project', project.id, { host, removed }, req.ip);
-    res.json({ hosts: listAllowlist(project.id), removed, egress });
-  });
-
-  // Egress traffic log — what this project's container actually reached, as squid
-  // recorded it. Read-only, any member (viewer+); pairs with monitor mode so an
-  // admin can watch traffic and decide what to allowlist. Best-effort: a missing
-  // access log returns an empty list, not an error.
+  // Egress traffic log — what this project's container actually reached, as the
+  // FIREWALL recorded it (the nftables fence logs every new outbound connection
+  // to the kernel log; squid was removed). Read-only, any member (viewer+). The
+  // firewall sees IP:port, not hostnames, so entries show the destination
+  // address. Best-effort: a host without a readable kernel log returns an empty
+  // list, not an error.
   router.get('/projects/:id/egress-log', requireMock2Role('viewer'), async (req, res) => {
     const project = req.mock2Project;
     const cidr = project.bridge_cidr || bridgeCidrForProject(project.id);

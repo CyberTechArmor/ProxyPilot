@@ -66,7 +66,7 @@ function shSingleQuote(s) {
 // execStartForStartCommand(startCommand, { appDir }) → the systemd ExecStart line
 // value for a manifest `start` command. Wrapped in `/bin/sh -lc '…'` so a shell
 // command like `npm run start` (not an absolute path) is valid as ExecStart, the
-// login shell loads the baked proxy env, and the working dir is the app dir.
+// login shell loads the container env, and the working dir is the app dir.
 // Single quotes in the command are escaped so a runner-edited start command can
 // never break the unit.
 export function execStartForStartCommand(startCommand, { appDir = '/srv/app' } = {}) {
@@ -97,8 +97,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${appDir}
 Environment=PORT=${webPort}
-# Inherit the baked proxy env (M4) so anything the dev server spawns egresses
-# through the filtering proxy. The leading '-' makes it optional (M2/M3 hosts).
+# Inherit any operator-set container env. The leading '-' makes it optional.
 EnvironmentFile=-/etc/environment
 ExecStart=${execStart}
 Restart=on-failure
@@ -154,8 +153,9 @@ export function deployProjectStatus(deployStatus) {
 }
 
 // deployFailureMessage(step, detail) → the actionable, plain-language error a
-// deploy failure surfaces (never a silent "succeeded"). Egress failures name the
-// squid fence explicitly so the operator knows the fix is host-side, not code.
+// deploy failure surfaces (never a silent "succeeded"). Egress failures point the
+// operator host-side (the bridge NAT / host internet) so they know the fix is not
+// in the code.
 export function deployFailureMessage(step, detail = '') {
   const d = String(detail || '').trim();
   const looksLikeEgress = /ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|proxy|registry\.npmjs|network|could not resolve|unable to connect|403 Forbidden|407/i.test(d);
@@ -167,7 +167,7 @@ export function deployFailureMessage(step, detail = '') {
     health: 'The app started but is not serving on its web port',
   }[step] || 'Deploy failed';
   const egressHint = looksLikeEgress && (step === 'install')
-    ? ' — the container could not reach the npm registry through the egress proxy. Confirm squid is up on the host and registry.npmjs.org is in the project allowlist (this does NOT disable the fence).'
+    ? ' — the container could not reach the npm registry. Egress is the bridge\'s Incus NAT: confirm the host has working internet and the m2br* bridge has ipv4.nat=true (the firewall logs egress but never blocks the internet path).'
     : '';
   return `${base}${egressHint}${d ? `: ${d.slice(-600)}` : '.'}`;
 }

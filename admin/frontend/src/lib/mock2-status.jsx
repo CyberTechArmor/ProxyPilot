@@ -18,6 +18,10 @@ const STATUS_STYLES = {
   awaiting_user: { label: 'Awaiting you', cls: 'bg-violet-500/10 text-violet-500', pulse: true },
   awaiting_admin: { label: 'Awaiting admin', cls: 'bg-amber-500/10 text-amber-500', pulse: true },
   drift: { label: 'Update available', cls: 'bg-sky-500/10 text-sky-500' },
+  // Run phase — the built app's lifecycle on the live URL (deriveProjectStatus).
+  deploying: { label: 'Deploying', cls: 'bg-cyan-500/10 text-cyan-500', pulse: true },
+  serving: { label: 'Live', cls: 'bg-emerald-500/10 text-emerald-500' },
+  deploy_failed: { label: 'Deploy failed', cls: 'bg-red-500/10 text-red-500' },
   failed: { label: 'Failed', cls: 'bg-red-500/10 text-red-500' },
   archived: { label: 'Archived', cls: 'bg-muted text-muted-foreground' },
   unknown: { label: 'Unknown', cls: 'bg-muted text-muted-foreground' },

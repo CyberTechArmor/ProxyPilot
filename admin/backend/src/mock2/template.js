@@ -17,27 +17,43 @@
 // Terminology (risk R7): the dev server here is a plain static server; nothing
 // is named "agent".
 
+import { buildScaffoldFiles } from './scaffold.js';
+import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
+
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
 // Stage-1 mockup preview at /_preview (from state/mockups/), and the seed carries
 // an empty state/mockups/ so the preview path exists before the first mockup.
-export const MOCK2_TEMPLATE_VERSION = 'm7-concept-1';
+// run-1: the seed is now the real TS/Express/Drizzle runtime scaffold (R8,
+// scaffold.js) plus a declared run contract in mock2.yaml; serve.py stays as the
+// pre-build/Concept-stage placeholder and the deploy step swaps in the real app.
+export const MOCK2_TEMPLATE_VERSION = 'run-1';
 
 // The default declared web port. Overridable per project only by editing
 // mock2.yaml in the repo (a commit, visible in change records — ADR-005).
 export const DEFAULT_WEB_PORT = 3000;
 
-// mock2.yaml — the port/topology manifest. `web` is the single exposed port
-// ProxyPilot publishes; everything else is internal and default-denied at the
-// project bridge in M4.
+// mock2.yaml — the port/topology manifest (ADR-005) AND the run contract
+// (Run phase). `web` is the single exposed port ProxyPilot publishes; everything
+// else is internal and default-denied at the project bridge in M4. The `run`
+// block DECLARES how the app installs/migrates/builds/starts — the deploy step
+// obeys it verbatim and NEVER sniffs the tree for a start command (declared, not
+// discovered, exactly like ports).
 export function defaultManifest({ webPort = DEFAULT_WEB_PORT } = {}) {
-  return `# mock2.yaml — project topology manifest (ADR-005).
+  return `# mock2.yaml — project topology manifest + run contract (ADR-005).
 # Ports are DECLARED here, never discovered. ProxyPilot registers exactly one
 # HTTPS route, to \`web\`; everything else stays internal to the project bridge.
 version: 1
 ports:
   web: ${webPort}        # exposed — the one HTTPS route ProxyPilot publishes
   postgres: 5432   # internal — Postgres runs inside this container (ADR-008)
+# How the app runs. The deploy step runs these verbatim (declared, not sniffed).
+run:
+  runtime: ${DEFAULT_RUN_CONTRACT.runtime}
+  install: ${DEFAULT_RUN_CONTRACT.install}
+  migrate: ${DEFAULT_RUN_CONTRACT.migrate}
+  build: ${DEFAULT_RUN_CONTRACT.build}
+  start: ${DEFAULT_RUN_CONTRACT.start}
 `;
 }
 
@@ -150,22 +166,35 @@ DATABASE_URL=postgres://app:app@127.0.0.1:5432/app
 
 // buildSeedFiles(project, opts) → [{ path, content, mode }]. The exact tree the
 // first (seed) commit contains. `mode` is octal for the entries that must be
-// executable (the dev server).
+// executable (the dev server + the migrate script).
+//
+// The tree is the real TS/Express/Drizzle runtime scaffold (scaffold.js, R8)
+// composed with: the manifest (ports + run contract), the secrets manifest, and
+// serve.py + public/index.html — the pre-build/Concept-stage PLACEHOLDER dev
+// server. Before the first build, serve.py owns the web port (serves the
+// placeholder page at / and the mockup at /_preview); the deploy step swaps in
+// the scaffold's own runtime once a build succeeds.
 export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
   return [
     { path: 'mock2.yaml', content: defaultManifest({ webPort }) },
+    // The real runtime scaffold (package.json, tsconfig, src/, migrations/, …).
+    ...buildScaffoldFiles(project),
+    // Pre-build placeholder dev server (Concept stage) — kept as the idle/fallback
+    // front door until the deploy step swaps the systemd unit to the real app.
     { path: 'public/index.html', content: placeholderIndexHtml(project) },
     { path: 'serve.py', content: serverPy(webPort), mode: 0o755 },
     { path: '.env.example', content: envExample(webPort) },
     {
       path: '.gitignore',
-      content: '.env\n__pycache__/\nnode_modules/\n',
+      content: '.env\n__pycache__/\nnode_modules/\ndist/\n*.log\n',
     },
     {
       path: 'README.md',
       content: `# ${String(project?.name || 'Project')}\n\n` +
         `ProxyPilot Mock2 project (template ${MOCK2_TEMPLATE_VERSION}). ` +
-        `The declared topology is in \`mock2.yaml\`; the dev server is \`serve.py\`.\n`,
+        `The declared topology and run contract are in \`mock2.yaml\`; the app is a ` +
+        `TypeScript/Express/Drizzle scaffold under \`src/\` with migrations in \`migrations/\`. ` +
+        `\`serve.py\` is the pre-build placeholder dev server (Concept stage).\n`,
     },
     {
       // state/ is where later phases append rules.md and change records
@@ -270,6 +299,11 @@ export no_proxy="$NO_PROXY_VAL" NO_PROXY="$NO_PROXY_VAL"
 export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, proxyUrl = null, noProxy = 'localhost,127.0.0.1,::1' } = {}) {
   // Reuse the shared proxy-config builder (also run standalone before the clone).
   const proxyBlock = buildProxyConfigScript({ proxyUrl, noProxy });
+  // The pre-build placeholder unit (serve.py). Same builder the deploy step uses
+  // to rewrite ExecStart to the real app, so the two units differ ONLY in ExecStart.
+  const devServiceUnit = buildDevServiceUnit({
+    appDir, webPort, execStart: execStartForServePy(appDir),
+  }).trimEnd();
   return `#!/bin/sh
 set -e
 APP_DIR="${appDir}"
@@ -297,10 +331,27 @@ apt-get install -y --no-install-recommends python3 || true
 # runtime "apt-get install" fails if the proxy is down or the host isn't allowed.
 apt-get install -y --no-install-recommends git curl nano sudo ca-certificates || echo "[mock2] toolbox install skipped/failed (non-fatal)"
 apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"
+# Node.js + npm for the runtime scaffold (R8). Installed at BOOTSTRAP (pre-fence,
+# direct NAT egress) because once the fence is up apt can only reach the filtering
+# proxy — so the Node RUNTIME must be here before then. The npm PACKAGES the app
+# needs (npm install) are fetched at DEPLOY, post-fence, through squid to
+# registry.npmjs.org (in the default allowlist). Non-fatal: a project that never
+# builds still comes online on the placeholder dev server.
+apt-get install -y --no-install-recommends nodejs npm || echo "[mock2] nodejs/npm install skipped/failed (non-fatal; the app cannot deploy without it)"
 
 # Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.
 if command -v pg_ctlcluster >/dev/null 2>&1; then
   (service postgresql start || pg_ctlcluster "$(ls /etc/postgresql 2>/dev/null | head -n1)" main start || true) 2>/dev/null || true
+fi
+
+# Provision the in-container app role + database (ADR-008) so the app's declared
+# DATABASE_URL (postgres://app:app@127.0.0.1:5432/app in .env.example, and the
+# migrate script's default) authenticates. Idempotent + best-effort: the
+# placeholder dev server does not need it, but the DEPLOYED app (its migrate step)
+# does. Runs locally against the just-started cluster — no egress needed.
+if command -v psql >/dev/null 2>&1; then
+  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_roles WHERE rolname='app'\\" | grep -q 1 || psql -c \\"CREATE ROLE app LOGIN PASSWORD 'app'\\"" 2>/dev/null || echo "[mock2] app role create skipped/failed (non-fatal)"
+  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_database WHERE datname='app'\\" | grep -q 1 || psql -c \\"CREATE DATABASE app OWNER app\\"" 2>/dev/null || echo "[mock2] app database create skipped/failed (non-fatal)"
 fi
 
 # Bake the egress proxy into the container env NOW, for POST-fence runtime: once
@@ -312,25 +363,13 @@ fi
 ${proxyBlock}
 
 # Dev server systemd unit — restarts on crash, starts on boot so a container
-# restart (idle-stop lifecycle, M9) brings the app back automatically.
+# restart (idle-stop lifecycle, M9) brings the app back automatically. This is
+# the PRE-BUILD placeholder unit (serve.py); the deploy step (deploy.js) rewrites
+# ExecStart to the manifest \`start\` command once a build succeeds, and that
+# rewritten unit persists across restarts. Built with the shared buildDevServiceUnit
+# so the deploy rewrite and this seed produce byte-identical units bar ExecStart.
 cat > /etc/systemd/system/mock2-dev.service <<UNIT
-[Unit]
-Description=Mock2 project dev server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=${appDir}
-Environment=PORT=${webPort}
-# Inherit the baked proxy env (M4) so anything the dev server spawns egresses
-# through the filtering proxy. The leading '-' makes it optional (M2/M3 hosts).
-EnvironmentFile=-/etc/environment
-ExecStart=/usr/bin/python3 ${appDir}/serve.py
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
+${devServiceUnit}
 UNIT
 
 systemctl daemon-reload || true

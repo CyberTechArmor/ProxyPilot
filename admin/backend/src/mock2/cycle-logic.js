@@ -188,6 +188,9 @@ export function publicCycleShape(row) {
     retries: row.retries ?? 0,
     interrupt_request: row.interrupt_request || null,
     error: row.error || null,
+    // Run phase — whether the built app was deployed and is serving on the live
+    // URL: null | 'deploying' | 'serving' | 'deploy_failed'.
+    deploy_status: row.deploy_status || null,
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

@@ -46,6 +46,7 @@ import {
   purgeProjectSlugHistory,
 } from './projects.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
+import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
 import {
   startProvision,
@@ -327,6 +328,11 @@ function shapeProject(project, { isAdmin }) {
   const current = getCurrentFrameworkVersion();
   const frameworkUpdateAvailable = isFrameworkDrifted(project.last_built_framework_version_id, current?.id ?? null);
   const lastBuilt = project.last_built_framework_version_id ? getFrameworkVersion(project.last_built_framework_version_id) : null;
+  // Run phase — the derived deploy signal from the latest cycle's deploy_status
+  // (deploying/serving/deploy_failed). One cheap lookup, kept in the shaper so
+  // the tile and the detail page derive the deploy state identically.
+  const latest = latestCycle(project.id);
+  const deployState = deployProjectStatus(latest?.deploy_status);
   return publicProjectShape(project, {
     parentDomain: parent?.domain || null,
     editorCount: counts.editor,
@@ -338,6 +344,7 @@ function shapeProject(project, { isAdmin }) {
     frameworkUpdateAvailable,
     frameworkCurrentVersion: current?.version ?? null,
     frameworkLastBuiltVersion: lastBuilt?.version ?? null,
+    deployState,
   });
 }
 

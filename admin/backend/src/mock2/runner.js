@@ -44,6 +44,7 @@ import {
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
+import { deployProject, readRunContract } from './deploy.js';
 
 const APP_DIR = '/srv/app';
 const GATES_DIR = '/srv/gates';
@@ -337,10 +338,32 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         continue;
       }
       const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: decision.finishSummary });
+
+      // Run phase — deploy the built app so "succeeded" means "serving". Install
+      // deps → migrate (in-container Postgres, ADR-008) → build → swap the systemd
+      // unit's ExecStart to the manifest `start` command → restart → health-check,
+      // all inside the container through host.js while still holding the checkout
+      // lock (ADR-004). A placeholder project (no run contract) is a no-op; a
+      // deploy failure is a distinct, retryable terminal state (not a silent
+      // success). The live URL then serves the real app (the CycleCard reloads
+      // the preview on success via onBuilt).
+      const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+      if (!deployed.ok) {
+        finishCycle(cycle.id, { status: 'failed', error: deployed.error });
+        releaseLock(projectId, holder);
+        setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error, commit: record?.commit_sha || null });
+        return scheduleJobCleanup(cycle.id);
+      }
       finishCycle(cycle.id, { status: 'succeeded' });
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
-      setJob(cycle.id, { phase: 'succeeded', message: 'Change complete — gates green, checkpoint recorded.', commit: record?.commit_sha || null });
+      setJob(cycle.id, {
+        phase: deployed.skipped ? 'succeeded' : 'serving',
+        message: deployed.skipped
+          ? 'Change complete — gates green, checkpoint recorded.'
+          : 'Deployed — gates green and the app is live on its URL.',
+        commit: record?.commit_sha || null,
+      });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -537,6 +560,49 @@ async function checkpointAndRecord({ cycle, project, containerName, holder, gate
   }
 
   return record;
+}
+
+// ---- deploy stage (Run phase) ----
+
+// deployStage — after gates are green and the change is checkpointed, install +
+// migrate + build + swap the systemd unit to the manifest `start` command +
+// restart, so the live URL serves the REAL app instead of the placeholder. The
+// run command is DECLARED in mock2.yaml (ADR-005), never sniffed. Reports each
+// step through setJob (the CycleCard renders job.message) and refreshes the lock
+// (a deploy writes the container). Returns { ok, skipped, error }.
+//   - skipped: the project has no run contract (an old placeholder) — the
+//     serve.py front door keeps serving; not a failure.
+//   - !ok: install/migrate/build/start/health failed — a distinct, retryable
+//     terminal state (cycle → 'failed', deploy_status → 'deploy_failed'). The
+//     existing editor Retry (CycleCard, cycle.status === 'failed') resumes it.
+async function deployStage({ cycle, project, containerName, holder }) {
+  const projectId = Number(project.id);
+  const webPort = project.web_port || 3000;
+
+  const runContract = await readRunContract(containerName, APP_DIR);
+  if (!runContract.hasContract) {
+    updateCycle(cycle.id, { deploy_status: null });
+    return { ok: true, skipped: true };
+  }
+
+  updateCycle(cycle.id, { deploy_status: 'deploying' });
+  setJob(cycle.id, { phase: 'deploying', message: 'Deploying — installing dependencies…' });
+
+  const result = await deployProject({
+    containerName, appDir: APP_DIR, webPort, runContract,
+    onStep: (key, label) => {
+      setJob(cycle.id, { phase: 'deploying', message: label });
+      touchLock(projectId, holder); // a deploy step writes the container
+    },
+  });
+
+  if (!result.ok) {
+    updateCycle(cycle.id, { deploy_status: 'deploy_failed' });
+    return { ok: false, error: `Deploy failed at "${result.step}" — ${result.error}` };
+  }
+  updateCycle(cycle.id, { deploy_status: 'serving' });
+  touchLock(projectId, holder);
+  return { ok: true };
 }
 
 // Retries exhausted → awaiting_admin + a retries_exhausted queue item + a handoff

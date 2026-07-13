@@ -28,6 +28,17 @@ export function latestCycle(projectId) {
   return getMock2Db().prepare(`SELECT * FROM mock2_cycles WHERE project_id = ? ORDER BY id DESC LIMIT 1`).get(Number(projectId));
 }
 
+// Has this project ever been deployed (a build cycle reached deploy_status
+// 'serving')? The rehydrate path uses this to decide whether to re-run the
+// deploy step and restore the built app rather than the placeholder (Run-phase
+// idempotency point 5). Cheap indexed-ish scan; one row is enough.
+export function projectHasBeenDeployed(projectId) {
+  const row = getMock2Db()
+    .prepare(`SELECT 1 FROM mock2_cycles WHERE project_id = ? AND deploy_status = 'serving' LIMIT 1`)
+    .get(Number(projectId));
+  return !!row;
+}
+
 // Count a project's live cycles (queued/estimating/running) — the concurrency
 // input canStartCycle uses. The lock already forecloses concurrent cycles per
 // project, but the count feeds the self-hosted GPU concurrency cap too.
@@ -61,7 +72,7 @@ export function insertCycle({
 const WRITABLE = new Set([
   'status', 'current_gate', 'gates_json', 'est_tokens', 'est_cost_cents',
   'used_tokens', 'used_cost_cents', 'retries', 'interrupt_request', 'error',
-  'started_at', 'finished_at', 'classifier_outcome',
+  'started_at', 'finished_at', 'classifier_outcome', 'deploy_status',
 ]);
 
 export function updateCycle(id, patch = {}) {

@@ -40,6 +40,7 @@ import {
   gatewayForCidr,
   createProjectBridge,
   deleteProjectBridge,
+  ensureHostEgress,
 } from './network.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { runPortDriftCheck } from './port-check.js';
@@ -211,10 +212,13 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const bridge = await createProjectBridge({ name: bridgeName, cidr: bridgeCidr });
   if (!bridge.ok) return bail(`project bridge create failed: ${bridge.error}`);
   updateProject(projectId, { bridge_name: bridgeName, bridge_cidr: bridgeCidr });
-  // Egress is the bridge's own Incus NAT (ipv4.nat=true) — there is no host-side
-  // proxy to install, configure, or keep alive, so no preflight can fail here.
-  // The nftables fence (applied at activation, below) logs and contains egress;
-  // it never blocks the internet path, so a container always has a way out.
+  // Egress is the bridge's own Incus NAT (ipv4.nat=true) — no host-side proxy to
+  // install or keep alive. But the host must actually FORWARD + masquerade the
+  // bridge out: enable IPv4 forwarding and, on a Docker host (whose FORWARD chain
+  // defaults to DROP for non-Docker bridges), allow m2br* through DOCKER-USER.
+  // Without this the clone below can't reach the Debian mirrors ("Unable to
+  // connect"). Idempotent + best-effort; run before the container launches.
+  await ensureHostEgress().catch((e) => console.warn('[mock2] ensureHostEgress failed:', e?.message));
 
   // ---- Launch the container, NIC pinned to the project bridge ----
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });

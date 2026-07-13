@@ -1304,6 +1304,16 @@ main() {
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cp -r "${SCRIPT_DIR}/admin" "$INSTALL_DIR/"
 
+    # Copy the operator scripts (scripts/mock2-enable-egress.sh, patch helpers,
+    # …) into the install root so they exist where every log/error message tells
+    # the operator to run them ("run scripts/mock2-enable-egress.sh"). Before
+    # this they lived only in the source checkout, so a `/opt/proxypilot/scripts`
+    # path did not exist and the guidance was un-followable on a deployed host.
+    if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
+        cp -r "${SCRIPT_DIR}/scripts" "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR"/scripts/*.sh 2>/dev/null || true
+    fi
+
     # Copy the CVE engine (Python package). The dashboard pivots
     # through nsenter -t 1 to run `python3 -m proxypilot.engine` on
     # the host with PYTHONPATH=$INSTALL_DIR — so the package must

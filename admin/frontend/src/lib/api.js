@@ -1132,6 +1132,12 @@ export const api = {
   mock2SetIdleStopDays: (days) =>
     request('/mock2/settings/idle-stop-days', { method: 'POST', body: JSON.stringify({ days }) }),
 
+  // Mock2 concept chat message limit (admin-only). Read returns the current
+  // ceiling and the selectable options (4k/8k/16k/32k).
+  mock2GetChatMaxChars: () => request('/mock2/settings/chat-max-chars'),
+  mock2SetChatMaxChars: (maxChars) =>
+    request('/mock2/settings/chat-max-chars', { method: 'POST', body: JSON.stringify({ max_chars: maxChars }) }),
+
   // Mock2 per-project egress allowlist (Phase M4). Read is member-visible; add/
   // remove are admin-only (audit-logged) and regenerate the squid ACL.
   mock2GetEgressAllowlist: (id) => request(`/mock2/projects/${id}/egress-allowlist`),

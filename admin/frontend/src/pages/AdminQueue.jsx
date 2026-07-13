@@ -128,6 +128,9 @@ export default function AdminQueue() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState({ kind: 'all', status: 'open' });
+  const [chatMax, setChatMax] = useState(null);          // current limit (number) or null while loading
+  const [chatOptions, setChatOptions] = useState([]);    // selectable ceilings
+  const [savingChat, setSavingChat] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -159,6 +162,31 @@ export default function AdminQueue() {
   }, []);
 
   useEffect(() => { if (gate === 'enabled') load(); }, [gate, load]);
+
+  // Concept chat message limit (admin-configurable, 4k/8k/16k/32k).
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetChatMaxChars()
+      .then((r) => { setChatMax(r.max_chars); setChatOptions(r.options || []); })
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load chat limit failed:', err); });
+  }, [gate]);
+
+  const onChatMaxChange = async (value) => {
+    const next = Number(value);
+    const prev = chatMax;
+    setChatMax(next); // optimistic
+    setSavingChat(true);
+    try {
+      const res = await api.mock2SetChatMaxChars(next);
+      setChatMax(res.max_chars);
+      toast({ title: 'Chat message limit updated', description: `${res.max_chars.toLocaleString()} characters per message.` });
+    } catch (err) {
+      setChatMax(prev); // roll back
+      toast({ variant: 'destructive', title: 'Could not update limit', description: err.message });
+    } finally {
+      setSavingChat(false);
+    }
+  };
 
   const onStatus = async (item, status) => {
     setBusy(true);
@@ -203,6 +231,35 @@ export default function AdminQueue() {
           <RotateCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </Button>
       </div>
+
+      {/* Concept chat settings — admin-configurable per-message character limit. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Chat message limit</CardTitle>
+          <CardDescription>
+            Maximum characters a user can send in a single design-chat message.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-1.5 max-w-xs">
+            <label className="text-xs text-muted-foreground" htmlFor="chat-max">Characters per message</label>
+            <Select
+              value={chatMax != null ? String(chatMax) : undefined}
+              onValueChange={onChatMaxChange}
+              disabled={chatMax == null || savingChat}
+            >
+              <SelectTrigger id="chat-max" className="h-11 sm:h-10">
+                <SelectValue placeholder="Loading…" />
+              </SelectTrigger>
+              <SelectContent>
+                {chatOptions.map((n) => (
+                  <SelectItem key={n} value={String(n)}>{n.toLocaleString()} characters</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Filters — stack on mobile. */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

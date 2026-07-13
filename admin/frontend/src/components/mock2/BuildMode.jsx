@@ -46,11 +46,14 @@ export default function BuildMode({
   useEffect(() => { load(); }, [load]);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
+  // Fast (3s) while a cycle is live so its status/task-list update on their own;
+  // gentle (8s) otherwise while online so a cycle started elsewhere (or a missed
+  // terminal transition) still surfaces without a manual refresh.
   useEffect(() => {
-    if (!active) return undefined;
-    const t = setInterval(() => { load(); if (onChanged) onChanged(); }, 3000);
+    if (!online) return undefined;
+    const t = setInterval(() => { load(); if (active && onChanged) onChanged(); }, active ? 3000 : 8000);
     return () => clearInterval(t);
-  }, [active, load, onChanged]);
+  }, [online, active, load, onChanged]);
 
   // Ask for browser-notification permission once, when a build is live, so the
   // finish alert can fire. (The Notifications settings page also has an explicit

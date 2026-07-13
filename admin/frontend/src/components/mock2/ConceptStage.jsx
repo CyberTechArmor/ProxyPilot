@@ -91,6 +91,9 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // in flight, or while any rule question is open (so answers + the "starting the
   // build" transition settle on their own).
   const jobActive = data?.job && !['done', 'approved', 'failed'].includes(data.job.phase);
+  // The approval (mockup → Build) job specifically — surfaced as a prominent
+  // "Unlocking Build…" loader so the stage handoff never looks stuck.
+  const approvalActive = jobActive && data?.job?.kind === 'approval';
   const auditJob = data?.audit_job || null;
   const auditActive = !!auditJob && !['building', 'awaiting_user', 'awaiting_admin', 'failed', 'done'].includes(auditJob.phase);
   const openQuestionCount = (data?.open_question_ids || []).length;
@@ -203,6 +206,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
             <ClipboardList className="h-3.5 w-3.5" /> Design conversation — read-only history of how the design was decided.
           </p>
+        ) : null}
+
+        {/* Mockup → Build handoff. Approval extracts the design inventory and
+            unlocks Build in the background; this makes the wait visible so the
+            user knows the next screen is coming (it switches on its own once the
+            parent's project poll sees design_approved flip — no refresh). */}
+        {!archived && approvalActive ? (
+          <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3 shrink-0">
+            <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Unlocking Build…</p>
+              <p className="text-xs text-muted-foreground">
+                {data?.job?.message || 'Extracting the design inventory'} — this switches to the build view automatically.
+              </p>
+            </div>
+          </div>
         ) : null}
 
         {/* Model-slot readiness (concept needs the concept_chat + mockup slots). */}

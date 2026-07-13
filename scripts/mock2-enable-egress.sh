@@ -71,15 +71,24 @@ fi
 #    in squid.conf to an explicit 0.0.0.0 bind. This is safe: the host firewall
 #    (table inet proxypilot, input policy drop) only admits the m2br* bridges to
 #    this port, so 0.0.0.0 does NOT expose an open proxy on the public interface.
-#    Idempotent — a line already bound to 0.0.0.0:PORT is left untouched. Retire
-#    the old port-only drop-in (superseded by editing the real http_port line).
-rm -f "$PORT_FILE" 2>/dev/null || true
+#
+#    SANITIZE any existing http_port line for our port to the clean form. This
+#    matches ANY value token that contains PROXY_PORT — a bare port, a
+#    localhost/v6/0.0.0.0 bind, AND a token with trailing junk stuck to it (e.g.
+#    a hand-edit that left `http_port 0.0.0.0:3128#TODO:review`, which squid
+#    parses as the port "3128#TODO:review" and FATALs on: "Bungled … http_port …
+#    is supposed to be a number"). We rewrite the whole token, dropping the junk,
+#    then de-duplicate so exactly one clean directive remains. Idempotent — a line
+#    already `http_port 0.0.0.0:PORT` rewrites to itself.
+rm -f "$PORT_FILE" 2>/dev/null || true   # retire the old port-only drop-in
 if [ -f "$SQUID_CONF" ]; then
-  if grep -qE "^[[:space:]]*http_port[[:space:]]+0\.0\.0\.0:${PROXY_PORT}([[:space:]]|\$)" "$SQUID_CONF"; then
-    log "squid http_port already pinned to 0.0.0.0:${PROXY_PORT}"
-  elif grep -qE "^[[:space:]]*http_port[[:space:]]+(\[::\]:|127\.0\.0\.1:)?${PROXY_PORT}([[:space:]]|\$)" "$SQUID_CONF"; then
-    log "pinning squid http_port to 0.0.0.0:${PROXY_PORT}"
-    sed -i -E "s|^([[:space:]]*)http_port[[:space:]]+(\[::\]:|127\.0\.0\.1:)?${PROXY_PORT}([[:space:]]*)\$|\1http_port 0.0.0.0:${PROXY_PORT}|" "$SQUID_CONF"
+  if grep -qE "^[[:space:]]*http_port[[:space:]]+([^[:space:]]*:)?${PROXY_PORT}([^[:space:]]|[[:space:]]|\$)" "$SQUID_CONF"; then
+    log "normalizing squid http_port to 0.0.0.0:${PROXY_PORT}"
+    # Rewrite: value token = optional "addr:" + PROXY_PORT + optional trailing junk.
+    sed -i -E "s|^([[:space:]]*)http_port[[:space:]]+([^[:space:]]*:)?${PROXY_PORT}([^[:space:]]*)?([[:space:]].*)?\$|\1http_port 0.0.0.0:${PROXY_PORT}|" "$SQUID_CONF"
+    # De-dupe: keep the first clean line, drop any further identical http_port lines.
+    awk -v seen=0 "/^[[:space:]]*http_port[[:space:]]+0\\.0\\.0\\.0:${PROXY_PORT}([[:space:]]|\$)/{ if (seen) next; seen=1 } { print }" "$SQUID_CONF" > "${SQUID_CONF}.pp.tmp" \
+      && mv "${SQUID_CONF}.pp.tmp" "$SQUID_CONF"
   else
     log "adding http_port 0.0.0.0:${PROXY_PORT} to squid.conf"
     printf '\n# Added by ProxyPilot Mock2 (M4)\nhttp_port 0.0.0.0:%s\n' "$PROXY_PORT" >> "$SQUID_CONF"
@@ -96,16 +105,38 @@ if [ ! -f "$ACL_FILE" ]; then
 EOF
 fi
 
-# 5. Enable + (re)start squid. `reconfigure` if already running, else start.
+# 5. Validate the config BEFORE touching the running daemon. A broken squid.conf
+#    (e.g. the bungled http_port we just sanitized, or an unrelated hand-edit)
+#    makes `systemctl restart` fail with a FATAL that only shows in the journal —
+#    surface it here instead. `squid -k parse` exits non-zero and prints the exact
+#    offending line on any error.
+if ! parse_out="$(squid -k parse 2>&1)"; then
+  echo "[mock2-egress] squid rejected its configuration — NOT (re)starting:" >&2
+  printf '%s\n' "$parse_out" | tail -n 20 >&2
+  echo "[mock2-egress] fix /etc/squid/squid.conf (see the 'Bungled …' line above) and re-run this script." >&2
+  exit 1
+fi
+
+# 6. Enable + (re)start squid. `reconfigure` if already running, else start.
 if command -v systemctl >/dev/null 2>&1; then
   systemctl enable squid >/dev/null 2>&1 || true
   if systemctl is-active --quiet squid; then
-    squid -k reconfigure || systemctl reload squid || systemctl restart squid
+    squid -k reconfigure || systemctl reload-or-restart squid || systemctl restart squid
   else
     systemctl restart squid
   fi
 else
   service squid restart || squid -z || true
+fi
+
+# 7. Confirm squid is actually listening on the port — a started-but-not-listening
+#    daemon is the failure the backend preflight guards against. Best-effort.
+if command -v ss >/dev/null 2>&1; then
+  if ss -ltnH "sport = :${PROXY_PORT}" 2>/dev/null | grep -q .; then
+    log "squid is listening on :${PROXY_PORT}"
+  else
+    echo "[mock2-egress] WARNING: squid is not listening on :${PROXY_PORT} yet — check 'systemctl status squid'" >&2
+  fi
 fi
 
 log "egress proxy ready on port ${PROXY_PORT} (ACL file ${ACL_FILE})"

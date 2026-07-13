@@ -289,6 +289,13 @@ printf 'Acquire::ForceIPv4 "true";\\n' > /etc/apt/apt.conf.d/00mock2-ipv4
 # image without it must still come online.
 apt-get update -y || true
 apt-get install -y --no-install-recommends python3 || true
+# Operator/runner toolbox baked in at bootstrap (pre-fence, direct egress) so it
+# is on EVERY container: a shell into the box has an editor, git works for the
+# runner's checkpoints, curl is there for health checks, and sudo exists for the
+# rare privileged step. Installing here (not at runtime) is deliberate — once the
+# network fence is applied below, apt can only reach the filtering proxy, so a
+# runtime "apt-get install" fails if the proxy is down or the host isn't allowed.
+apt-get install -y --no-install-recommends git curl nano sudo ca-certificates || echo "[mock2] toolbox install skipped/failed (non-fatal)"
 apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"
 
 # Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.

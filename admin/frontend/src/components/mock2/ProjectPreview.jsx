@@ -73,6 +73,42 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
   );
 }
 
+// LiveAppBar — the build-mode stand-in for the preview iframe. The BUILT app
+// sets its own frame-ancestors policy (constitution §5) and refuses to be
+// embedded, so an iframe just shows "refused to connect". Instead we show a
+// compact bar with the live URL and an open-in-new-tab button — the running app
+// opens in a real tab where its own security headers apply.
+export function LiveAppBar({ url }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 overflow-hidden shrink-0">
+      <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="hidden sm:flex items-center gap-1.5 shrink-0">
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
+          </span>
+          {url ? (
+            <a href={url} target="_blank" rel="noreferrer" className="truncate text-xs font-mono text-primary hover:underline">{url}</a>
+          ) : (
+            <span className="truncate text-xs font-mono text-muted-foreground">No live URL yet</span>
+          )}
+        </div>
+        {url ? (
+          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
+            <a href={url} target="_blank" rel="noreferrer" aria-label="Open the app in a new tab">
+              <ExternalLink className="h-4 w-4 mr-1" /> Open app
+            </a>
+          </Button>
+        ) : null}
+      </div>
+      <p className="px-3 py-2.5 text-[11px] text-muted-foreground">
+        The running app opens in a new tab — it sets a frame policy that blocks being embedded here.
+      </p>
+    </div>
+  );
+}
+
 // Shown when there is no preview yet (no mockup, or the project is still
 // provisioning). Keeps the chat as the focus while explaining what will appear.
 export function PreviewPlaceholder({ project }) {

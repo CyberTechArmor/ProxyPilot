@@ -15,14 +15,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
-import { PreviewPanel, PreviewPlaceholder } from './ProjectPreview';
+import { LiveAppBar, PreviewPlaceholder } from './ProjectPreview';
 import BuildStatus from './BuildStatus';
 import BuildChat from './BuildChat';
 import { deriveBuildTasks } from '@/lib/build-tasks';
 import { ensureNotifyPermission, notifyBrowser } from '@/lib/browser-notify';
 
 export default function BuildMode({
-  projectId, project, canEdit, isAdmin, previewSrc, previewReloadNonce, onChanged, onBuilt,
+  projectId, project, canEdit, isAdmin, previewSrc, onChanged, onBuilt,
 }) {
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
@@ -32,7 +32,6 @@ export default function BuildMode({
   const lastTerminalKey = useRef(null);
 
   const online = project?.lifecycle === 'active';
-  const designApproved = !!project?.stage?.design_approved;
 
   const load = useCallback(async () => {
     try {
@@ -145,12 +144,12 @@ export default function BuildMode({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto lg:flex-row lg:overflow-hidden">
-      {/* LEFT — build information: the live app preview + the build status/task list. */}
+      {/* LEFT — build information: the live-app link + the build status/task list.
+          In build mode the app is the deployed site (it refuses to be iframed),
+          so we show a compact open-in-new-tab bar instead of an embedded preview. */}
       <div className="min-w-0 flex flex-col gap-4 lg:flex-[1.55] lg:min-h-0 lg:overflow-y-auto">
-        {previewSrc ? (
-          <div className="h-[55vh] lg:h-[60vh] shrink-0">
-            <PreviewPanel src={previewSrc} title={project.name} approved={designApproved} reloadKey={previewReloadNonce} />
-          </div>
+        {online ? (
+          <LiveAppBar url={project.url || previewSrc || null} />
         ) : (
           <PreviewPlaceholder project={project} />
         )}

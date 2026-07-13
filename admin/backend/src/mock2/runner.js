@@ -37,7 +37,7 @@ import {
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
-import { raiseQueueItem } from './queue.js';
+import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
@@ -196,6 +196,28 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   });
 
   return { status: 'started', cycle: getCycle(cycle.id) };
+}
+
+// retryCycle — resume a build that stalled awaiting an admin because the runner
+// exhausted its retries on a TRANSIENT failure (e.g. an upstream 429 rate limit).
+// The stalled cycle already checkpointed its WIP and released the lock, so we just
+// clear its handoff queue item and start a FRESH cycle with the same instruction —
+// which continues from that checkpoint in the container. Editors can self-serve
+// this once they've fixed the underlying cause (added billing, raised the limit);
+// it is NOT a bypass for an audit-stage framework deviation (that clears only when
+// an admin resolves the deviation, so those cycles carry no `error` and the UI
+// won't offer Retry). Returns the same shape as startCycle.
+export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0 }) {
+  if (!cycle) return { status: 'error', error: 'No cycle to retry.' };
+  if (!['awaiting_admin', 'failed'].includes(cycle.status)) {
+    return { status: 'error', error: `This cycle is "${cycle.status}" — there is nothing to retry.` };
+  }
+  // Clear the retries/quota handoff so it stops nagging in the admin queue (both
+  // dedupe keys the escalation paths use). Best-effort — a missing item is fine.
+  for (const key of [`mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`, `mock2-quota:${project.id}`]) {
+    try { resolveQueueItem(key, { resolution: 'retried by editor' }); } catch { /* best effort */ }
+  }
+  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin });
 }
 
 // ---- the agentic loop ----

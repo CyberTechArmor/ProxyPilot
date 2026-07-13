@@ -64,11 +64,20 @@ export async function callModelTurn({
 // ---- Anthropic Messages API (tool use) ----
 async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
-  const messages = anthropicMessages(transcript);
+  const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
   const body = {
     model,
     max_tokens: maxTokens,
-    system,
+    // Prompt caching (rate-limit mitigation): the framework constitution / design
+    // system / rules are large and STABLE across a conversation, and so is the
+    // growing message history — reprocessing them every back-and-forth burns ITPM
+    // (cache_read tokens don't count against the input-tokens-per-minute limit;
+    // only uncached input + cache writes do). Render order is tools → system →
+    // messages, so a breakpoint on the last system block caches tools + system
+    // together, and one on the last message block caches the whole conversation
+    // prefix — each new turn then only pays for the new turns. Below the model's
+    // minimum cacheable size it silently no-ops, which is fine.
+    ...(system ? { system: [{ type: 'text', text: String(system), cache_control: { type: 'ephemeral' } }] } : {}),
     tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
     messages,
   };
@@ -89,8 +98,33 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
   }
   return {
     ok: true, text: outText, toolCalls, stopReason: j.stop_reason || null,
-    usage: { inputTokens: j.usage?.input_tokens || 0, outputTokens: j.usage?.output_tokens || 0 },
+    usage: {
+      inputTokens: j.usage?.input_tokens || 0,
+      outputTokens: j.usage?.output_tokens || 0,
+      // Surfaced for observability; cache_read is free on ITPM, cache_creation is
+      // charged like input. Callers that only read input/output tokens still work.
+      cacheReadInputTokens: j.usage?.cache_read_input_tokens || 0,
+      cacheCreationInputTokens: j.usage?.cache_creation_input_tokens || 0,
+    },
   };
+}
+
+// Put a single cache breakpoint on the last content block of the last message so
+// the entire conversation prefix caches; the next turn reads it back instead of
+// reprocessing every prior turn. Non-mutating (clones the touched message +
+// block). anthropicMessages always emits object blocks, so there's a block to
+// mark; a request with no messages is left untouched.
+function withMessageCacheBreakpoint(messages) {
+  if (!messages.length) return messages;
+  const out = messages.slice();
+  const lastIdx = out.length - 1;
+  const last = out[lastIdx];
+  if (Array.isArray(last.content) && last.content.length) {
+    const content = last.content.map((b) => ({ ...b }));
+    content[content.length - 1] = { ...content[content.length - 1], cache_control: { type: 'ephemeral' } };
+    out[lastIdx] = { ...last, content };
+  }
+  return out;
 }
 
 function anthropicMessages(transcript) {

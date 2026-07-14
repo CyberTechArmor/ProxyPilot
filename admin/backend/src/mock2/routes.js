@@ -100,6 +100,8 @@ import {
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
 } from './authorizations.js';
 import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
+import { explainCard } from './explain.js';
+import { EXPLAIN_MAX_INPUT_CHARS } from './explain-logic.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
 } from './cycles.js';
@@ -329,6 +331,15 @@ const resumeSchema = z.object({
 const authDecisionSchema = z.object({
   approved: z.boolean(),
   conditions: z.string().trim().max(2000).optional(),
+});
+// "Explain this" — a card's full text + minimal cycle context for the summary lane to
+// rewrite in plain language. Read-only; card_id is opaque (used only for the audit note).
+const explainSchema = z.object({
+  text: z.string().trim().min(1).max(EXPLAIN_MAX_INPUT_CHARS + 4000),
+  kind: z.enum(['blocker', 'authorization', 'deviation', 'rule_question']).optional(),
+  title: z.string().trim().max(400).optional(),
+  status: z.string().trim().max(60).optional(),
+  card_id: z.string().trim().max(160).optional(),
 });
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
@@ -1404,6 +1415,31 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY_DEPLOY', 'mock2_cycle', cycle.id,
       { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ cycle: publicCycleShape(result.cycle) });
+  });
+
+  // "Explain this" — rewrite a blocker / authorization / deviation / rule-question
+  // card in plain language via the summary lane (small/fast model). READ-ONLY: it never
+  // blocks, resumes, grants, or resolves anything; it only reads the card text and logs
+  // that an explanation was VIEWED. Any member (viewer+) may ask. On a model/slot
+  // failure it returns { ok:false } with 200 so the client falls back to the original
+  // text — the operator is never blocked on the explainer (task item 3).
+  router.post('/projects/:id/explain', requireMock2Role('viewer'), async (req, res) => {
+    const parsed = explainSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'text is required to explain a card' });
+    const { text, kind = 'blocker', title = '', status = '', card_id = null } = parsed.data;
+    let result;
+    try {
+      result = await explainCard({ text, title, status, kind });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the explainer failed' };
+    }
+    // Audit log ONLY that an explanation was viewed — no state change to the cycle,
+    // authorization, or deviation this explained.
+    logAudit(req.user.id, 'MOCK2_EXPLAIN_VIEW', 'mock2_project', req.mock2Project.id,
+      { kind, card_id, ok: !!result.ok }, req.ip);
+    return res.json(result.ok
+      ? { ok: true, explanation: result.explanation }
+      : { ok: false, error: result.error || 'could not explain this right now' });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets

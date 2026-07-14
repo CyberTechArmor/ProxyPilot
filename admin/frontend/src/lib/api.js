@@ -1210,6 +1210,10 @@ export const api = {
   // resumed cycle. A bare call resumes with no new context.
   mock2RetryCycle: (id, cycleId, body = null) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) }),
+  // "Explain this" — plain-language rewrite of a blocker/authorization/deviation/rule
+  // card via the summary lane. Read-only; returns { ok, explanation } or { ok:false }.
+  mock2ExplainCard: (id, body) =>
+    request(`/mock2/projects/${id}/explain`, { method: 'POST', body: JSON.stringify(body) }),
   // Scoped one-time authorizations (Part 4).
   mock2ListAuthorizations: (id) => request(`/mock2/projects/${id}/authorizations`),
   mock2DecideAuthorization: (id, authId, approved, conditions) =>

@@ -13,6 +13,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Loader2, CheckCircle2, HelpCircle } from 'lucide-react';
+import ExplainThis from './ExplainThis';
 
 // A rule_question body carries { question, choices } as JSON (M8, ADR-002).
 // Tolerant of a plain-text body (older rows).
@@ -30,7 +31,7 @@ export function parseRuleQuestion(body) {
 // choices (≥44px) and a free-text escape hatch (ADR-002). Editors answer; the
 // answer appends to state/rules.md and, when the last one is confirmed, Build
 // starts automatically. Answered questions read as a compact confirmation.
-export function RuleQuestion({ m, open, canEdit, busy, onAnswer }) {
+export function RuleQuestion({ m, open, canEdit, busy, onAnswer, projectId = null }) {
   const { question, choices } = parseRuleQuestion(m.body);
   const [free, setFree] = useState('');
   if (!open) {
@@ -48,9 +49,17 @@ export function RuleQuestion({ m, open, canEdit, busy, onAnswer }) {
   return (
     <div className="flex justify-start" data-open-question>
       <div className="max-w-[92%] w-full rounded-xl border border-violet-500/30 bg-violet-500/5 px-3 py-2.5 space-y-2.5">
-        <p className="flex items-center gap-1.5 text-[11px] font-medium text-violet-500">
-          <HelpCircle className="h-3.5 w-3.5" /> Rule question — confirm to continue building
-        </p>
+        <div className="flex items-start justify-between gap-2">
+          <p className="flex items-center gap-1.5 text-[11px] font-medium text-violet-500">
+            <HelpCircle className="h-3.5 w-3.5" /> Rule question — confirm to continue building
+          </p>
+          {projectId ? (
+            <ExplainThis
+              projectId={projectId} kind="rule_question" cardId={`q-${m.question_id}`}
+              status="waiting for your answer" text={question} className="-my-1 shrink-0"
+            />
+          ) : null}
+        </div>
         <p className="text-sm text-foreground break-words">{question}</p>
         {canEdit ? (
           <>
@@ -133,7 +142,7 @@ export function ChatBubble({ m }) {
 // newest message in view.
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
-  working = false, workingLabel = 'Working…', emptyLabel,
+  working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -146,7 +155,7 @@ export function ChatMessageList({
       ) : (
         messages.map((m) => (
           m.kind === 'rule_question'
-            ? <RuleQuestion key={m.id} m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} />
+            ? <RuleQuestion key={m.id} m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
             : <ChatBubble key={m.id} m={m} />
         ))
       )}

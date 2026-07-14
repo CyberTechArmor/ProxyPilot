@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
+import ExplainThis from './ExplainThis';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
@@ -74,6 +75,15 @@ export default function BuildStatus({
     max_turns: 'reached the step ceiling without finishing',
   };
   const statusLabel = blocked ? 'blocked' : paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
+  // The blocker card's full engineer-facing text, assembled for "Explain this": the
+  // halt reason, the model's error detail, and every proposed option (with its risk +
+  // the exact operation a grant option would run) plus any legacy authorization scopes.
+  const blockerExplainText = [
+    HALT_LABELS[cycle?.halt_reason] ? `The build stopped: ${HALT_LABELS[cycle.halt_reason]}` : null,
+    cycle?.error || null,
+    ...(cycle?.halt_options || []).map((o) => `Option — ${o.label}${o.risk || o.detail ? `: ${o.risk || o.detail}` : ''}${o.authorization?.scope ? ` (it would run: ${o.authorization.scope}${o.authorization.expectedRows != null && o.authorization.expectedRows !== '' ? `, affecting ${o.authorization.expectedRows} row(s)` : ''})` : ''}`),
+    ...auths.map((a) => `Requested one-time permission: ${a.scope}${a.reason ? ` — ${a.reason}` : ''}`),
+  ].filter(Boolean).join('\n');
   // Any non-successful terminal build can be continued (soft retry — it resumes
   // from the checkpoint/working tree in the container, no work lost). A soft
   // pause has its own Resume block and a deploy failure its own Retry deploy /
@@ -244,15 +254,22 @@ export default function BuildStatus({
                 success, a user stop, and a soft budget pause. */}
             {blocked ? (
               <div className="space-y-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
-                <p className="text-xs text-orange-600 flex items-start gap-1">
-                  <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <span>
-                    <span className="font-medium">Blocked — needs attention.</span>{' '}
-                    {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
-                    {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
-                    {' '}Your work so far is checkpointed — add context or resolve the blocker, then resume.
-                  </span>
-                </p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-xs text-orange-600 flex items-start gap-1">
+                    <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      <span className="font-medium">Blocked — needs attention.</span>{' '}
+                      {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
+                      {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
+                      {' '}Your work so far is checkpointed — add context or resolve the blocker, then resume.
+                    </span>
+                  </p>
+                  <ExplainThis
+                    projectId={projectId} kind="blocker" cardId={`blocker-${cycle.id}`}
+                    title={cycle.instruction || ''} status={statusLabel} text={blockerExplainText}
+                    className="shrink-0"
+                  />
+                </div>
 
                 {/* One choice card (task Part 2): the model's 2–4 proposed resolutions
                     as radio-style choices + a free-text "Other". Picking one resumes the
@@ -437,7 +454,16 @@ export default function BuildStatus({
               <div className="space-y-2">
                 {deviations.map((d) => (
                   <div key={d.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-                    <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                      {d.detail ? (
+                        <ExplainThis
+                          projectId={projectId} kind="deviation" cardId={`dev-${d.id}`}
+                          title={cycle?.instruction || ''} status="needs an admin decision" text={d.detail}
+                          className="shrink-0"
+                        />
+                      ) : null}
+                    </div>
                     {/* Approve-as-edited: rewrite the deviation / append conditions.
                         The edited text becomes the authoritative APPROVED record. */}
                     <textarea

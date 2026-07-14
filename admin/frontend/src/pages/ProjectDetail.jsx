@@ -40,7 +40,7 @@ import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
-import { ProjectTimeCard, FrameworkDecisionsLog } from '@/components/mock2/ProjectTimeCard';
+import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard } from '@/components/mock2/ProjectTimeCard';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
 // until the row reaches the job's target lifecycle (or fails). One map so the
@@ -549,6 +549,10 @@ export default function ProjectDetail() {
       {/* Framework decisions log (admin) — every deviation request + how it was decided. */}
       {isAdmin ? <FrameworkDecisionsLog projectId={id} /> : null}
 
+      {/* Declared outbound egress — the internal hosts the app must reach, each
+          admin-approved; anything not declared+approved stays blocked. */}
+      <EgressGrantsCard projectId={id} isAdmin={isAdmin} />
+
       {/* (build cycle + build chat now live in the Chat tab above) */}
 
       {/* Design archive — where the design started. Once the design is approved
@@ -722,8 +726,10 @@ export default function ProjectDetail() {
                 <ul className="divide-y text-xs">
                   {egressLog.slice().reverse().map((e, i) => (
                     <li key={i} className="flex items-center gap-2 px-2 py-1.5">
-                      <span className={`shrink-0 font-mono font-medium ${e.denied ? 'text-destructive' : 'text-emerald-600'}`}>
-                        {e.denied ? 'BLOCK' : 'OUT'}
+                      <span className={`shrink-0 font-mono font-medium ${
+                        e.denied ? 'text-destructive' : e.action === 'GRANT' ? 'text-sky-600' : 'text-emerald-600'
+                      }`}>
+                        {e.action === 'GRANT' ? 'GRANT' : e.denied ? 'BLOCK' : 'OUT'}
                       </span>
                       <span className="shrink-0 font-mono text-muted-foreground">{e.method}</span>
                       <span className="min-w-0 break-all font-mono">{e.url}</span>

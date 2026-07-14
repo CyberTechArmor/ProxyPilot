@@ -502,4 +502,58 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Declared, admin-approved outbound egress grants. Same "declared, never
+    // discovered" discipline as ports: an app declares the internal hosts it must
+    // reach in mock2.yaml `egress:`, each becomes a PENDING grant + an admin-queue
+    // item (kind egress_grant), and only APPROVED grants are wired into the
+    // project's nftables fence at deploy/reconcile (scoped to that project's
+    // bridge). Adding the egress_grant queue kind needs the queue CHECK rebuilt
+    // (SQLite can't ALTER a CHECK) — a plain table rebuild, dedupe_key UNIQUE is
+    // re-declared inline.
+    version: 511,
+    name: 'mock2_egress_grants',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_queue_items_new (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN
+            ('framework_deviation','drift','retries_exhausted','flag','orphaned',
+             'port_drift','quota_exhausted','provisioning_failed','renewal_failed','egress_grant')),
+          ref_table TEXT,
+          ref_id INTEGER,
+          detail TEXT,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','resolved','dismissed')),
+          dedupe_key TEXT UNIQUE,
+          raised_at TEXT,
+          resolved_by INTEGER,
+          resolved_at TEXT,
+          resolution TEXT
+        );
+        INSERT INTO mock2_queue_items_new
+          (id, project_id, kind, ref_table, ref_id, detail, status, dedupe_key, raised_at, resolved_by, resolved_at, resolution)
+          SELECT id, project_id, kind, ref_table, ref_id, detail, status, dedupe_key, raised_at, resolved_by, resolved_at, resolution
+          FROM mock2_queue_items;
+        DROP TABLE mock2_queue_items;
+        ALTER TABLE mock2_queue_items_new RENAME TO mock2_queue_items;
+
+        CREATE TABLE mock2_egress_grants (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          host TEXT NOT NULL,
+          port INTEGER NOT NULL,
+          protocol TEXT NOT NULL DEFAULT 'tcp',
+          reason TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','denied','revoked')),
+          reachable TEXT,
+          requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+          decided_by INTEGER,
+          decided_at TEXT,
+          UNIQUE(project_id, host, port, protocol)
+        );
+        CREATE INDEX idx_mock2_egress_grants_project ON mock2_egress_grants(project_id, status);
+      `);
+    },
+  },
 ];

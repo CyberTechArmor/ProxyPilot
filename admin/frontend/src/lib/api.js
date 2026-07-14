@@ -1148,6 +1148,14 @@ export const api = {
     request(`/mock2/projects/${id}/typing`, { method: 'POST', body: JSON.stringify({ seconds }) }),
   mock2GetTimeSummary: (id) => request(`/mock2/projects/${id}/time-summary`),
 
+  // Declared egress grants — the internal hosts the app declared in mock2.yaml
+  // `egress:`, each with its admin-decision status and host-reachability probe.
+  // Member-visible list; admin re-probe (does the HOST route to it?). Approve/deny
+  // flows through the admin queue (mock2SetQueueItemStatus on the egress_grant item).
+  mock2ListEgress: (id) => request(`/mock2/projects/${id}/egress`),
+  mock2ProbeEgress: (id, grantId) =>
+    request(`/mock2/projects/${id}/egress/${grantId}/probe`, { method: 'POST' }),
+
   // ---- M5: model connectors, slots, prices ----
   mock2ListConnectors: () => request('/mock2/connectors'),
   mock2GetConnector: (id) => request(`/mock2/connectors/${id}`),

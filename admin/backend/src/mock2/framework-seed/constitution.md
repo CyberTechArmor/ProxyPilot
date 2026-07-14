@@ -143,7 +143,7 @@ release, however small.
 Production-ready means all of:
 
 - The deterministic gates — `typecheck`, `constitution-lint`, `rule-coverage`,
-  `security-scan`, `test` — are **all green**, **and**
+  `security-scan`, `test`, `ui-interaction` — are **all green**, **and**
 - the **end-to-end / journey gate** passes: the primary user journey runs against a
   **real build** (the app booted against Postgres, migrated + seeded, driven over real
   HTTP — e.g. bootstrap → login → gated load of the shell). **Green gates that only
@@ -187,3 +187,36 @@ building nothing when an exception was approved is a defect, not compliance.
   placeholder screen.
 - A capability is not delivered until something drives it: a new backend route that no
   screen calls, or a new screen that calls nothing, is unfinished work, not a feature.
+
+## 11. Rendered-DOM proof & cross-layer consistency
+
+Hardened after a real regression: an admin's credential inputs shipped **disabled**
+through five green gates, because nothing exercised the rendered DOM.
+
+- **A UI change must carry an interaction test.** Any change touching user-facing
+  paths must add/update `state/ui-checks.json` with checks covering every touched
+  screen (the `ui-interaction` gate enforces coverage; the browser smoke connector
+  executes the matching checks against the deployed app). Checks assert the
+  **per-role state of interactive controls**: controls a role may edit are enabled
+  and **keep typed input**; controls a role may not edit are disabled while status
+  stays readable; write-only secrets enable only after Replace; the page produces
+  **zero console errors**. Test-fixture users exist for **every role** the app
+  defines and are referenced by the checks.
+- **A change that touches `migrations/` or the data layer must prove the full
+  migration chain applies cleanly to a scratch database and the app boots against
+  the result** (the DB smoke connector). A warranted smoke connector that cannot
+  run **fails the cycle** — never a silent skip that reads as success.
+- **Shared enums live in ONE module.** Role names (and any value shared across
+  layers) come from a single shared constants module imported by both server and
+  browser code; a hard-coded role string literal in browser code is a lint
+  violation.
+- **Client checks cite their server source.** Any client-side permission check
+  must cite the server source it was verified against, and that source must have
+  been **read in the same cycle** — a value assumed rather than read is declared
+  as an assumption in the change record, and a permission value left assumed is a
+  defect.
+- **Change records carry acceptance evidence.** Every finish includes a
+  human-runnable acceptance check per user-visible change ("as admin, do X,
+  expect Y") and the explicit verified-vs-assumed split of its cross-layer
+  assumptions. The review pass rejects a UI diff with no corresponding
+  interaction test.

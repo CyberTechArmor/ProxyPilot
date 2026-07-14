@@ -1953,10 +1953,13 @@ export function createMock2Router() {
   // of the whole chain (any member). The M6 verify checklist asserts this passes.
   router.get('/projects/:id/change-records', requireMock2Role('viewer'), (req, res) => {
     // Join each record to its cycle's spend so the change history can show a
-    // per-change token/cost counter without a second round-trip (Task 3).
+    // per-change token/cost counter without a second round-trip (Task 3), and to
+    // its cycle's REQUEST so the log download is request-scoped: one build
+    // request = ONE log, however many checkpoints (halts/resumes/retries) it
+    // took. request_id is null on legacy cycles — the UI falls back per-cycle.
     const usageByCycle = new Map();
     for (const c of listCyclesForProject(req.mock2Project.id, { limit: 1000 })) {
-      usageByCycle.set(c.id, { used_tokens: c.used_tokens ?? 0, used_cost_cents: c.used_cost_cents ?? 0 });
+      usageByCycle.set(c.id, { used_tokens: c.used_tokens ?? 0, used_cost_cents: c.used_cost_cents ?? 0, request_id: c.request_id ?? null });
     }
     const records = listChangeRecords(req.mock2Project.id).map((r) => {
       let gates = null;
@@ -1969,6 +1972,7 @@ export function createMock2Router() {
         commit_sha: r.commit_sha, gates_run: gates, rules_touched: rules,
         framework_version: r.framework_version,
         cycle_id: r.cycle_id, initiated_by: r.initiated_by,
+        request_id: usage ? usage.request_id : null,
         used_tokens: usage ? usage.used_tokens : null,
         used_cost_cents: usage ? usage.used_cost_cents : null,
         acting_as_admin: Number(r.acting_as_admin) === 1, created_at: r.created_at,

@@ -1264,7 +1264,13 @@ export const api = {
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),
   mock2ForceReleaseLock: (id) => request(`/mock2/projects/${id}/lock/force-release`, { method: 'POST' }),
   mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
-  // Downloadable build transcript: one cycle's full log, or the whole project's.
+  // Downloadable build transcript. THE log surface is per-REQUEST (one build
+  // request = one merged, deduplicated log artifact, idempotent per content —
+  // the same request always downloads as the same file); the per-cycle log
+  // remains for legacy records whose cycle predates the request umbrella, and
+  // the project log is the everything-export.
+  mock2GetRequestLog: (id, requestId) => request(`/mock2/projects/${id}/requests/${requestId}/log`),
+  mock2ListRequests: (id) => request(`/mock2/projects/${id}/requests`),
   mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
   mock2SubmitCycleFeedback: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),

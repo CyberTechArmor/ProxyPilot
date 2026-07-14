@@ -311,7 +311,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
     finishCycle(cycle.id, { status: 'succeeded' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Audit passed — no rule questions. Starting the build.' });
     setJob(projectId, { phase: 'building', message: 'Audit passed — starting the build.', cycleId: cycle.id });
-    await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework });
+    await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework, requestId: cycle.request_id ?? null });
     return scheduleJobCleanup(projectId);
   }
 
@@ -357,7 +357,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '' }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
@@ -368,7 +368,10 @@ async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin
   const fullInstruction = adminDecisions ? `${instruction}\n\n${adminDecisions}` : instruction;
   let result;
   try {
-    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin });
+    // Thread the umbrella request EXPLICITLY (one build request = one log): the
+    // build cycle joins the audit cycle's request instead of relying on the
+    // latest-open-request fallback inside startCycle.
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build' });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };
@@ -484,6 +487,7 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   await proceedToBuild({
     project, instruction: auditCycle?.instruction || 'Build the app from the approved inventory and confirmed rules.',
     initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework, adminDecisions,
+    requestId: auditCycle?.request_id ?? null,
   });
   scheduleJobCleanup(projectId);
   return true;

@@ -104,7 +104,7 @@ import {
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain } from './change-records.js';
-import { listCycleEvents, listProjectCycleEvents } from './cycle-events.js';
+import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages } from './chats.js';
 import {
@@ -277,6 +277,10 @@ const projectRemoteSchema = z.object({
 // not baked in here, so raising the limit carries over to Build too.
 const cycleStartSchema = z.object({
   instruction: z.string().trim().min(1),
+});
+const cycleFeedbackSchema = z.object({
+  rating: z.enum(['up', 'down']),
+  note: z.string().trim().max(4000).optional(),
 });
 const interruptSchema = z.object({
   action: z.enum(INTERRUPTS),
@@ -1228,9 +1232,34 @@ export function createMock2Router() {
   });
 
   // The project's latest cycle — the poll target for the "gates going green" view.
+  // Carries the Builder's feedback (thumbs up/down) so the UI can require a rating
+  // on a finished build before the next cycle.
   router.get('/projects/:id/cycle', requireMock2Role('viewer'), (req, res) => {
     const cycle = latestCycle(req.mock2Project.id);
-    res.json({ cycle: cycle ? publicCycleShape(cycle) : null, job: cycle ? getCycleJobStatus(cycle.id) : null });
+    res.json({
+      cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
+      job: cycle ? getCycleJobStatus(cycle.id) : null,
+    });
+  });
+
+  // Record the Builder's thumbs up/down on a finished build (editor). A thumbs-down
+  // requires a note; both land in the cycle's event log for later evaluation. Only
+  // a terminal cycle can be rated (rating a running build makes no sense).
+  router.post('/projects/:id/cycles/:cycleId/feedback', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status)) {
+      return res.status(409).json({ error: 'This build is still running — rate it once it finishes.' });
+    }
+    const parsed = cycleFeedbackSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'rating must be up or down' });
+    const note = (parsed.data.note || '').trim();
+    if (parsed.data.rating === 'down' && !note) {
+      return res.status(400).json({ error: 'A note is required for a thumbs-down so the log can be evaluated.' });
+    }
+    const feedback = recordCycleFeedback({ projectId: req.mock2Project.id, cycleId: cycle.id, rating: parsed.data.rating, note: note || null, userId: req.user.id });
+    logAudit(req.user.id, 'MOCK2_CYCLE_FEEDBACK', 'mock2_cycle', cycle.id, { rating: parsed.data.rating, has_note: !!note }, req.ip);
+    res.json({ feedback });
   });
 
   // Poll one cycle (viewer). Job progress rides alongside (house 202+poll pattern).

@@ -1218,6 +1218,8 @@ export const api = {
   mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
   // Downloadable build transcript: one cycle's full log, or the whole project's.
   mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
+  mock2SubmitCycleFeedback: (id, cycleId, body) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),
   mock2GetProjectLog: (id) => request(`/mock2/projects/${id}/log`),
   mock2GetLockIdleMinutes: () => request('/mock2/settings/lock-idle-minutes'),
   mock2SetLockIdleMinutes: (minutes) =>

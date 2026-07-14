@@ -16,7 +16,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import {
-  ShieldCheck, XCircle, ChevronDown, ChevronRight, GitCommitHorizontal, Loader2, Coins, Download,
+  ShieldCheck, XCircle, ChevronDown, ChevronRight, ChevronLeft, GitCommitHorizontal, Loader2, Coins, Download,
 } from 'lucide-react';
 import { fmtUsage } from './ProjectTimeCard';
 
@@ -191,6 +191,8 @@ export default function ChangeHistory({ projectId }) {
   const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState(null); // seq of the open row, or null
   const [downloadingAll, setDownloadingAll] = useState(false);
+  const [page, setPage] = useState(0); // 0-based page of change records (newest first)
+  const PAGE_SIZE = 8;
 
   const load = useCallback(async () => {
     try {
@@ -220,6 +222,12 @@ export default function ChangeHistory({ projectId }) {
   if (!data) return <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading change history…</p>;
 
   const { records = [], verification } = data;
+  // Newest first, then paginate — a long history shouldn't wall of scroll.
+  const ordered = [...records].sort((a, b) => b.seq - a.seq);
+  const pageCount = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const start = clampedPage * PAGE_SIZE;
+  const shown = ordered.slice(start, start + PAGE_SIZE);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -237,7 +245,7 @@ export default function ChangeHistory({ projectId }) {
         <p className="text-xs text-muted-foreground">No change records yet.</p>
       ) : (
         <ul className="space-y-1.5">
-          {records.map((r) => {
+          {shown.map((r) => {
             const open = expanded === r.seq;
             return (
               <li key={r.seq} className="text-xs border rounded-md">
@@ -265,6 +273,19 @@ export default function ChangeHistory({ projectId }) {
           })}
         </ul>
       )}
+      {pageCount > 1 ? (
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <Button variant="ghost" size="sm" className="h-8" disabled={clampedPage === 0} onClick={() => { setExpanded(null); setPage(clampedPage - 1); }}>
+            <ChevronLeft className="h-3.5 w-3.5 mr-1" /> Newer
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            {start + 1}–{Math.min(start + PAGE_SIZE, ordered.length)} of {ordered.length}
+          </span>
+          <Button variant="ghost" size="sm" className="h-8" disabled={clampedPage >= pageCount - 1} onClick={() => { setExpanded(null); setPage(clampedPage + 1); }}>
+            Older <ChevronRight className="h-3.5 w-3.5 ml-1" />
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

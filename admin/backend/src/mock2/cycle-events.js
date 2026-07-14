@@ -69,3 +69,34 @@ export function listProjectCycleEvents(projectId) {
     .all(Number(projectId))
     .map(shapeEvent);
 }
+
+// The Builder's thumbs up/down verdict on a finished build, stored as a normal
+// event (kind 'feedback') so it rides the downloadable log for later evaluation.
+// A thumbs-down carries the required note. getCycleFeedback returns the latest one
+// (or null) — the UI uses it to know whether a build still needs rating before the
+// next cycle. NOT best-effort: a feedback write must land (it gates the flow), so
+// this one is allowed to throw.
+export function recordCycleFeedback({ projectId, cycleId, rating, note = null, userId = null }) {
+  const db = getMock2Db();
+  const last = db.prepare(`SELECT MAX(seq) AS m FROM mock2_cycle_events WHERE cycle_id = ?`).get(Number(cycleId));
+  const seq = (last?.m || 0) + 1;
+  db.prepare(
+    `INSERT INTO mock2_cycle_events (project_id, cycle_id, seq, kind, role, content, meta_json, created_at)
+     VALUES (?, ?, ?, 'feedback', 'user', ?, ?, ?)`,
+  ).run(
+    Number(projectId), Number(cycleId), seq,
+    note == null ? null : clip(note),
+    JSON.stringify({ rating, user_id: userId }),
+    nowIso(),
+  );
+  return getCycleFeedback(cycleId);
+}
+
+export function getCycleFeedback(cycleId) {
+  const row = getMock2Db()
+    .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? AND kind = 'feedback' ORDER BY seq DESC LIMIT 1`)
+    .get(Number(cycleId));
+  if (!row) return null;
+  const ev = shapeEvent(row);
+  return { rating: ev.meta?.rating || null, note: ev.content || null, created_at: ev.created_at };
+}

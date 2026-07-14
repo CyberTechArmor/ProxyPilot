@@ -19,7 +19,7 @@ import { Loader2, Zap, Hammer } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
-export default function BuildChat({ projectId, project, canEdit, online, active, job, onStarted }) {
+export default function BuildChat({ projectId, project, canEdit, online, active, job, needsFeedback = false, onStarted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
@@ -107,7 +107,7 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
     } finally { setBusy(false); }
   };
 
-  const composerDisabled = busy || active || !online;
+  const composerDisabled = busy || active || !online || needsFeedback;
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -133,10 +133,13 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">
+            {needsFeedback ? (
+              <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next change.</p>
+            ) : null}
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
-                ? (active ? 'A build is running — wait for it to finish…' : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”')
+                ? (needsFeedback ? 'Rate the last build to continue…' : active ? 'A build is running — wait for it to finish…' : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”')
                 : 'Project must be online to run a build.'}
               value={instruction}
               disabled={composerDisabled}

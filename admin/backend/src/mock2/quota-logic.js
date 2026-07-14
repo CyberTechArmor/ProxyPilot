@@ -10,13 +10,61 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
-// Round-half-up cents for a token spend against an effective-dated price row.
-// Prices are cents per million tokens (mtok). Self-hosted models price at 0.
-export function costCentsForUsage({ inputTokens = 0, outputTokens = 0 }, price) {
+// Prompt-caching price multipliers on the base INPUT rate (Anthropic): a cache
+// read is billed at 0.1×, a cache write (creation) at 1.25×. Providers that don't
+// cache simply pass 0 for these token counts, so the math is a no-op there.
+export const CACHE_READ_MULT = 0.1;
+export const CACHE_WRITE_MULT = 1.25;
+
+// Cents for a token spend against an effective-dated price row. Prices are cents
+// per million tokens (mtok). Self-hosted / unpriced models price at 0. Cache-aware:
+// fresh input at 1×, cache reads at 0.1×, cache writes at 1.25× (Anthropic returns
+// these as SEPARATE token counts — input_tokens excludes them — so ignoring them,
+// as the old cost calc did, under-reports the real bill once caching is on).
+// Returns FRACTIONAL cents on purpose: a single build turn is often a fraction of
+// a cent, so rounding here (and again on every accumulation) used to floor each
+// call to 0 and lose the whole cost — the accumulated total is rounded only for
+// display.
+export function costCentsForUsage(
+  { inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0 }, price,
+) {
   if (!price) return 0;
-  const inC = (Number(inputTokens) / 1_000_000) * Number(price.input_cents_per_mtok || 0);
-  const outC = (Number(outputTokens) / 1_000_000) * Number(price.output_cents_per_mtok || 0);
-  return Math.round(inC + outC);
+  const inRate = Number(price.input_cents_per_mtok || 0);
+  const outRate = Number(price.output_cents_per_mtok || 0);
+  const inC = (Number(inputTokens) / 1_000_000) * inRate;
+  const outC = (Number(outputTokens) / 1_000_000) * outRate;
+  const readC = (Number(cacheReadTokens) / 1_000_000) * inRate * CACHE_READ_MULT;
+  const writeC = (Number(cacheWriteTokens) / 1_000_000) * inRate * CACHE_WRITE_MULT;
+  return inC + outC + readC + writeC;
+}
+
+// Built-in list prices for the common cloud models, in cents per mtok (base input
+// / output), from the providers' published rates. This is the FALLBACK used when
+// an admin hasn't entered an explicit price row for a connector+model — without
+// it every cost shows $0 until someone hand-enters prices. An explicit price row
+// always wins (effectivePrice checks the DB first). Matched in order, most
+// specific first, on a lower-cased model id, so a date suffix
+// (…-20260101) or an alias still resolves. Anthropic has no pricing API, so these
+// are the documented rates; edit here (or set a price row) when they change.
+export const DEFAULT_MODEL_PRICES = Object.freeze([
+  // Anthropic (docs.anthropic.com pricing). Opus 4.5–4.8 share a rate; 4/4.1 are pricier.
+  { match: /opus-4-(5|6|7|8)\b/, input: 500, output: 2500 },
+  { match: /opus-4(-1)?\b/, input: 1500, output: 7500 },
+  { match: /sonnet-(5|4-6|4-5|4)\b/, input: 300, output: 1500 },
+  { match: /haiku-(4-5|4-6|4)\b/, input: 100, output: 500 },
+  { match: /haiku-3-5\b/, input: 80, output: 400 },
+  { match: /(fable|mythos)-5\b/, input: 1000, output: 5000 },
+]);
+
+// The fallback price row for a model id, or null if we don't know it (then cost
+// stays 0 until an admin enters an explicit price). Pure + unit-tested.
+export function defaultModelPrice(model) {
+  const id = String(model || '').toLowerCase();
+  if (!id) return null;
+  for (const p of DEFAULT_MODEL_PRICES) {
+    if (p.match.test(id)) return { input_cents_per_mtok: p.input, output_cents_per_mtok: p.output };
+  }
+  return null;
 }
 
 // Sum a set of ledger rows into totals. Pure over plain objects, so the DB layer

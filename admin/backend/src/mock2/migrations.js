@@ -29,6 +29,35 @@
 //   508 Run — deploy step: mock2_cycles.deploy_status (NULL/'deploying'/'serving'
 //            /'deploy_failed') — whether the built app was installed, migrated,
 //            built and started so the live URL serves it (Run phase) — additive
+//   509 M7 — mock2_projects.mockup_archived_id (preserve the mockup after
+//            approval so the design preview stays reachable) — additive
+//   510 M7 — mock2_projects.chat_typing_seconds (client-measured active-typing
+//            time counter for the Details time card) — additive
+//   511 Run — mock2_cycles.pause_reason (why a cycle soft-paused on a token/time
+//            budget: 'budget_tokens' | 'budget_time' — NULL otherwise) — additive
+//   512 Run — mock2_cycle_events (durable per-cycle transcript: task, AI messages,
+//            tool calls/results, gates, checkpoint, deploy — the downloadable
+//            "what happened" log) — additive, new table
+//   513 Run — mock2_cycles.halt_reason (why a cycle halted without success) — additive
+//   514 Run — human feedback channels: mock2_cycles.halt_options_json +
+//            resume_context_json, and mock2_authorizations (scoped one-time
+//            operational grants) — additive, two columns + new table
+//   515 Cost — cost-truth: mock2_requests (umbrella), mock2_cycles gains the four
+//            canonical token classes + usage_schema_version + request_id/segment,
+//            and mock2_consults (advisory second opinion) — strictly additive,
+//            nullable columns + new tables, reversible, no row rewrites
+//   516 Lib — component library: mock2_components (reusable, named building
+//            blocks — e.g. an LDAPS auth module), mock2_component_versions
+//            (append-only content with a REQUIRED annotated change_reason;
+//            revert = new version, same idiom as the framework registry), and
+//            mock2_component_submissions (a project member proposes code from
+//            their project; an admin approves it into the library or rejects
+//            it with a reason — all through the platform) — additive, new tables
+//   517 Egress — declared, admin-approved outbound egress: mock2_egress_grants
+//            (an app declares internal hosts it must reach in mock2.yaml
+//            `egress:`; each is a pending grant an admin approves before it is
+//            wired into the project fence) + rebuilds mock2_queue_items to add
+//            the `egress_grant` kind to the CHECK
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -503,6 +532,252 @@ export const MOCK2_MIGRATIONS = [
     },
   },
   {
+    // Soft-pause reason. A build cycle that crosses a token or wall-clock budget
+    // is checkpointed and PAUSED (resumable) rather than failed — stored as an
+    // 'interrupted' status (an allowed value, so no CHECK-constraint rebuild)
+    // tagged with WHY it paused: 'budget_tokens' | 'budget_time'. NULL for every
+    // other interrupted cycle (a user stop_after_step / queue_after_step) and for
+    // every pre-existing row, so today's interrupt semantics are unchanged; the UI
+    // only offers one-click Resume when this reason is set. Additive.
+    version: 511,
+    name: 'mock2_cycle_pause_reason',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN pause_reason TEXT;
+      `);
+    },
+  },
+  {
+    // Per-cycle event log — the durable transcript of what actually happened in a
+    // build so it can be reviewed and downloaded ("how did it do?"). setJob only
+    // carries ephemeral progress; this records every step: the task text, each AI
+    // message, each tool call + (truncated) result, gate outcomes, the checkpoint,
+    // and the deploy. seq orders events within a cycle. Additive; a disabled host
+    // never writes it.
+    version: 512,
+    name: 'mock2_cycle_events',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_cycle_events (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          seq INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          role TEXT,
+          content TEXT,
+          meta_json TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_cycle_events_cycle ON mock2_cycle_events (cycle_id, seq);
+        CREATE INDEX idx_mock2_cycle_events_project ON mock2_cycle_events (project_id, id);
+      `);
+    },
+  },
+  {
+    // Halt reason. A build cycle that CANNOT honestly finish — the model called
+    // halt(reason) because it is blocked, or the no-progress circuit breaker tripped
+    // (repeated no-tool-call / near-identical / no-state-change turns) — ends as a
+    // needs-attention terminal rather than 'succeeded'. Stored on the allowed
+    // 'awaiting_admin' status (no CHECK-constraint rebuild, same idiom as 511's
+    // pause_reason) tagged with WHY it halted: 'model_halt' | 'no_tool_calls' |
+    // 'repeated_output' | 'no_state_change'. NULL for every retries-exhausted
+    // awaiting_admin and every pre-existing row, so today's semantics are unchanged;
+    // the UI shows a distinct "Blocked — needs attention" when this reason is set.
+    // Additive; a disabled host never writes it.
+    version: 513,
+    name: 'mock2_cycle_halt_reason',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN halt_reason TEXT;
+      `);
+    },
+  },
+  {
+    // Human feedback channels for blocked/awaiting states. Two additive cycle
+    // columns + one new table:
+    //  - halt_options_json: when the model halts it can PROPOSE resolution choices
+    //    ([{id,label,detail}]) alongside its reason; the operator picks one (rendered
+    //    with the rule-question card UI) and the choice is injected on resume.
+    //  - resume_context_json: the operator guidance carried into a resumed cycle — a
+    //    free-text message, the selected halt option, and the ids of the one-time
+    //    authorizations granted for this resume — injected as a labeled user turn
+    //    AFTER the original task. NULL on a bare resume and every pre-existing row.
+    //  - mock2_authorizations: SCOPED ONE-TIME operational authorizations, distinct
+    //    from constitutional deviations. A cycle's model may request one (exact scope,
+    //    e.g. a specific SQL statement); an admin grants/denies (optionally appending
+    //    conditions); it is single-use (→ 'used' when injected) and expires with the
+    //    cycle. Fully audit-logged. A disabled host never writes any of this.
+    version: 514,
+    name: 'mock2_human_feedback_channels',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN halt_options_json TEXT;
+        ALTER TABLE mock2_cycles ADD COLUMN resume_context_json TEXT;
+
+        CREATE TABLE mock2_authorizations (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          reason TEXT,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','granted','denied','used','expired')),
+          conditions TEXT,
+          granted_by INTEGER,
+          granted_at TEXT,
+          used_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_authorizations_project ON mock2_authorizations (project_id, status);
+        CREATE INDEX idx_mock2_authorizations_cycle ON mock2_authorizations (cycle_id);
+      `);
+    },
+  },
+  {
+    // Cost-truth (docs/agent-sdk-migration.md § "Cost-truth"). STRICTLY ADDITIVE and
+    // reversible: only NEW tables + NULLABLE columns — no existing row is rewritten and
+    // no existing column/type changes, so behavior is byte-identical until code opts in.
+    //   - mock2_requests: the umbrella "one build ask = one record" entity. Cycles
+    //     become segments of a request. NULL request_id on every pre-existing cycle
+    //     (legacy / new-requests-only backfill, per the doc) — nothing is regrouped.
+    //   - mock2_cycles gains the FOUR canonical token classes + a usage_schema_version
+    //     stamp + request_id + segment. used_tokens/used_cost_cents stay untouched (the
+    //     old "billable in+out" number); the four new columns are the honest basis.
+    //     Every column is NULLable so existing rows read exactly as before (pre-v3,
+    //     flagged non-comparable by usage-logic.isComparable).
+    //   - mock2_consults: the bounded advisory "second opinion" (Fable 5), one row per
+    //     consult, its own cost segment in the request roll-up.
+    // A disabled host never runs any of this.
+    version: 515,
+    name: 'mock2_cost_truth_request_usage_consults',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_requests (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          instruction TEXT,
+          status TEXT NOT NULL DEFAULT 'open',
+          initiated_by INTEGER,
+          acting_as_admin INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX idx_mock2_requests_project ON mock2_requests (project_id, id);
+
+        ALTER TABLE mock2_cycles ADD COLUMN request_id INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN segment TEXT;
+        ALTER TABLE mock2_cycles ADD COLUMN input_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN output_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN cache_read_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN cache_write_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN usage_schema_version INTEGER;
+        CREATE INDEX idx_mock2_cycles_request ON mock2_cycles (request_id);
+
+        CREATE TABLE mock2_consults (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          request_id INTEGER,
+          cycle_id INTEGER,
+          trigger TEXT NOT NULL,
+          model TEXT,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_cents REAL NOT NULL DEFAULT 0,
+          diagnosis TEXT,
+          paths_json TEXT,
+          suggested_resume TEXT,
+          requested_by INTEGER,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_consults_request ON mock2_consults (request_id);
+        CREATE INDEX idx_mock2_consults_cycle ON mock2_consults (cycle_id);
+      `);
+    },
+  },
+  {
+    // Component library (docs/features/component-library.md). Reusable, versioned
+    // building blocks (an LDAPS connection module, a rate limiter, …) the build
+    // runner is told about and can pull verbatim, so repeated needs are met with
+    // ONE audited implementation instead of a fresh AI rewrite each time.
+    //   - mock2_components: the registry row — a stable key, display metadata, and
+    //     a lifecycle status (draft = admin-only WIP, published = offered to every
+    //     build, deprecated = kept for history but no longer offered).
+    //   - mock2_component_versions: append-only content ([{path, content}] files +
+    //     integration notes). change_reason is NOT NULL by design: every version
+    //     carries WHY it exists (the annotated swap/upgrade record). Revert = a
+    //     NEW version carrying old content, same idiom as mock2_framework_versions.
+    //   - mock2_component_submissions: the in-platform promotion path — a project
+    //     editor proposes files from their project as a new component (or a new
+    //     version of an existing one); an admin approves/rejects with a reason.
+    // Additive; a disabled host never writes any of this.
+    version: 516,
+    name: 'mock2_component_library',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_components (
+          id INTEGER PRIMARY KEY,
+          key TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          description TEXT,
+          category TEXT,
+          tags TEXT,
+          status TEXT NOT NULL DEFAULT 'published'
+            CHECK (status IN ('draft','published','deprecated')),
+          current_version_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT,
+          updated_at TEXT
+        );
+
+        CREATE TABLE mock2_component_versions (
+          id INTEGER PRIMARY KEY,
+          component_id INTEGER NOT NULL,
+          version INTEGER NOT NULL,
+          files_json TEXT NOT NULL,
+          usage_md TEXT,
+          change_reason TEXT NOT NULL,
+          reverted_from_version INTEGER,
+          source TEXT NOT NULL DEFAULT 'in_app'
+            CHECK (source IN ('in_app','import','submission','revert')),
+          source_project_id INTEGER,
+          submission_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT,
+          UNIQUE (component_id, version)
+        );
+        CREATE INDEX idx_mock2_component_versions_component
+          ON mock2_component_versions (component_id, version);
+
+        CREATE TABLE mock2_component_submissions (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          component_id INTEGER,
+          proposed_key TEXT,
+          proposed_name TEXT NOT NULL,
+          description TEXT,
+          category TEXT,
+          tags TEXT,
+          files_json TEXT NOT NULL,
+          usage_md TEXT,
+          notes TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','approved','rejected','withdrawn')),
+          review_reason TEXT,
+          reviewed_by INTEGER,
+          reviewed_at TEXT,
+          result_component_id INTEGER,
+          result_version_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT
+        );
+        CREATE INDEX idx_mock2_component_submissions_status
+          ON mock2_component_submissions (status, id);
+        CREATE INDEX idx_mock2_component_submissions_project
+          ON mock2_component_submissions (project_id, id);
+      `);
+    },
+  },
+  {
     // Declared, admin-approved outbound egress grants. Same "declared, never
     // discovered" discipline as ports: an app declares the internal hosts it must
     // reach in mock2.yaml `egress:`, each becomes a PENDING grant + an admin-queue
@@ -511,7 +786,7 @@ export const MOCK2_MIGRATIONS = [
     // bridge). Adding the egress_grant queue kind needs the queue CHECK rebuilt
     // (SQLite can't ALTER a CHECK) — a plain table rebuild, dedupe_key UNIQUE is
     // re-declared inline.
-    version: 511,
+    version: 517,
     name: 'mock2_egress_grants',
     up: (d) => {
       d.exec(`

@@ -39,6 +39,29 @@ const SLOT_CAP = {
   concept_chat: 'chat', mockup: 'chat', audit: 'chat', classifier: 'classify',
   build_runner: 'agentic_build', summary: 'summarize', remediation: 'agentic_build',
 };
+
+// The Claude models offered per slot. Pick by effort/quality vs. cost — spend
+// Opus only where the work is hard (agentic coding), Sonnet where quality matters
+// at lower cost, Haiku for cheap low-risk stages. Prices are the published base
+// input/output rate per million tokens (used only for the in-menu hint).
+const MODEL_OPTIONS = [
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', tier: 'High effort — thinking, coding, agentic', inPerM: 5, outPerM: 25 },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', tier: 'Balanced — quality at lower cost', inPerM: 3, outPerM: 15 },
+  { id: 'claude-haiku-4-6', label: 'Claude Haiku 4.6', tier: 'Fast & cheap — low-risk tasks', inPerM: 1, outPerM: 5 },
+];
+// Suggested model per slot (a recommendation — the dropdown lets you override).
+// Opus for the agentic build/remediation; Sonnet for the quality-sensitive design
+// + audit stages; Haiku for the cheap classify/summarize stages.
+const SLOT_SUGGESTED_MODEL = {
+  concept_chat: 'claude-sonnet-4-6',
+  mockup: 'claude-sonnet-4-6',
+  audit: 'claude-sonnet-4-6',
+  classifier: 'claude-haiku-4-6',
+  build_runner: 'claude-opus-4-8',
+  summary: 'claude-haiku-4-6',
+  remediation: 'claude-opus-4-8',
+};
+const modelLabel = (id) => MODEL_OPTIONS.find((m) => m.id === id)?.label || id;
 const GIT_PROVIDERS = ['github', 'gitea', 'generic_https', 'generic_ssh'];
 
 function TestBadge({ test }) {
@@ -238,6 +261,8 @@ export default function ModelConnectors() {
         <TabsContent value="slots" className="space-y-3">
           <p className="text-sm text-muted-foreground">
             Each stage of a build cycle calls one connector + model. Assignment is capability-enforced — e.g. <strong>build_runner</strong> refuses a chat-only model.
+            Each slot shows a suggested model: spend <strong>Opus</strong> only on the hard agentic build, <strong>Sonnet</strong> where quality matters,
+            and <strong>Haiku</strong> on the cheap classify/summarize stages — the biggest lever on cost.
           </p>
           {SLOTS.map((slot) => {
             const cur = slots.find((s) => s.slot === slot) || {};
@@ -375,8 +400,21 @@ export default function ModelConnectors() {
 }
 
 function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
-  const [connectorId, setConnectorId] = useState(cur.connector_id ? String(cur.connector_id) : '');
-  const [model, setModel] = useState(cur.model || '');
+  const suggested = SLOT_SUGGESTED_MODEL[slot];
+  // Default the connector to the currently-assigned one, else the only eligible
+  // one (so a single-provider setup needs no picking). Default the model to the
+  // current assignment, else this slot's suggestion.
+  const [connectorId, setConnectorId] = useState(
+    cur.connector_id ? String(cur.connector_id) : (eligible.length === 1 ? String(eligible[0].id) : ''),
+  );
+  const [model, setModel] = useState(cur.model || suggested || '');
+
+  // Offer the standard models plus, if the slot already runs a custom id, that
+  // id too (so the dropdown never silently drops an existing assignment).
+  const options = MODEL_OPTIONS.some((m) => m.id === model) || !model
+    ? MODEL_OPTIONS
+    : [...MODEL_OPTIONS, { id: model, label: model, tier: 'Current assignment', inPerM: null, outPerM: null }];
+
   return (
     <Card>
       <CardContent className="space-y-2 p-4">
@@ -387,14 +425,36 @@ function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
         {cur.connector_name ? (
           <p className="text-xs text-muted-foreground">Current: {cur.connector_name} · <code>{cur.model}</code></p>
         ) : <p className="text-xs text-amber-500">unassigned</p>}
+        {suggested ? (
+          <p className="text-xs text-muted-foreground">
+            Suggested: <span className="text-foreground">{modelLabel(suggested)}</span>
+            {model !== suggested ? (
+              <button type="button" className="ml-1 text-primary hover:underline" onClick={() => setModel(suggested)}>use</button>
+            ) : <span className="ml-1 text-emerald-500">✓</span>}
+          </p>
+        ) : null}
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
           <Select value={connectorId} onValueChange={setConnectorId}>
             <SelectTrigger className="min-h-[44px]"><SelectValue placeholder={eligible.length ? 'Connector' : 'no eligible connector'} /></SelectTrigger>
             <SelectContent>{eligible.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}</SelectContent>
           </Select>
-          <Input className="min-h-[44px]" value={model} onChange={(e) => setModel(e.target.value)} placeholder="model id (e.g. claude-opus-4-8)" />
+          <Select value={model} onValueChange={setModel}>
+            <SelectTrigger className="min-h-[44px]"><SelectValue placeholder="Model" /></SelectTrigger>
+            <SelectContent>
+              {options.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  <span className="flex flex-col">
+                    <span>{m.label}{m.id === suggested ? ' · suggested' : ''}</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {m.tier}{m.inPerM != null ? ` · $${m.inPerM}/$${m.outPerM} per M tok` : ''}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="flex gap-2">
-            <Button size="sm" className="min-h-[44px] flex-1" onClick={() => onAssign(slot, connectorId, model.trim())}>Assign</Button>
+            <Button size="sm" className="min-h-[44px] flex-1" onClick={() => onAssign(slot, connectorId, (model || '').trim())}>Assign</Button>
             {cur.connector_name && <Button size="sm" variant="ghost" className="min-h-[44px]" onClick={onClear}>Clear</Button>}
           </div>
         </div>

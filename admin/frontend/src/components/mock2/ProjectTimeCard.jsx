@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Clock, Sparkles, Hammer, Wrench, ShieldAlert, Keyboard, CheckCircle2, Ban, Timer,
+  Clock, Sparkles, Hammer, Wrench, ShieldAlert, Keyboard, CheckCircle2, Ban, Timer, Coins,
   Globe, RefreshCw, Wifi, WifiOff,
 } from 'lucide-react';
 
@@ -23,6 +23,29 @@ function fmt(s) {
   const sec = n % 60;
   if (h) return `${h}h ${m}m`;
   return `${m}m ${sec}s`;
+}
+
+// Model spend, shown the same way per change record: "12,480 tok · $0.09".
+export function fmtTokens(t) {
+  return `${Math.max(0, Math.round(Number(t) || 0)).toLocaleString()} tok`;
+}
+export function fmtCost(cents) {
+  return `$${(Math.max(0, Number(cents) || 0) / 100).toFixed(2)}`;
+}
+export function fmtUsage(tokens, cents) {
+  return `${fmtTokens(tokens)} · ${fmtCost(cents)}`;
+}
+
+function UsageRow({ icon: Icon, label, tokens, cents, strong = false, indent = false }) {
+  return (
+    <div className={`flex items-center justify-between gap-3 text-sm ${indent ? 'pl-5' : ''}`}>
+      <span className={`flex items-center gap-2 min-w-0 ${strong ? 'font-medium' : 'text-muted-foreground'}`}>
+        {Icon ? <Icon className="h-3.5 w-3.5 shrink-0" /> : null}
+        <span className="truncate">{label}</span>
+      </span>
+      <span className={`font-mono text-xs whitespace-nowrap ${strong ? 'font-medium' : ''}`}>{fmtUsage(tokens, cents)}</span>
+    </div>
+  );
 }
 
 function Row({ icon: Icon, label, seconds, strong = false, indent = false }) {
@@ -39,11 +62,13 @@ function Row({ icon: Icon, label, seconds, strong = false, indent = false }) {
 
 export function ProjectTimeCard({ projectId }) {
   const [summary, setSummary] = useState(null);
+  const [usage, setUsage] = useState(null);
 
   const load = useCallback(async () => {
     try {
       const r = await api.mock2GetTimeSummary(projectId);
       setSummary(r.summary || null);
+      setUsage(r.usage || null);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load time summary failed:', err);
     }
@@ -88,6 +113,15 @@ export function ProjectTimeCard({ projectId }) {
             <div className="border-t pt-3">
               <Row icon={Timer} label="Total tracked" seconds={summary.total_tracked_seconds} strong />
             </div>
+
+            {usage ? (
+              <div className="border-t pt-3 space-y-1.5">
+                <UsageRow icon={Coins} label="Tokens &amp; cost" tokens={usage.total_tokens} cents={usage.total_cost_cents} strong />
+                <UsageRow label="Mockup build" tokens={usage.by_stage?.mockup?.tokens} cents={usage.by_stage?.mockup?.cost_cents} indent />
+                <UsageRow label="Building the app" tokens={usage.by_stage?.building?.tokens} cents={usage.by_stage?.building?.cost_cents} indent />
+                <UsageRow label="Adjustments" tokens={usage.by_stage?.adjustments?.tokens} cents={usage.by_stage?.adjustments?.cost_cents} indent />
+              </div>
+            ) : null}
           </>
         )}
       </CardContent>

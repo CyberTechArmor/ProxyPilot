@@ -140,6 +140,34 @@ export function buildCycleNotification({ project = {}, cycle = {}, outcome }) {
     };
   }
 
+  if (outcome === 'paused') {
+    const title = `Build paused — ${name}`;
+    const line = `The build was checkpointed and paused${cycle.error ? `: ${String(cycle.error).slice(0, 160)}` : '.'} Resume it to continue where it stopped.`;
+    const body = [short ? `Change: ${short}` : null, line, url ? url : null].filter(Boolean).join('\n');
+    return {
+      level: 'info',
+      title,
+      body,
+      subject: title,
+      text: `${line}${short ? `\n\nChange: ${short}` : ''}`,
+      sms: `ProxyPilot: build paused for ${name} — resume to continue.`,
+    };
+  }
+
+  if (outcome === 'blocked') {
+    const title = `Build blocked — ${name}`;
+    const line = `The build stopped without finishing and needs attention${cycle.error ? `: ${String(cycle.error).slice(0, 160)}` : '.'} Resume it once the blocker is cleared.`;
+    const body = [short ? `Change: ${short}` : null, line, url ? url : null].filter(Boolean).join('\n');
+    return {
+      level: 'warning',
+      title,
+      body,
+      subject: title,
+      text: `${line}${short ? `\n\nChange: ${short}` : ''}`,
+      sms: `ProxyPilot: build blocked for ${name} — needs attention.`,
+    };
+  }
+
   const failedDeploy = outcome === 'deploy_failed';
   const title = failedDeploy
     ? `Deploy failed — ${name}`

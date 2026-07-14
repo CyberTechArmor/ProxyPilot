@@ -22,6 +22,14 @@ export function listCyclesForProject(projectId, { limit = 50 } = {}) {
     .all(Number(projectId), Number(limit));
 }
 
+// Every cycle that is a SEGMENT of one request (cost-truth), in execution order.
+export function listCyclesForRequest(requestId) {
+  if (requestId == null) return [];
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_cycles WHERE request_id = ? ORDER BY id ASC`)
+    .all(Number(requestId));
+}
+
 // The most recent cycle for a project (the poll target for the "gates going
 // green" view). Includes terminal ones so the UI can show the last result.
 export function latestCycle(projectId) {
@@ -56,23 +64,30 @@ export function countRunningCycles(projectId = null) {
 export function insertCycle({
   projectId, frameworkVersionId, stage = 'build', instruction,
   initiatedBy, actingAsAdmin = 0, estTokens = null, estCostCents = null, status = 'estimating',
+  requestId = null, segment = null,
 }) {
   const info = getMock2Db()
     .prepare(
       `INSERT INTO mock2_cycles
          (project_id, framework_version_id, stage, status, instruction, initiated_by, acting_as_admin,
-          est_tokens, est_cost_cents, used_tokens, used_cost_cents, retries, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)`,
+          est_tokens, est_cost_cents, used_tokens, used_cost_cents, retries, created_at, request_id, segment)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
     )
     .run(Number(projectId), Number(frameworkVersionId), stage, status, instruction ?? null, initiatedBy ?? null,
-      actingAsAdmin ? 1 : 0, estTokens, estCostCents, nowIso());
+      actingAsAdmin ? 1 : 0, estTokens, estCostCents, nowIso(),
+      requestId == null ? null : Number(requestId), segment == null ? null : String(segment));
   return getCycle(info.lastInsertRowid);
 }
 
 const WRITABLE = new Set([
   'status', 'current_gate', 'gates_json', 'est_tokens', 'est_cost_cents',
   'used_tokens', 'used_cost_cents', 'retries', 'interrupt_request', 'error',
-  'started_at', 'finished_at', 'classifier_outcome', 'deploy_status',
+  'started_at', 'finished_at', 'classifier_outcome', 'deploy_status', 'pause_reason',
+  'halt_reason', 'halt_options_json', 'resume_context_json',
+  // Cost-truth (migration 515): the umbrella request link + segment label, the four
+  // canonical token classes, and the usage schema stamp. All additive + nullable.
+  'request_id', 'segment',
+  'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'usage_schema_version',
 ]);
 
 export function updateCycle(id, patch = {}) {
@@ -88,9 +103,11 @@ export function updateCycle(id, patch = {}) {
 // write). Kept a dedicated increment so concurrent-safe += stays a single
 // statement (risk R4 — short transactions).
 export function addCycleUsage(id, { tokens = 0, costCents = 0 }) {
+  // Tokens are whole; cost accumulates as FRACTIONAL cents (rounding each sub-cent
+  // per-call cost to 0 here would zero out the whole build's cost). Display rounds.
   getMock2Db()
     .prepare(`UPDATE mock2_cycles SET used_tokens = used_tokens + ?, used_cost_cents = used_cost_cents + ? WHERE id = ?`)
-    .run(Math.round(tokens), Math.round(costCents), Number(id));
+    .run(Math.round(tokens), Number(costCents) || 0, Number(id));
   return getCycle(id);
 }
 

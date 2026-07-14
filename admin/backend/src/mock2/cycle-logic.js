@@ -12,6 +12,8 @@
 // Terminology (risk R7): the AI build component is the RUNNER; the slot that
 // drives it is build_runner. Nothing here is named "agent".
 
+import { USAGE_SCHEMA_VERSION } from './usage-logic.js';
+
 // The mock2_cycles.status vocabulary (migration 502 CHECK), split into the sets
 // the runner branches on. refused_quota / abandoned / failed / succeeded are
 // terminal; awaiting_admin is terminal-until-an-admin-acts (retries exhausted).
@@ -78,7 +80,11 @@ export function interruptDecision(interruptRequest) {
 // the mid-cycle buffer stop is the real guard.
 export const DEFAULT_TURN_INPUT_TOKENS = 12000;
 export const DEFAULT_TURN_OUTPUT_TOKENS = 3000;
-export const DEFAULT_ESTIMATE_TURNS = 8;
+// Recalibrated up (~2.3×, was 8): observed real builds — especially anything
+// non-trivial like an auth module — run many more than 8 turns, so the old
+// reservation ran well under actual usage. A production-grade feature commonly
+// takes ~18 turns; the safety factor still pads on top.
+export const DEFAULT_ESTIMATE_TURNS = 18;
 export const DEFAULT_SAFETY_FACTOR = 1.5;
 
 // estimateCycleTokens — the buffered token envelope for a cycle. Pure so the
@@ -164,6 +170,10 @@ export function retriesExhausted(retries) {
 
 // Client-safe view of a cycle row for the poll endpoint + the "gates going
 // green" view. gates_json is parsed back for the UI.
+function safeJsonArray(json) {
+  try { const v = JSON.parse(json || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+
 export function publicCycleShape(row) {
   if (!row) return null;
   let gates = [];
@@ -191,6 +201,37 @@ export function publicCycleShape(row) {
     // Run phase — whether the built app was deployed and is serving on the live
     // URL: null | 'deploying' | 'serving' | 'deploy_failed'.
     deploy_status: row.deploy_status || null,
+    // Why an 'interrupted' cycle soft-paused on a budget: 'budget_tokens' |
+    // 'budget_time' | null. Set → the cycle is a resumable Pause, not a stop.
+    pause_reason: row.pause_reason || null,
+    // Why a cycle HALTED without success (needs attention): 'model_halt' |
+    // 'no_tool_calls' | 'repeated_output' | 'no_state_change' |
+    // 'authorization_request' | null. Set on an 'awaiting_admin' cycle → "Blocked —
+    // needs attention", distinct from a retries-exhausted awaiting_admin (halt_reason
+    // null) and from a user stop.
+    halt_reason: row.halt_reason || null,
+    // Resolution options the model PROPOSED when it halted, so the operator can pick
+    // one (rendered as a single rule-question-style choice card) and have it injected
+    // on resume. Each is { id, label, kind, risk/detail, injectOnResume, recommended,
+    // authorization:{scope,expectedRows}|null } — kind is one of grant_authorization |
+    // expand_scope | run_dependency_first | override_rule | abandon. [] when none.
+    halt_options: safeJsonArray(row.halt_options_json),
+    // Cost-truth (migration 515): the umbrella request this cycle is a segment of, and
+    // the canonical four-class usage. used_tokens above is the legacy single figure
+    // (label it "billable in+out"); `usage` is the honest basis. cost_cents mirrors
+    // used_cost_cents (cost computation unchanged). schema_version < 3 (or null) ⇒ a
+    // legacy-basis row, flagged non-comparable and excluded from history/estimator.
+    request_id: row.request_id ?? null,
+    segment: row.segment || null,
+    usage: {
+      input: row.input_tokens ?? null,
+      output: row.output_tokens ?? null,
+      cache_read: row.cache_read_tokens ?? null,
+      cache_write: row.cache_write_tokens ?? null,
+      cost_cents: row.used_cost_cents ?? 0,
+      schema_version: row.usage_schema_version ?? null,
+      comparable: Number(row.usage_schema_version || 0) >= USAGE_SCHEMA_VERSION,
+    },
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

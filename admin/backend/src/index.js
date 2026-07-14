@@ -456,7 +456,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -467,6 +467,11 @@ if (mock2Gate.enabled) {
     // placeholder version 1 on first enabled boot. Idempotent — a no-op once any
     // version exists. Non-fatal (a failed seed just leaves an empty registry).
     try { seedFrameworkV1(null); } catch (err) { console.error('[mock2] framework seed failed:', err?.message || err); }
+    // Seed upgrade: if the vendored framework seed changed since the latest
+    // published version (e.g. a fixed gate script), publish it as a new version so
+    // the fix can actually reach projects (they adopt it via drift → update cycle;
+    // nothing auto-remediates). Idempotent — a no-op when the seed is unchanged.
+    try { upgradeFrameworkFromSeed(null); } catch (err) { console.error('[mock2] framework seed upgrade failed:', err?.message || err); }
     app.use('/api/mock2', authenticateToken, createMock2Router());
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.

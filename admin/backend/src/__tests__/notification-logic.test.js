@@ -122,6 +122,18 @@ test('buildCycleNotification: deploy_failed and failed are warnings', () => {
   assert.match(f.text, /boom/);
 });
 
+test('buildCycleNotification: paused is an info-level resumable message', () => {
+  const m = buildCycleNotification({
+    project: { name: 'Fly' },
+    cycle: { error: 'Paused — token budget reached (~1000k tokens this run).' },
+    outcome: 'paused',
+  });
+  assert.equal(m.level, 'info');
+  assert.match(m.title, /Build paused/);
+  assert.match(m.text, /Resume it to continue/);
+  assert.match(m.sms, /resume/i);
+});
+
 test('buildCycleNotification truncates a very long instruction', () => {
   const long = 'x'.repeat(400);
   const m = buildCycleNotification({ project: { name: 'Fly' }, cycle: { instruction: long, deploy_status: 'serving' }, outcome: 'succeeded' });

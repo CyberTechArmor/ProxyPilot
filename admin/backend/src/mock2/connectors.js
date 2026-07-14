@@ -23,6 +23,7 @@ import {
   interpretTestResponse,
   connectorEgressHosts,
 } from './connector-logic.js';
+import { defaultModelPrice } from './quota-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -215,6 +216,17 @@ export function upsertPrice({ connectorId, model, inputCentsPerMtok, outputCents
     )
     .run(Number(connectorId), model, Math.round(inputCentsPerMtok), Math.round(outputCentsPerMtok), eff);
   return listPrices(connectorId);
+}
+
+// The price row in effect for a connector+model right now: the newest explicit
+// DB row whose effective_at is in the past, else the built-in default rate for
+// the model (so cost isn't $0 just because nobody hand-entered a price), else
+// null (an unknown/self-hosted model — cost 0). One implementation, used by every
+// stage (concept / audit / runner) so pricing can never diverge between them.
+export function effectivePrice(connectorId, model) {
+  const now = nowIso();
+  const row = listPrices(connectorId).find((p) => p.model === model && String(p.effective_at) <= now);
+  return row || defaultModelPrice(model);
 }
 
 export function deletePrice(id) {

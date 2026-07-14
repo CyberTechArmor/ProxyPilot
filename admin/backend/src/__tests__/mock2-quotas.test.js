@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   costCentsForUsage,
+  defaultModelPrice,
   sumLedger,
   remainingBudgetCents,
   bufferedReservationCents,
@@ -24,6 +25,47 @@ test('costCentsForUsage: cents per mtok, rounded', () => {
   assert.equal(costCentsForUsage({ inputTokens: 1_000_000, outputTokens: 500_000 }, price), 1250);
   assert.equal(costCentsForUsage({ inputTokens: 0, outputTokens: 0 }, price), 0);
   assert.equal(costCentsForUsage({ inputTokens: 100, outputTokens: 100 }, null), 0); // self-hosted: no price → 0
+});
+
+test('defaultModelPrice: known Claude models resolve to their documented rate', () => {
+  assert.deepEqual(defaultModelPrice('claude-opus-4-8'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
+  assert.deepEqual(defaultModelPrice('claude-sonnet-4-6'), { input_cents_per_mtok: 300, output_cents_per_mtok: 1500 });
+  assert.deepEqual(defaultModelPrice('claude-haiku-4-6'), { input_cents_per_mtok: 100, output_cents_per_mtok: 500 });
+  // Older / pricier Opus tiers and a date-suffixed id still resolve.
+  assert.deepEqual(defaultModelPrice('claude-opus-4-1'), { input_cents_per_mtok: 1500, output_cents_per_mtok: 7500 });
+  assert.deepEqual(defaultModelPrice('claude-opus-4-8-20260101'), { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 });
+});
+
+test('defaultModelPrice: unknown / self-hosted models have no default (cost stays 0)', () => {
+  assert.equal(defaultModelPrice('llama-3-70b'), null);
+  assert.equal(defaultModelPrice(''), null);
+  assert.equal(defaultModelPrice(null), null);
+});
+
+test('costCentsForUsage with the default price gives a real cost (not $0)', () => {
+  const p = defaultModelPrice('claude-opus-4-8');
+  // 20k input + 5k output on Opus = 20000/1e6*500 + 5000/1e6*2500 = 10 + 12.5 = 22.5¢
+  assert.ok(Math.abs(costCentsForUsage({ inputTokens: 20_000, outputTokens: 5_000 }, p) - 22.5) < 1e-9);
+});
+
+test('costCentsForUsage prices cache reads at 0.1x and cache writes at 1.25x input', () => {
+  const p = { input_cents_per_mtok: 500, output_cents_per_mtok: 2500 }; // Opus
+  // 100k cache read = 100000/1e6*500*0.1 = 5¢; 100k cache write = *1.25 = 62.5¢.
+  const c = costCentsForUsage({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 100_000, cacheWriteTokens: 100_000 }, p);
+  assert.ok(Math.abs(c - (5 + 62.5)) < 1e-9);
+  // Ignoring cache tokens (the old behavior) would have reported $0 here.
+  assert.equal(costCentsForUsage({ inputTokens: 0, outputTokens: 0 }, p), 0);
+});
+
+test('costCentsForUsage: sub-cent per-call costs are NOT floored to 0 (they accumulate)', () => {
+  // A single build turn is a fraction of a cent — it must survive as a fraction so
+  // 40 of them add up to a real cost instead of rounding to 0 each time.
+  const price = { input_cents_per_mtok: 300, output_cents_per_mtok: 1500 };
+  const perTurn = costCentsForUsage({ inputTokens: 800, outputTokens: 200 }, price); // 0.24 + 0.30 = 0.54¢
+  assert.ok(perTurn > 0 && perTurn < 1, `expected a sub-cent fraction, got ${perTurn}`);
+  assert.ok(Math.abs(perTurn - 0.54) < 1e-9);
+  // 40 such turns ≈ 21.6¢ — a real cost, not $0.
+  assert.ok(Math.abs(perTurn * 40 - 21.6) < 1e-6);
 });
 
 test('sumLedger: totals across rows', () => {

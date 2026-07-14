@@ -46,7 +46,7 @@ import {
   purgeProjectSlugHistory,
   addTypingSeconds,
 } from './projects.js';
-import { computeTimeSummary } from './time-logic.js';
+import { computeTimeSummary, computeUsageSummary } from './time-logic.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
@@ -98,10 +98,39 @@ import {
 import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
-// ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
+// ---- Component library (migration 516) ----
 import {
-  getCycle, listCyclesForProject, latestCycle, setInterrupt,
+  listComponents, getComponent, getComponentByKey, getComponentVersion,
+  listComponentVersions, getCurrentComponentVersion,
+  insertComponent, insertComponentVersion, updateComponentMeta, deleteComponent,
+  insertSubmission, getSubmission, listSubmissions, countPendingSubmissions,
+  approveSubmission, rejectSubmission,
+} from './components.js';
+import {
+  COMPONENT_STATUSES, MAX_COMPONENT_FILES,
+  validateComponentKey, deriveComponentKey, normalizeTags,
+  validateComponentFiles, validateChangeReason,
+  publicComponentShape, publicComponentVersionShape, publicSubmissionShape,
+  buildComponentExport, parseComponentImport,
+} from './component-logic.js';
+// ---- M6: cycle runner + checkout lock ----
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, readFileInContainer } from './runner.js';
+import {
+  getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
+  insertAuthorization, decideAuthorization, publicAuthorizationShape,
+} from './authorizations.js';
+import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
+import { explainCard } from './explain.js';
+import { EXPLAIN_MAX_INPUT_CHARS } from './explain-logic.js';
+// ---- Cost-truth: requests (umbrella), consults (second opinion), grouped log ----
+import { getRequest, listRequestsForProject, closeRequest, publicRequestShape } from './requests.js';
+import { listCyclesForRequest } from './cycles.js';
+import { listConsultsForRequest, listConsultsForCycle, countConsultsForCycle, countConsultsForRequest, publicConsultShape } from './consults.js';
+import { buildRequestLog, requestLogArtifact } from './request-log.js';
+import { runConsult } from './consult.js';
+import { consultAllowed } from './consult-logic.js';
+import {
+  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
 import {
@@ -109,6 +138,7 @@ import {
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
 import { listChangeRecords, verifyProjectChain } from './change-records.js';
+import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages } from './chats.js';
 import {
@@ -276,8 +306,15 @@ const projectRemoteSchema = z.object({
   push_on_checkpoint: z.boolean().optional(),
 });
 // ---- M6 Zod schemas ----
+// The instruction ceiling is the same operator-configurable chat_max_chars the
+// design chat uses (getChatMaxChars) — the length bound is applied in the handler,
+// not baked in here, so raising the limit carries over to Build too.
 const cycleStartSchema = z.object({
-  instruction: z.string().trim().min(1).max(2000),
+  instruction: z.string().trim().min(1),
+});
+const cycleFeedbackSchema = z.object({
+  rating: z.enum(['up', 'down']),
+  note: z.string().trim().max(4000).optional(),
 });
 const interruptSchema = z.object({
   action: z.enum(INTERRUPTS),
@@ -298,12 +335,98 @@ const chatMessageSchema = z.object({
 });
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
-  answer: z.string().trim().min(1).max(2000),
+  // Length bound applied in the handler against getChatMaxChars() (same ceiling
+  // as the design + build chat), so a raised limit carries over here too.
+  answer: z.string().trim().min(1),
 });
 const queueStatusSchema = z.object({
   status: z.enum(['open', 'in_progress', 'resolved', 'dismissed']),
   resolution: z.string().trim().max(1000).optional(),
+  // Approve-as-edited (framework_deviation): the admin may rewrite the deviation
+  // text and/or append conditions; the edited text becomes the authoritative record.
+  editedText: z.string().trim().max(4000).optional(),
+  conditions: z.string().trim().max(2000).optional(),
 });
+// Resume-with-message: optional operator guidance carried into the resumed cycle,
+// and the id/label of a halt resolution option the operator chose.
+const resumeSchema = z.object({
+  message: z.string().trim().max(8000).optional(),
+  option: z.string().trim().max(200).optional(),
+});
+// Scoped one-time authorization decision (admin): grant (optionally with appended
+// conditions) or deny.
+const authDecisionSchema = z.object({
+  approved: z.boolean(),
+  conditions: z.string().trim().max(2000).optional(),
+});
+// "Explain this" — a card's full text + minimal cycle context for the summary lane to
+// rewrite in plain language. Read-only; card_id is opaque (used only for the audit note).
+const explainSchema = z.object({
+  text: z.string().trim().min(1).max(EXPLAIN_MAX_INPUT_CHARS + 4000),
+  kind: z.enum(['blocker', 'authorization', 'deviation', 'rule_question']).optional(),
+  title: z.string().trim().max(400).optional(),
+  status: z.string().trim().max(60).optional(),
+  card_id: z.string().trim().max(160).optional(),
+});
+// ---- Component library Zod schemas ----
+const componentFileSchema = z.object({
+  path: z.string().min(1).max(400),
+  content: z.string().max(250000),
+});
+const componentCreateSchema = z.object({
+  key: z.string().trim().max(64).optional(),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(COMPONENT_STATUSES).optional(),
+  usage_md: z.string().max(20000).optional(),
+  files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
+  change_reason: z.string().trim().max(2000).optional(),
+});
+const componentMetaSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(COMPONENT_STATUSES).optional(),
+}).refine((o) => Object.keys(o).length > 0, 'no fields to update');
+const componentVersionSchema = z.object({
+  files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
+  usage_md: z.string().max(20000).optional(),
+  change_reason: z.string().trim().min(1).max(2000),
+});
+const componentImportSchema = z.object({
+  doc: z.record(z.any()),
+  change_reason: z.string().trim().max(2000).optional(),
+});
+// A submission proposes files either INLINE or by container PATHS (read from the
+// running project container server-side, so "promote what I just built" is one
+// click, not copy-paste).
+const submissionCreateSchema = z.object({
+  component_id: z.union([z.number().int(), z.string()]).optional(),
+  proposed_key: z.string().trim().max(64).optional(),
+  proposed_name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  usage_md: z.string().max(20000).optional(),
+  notes: z.string().trim().max(4000).optional(),
+  files: z.array(componentFileSchema).max(MAX_COMPONENT_FILES).optional(),
+  paths: z.array(z.string().min(1).max(400)).max(MAX_COMPONENT_FILES).optional(),
+}).refine((o) => (o.files && o.files.length) || (o.paths && o.paths.length), 'files or paths required');
+const submissionReviewSchema = z.object({
+  approved: z.boolean(),
+  reason: z.string().trim().max(2000).optional(),
+  overrides: z.object({
+    key: z.string().trim().max(64).optional(),
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().trim().max(2000).optional(),
+    category: z.string().trim().max(80).optional(),
+    tags: z.array(z.string()).optional(),
+  }).optional(),
+});
+
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
   skills_json: z.string().min(1),
@@ -778,7 +901,10 @@ export function createMock2Router() {
     const project = getProject(req.mock2Project.id);
     const cycles = listCyclesForProject(project.id, { limit: 500 });
     const deviations = listQueueItems({ projectId: project.id, kind: 'framework_deviation', limit: 500 });
-    res.json({ summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }) });
+    res.json({
+      summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }),
+      usage: computeUsageSummary({ cycles }),
+    });
   });
 
   // Destroy a project: tear down its container + bridge, drop its slug block,
@@ -1199,6 +1325,290 @@ export function createMock2Router() {
   });
 
   // ============================================================
+  // Component library (migration 516). Reusable, versioned building blocks the
+  // build runner is offered so recurring needs (an LDAPS auth module, …) reuse
+  // ONE audited implementation. Reads are open to any authenticated user (a
+  // project editor browses what exists before proposing); writes are admin;
+  // delete additionally requires sudo. Content is immutable per version — every
+  // change is a NEW version with a REQUIRED annotated change_reason.
+  // ============================================================
+
+  router.get('/components', (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    if (status && !COMPONENT_STATUSES.includes(status)) return res.status(400).json({ error: 'unknown status' });
+    const rows = listComponents({ status }).map((c) => publicComponentShape(c, { currentVersion: getCurrentComponentVersion(c) }));
+    res.json({ components: rows, pending_submissions: isReqAdmin(req) ? countPendingSubmissions() : undefined });
+  });
+
+  router.get('/components/:id', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    res.json({ component: publicComponentShape(row, { currentVersion: getCurrentComponentVersion(row), includeFiles: true }) });
+  });
+
+  router.post('/components', requireAdmin, (req, res) => {
+    const parsed = componentCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid component' });
+    const d = parsed.data;
+    const keyCheck = validateComponentKey(d.key || deriveComponentKey(d.name));
+    if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+    if (getComponentByKey(keyCheck.key)) return res.status(409).json({ error: `A component with key "${keyCheck.key}" already exists — publish a new version of it instead` });
+    const filesCheck = validateComponentFiles(d.files);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const { component, version } = insertComponent({
+      key: keyCheck.key, name: d.name, description: d.description || null,
+      category: d.category || null, tags: normalizeTags(d.tags),
+      status: d.status || 'published', files: filesCheck.files,
+      usage_md: d.usage_md || null,
+      change_reason: (d.change_reason || '').trim() || 'Initial version',
+      createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_CREATE', 'mock2_component', component.id, { key: component.key, files: filesCheck.files.length }, req.ip);
+    res.status(201).json({ component: publicComponentShape(component, { currentVersion: version, includeFiles: true }) });
+  });
+
+  router.patch('/components/:id', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const parsed = componentMetaSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid update' });
+    const d = parsed.data;
+    const updated = updateComponentMeta(row.id, {
+      ...(d.name !== undefined ? { name: d.name } : {}),
+      ...(d.description !== undefined ? { description: d.description || null } : {}),
+      ...(d.category !== undefined ? { category: d.category || null } : {}),
+      ...(d.tags !== undefined ? { tags: normalizeTags(d.tags) } : {}),
+      ...(d.status !== undefined ? { status: d.status } : {}),
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_UPDATE', 'mock2_component', row.id, { key: row.key, fields: Object.keys(d) }, req.ip);
+    res.json({ component: publicComponentShape(updated, { currentVersion: getCurrentComponentVersion(updated) }) });
+  });
+
+  router.delete('/components/:id', requireAdmin, requireSudo, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    deleteComponent(row.id);
+    logAudit(req.user.id, 'MOCK2_COMPONENT_DELETE', 'mock2_component', row.id, { key: row.key }, req.ip);
+    res.json({ ok: true });
+  });
+
+  // Version history — the annotated record of every swap and why.
+  router.get('/components/:id/versions', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    res.json({ versions: listComponentVersions(row.id).map((v) => publicComponentVersionShape(v)) });
+  });
+
+  router.get('/components/:id/versions/:vid', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const v = getComponentVersion(req.params.vid);
+    if (!v || v.component_id !== row.id) return res.status(404).json({ error: 'Version not found' });
+    res.json({ version: publicComponentVersionShape(v, { includeFiles: true }) });
+  });
+
+  // Publish a new version. change_reason is REQUIRED — the library's history
+  // must say why each version exists.
+  router.post('/components/:id/versions', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const parsed = componentVersionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid version' });
+    const reasonCheck = validateChangeReason(parsed.data.change_reason);
+    if (!reasonCheck.ok) return res.status(400).json({ error: reasonCheck.error });
+    const filesCheck = validateComponentFiles(parsed.data.files);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const version = insertComponentVersion(row.id, {
+      files: filesCheck.files, usage_md: parsed.data.usage_md || null,
+      change_reason: reasonCheck.reason, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_VERSION_PUBLISH', 'mock2_component', row.id, { key: row.key, version: version.version }, req.ip);
+    res.status(201).json({ version: publicComponentVersionShape(version, { includeFiles: true }) });
+  });
+
+  // Revert = a NEW version carrying the old content (same idiom as the
+  // framework registry) — the annotated reason records the rollback.
+  router.post('/components/:id/versions/:vid/revert', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const source = getComponentVersion(req.params.vid);
+    if (!source || source.component_id !== row.id) return res.status(404).json({ error: 'Version not found' });
+    const reason = String(req.body?.change_reason || '').trim() || `Revert to v${source.version}`;
+    const version = insertComponentVersion(row.id, {
+      files: JSON.parse(source.files_json), usage_md: source.usage_md,
+      change_reason: reason, revertedFromVersion: source.version,
+      source: 'revert', createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_VERSION_REVERT', 'mock2_component', row.id, { key: row.key, version: version.version, reverted_from: source.version }, req.ip);
+    res.status(201).json({ version: publicComponentVersionShape(version, { includeFiles: true }) });
+  });
+
+  // Export the current version as a portable JSON document (download).
+  router.get('/components/:id/export', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const current = getCurrentComponentVersion(row);
+    if (!current) return res.status(409).json({ error: 'Component has no versions' });
+    const doc = buildComponentExport(row, current);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${row.key}-v${current.version}.component.json"`);
+    res.json(doc);
+  });
+
+  // Import a component document (admin). A NEW key creates the component; a
+  // key that already exists appends a NEW VERSION of it (annotated as an import).
+  router.post('/components/import', requireAdmin, (req, res) => {
+    const parsed = componentImportSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'doc (the exported component JSON) is required' });
+    const check = parseComponentImport(parsed.data.doc);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    const d = check.data;
+    const reason = (parsed.data.change_reason || '').trim() || `Imported component document (${d.key})`;
+    const existing = getComponentByKey(d.key);
+    if (existing) {
+      const version = insertComponentVersion(existing.id, {
+        files: d.files, usage_md: d.usage_md, change_reason: reason,
+        source: 'import', createdBy: req.user.id,
+      });
+      logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', existing.id, { key: d.key, as: 'new_version', version: version.version }, req.ip);
+      return res.status(201).json({ component: publicComponentShape(getComponent(existing.id), { currentVersion: version }), created: false });
+    }
+    const { component, version } = insertComponent({
+      key: d.key, name: d.name, description: d.description, category: d.category,
+      tags: d.tags, files: d.files, usage_md: d.usage_md,
+      change_reason: reason, source: 'import', createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', component.id, { key: d.key, as: 'new_component', version: version.version }, req.ip);
+    res.status(201).json({ component: publicComponentShape(component, { currentVersion: version }), created: true });
+  });
+
+  // ---- submissions: the in-platform promotion path ----
+
+  // Propose code from a project as a component (project editor). Files come
+  // inline OR as container paths (read server-side from the RUNNING project
+  // container, so "promote what the last build wrote" needs no copy-paste).
+  router.post('/projects/:id/component-submissions', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = submissionCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid submission' });
+    const d = parsed.data;
+
+    let targetComponent = null;
+    if (d.component_id != null && d.component_id !== '') {
+      targetComponent = getComponent(d.component_id);
+      if (!targetComponent) return res.status(400).json({ error: 'No such component to propose a version for' });
+    }
+    let proposedKey = null;
+    if (!targetComponent) {
+      const keyCheck = validateComponentKey(d.proposed_key || deriveComponentKey(d.proposed_name));
+      if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+      proposedKey = keyCheck.key;
+    }
+
+    // Resolve the files: inline wins; otherwise read each path from the container.
+    let candidateFiles = d.files || [];
+    if (!candidateFiles.length) {
+      if (project.lifecycle !== 'active') {
+        return res.status(409).json({ error: 'Reading files from the project requires its container to be running — wake the project or paste the files inline' });
+      }
+      candidateFiles = [];
+      for (const p of d.paths || []) {
+        const r = await readFileInContainer(project.container_name, p);
+        if (!r.ok) return res.status(400).json({ error: `Could not read "${p}" from the project: ${r.error}` });
+        candidateFiles.push({ path: p, content: r.content });
+      }
+    }
+    const filesCheck = validateComponentFiles(candidateFiles);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+
+    const submission = insertSubmission({
+      projectId: project.id, componentId: targetComponent?.id || null,
+      proposedKey, proposedName: d.proposed_name,
+      description: d.description || null, category: d.category || null,
+      tags: normalizeTags(d.tags), files: filesCheck.files,
+      usage_md: d.usage_md || null, notes: d.notes || null, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMIT', 'mock2_component_submission', submission.id,
+      { project_id: project.id, target_component_id: targetComponent?.id || null, files: filesCheck.files.length }, req.ip);
+    try {
+      postNotification({
+        level: 'info',
+        title: `Component submission: ${d.proposed_name}`,
+        body: `${project.name} proposed ${targetComponent ? `a new version of "${targetComponent.name}"` : `a new component "${d.proposed_name}"`} for the library. Review it under Projects → Components.`,
+        source: 'mock2-component-submission',
+        source_id: submission.id,
+        dedupe_key: `mock2-component-submission:${submission.id}`,
+      });
+    } catch (err) { console.error('[mock2] postNotification failed:', err?.message); }
+    res.status(201).json({ submission: publicSubmissionShape(submission) });
+  });
+
+  // A project's own submissions (member view — track the review outcome).
+  router.get('/projects/:id/component-submissions', requireMock2Role('viewer'), (req, res) => {
+    res.json({ submissions: listSubmissions({ projectId: req.mock2Project.id }).map((s) => publicSubmissionShape(s)) });
+  });
+
+  // The review inbox (admin).
+  router.get('/component-submissions', requireAdmin, (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    if (status && !['pending', 'approved', 'rejected', 'withdrawn'].includes(status)) return res.status(400).json({ error: 'unknown status' });
+    res.json({ submissions: listSubmissions({ status }).map((s) => publicSubmissionShape(s)) });
+  });
+
+  router.get('/component-submissions/:id', requireAdmin, (req, res) => {
+    const row = getSubmission(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Submission not found' });
+    res.json({ submission: publicSubmissionShape(row, { includeFiles: true }) });
+  });
+
+  // Approve into the library (new component, or new version of the targeted
+  // one) or reject with a reason — the submitter sees the outcome + reason.
+  router.post('/component-submissions/:id/review', requireAdmin, (req, res) => {
+    const row = getSubmission(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Submission not found' });
+    if (row.status !== 'pending') return res.status(409).json({ error: `Submission is already ${row.status}` });
+    const parsed = submissionReviewSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid review' });
+    const d = parsed.data;
+
+    if (!d.approved) {
+      const reason = (d.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'A reason is required to reject — the submitter sees it' });
+      const updated = rejectSubmission(row.id, { reviewerId: req.user.id, reason });
+      logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMISSION_REJECT', 'mock2_component_submission', row.id, { reason }, req.ip);
+      return res.json({ submission: publicSubmissionShape(updated) });
+    }
+
+    const overrides = { ...(d.overrides || {}) };
+    if (overrides.key !== undefined) {
+      const keyCheck = validateComponentKey(overrides.key);
+      if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+      overrides.key = keyCheck.key;
+    }
+    if (overrides.tags !== undefined) overrides.tags = normalizeTags(overrides.tags);
+    // Creating a NEW component whose key already exists is a reviewer mistake —
+    // point them at targeting the existing component instead.
+    if (!row.component_id) {
+      const key = overrides.key || row.proposed_key;
+      if (key && getComponentByKey(key)) {
+        return res.status(409).json({ error: `Key "${key}" already exists — re-review with an overridden key, or have the submitter target that component with a new-version submission` });
+      }
+    }
+    let result;
+    try {
+      result = approveSubmission(row, { reviewerId: req.user.id, reason: (d.reason || '').trim() || null, overrides });
+    } catch (err) {
+      return res.status(409).json({ error: `Could not approve: ${err?.message || 'unknown error'}` });
+    }
+    logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMISSION_APPROVE', 'mock2_component_submission', row.id,
+      { component_id: result.component.id, key: result.component.key, version: result.version.version }, req.ip);
+    res.json({
+      submission: publicSubmissionShape(result.submission),
+      component: publicComponentShape(result.component, { currentVersion: result.version }),
+    });
+  });
+
+  // ============================================================
   // M6 — Cycle runner + checkout lock (ADR-003/004). A cycle is one targeted
   // change: exec into the fenced container, run the pinned gates, checkpoint. The
   // lock guards the CONTAINER (ADR-004) — startCycle takes it as the cycle holder
@@ -1213,8 +1623,12 @@ export function createMock2Router() {
   // gates → run in the background. 202 + poll (or 200 refused_quota).
   router.post('/projects/:id/cycles', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
+    const maxChars = getChatMaxChars();
     const parsed = cycleStartSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'instruction is required (1–2000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: `instruction is required (1–${maxChars} chars)` });
+    if (parsed.data.instruction.length > maxChars) {
+      return res.status(400).json({ error: `instruction is too long (max ${maxChars} chars)` });
+    }
     // M8 (ADR-002): the Build press runs the AUDIT first. It compares the
     // approved inventory + rules.md + the pinned framework and either asks
     // editor/admin questions (blocking the build) or, when clear, hands off to
@@ -1243,9 +1657,37 @@ export function createMock2Router() {
   });
 
   // The project's latest cycle — the poll target for the "gates going green" view.
+  // Carries the Builder's feedback (thumbs up/down) so the UI can require a rating
+  // on a finished build before the next cycle.
   router.get('/projects/:id/cycle', requireMock2Role('viewer'), (req, res) => {
     const cycle = latestCycle(req.mock2Project.id);
-    res.json({ cycle: cycle ? publicCycleShape(cycle) : null, job: cycle ? getCycleJobStatus(cycle.id) : null });
+    res.json({
+      cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
+      job: cycle ? getCycleJobStatus(cycle.id) : null,
+      // Pending one-time authorization requests (Part 4) so the blocked card can show
+      // them + an admin Grant/Deny without a separate fetch.
+      authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),
+    });
+  });
+
+  // Record the Builder's thumbs up/down on a finished build (editor). A thumbs-down
+  // requires a note; both land in the cycle's event log for later evaluation. Only
+  // a terminal cycle can be rated (rating a running build makes no sense).
+  router.post('/projects/:id/cycles/:cycleId/feedback', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status)) {
+      return res.status(409).json({ error: 'This build is still running — rate it once it finishes.' });
+    }
+    const parsed = cycleFeedbackSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'rating must be up or down' });
+    const note = (parsed.data.note || '').trim();
+    if (parsed.data.rating === 'down' && !note) {
+      return res.status(400).json({ error: 'A note is required for a thumbs-down so the log can be evaluated.' });
+    }
+    const feedback = recordCycleFeedback({ projectId: req.mock2Project.id, cycleId: cycle.id, rating: parsed.data.rating, note: note || null, userId: req.user.id });
+    logAudit(req.user.id, 'MOCK2_CYCLE_FEEDBACK', 'mock2_cycle', cycle.id, { rating: parsed.data.rating, has_note: !!note }, req.ip);
+    res.json({ feedback });
   });
 
   // Poll one cycle (viewer). Job progress rides alongside (house 202+poll pattern).
@@ -1277,21 +1719,131 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const cycle = getCycle(req.params.cycleId);
     if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const parsedResume = resumeSchema.safeParse(req.body || {});
+    if (!parsedResume.success) return res.status(400).json({ error: 'Invalid resume message/option.' });
+    const optionId = parsedResume.data.option || null;
+    const message = (parsedResume.data.message || '').trim();
+
+    // Resolve the chosen halt option against what the model actually offered, so the
+    // typed kind decides how the choice is applied (task Part 3). The offered options
+    // are the audit-visible record of what was on the card.
+    let offered = [];
+    try { offered = cycle.halt_options_json ? JSON.parse(cycle.halt_options_json) : []; } catch { offered = []; }
+    const chosen = optionId ? resolveSelectedOption(offered, optionId) : null;
+    const offeredIds = (Array.isArray(offered) ? offered : []).map((o) => o?.id).filter(Boolean);
+    const auditBase = {
+      from_cycle: cycle.id,
+      offered_options: offeredIds,
+      chosen_option: chosen?.id || null,
+      chosen_label: chosen?.label || null,
+      chosen_kind: chosen?.kind || null,
+      has_context: !!message,
+      acting_as_admin: req.mock2Access.actingAsAdmin,
+    };
+
+    // The privileged kinds (grant a one-time authorization, override a rule) may only
+    // be chosen by an admin — grant/deny folds into picking/rejecting the option.
+    const actingAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    if (chosen && haltOptionRequiresAdmin(chosen.kind) && !actingAdmin) {
+      return res.status(403).json({ error: `Choosing “${chosen.label}” requires an administrator.` });
+    }
+
+    // Abandon closes the cycle as abandoned — no resume (task Part 3).
+    if (chosen && chosen.kind === 'abandon') {
+      finishCycle(cycle.id, { status: 'abandoned', error: `abandoned by operator${message ? `: ${message}` : ''}` });
+      // Cost-truth: abandoning closes the whole umbrella request.
+      try { if (cycle.request_id) closeRequest(cycle.request_id, 'abandoned'); } catch { /* best effort */ }
+      for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
+        try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: req.user.id }); } catch { /* best effort */ }
+      }
+      logAudit(req.user.id, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { ...auditBase, context: message || null }, req.ip);
+      return res.json({ cycle: publicCycleShape(getCycle(cycle.id)), abandoned: true });
+    }
+
+    // A grant_authorization (or override_rule) option carries the exact scope the
+    // operator is signing off on: create + grant that one-time authorization now, so
+    // the resume injects it (single-use). Admin-gated above. Any typed context becomes
+    // the binding conditions on the grant.
+    if (chosen && haltOptionCarriesAuthorization(chosen)) {
+      try {
+        const auth = insertAuthorization({ projectId: project.id, cycleId: cycle.id, scope: chosen.authorization.scope, reason: chosen.label });
+        decideAuthorization(auth.id, { approved: true, conditions: message || null, by: req.user.id });
+        logAudit(req.user.id, 'MOCK2_AUTHORIZATION_DECISION', 'mock2_authorization', auth.id,
+          { approved: true, via: 'halt_option', option: chosen.id, scope: chosen.authorization.scope, expected_rows: chosen.authorization.expectedRows ?? null }, req.ip);
+      } catch (err) {
+        return res.status(500).json({ error: `Could not grant the authorization: ${err?.message || 'unknown error'}` });
+      }
+    }
+
     let result;
     try {
       result = await retryCycle({
         project, cycle,
         initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        message, option: optionId,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY', 'mock2_cycle', result.cycle?.id || cycle.id,
-      { from_cycle: cycle.id, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { ...auditBase, status: result.status, context: message || null }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });
+  });
+
+  // "Get guidance" — the operator-triggered escalation consult (a Fable 5 SECOND
+  // OPINION) on a blocked cycle. Advisory-only: it never resumes, grants, or switches the
+  // build lane; it returns a diagnosis + ranked paths + suggested resume text attached to
+  // the halt card. Bounded (~$0.50) and logged as its own request segment. The operator
+  // button bypasses the auto caps (they're explicitly asking); its cost is on them.
+  router.post('/projects/:id/cycles/:cycleId/consult', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (!cycle.halt_reason && cycle.status !== 'awaiting_admin' && cycle.status !== 'failed') {
+      return res.status(409).json({ error: 'A second opinion is available on a blocked or failed build.' });
+    }
+    const trigger = 'operator';
+    const gate = consultAllowed({
+      trigger,
+      perHaltCount: countConsultsForCycle(cycle.id),
+      perRequestCount: countConsultsForRequest(cycle.request_id),
+    });
+    if (!gate.allowed) return res.status(409).json({ error: gate.reason });
+
+    // Compile the tool-free digest from what the cycle already carries (no container
+    // reads — bounded by construction). Gate output comes from the stored gate reports.
+    let gateOutput = '';
+    try {
+      const gates = cycle.gates_json ? JSON.parse(cycle.gates_json) : [];
+      gateOutput = (Array.isArray(gates) ? gates : []).map((g) => `${g.name}: ${g.status}${g.report ? ` — ${g.report}` : ''}`).join('\n');
+    } catch { /* ignore */ }
+    const digestParts = {
+      task: cycle.instruction || '',
+      haltReason: cycle.error || cycle.halt_reason || 'blocked',
+      lastErrors: cycle.error || '',
+      gateOutput,
+    };
+
+    let result;
+    try {
+      result = await runConsult({ projectId: project.id, requestId: cycle.request_id, cycleId: cycle.id, trigger, digestParts, requestedBy: req.user.id });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the consult failed' };
+    }
+    // Read-only w.r.t. the build; log that a second opinion was requested.
+    logAudit(req.user.id, 'MOCK2_CONSULT', 'mock2_cycle', cycle.id,
+      { trigger, request_id: cycle.request_id, ok: !!result.ok, cost_cents: result.consult?.cost_cents ?? null }, req.ip);
+    return res.json(result.ok ? { ok: true, consult: result.consult } : { ok: false, error: result.error });
+  });
+
+  // List the consults (second opinions) attached to a cycle — the halt card reads these.
+  router.get('/projects/:id/cycles/:cycleId/consults', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    res.json({ consults: listConsultsForCycle(cycle.id).map(publicConsultShape) });
   });
 
   // Retry the DEPLOY only (install → migrate → build → start → health) for a
@@ -1311,6 +1863,31 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY_DEPLOY', 'mock2_cycle', cycle.id,
       { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ cycle: publicCycleShape(result.cycle) });
+  });
+
+  // "Explain this" — rewrite a blocker / authorization / deviation / rule-question
+  // card in plain language via the summary lane (small/fast model). READ-ONLY: it never
+  // blocks, resumes, grants, or resolves anything; it only reads the card text and logs
+  // that an explanation was VIEWED. Any member (viewer+) may ask. On a model/slot
+  // failure it returns { ok:false } with 200 so the client falls back to the original
+  // text — the operator is never blocked on the explainer (task item 3).
+  router.post('/projects/:id/explain', requireMock2Role('viewer'), async (req, res) => {
+    const parsed = explainSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'text is required to explain a card' });
+    const { text, kind = 'blocker', title = '', status = '', card_id = null } = parsed.data;
+    let result;
+    try {
+      result = await explainCard({ text, title, status, kind });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the explainer failed' };
+    }
+    // Audit log ONLY that an explanation was viewed — no state change to the cycle,
+    // authorization, or deviation this explained.
+    logAudit(req.user.id, 'MOCK2_EXPLAIN_VIEW', 'mock2_project', req.mock2Project.id,
+      { kind, card_id, ok: !!result.ok }, req.ip);
+    return res.json(result.ok
+      ? { ok: true, explanation: result.explanation }
+      : { ok: false, error: result.error || 'could not explain this right now' });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets
@@ -1375,17 +1952,100 @@ export function createMock2Router() {
   // The project's append-only, hash-chained change history + a live verification
   // of the whole chain (any member). The M6 verify checklist asserts this passes.
   router.get('/projects/:id/change-records', requireMock2Role('viewer'), (req, res) => {
+    // Join each record to its cycle's spend so the change history can show a
+    // per-change token/cost counter without a second round-trip (Task 3).
+    const usageByCycle = new Map();
+    for (const c of listCyclesForProject(req.mock2Project.id, { limit: 1000 })) {
+      usageByCycle.set(c.id, { used_tokens: c.used_tokens ?? 0, used_cost_cents: c.used_cost_cents ?? 0 });
+    }
     const records = listChangeRecords(req.mock2Project.id).map((r) => {
       let gates = null;
       try { gates = r.gates_run ? JSON.parse(r.gates_run) : null; } catch { gates = null; }
+      let rules = null;
+      try { rules = r.rules_touched ? JSON.parse(r.rules_touched) : null; } catch { rules = null; }
+      const usage = r.cycle_id != null ? usageByCycle.get(r.cycle_id) : null;
       return {
         seq: r.seq, prev_hash: r.prev_hash, hash: r.hash, summary: r.summary,
-        commit_sha: r.commit_sha, gates_run: gates, framework_version: r.framework_version,
+        commit_sha: r.commit_sha, gates_run: gates, rules_touched: rules,
+        framework_version: r.framework_version,
         cycle_id: r.cycle_id, initiated_by: r.initiated_by,
+        used_tokens: usage ? usage.used_tokens : null,
+        used_cost_cents: usage ? usage.used_cost_cents : null,
         acting_as_admin: Number(r.acting_as_admin) === 1, created_at: r.created_at,
       };
     });
     res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
+  });
+
+  // ---- Build log (downloadable transcript — "what actually happened") ----
+
+  // One cycle's full transcript: the cycle row, its change record (if it
+  // checkpointed), the chat messages tied to it (the user request + framework
+  // rule questions/answers + system events), and the durable event log (every AI
+  // message, tool call/result, gate, checkpoint, deploy). Assembled for review /
+  // download so a Builder can evaluate how a build went. Viewer-gated.
+  router.get('/projects/:id/cycles/:cycleId/log', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const cid = Number(cycle.id);
+    const record = listChangeRecords(req.mock2Project.id).find((r) => Number(r.cycle_id) === cid) || null;
+    const messages = listMessages(req.mock2Project.id).map(publicChatMessageShape).filter((m) => Number(m.cycle_id) === cid);
+    res.json({
+      project: { id: req.mock2Project.id, name: req.mock2Project.name },
+      cycle: publicCycleShape(cycle),
+      change_record: record ? { seq: record.seq, commit_sha: record.commit_sha, summary: record.summary } : null,
+      messages,
+      events: listCycleEvents(cid),
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  // ---- Cost-truth: requests (one ask = one record) ----
+
+  // List a project's requests (umbrella entities), newest first, each with its cumulative
+  // cost roll-up + segment costs derived from its cycles + consults.
+  router.get('/projects/:id/requests', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const requests = listRequestsForProject(pid).map((r) => {
+      const cycles = listCyclesForRequest(r.id);
+      const consults = listConsultsForRequest(r.id).map(publicConsultShape);
+      const log = buildRequestLog({ request: publicRequestShape(r), cycles: cycles.map(publicCycleShape), consults });
+      return { ...publicRequestShape(r), cost: log.cost, segments: log.segments, final_status: log.final_status };
+    });
+    res.json({ requests });
+  });
+
+  // One request's merged, ordered, deduplicated log — the "one entry per request"
+  // history + the idempotent "Download log" artifact (fixes the byte-identical duplicate
+  // export). The artifact hash is over deterministic content only, so a double-export
+  // yields one identical artifact.
+  router.get('/projects/:id/requests/:reqId/log', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const request = getRequest(req.params.reqId);
+    if (!request || request.project_id !== pid) return res.status(404).json({ error: 'Request not found' });
+    const cycles = listCyclesForRequest(request.id).map(publicCycleShape);
+    const consults = listConsultsForRequest(request.id).map(publicConsultShape);
+    const changeRecords = listChangeRecords(pid).filter((r) => cycles.some((c) => Number(c.id) === Number(r.cycle_id)));
+    const cycleIds = new Set(cycles.map((c) => Number(c.id)));
+    const messages = listMessages(pid).map(publicChatMessageShape).filter((m) => cycleIds.has(Number(m.cycle_id)));
+    const events = cycles.flatMap((c) => listCycleEvents(c.id));
+    const log = buildRequestLog({ request: publicRequestShape(request), cycles, changeRecords, messages, events, consults });
+    const artifact = requestLogArtifact(log, { at: new Date().toISOString() });
+    res.json(artifact);
+  });
+
+  // The whole project's build log — every cycle's events + every chat message +
+  // every change record, in one downloadable document, for end-to-end evaluation.
+  router.get('/projects/:id/log', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    res.json({
+      project: { id: pid, name: req.mock2Project.name },
+      cycles: listCyclesForProject(pid, { limit: 1000 }).map(publicCycleShape),
+      change_records: listChangeRecords(pid).map((r) => ({ seq: r.seq, cycle_id: r.cycle_id, commit_sha: r.commit_sha, summary: r.summary, created_at: r.created_at })),
+      messages: listMessages(pid).map(publicChatMessageShape),
+      events: listProjectCycleEvents(pid),
+      generated_at: new Date().toISOString(),
+    });
   });
 
   // ============================================================
@@ -1506,8 +2166,12 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const question = getQuestion(req.params.qid);
     if (!question || question.project_id !== project.id) return res.status(404).json({ error: 'Question not found' });
+    const maxChars = getChatMaxChars();
     const parsed = answerQuestionSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'answer is required (1–2000 chars)' });
+    if (!parsed.success) return res.status(400).json({ error: `answer is required (1–${maxChars} chars)` });
+    if (parsed.data.answer.length > maxChars) {
+      return res.status(400).json({ error: `answer is too long (max ${maxChars} chars)` });
+    }
     let result;
     try {
       result = await answerAuditQuestion({
@@ -1552,6 +2216,31 @@ export function createMock2Router() {
     res.json({ counts: queueCounts() });
   });
 
+  // Scoped one-time operational authorizations (Part 4). Project members can SEE the
+  // pending requests a blocked cycle raised; an admin grants/denies. A grant is
+  // injected on the next resume and consumed (single-use).
+  router.get('/projects/:id/authorizations', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const open = listOpenAuthorizations(project.id).map(publicAuthorizationShape);
+    res.json({ authorizations: open });
+  });
+
+  router.post('/projects/:id/authorizations/:authId/decision', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (!(isReqAdmin(req) || req.mock2Access?.actingAsAdmin)) {
+      return res.status(403).json({ error: 'Only an administrator can grant or deny a one-time authorization.' });
+    }
+    const auth = getAuthorization(req.params.authId);
+    if (!auth || auth.project_id !== project.id) return res.status(404).json({ error: 'Authorization not found' });
+    if (auth.status !== 'open') return res.status(409).json({ error: `This authorization is already "${auth.status}".` });
+    const parsed = authDecisionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'approved (boolean) is required; conditions optional.' });
+    const updated = decideAuthorization(auth.id, { approved: parsed.data.approved, conditions: parsed.data.conditions || null, by: req.user.id });
+    logAudit(req.user.id, 'MOCK2_AUTHORIZATION_DECISION', 'mock2_authorization', auth.id,
+      { project_id: project.id, cycle_id: auth.cycle_id, approved: parsed.data.approved, scope: auth.scope, conditions: parsed.data.conditions || null }, req.ip);
+    res.json({ authorization: publicAuthorizationShape(updated) });
+  });
+
   // Change a queue item's status (admin). Resolving/dismissing a
   // framework_deviation ALSO clears its linked audit question and resumes the
   // blocked Build (a project's answer never writes the framework — ADR-002).
@@ -1560,13 +2249,16 @@ export function createMock2Router() {
     if (!item) return res.status(404).json({ error: 'Queue item not found' });
     const parsed = queueStatusSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: `status must be one of ${QUEUE_STATUSES.join(', ')}` });
-    const { status, resolution } = parsed.data;
+    const { status, resolution, editedText, conditions } = parsed.data;
     const updated = setQueueItemStatus(item.id, status, { resolvedBy: req.user.id, resolution: resolution || null });
     let resumed = false;
     if (item.kind === 'framework_deviation' && item.ref_table === 'mock2_audit_questions' && item.ref_id
         && (status === 'resolved' || status === 'dismissed')) {
       try {
-        const r = await resolveFrameworkDeviation({ questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}` });
+        const r = await resolveFrameworkDeviation({
+          questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}`,
+          approved: status === 'resolved', editedText: editedText || null, conditions: conditions || null,
+        });
         resumed = !!r.resumed;
       } catch (err) { console.warn('[mock2] deviation resolve follow-through failed:', err?.message); }
     }
@@ -1595,7 +2287,7 @@ export function createMock2Router() {
       } catch (err) { console.warn('[mock2] egress grant follow-through failed:', err?.message); }
     }
     logAudit(req.user.id, 'MOCK2_QUEUE_ITEM_STATUS', 'mock2_queue_item', item.id,
-      { kind: item.kind, status, resumed }, req.ip);
+      { kind: item.kind, status, resumed, edited: !!(editedText || conditions) }, req.ip);
     res.json({ item: publicQueueItemShape(updated, { projectName: updated.project_id ? getProject(updated.project_id)?.name || null : null }), resumed });
   });
 

@@ -29,7 +29,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox } from 'lucide-react';
+import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox, Blocks } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
 // Preview the subdomain the backend will derive from a project name (mirrors
@@ -170,7 +170,7 @@ export default function Projects() {
       {/* M5 admin tooling: model/git connectors, quotas, framework registry.
           Admin-only, reachable only on an enabled host (each page self-guards). */}
       {isAdmin && (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
             <Link to="/projects/connectors">
               <Cpu className="h-5 w-5 shrink-0 text-primary" />
@@ -193,6 +193,12 @@ export default function Projects() {
             <Link to="/projects/queue">
               <Inbox className="h-5 w-5 shrink-0 text-primary" />
               <span className="flex flex-col items-start text-left"><span className="font-medium">Admin queue</span><span className="text-xs text-muted-foreground">Deviations · drift · flags</span></span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
+            <Link to="/projects/components">
+              <Blocks className="h-5 w-5 shrink-0 text-primary" />
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Components</span><span className="text-xs text-muted-foreground">Reusable blocks · versions · submissions</span></span>
             </Link>
           </Button>
         </div>

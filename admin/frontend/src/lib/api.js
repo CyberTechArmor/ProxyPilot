@@ -1205,6 +1205,35 @@ export const api = {
   mock2RevertFramework: (id, changelog) =>
     request(`/mock2/framework/versions/${id}/revert`, { method: 'POST', body: JSON.stringify({ changelog }) }),
 
+  // ---- Component library (migration 516): reusable, versioned building blocks ----
+  mock2ListComponents: (status) =>
+    request(`/mock2/components${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  mock2GetComponent: (id) => request(`/mock2/components/${id}`),
+  mock2CreateComponent: (body) =>
+    request('/mock2/components', { method: 'POST', body: JSON.stringify(body) }),
+  mock2UpdateComponent: (id, body) =>
+    request(`/mock2/components/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  mock2DeleteComponent: (id) =>
+    request(`/mock2/components/${id}`, { method: 'DELETE' }),
+  mock2ListComponentVersions: (id) => request(`/mock2/components/${id}/versions`),
+  mock2GetComponentVersion: (id, vid) => request(`/mock2/components/${id}/versions/${vid}`),
+  mock2PublishComponentVersion: (id, body) =>
+    request(`/mock2/components/${id}/versions`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2RevertComponentVersion: (id, vid, change_reason) =>
+    request(`/mock2/components/${id}/versions/${vid}/revert`, { method: 'POST', body: JSON.stringify({ change_reason }) }),
+  mock2ExportComponent: (id) => request(`/mock2/components/${id}/export`),
+  mock2ImportComponent: (doc, change_reason) =>
+    request('/mock2/components/import', { method: 'POST', body: JSON.stringify({ doc, change_reason }) }),
+  mock2CreateComponentSubmission: (projectId, body) =>
+    request(`/mock2/projects/${projectId}/component-submissions`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2ListProjectComponentSubmissions: (projectId) =>
+    request(`/mock2/projects/${projectId}/component-submissions`),
+  mock2ListComponentSubmissions: (status) =>
+    request(`/mock2/component-submissions${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  mock2GetComponentSubmission: (id) => request(`/mock2/component-submissions/${id}`),
+  mock2ReviewComponentSubmission: (id, body) =>
+    request(`/mock2/component-submissions/${id}/review`, { method: 'POST', body: JSON.stringify(body) }),
+
   // ---- Mock2 M6: cycle runner + checkout lock ----
   mock2StartCycle: (id, instruction) =>
     request(`/mock2/projects/${id}/cycles`, { method: 'POST', body: JSON.stringify({ instruction }) }),
@@ -1213,8 +1242,19 @@ export const api = {
   mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
   mock2InterruptCycle: (id, cycleId, action) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/interrupt`, { method: 'POST', body: JSON.stringify({ action }) }),
-  mock2RetryCycle: (id, cycleId) =>
-    request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST' }),
+  // Resume a stalled/blocked cycle. Optional { message, option } carries operator
+  // guidance (a free-text message and/or a chosen halt resolution option) into the
+  // resumed cycle. A bare call resumes with no new context.
+  mock2RetryCycle: (id, cycleId, body = null) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) }),
+  // "Explain this" — plain-language rewrite of a blocker/authorization/deviation/rule
+  // card via the summary lane. Read-only; returns { ok, explanation } or { ok:false }.
+  mock2ExplainCard: (id, body) =>
+    request(`/mock2/projects/${id}/explain`, { method: 'POST', body: JSON.stringify(body) }),
+  // Scoped one-time authorizations (Part 4).
+  mock2ListAuthorizations: (id) => request(`/mock2/projects/${id}/authorizations`),
+  mock2DecideAuthorization: (id, authId, approved, conditions) =>
+    request(`/mock2/projects/${id}/authorizations/${authId}/decision`, { method: 'POST', body: JSON.stringify({ approved, ...(conditions ? { conditions } : {}) }) }),
   // Retry only the deploy (from the existing checkpoint) for a gates-passed cycle
   // whose deploy failed — no model calls, no gate battery.
   mock2RetryDeploy: (id, cycleId) =>
@@ -1224,6 +1264,11 @@ export const api = {
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),
   mock2ForceReleaseLock: (id) => request(`/mock2/projects/${id}/lock/force-release`, { method: 'POST' }),
   mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
+  // Downloadable build transcript: one cycle's full log, or the whole project's.
+  mock2GetCycleLog: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/log`),
+  mock2SubmitCycleFeedback: (id, cycleId, body) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/feedback`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2GetProjectLog: (id) => request(`/mock2/projects/${id}/log`),
   mock2GetLockIdleMinutes: () => request('/mock2/settings/lock-idle-minutes'),
   mock2SetLockIdleMinutes: (minutes) =>
     request('/mock2/settings/lock-idle-minutes', { method: 'POST', body: JSON.stringify({ minutes }) }),
@@ -1248,8 +1293,10 @@ export const api = {
     return request(`/mock2/queue${q ? `?${q}` : ''}`);
   },
   mock2QueueCounts: () => request('/mock2/queue/counts'),
-  mock2SetQueueItemStatus: (itemId, status, resolution) =>
-    request(`/mock2/queue/${itemId}/status`, { method: 'POST', body: JSON.stringify({ status, resolution }) }),
+  // resolution is the short note; editedText/conditions drive "approve as edited"
+  // (the edited deviation text becomes the authoritative APPROVED record).
+  mock2SetQueueItemStatus: (itemId, status, resolution, extra = {}) =>
+    request(`/mock2/queue/${itemId}/status`, { method: 'POST', body: JSON.stringify({ status, resolution, ...extra }) }),
 
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),

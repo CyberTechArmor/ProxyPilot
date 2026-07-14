@@ -25,7 +25,7 @@ import { sh, b64 } from './host.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
-import { getSlot, getConnector, decryptConnectorKey, listPrices } from './connectors.js';
+import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -33,23 +33,27 @@ import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js'
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
 } from './cycles.js';
+import { insertRequest } from './requests.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
 import {
-  insertQuestion, getQuestion, answerQuestion, dismissQuestion,
-  countOpenEditorQuestions, countOpenAdminQuestions,
+  insertQuestion, getQuestion, answerQuestion, dismissQuestion, updateQuestionText,
+  countOpenEditorQuestions, countOpenAdminQuestions, listQuestionsForCycle,
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
+import { getChatMaxChars } from './settings.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { callModelTurn } from './model-client.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
   isFrameworkDrifted, driftLabel, estimateAuditTokens,
+  buildAdminDecisionsBlock, markDeviationDecision,
 } from './audit-logic.js';
+import { approveAsEditedText } from './unblock-logic.js';
 
 const APP_DIR = '/srv/app';
 const RULES_PATH = 'state/rules.md';
@@ -97,11 +101,8 @@ export function auditReady() {
 }
 
 // ---- pricing + quota (mirrors runner/concept; the audit step spends too, R5) ----
-
-function effectivePrice(connectorId, model) {
-  const now = nowIso();
-  return listPrices(connectorId).find((p) => p.model === model && String(p.effective_at) <= now) || null;
-}
+// Pricing (effectivePrice) is shared from connectors.js so every stage prices the
+// same way, with the built-in default rate as the fallback.
 
 function estimateAuditCostCents(ready) {
   return costCentsForUsage(estimateAuditTokens(), effectivePrice(ready.connector.id, ready.model));
@@ -121,7 +122,10 @@ function quotaVerdict(projectId, estCostCents) {
 }
 
 function recordSpend({ projectId, cycleId, connector, model, usage }) {
-  const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }, effectivePrice(connector.id, model));
+  const cacheRead = usage.cacheReadInputTokens || 0;
+  const cacheWrite = usage.cacheCreationInputTokens || 0;
+  const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, effectivePrice(connector.id, model));
+  // Cost is cache-aware; the token count is fresh input + output (see runner.js).
   addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0), costCents: cents });
   try {
     insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
@@ -222,13 +226,19 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // Drift check (non-blocking) — surfaces the banner + queue item before the audit.
   detectDrift(project, framework);
 
+  // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
+  // any resumes/consults are its segments (additive — request_id is nullable, this
+  // never changes runner behavior).
+  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin });
+
   // Quota (R5 — the audit step spends). refused_quota is a real terminal status.
   const estCostCents = estimateAuditCostCents(ready);
   const { verdict } = quotaVerdict(projectId, estCostCents);
   if (!verdict.ok) {
     const refused = insertCycle({
-      projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, 2000),
+      projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
       initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'refused_quota',
+      requestId: request.id, segment: 'define',
     });
     finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
     insertMessage({ projectId, kind: 'system', cycleId: refused.id, body: `Build not started — ${verdict.reason}` });
@@ -239,8 +249,9 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // It holds the questions (cycle_id NOT NULL) and remembers the Build instruction
   // to resume with once the gate clears.
   const cycle = insertCycle({
-    projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, 2000),
+    projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
     initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'running',
+    requestId: request.id, segment: 'define',
   });
   updateCycle(cycle.id, { started_at: nowIso() });
   getOrCreateChat(projectId);
@@ -346,13 +357,18 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '' }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
+  // Carry the admin's deviation decisions INTO the build instruction (so they
+  // persist on the cycle and survive a resume) — the runner honors an approved
+  // exception as an override of the constitution. Without this the runner never
+  // learns the admin approved the deviation and silently builds nothing.
+  const fullInstruction = adminDecisions ? `${instruction}\n\n${adminDecisions}` : instruction;
   let result;
   try {
-    result = await startCycle({ project: getProject(projectId), instruction, initiatedBy, actingAsAdmin });
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };
@@ -459,11 +475,15 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   const framework = getCurrentFrameworkVersion();
   const project = getProject(projectId);
   if (!framework || !project) return false;
+  // Fold the admin's decisions on this build's framework deviations into the
+  // runner's task so an APPROVED deviation is actually implemented (it overrides
+  // the constitution) and a DENIED one is skipped.
+  const adminDecisions = auditCycle ? buildAdminDecisionsBlock(listQuestionsForCycle(auditCycle.id)) : '';
   insertMessage({ projectId, kind: 'system', cycleId: auditCycle?.id || null, body: 'All rules confirmed — starting the build.' });
   setJob(projectId, { phase: 'building', message: 'Rules confirmed — starting the build.', cycleId: auditCycle?.id || null });
   await proceedToBuild({
     project, instruction: auditCycle?.instruction || 'Build the app from the approved inventory and confirmed rules.',
-    initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework,
+    initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework, adminDecisions,
   });
   scheduleJobCleanup(projectId);
   return true;
@@ -476,11 +496,26 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
 // the framework — the admin either amends the framework via the registry or
 // accepts the deviation for this project), then resume the build if this was the
 // last blocker. Returns { resumed }.
-export async function resolveFrameworkDeviation({ questionId, user, resolution = null }) {
+export async function resolveFrameworkDeviation({ questionId, user, resolution = null, approved = false, editedText = null, conditions = null }) {
   const question = getQuestion(questionId);
   if (!question) return { resumed: false };
+  // Record the decision with an APPROVED/DENIED marker so the resume path can
+  // build the authoritative decisions block for the runner (an approved deviation
+  // overrides the constitution; a denied one is skipped). Marker-prefixed answer
+  // rather than a free-text note so the parse can't be fooled.
+  //
+  // Approve-as-edited (Part 3): when the admin rewrites the deviation text and/or
+  // appends conditions, the EDITED text becomes the authoritative approved record —
+  // we replace the question text (buildAdminDecisionsBlock reads it) so the runner is
+  // handed exactly what the admin signed off on.
   if (question.status === 'open') {
-    dismissQuestion(question.id, { by: user?.id ?? null, answer: resolution });
+    if (approved && (editedText || conditions)) {
+      const edit = approveAsEditedText({ originalText: question.question, editedText: editedText || '', conditions: conditions || '' });
+      updateQuestionText(question.id, edit.text);
+      dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(true, edit.resolutionNote) });
+    } else {
+      dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(approved, resolution) });
+    }
   }
   const resumed = await maybeResumeBuild({ projectId: question.project_id, auditCycleId: question.cycle_id, actingAsAdmin: 1 });
   return { resumed };

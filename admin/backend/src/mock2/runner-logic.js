@@ -12,7 +12,7 @@
 // Terminology (risk R7): the AI build component is the runner; the slot that
 // drives it is build_runner. Nothing here — or anywhere in M6 — is named "agent".
 
-import { parseHaltOptions } from './unblock-logic.js';
+import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -81,26 +81,46 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'halt',
     description:
-      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you and, if you can, what a human must do). When there are concrete ways a human could unblock you, PROPOSE them in `options` — the operator picks one and it is fed back to you on resume. Never keep responding without calling a tool when you are stuck — call halt instead.',
+      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you), and ALWAYS propose 2–4 concrete `options` — the viable paths forward, each with its tradeoff and exactly what will be fed back to you on resume. Never a bare refusal: the operator picks one option (or an admin grants an authorization option) and it resumes the build. Never keep responding without calling a tool when you are stuck — call halt instead.',
     input_schema: {
       type: 'object',
       properties: {
         reason: { type: 'string', description: 'Why you cannot complete the change, in plain language.' },
         options: {
           type: 'array',
-          description: 'Optional: concrete resolution choices for the operator to pick from, e.g. [{"label":"Delete the stale test row","detail":"safe: it is test-only data"}]. Keep them specific and mutually distinct.',
+          minItems: 2,
+          maxItems: 4,
+          description:
+            'REQUIRED — the 2–4 viable paths a human could take to unblock you, specific and mutually distinct. The operator picks one; mark at most one recommended. Example: [{"label":"Grant the one-row DELETE","kind":"grant_authorization","risk":"deletes 1 stale test row from the live DB","recommended":true,"injectOnResume":"You are authorized to run the DELETE below, once.","authorization":{"scope":"DELETE FROM users WHERE email = \'seed@test\'","expectedRows":1}},{"label":"Run the framework-isolation cycle first, then resume","kind":"run_dependency_first","risk":"slower; needs a separate build","injectOnResume":"The isolation cycle has run; the seed row is gone — proceed."},{"label":"Abandon this change","kind":"abandon","risk":"no change is made"}].',
           items: {
             type: 'object',
             properties: {
               label: { type: 'string', description: 'Short choice label.' },
-              detail: { type: 'string', description: 'One-line explanation of what choosing this does.' },
+              kind: {
+                type: 'string',
+                enum: HALT_OPTION_KINDS,
+                description: 'The type of resolution: grant_authorization | expand_scope | run_dependency_first | override_rule (admin) | abandon.',
+              },
+              risk: { type: 'string', description: 'One-line tradeoff / risk of choosing this.' },
+              recommended: { type: 'boolean', description: 'Mark AT MOST ONE option recommended.' },
+              injectOnResume: { type: 'string', description: 'Exactly what will be fed back to you (as authoritative operator guidance) if this option is chosen.' },
+              authorization: {
+                type: 'object',
+                description: 'REQUIRED for kind grant_authorization / override_rule: the exact, narrowest privileged operation to authorize.',
+                properties: {
+                  scope: { type: 'string', description: 'The exact operation (e.g. a specific SQL statement).' },
+                  expectedRows: { type: ['integer', 'string'], description: 'How many rows/objects the operation should affect (e.g. 1).' },
+                },
+                required: ['scope'],
+                additionalProperties: false,
+              },
             },
-            required: ['label'],
+            required: ['label', 'kind'],
             additionalProperties: false,
           },
         },
       },
-      required: ['reason'],
+      required: ['reason', 'options'],
       additionalProperties: false,
     },
   },
@@ -244,15 +264,24 @@ ${skillLines}
 # If you cannot honestly finish
 If you cannot complete the change — you are blocked, a dependency is missing, the
 gate can't pass for a reason outside this change, or the real fix is out of scope —
-call halt(reason) with the specific blocker. halt is a real terminating action: it
-ends the cycle as blocked (a human is notified) without recording success and
-without deploying. When there are concrete ways a human could unblock you, pass them
-as halt options so the operator can pick one — it is fed back to you on resume.
-If the ONLY thing you need is a narrow, one-time privileged operation the constitution
-forbids (e.g. deleting a specific stale test-artifact row), call
-request_authorization(scope, reason) instead — an admin can grant that exact act for
-single use, and it is handed back to you on resume. Do NOT keep replying without
-calling a tool, and do NOT repeat the same explanation turn after turn — that makes
+call halt(reason, options) with the specific blocker. halt is a real terminating
+action: it ends the cycle as blocked (a human is notified) without recording success
+and without deploying.
+
+When you halt, ALWAYS propose the 2–4 viable paths forward with their tradeoffs —
+never a bare refusal. Each option needs a short label, a typed kind
+(grant_authorization | expand_scope | run_dependency_first | override_rule (admin) |
+abandon), a one-line risk/tradeoff, and exactly what to inject on resume if it is
+chosen; mark at most one recommended. The operator picks ONE and it is fed back to
+you on resume as authoritative guidance. If a narrow, one-time privileged operation
+the constitution forbids (e.g. deleting a specific stale test-artifact row) is a
+viable path, offer it as a grant_authorization option carrying the EXACT scope (the
+precise SQL/operation) and the expected row count — an admin grants that exact act
+for single use by picking it, and it is handed back to you on resume. (The standalone
+request_authorization tool still exists for a lone grant, but prefer halt with a
+grant_authorization option among the alternatives so the operator sees every path at
+once.) Do NOT keep replying without calling a tool, and do NOT repeat the same
+explanation turn after turn — that makes
 no progress and wastes the budget. Every turn must either make progress (a tool call
 that changes or checks the code), call finish (gates green), call halt (blocked), or
 request_authorization (need a one-time grant). If you are stuck, halt.
@@ -280,9 +309,17 @@ export function buildRunnerTask(instruction) {
 // halt takes precedence over finish: a turn that pairs both is a blocked turn (the
 // model should not both give up and claim success). Returns
 // { done, halted, haltReason, finishSummary, toolCalls, stalled }.
-export function classifyTurn(toolCalls = []) {
+export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
-  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false };
+  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false, refusal: false, trigger: null };
+  // Fable 5 (audit lane / consult) can return stop_reason "refusal" from its safety
+  // classifiers — a shape Opus 4.8 never produces. Map it to the existing halt state
+  // (needs-attention, resumable) with the refusal as the reason — NEVER a crash or a
+  // retry loop, and NEVER the "propose options" nudge (a refusing model won't). Checked
+  // first so it wins over an empty-turn "stalled" classification.
+  if (isRefusalStop(stopReason)) {
+    return { ...base, refusal: true, haltReason: REFUSAL_HALT_REASON, trigger: 'model_refusal' };
+  }
   // A request for a scoped one-time authorization ends the cycle awaiting an admin
   // (it wants to CONTINUE after a grant, so it's checked before halt).
   const authCall = calls.find((c) => c && c.name === 'request_authorization');
@@ -415,6 +452,7 @@ export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit 
 export function haltReasonLabel(reason) {
   switch (reason) {
     case 'model_halt': return 'the build reported it was blocked';
+    case 'model_refusal': return 'the model declined to continue (safety refusal)';
     case 'no_tool_calls': return 'no progress — repeated turns with no action';
     case 'repeated_output': return 'no progress — the same response repeated without changes';
     case 'no_state_change': return 'no progress — repeated the same action with no change';
@@ -422,6 +460,16 @@ export function haltReasonLabel(reason) {
     default: return String(reason || 'blocked');
   }
 }
+
+// A model turn that ended in a safety refusal (Fable 5's classifier can emit
+// stop_reason "refusal"; Opus 4.8 never does). Pure so both runners test it identically.
+export function isRefusalStop(stopReason) {
+  return String(stopReason || '').trim().toLowerCase() === 'refusal';
+}
+
+// The halt reason surfaced when a turn is a refusal — a needs-attention, resumable halt.
+export const REFUSAL_HALT_REASON =
+  'The model declined to continue (a safety refusal). A human should review and redirect it; your work so far is checkpointed and this is resumable.';
 
 // ---- Claude Agent SDK runner (Phase 1, docs/agent-sdk-migration.md) ----
 

@@ -68,6 +68,33 @@ export function isValidSlot(slot) {
   return MODEL_SLOTS.includes(slot);
 }
 
+// Recommended model per slot (cost-truth Part 5.1 — tiered routing). Slots are
+// admin-assigned; this is the DEFAULT/recommended id the UI suggests and the estimator
+// prices when a slot is unassigned. Fable 5 is recommended for EXACTLY ONE lane — audit
+// (tiny, judgment-dense, best price/quality). build_runner / remediation / everything
+// else stay on their current models. There is deliberately NO code path that routes
+// build or remediation to Fable 5 by default (see lanesRecommendingFable5 + its guard
+// test). Model ids are the latest Claude family (Opus 4.8 / Haiku 4.5 / Fable 5).
+export const RECOMMENDED_MODEL_FOR_SLOT = Object.freeze({
+  concept_chat: 'claude-opus-4-8',
+  mockup: 'claude-opus-4-8',
+  audit: 'claude-fable-5',       // ← the one deliberate Fable 5 lane
+  classifier: 'claude-haiku-4-5',
+  build_runner: 'claude-opus-4-8',
+  summary: 'claude-haiku-4-5',
+  remediation: 'claude-opus-4-8',
+});
+
+export function recommendedModelForSlot(slot) {
+  return RECOMMENDED_MODEL_FOR_SLOT[slot] || null;
+}
+
+// The lanes whose RECOMMENDED model is Fable 5 — must be exactly ['audit']. A guard test
+// asserts this so a change that would default build/remediation onto Fable 5 fails CI.
+export function lanesRecommendingFable5() {
+  return MODEL_SLOTS.filter((s) => /(fable|mythos)-5\b/.test(String(RECOMMENDED_MODEL_FOR_SLOT[s] || '')));
+}
+
 export function requiredCapabilityForSlot(slot) {
   return SLOT_REQUIRED_CAPABILITY[slot] || null;
 }

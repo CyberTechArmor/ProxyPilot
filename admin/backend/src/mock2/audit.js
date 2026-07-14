@@ -33,6 +33,7 @@ import { getCurrentFrameworkVersion, getFrameworkVersion } from './framework.js'
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
 } from './cycles.js';
+import { insertRequest } from './requests.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
@@ -225,6 +226,11 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // Drift check (non-blocking) — surfaces the banner + queue item before the audit.
   detectDrift(project, framework);
 
+  // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
+  // any resumes/consults are its segments (additive — request_id is nullable, this
+  // never changes runner behavior).
+  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin });
+
   // Quota (R5 — the audit step spends). refused_quota is a real terminal status.
   const estCostCents = estimateAuditCostCents(ready);
   const { verdict } = quotaVerdict(projectId, estCostCents);
@@ -232,6 +238,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     const refused = insertCycle({
       projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
       initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'refused_quota',
+      requestId: request.id, segment: 'define',
     });
     finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
     insertMessage({ projectId, kind: 'system', cycleId: refused.id, body: `Build not started — ${verdict.reason}` });
@@ -244,6 +251,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   const cycle = insertCycle({
     projectId, frameworkVersionId: framework.id, stage: 'define', instruction: String(instruction || '').slice(0, getChatMaxChars()),
     initiatedBy: user.id, actingAsAdmin, estCostCents, status: 'running',
+    requestId: request.id, segment: 'define',
   });
   updateCycle(cycle.id, { started_at: nowIso() });
   getOrCreateChat(projectId);

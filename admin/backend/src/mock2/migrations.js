@@ -38,6 +38,14 @@
 //   512 Run — mock2_cycle_events (durable per-cycle transcript: task, AI messages,
 //            tool calls/results, gates, checkpoint, deploy — the downloadable
 //            "what happened" log) — additive, new table
+//   513 Run — mock2_cycles.halt_reason (why a cycle halted without success) — additive
+//   514 Run — human feedback channels: mock2_cycles.halt_options_json +
+//            resume_context_json, and mock2_authorizations (scoped one-time
+//            operational grants) — additive, two columns + new table
+//   515 Cost — cost-truth: mock2_requests (umbrella), mock2_cycles gains the four
+//            canonical token classes + usage_schema_version + request_id/segment,
+//            and mock2_consults (advisory second opinion) — strictly additive,
+//            nullable columns + new tables, reversible, no row rewrites
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -610,6 +618,67 @@ export const MOCK2_MIGRATIONS = [
         );
         CREATE INDEX idx_mock2_authorizations_project ON mock2_authorizations (project_id, status);
         CREATE INDEX idx_mock2_authorizations_cycle ON mock2_authorizations (cycle_id);
+      `);
+    },
+  },
+  {
+    // Cost-truth (docs/agent-sdk-migration.md § "Cost-truth"). STRICTLY ADDITIVE and
+    // reversible: only NEW tables + NULLABLE columns — no existing row is rewritten and
+    // no existing column/type changes, so behavior is byte-identical until code opts in.
+    //   - mock2_requests: the umbrella "one build ask = one record" entity. Cycles
+    //     become segments of a request. NULL request_id on every pre-existing cycle
+    //     (legacy / new-requests-only backfill, per the doc) — nothing is regrouped.
+    //   - mock2_cycles gains the FOUR canonical token classes + a usage_schema_version
+    //     stamp + request_id + segment. used_tokens/used_cost_cents stay untouched (the
+    //     old "billable in+out" number); the four new columns are the honest basis.
+    //     Every column is NULLable so existing rows read exactly as before (pre-v3,
+    //     flagged non-comparable by usage-logic.isComparable).
+    //   - mock2_consults: the bounded advisory "second opinion" (Fable 5), one row per
+    //     consult, its own cost segment in the request roll-up.
+    // A disabled host never runs any of this.
+    version: 515,
+    name: 'mock2_cost_truth_request_usage_consults',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_requests (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          instruction TEXT,
+          status TEXT NOT NULL DEFAULT 'open',
+          initiated_by INTEGER,
+          acting_as_admin INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX idx_mock2_requests_project ON mock2_requests (project_id, id);
+
+        ALTER TABLE mock2_cycles ADD COLUMN request_id INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN segment TEXT;
+        ALTER TABLE mock2_cycles ADD COLUMN input_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN output_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN cache_read_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN cache_write_tokens INTEGER;
+        ALTER TABLE mock2_cycles ADD COLUMN usage_schema_version INTEGER;
+        CREATE INDEX idx_mock2_cycles_request ON mock2_cycles (request_id);
+
+        CREATE TABLE mock2_consults (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          request_id INTEGER,
+          cycle_id INTEGER,
+          trigger TEXT NOT NULL,
+          model TEXT,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_cents REAL NOT NULL DEFAULT 0,
+          diagnosis TEXT,
+          paths_json TEXT,
+          suggested_resume TEXT,
+          requested_by INTEGER,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_consults_request ON mock2_consults (request_id);
+        CREATE INDEX idx_mock2_consults_cycle ON mock2_consults (cycle_id);
       `);
     },
   },

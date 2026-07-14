@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import {
   parseHaltOptions, resolveSelectedOption, buildResumeContextBlock,
   buildAuthorizationBlock, approveAsEditedText, validateAuthScope, HALT_OPTION_LIMIT,
+  validateHaltOptions, haltOptionRequiresAdmin, haltOptionCarriesAuthorization,
+  HALT_OPTION_KINDS,
 } from '../mock2/unblock-logic.js';
 
 test('parseHaltOptions: normalizes strings + objects, assigns stable ids, caps count', () => {
@@ -33,8 +35,89 @@ test('resolveSelectedOption: matches by id or label, else synthesizes free-text'
   const options = parseHaltOptions(['Delete the row', 'Rewrite the test']);
   assert.equal(resolveSelectedOption(options, options[0].id).label, 'Delete the row');
   assert.equal(resolveSelectedOption(options, 'Rewrite the test').label, 'Rewrite the test');
-  assert.equal(resolveSelectedOption(options, 'do something else').id, 'free');
+  const free = resolveSelectedOption(options, 'do something else');
+  assert.equal(free.id, 'free');
+  assert.equal(free.kind, 'expand_scope'); // free-text is a neutral expand_scope
+  assert.equal(free.authorization, null);
   assert.equal(resolveSelectedOption(options, '   '), null);
+});
+
+test('parseHaltOptions: enriched shape — typed kind, risk, injectOnResume, inline authorization', () => {
+  const opts = parseHaltOptions([
+    {
+      label: 'Grant the one-row DELETE', kind: 'grant_authorization', recommended: true,
+      risk: 'deletes 1 stale test row from the live DB', injectOnResume: 'You may run the DELETE, once.',
+      authorization: { scope: "DELETE FROM users WHERE email = 'seed@test'", expectedRows: 1 },
+    },
+    { label: 'Run the framework isolation cycle first, then resume', kind: 'run_dependency_first', risk: 'slower' },
+    { label: 'Abandon this change', kind: 'abandon' },
+  ]);
+  assert.equal(opts.length, 3);
+  assert.equal(opts[0].kind, 'grant_authorization');
+  assert.equal(opts[0].recommended, true);
+  assert.equal(opts[0].risk, 'deletes 1 stale test row from the live DB');
+  assert.equal(opts[0].injectOnResume, 'You may run the DELETE, once.');
+  assert.equal(opts[0].authorization.scope, "DELETE FROM users WHERE email = 'seed@test'");
+  assert.equal(opts[0].authorization.expectedRows, '1');
+  assert.equal(opts[1].kind, 'run_dependency_first');
+  assert.equal(opts[2].kind, 'abandon');
+});
+
+test('parseHaltOptions: tolerant kind coercion + at most one recommended', () => {
+  const opts = parseHaltOptions([
+    { label: 'Override the rule', kind: 'override_rule (admin)', recommended: true },
+    { label: 'Just give up', recommended: true }, // 2nd recommended is dropped; label infers abandon
+    { label: 'Let me widen it', scope: 'ALTER TABLE x ADD COLUMN y' }, // top-level scope ⇒ grant_authorization
+  ]);
+  assert.equal(opts[0].kind, 'override_rule'); // " (admin)" suffix stripped
+  assert.equal(opts[0].recommended, true);
+  assert.equal(opts[1].kind, 'abandon'); // inferred from label
+  assert.equal(opts[1].recommended, false); // only the first recommended sticks
+  assert.equal(opts[2].kind, 'grant_authorization'); // inferred from an inline scope
+  assert.ok(HALT_OPTION_KINDS.includes(opts[2].kind));
+});
+
+test('validateHaltOptions: needs ≥2 options; grant/override kinds need an exact scope', () => {
+  assert.equal(validateHaltOptions([]).ok, false);
+  assert.equal(validateHaltOptions(['only one']).ok, false);
+  // grant_authorization option missing a scope is rejected (operator must see the exact op)
+  const noScope = validateHaltOptions([
+    { label: 'Grant it', kind: 'grant_authorization' },
+    { label: 'Abandon', kind: 'abandon' },
+  ]);
+  assert.equal(noScope.ok, false);
+  assert.match(noScope.error, /exact authorization scope/);
+  // a well-formed ADP-shaped halt validates
+  const ok = validateHaltOptions([
+    { label: 'Grant the one-row DELETE', kind: 'grant_authorization', authorization: { scope: 'DELETE FROM users WHERE id = 1', expectedRows: 1 }, recommended: true },
+    { label: 'Run the framework isolation cycle first, then resume', kind: 'run_dependency_first' },
+    { label: 'Abandon', kind: 'abandon' },
+  ]);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.options.length, 3);
+});
+
+test('haltOptionRequiresAdmin + haltOptionCarriesAuthorization', () => {
+  assert.equal(haltOptionRequiresAdmin('grant_authorization'), true);
+  assert.equal(haltOptionRequiresAdmin('override_rule'), true);
+  assert.equal(haltOptionRequiresAdmin('run_dependency_first'), false);
+  assert.equal(haltOptionRequiresAdmin('abandon'), false);
+  assert.equal(haltOptionCarriesAuthorization({ kind: 'grant_authorization', authorization: { scope: 'DELETE ...' } }), true);
+  assert.equal(haltOptionCarriesAuthorization({ kind: 'grant_authorization', authorization: null }), false);
+  assert.equal(haltOptionCarriesAuthorization({ kind: 'run_dependency_first', authorization: { scope: 'x' } }), false);
+});
+
+test('buildResumeContextBlock: injects the chosen option kind + its injectOnResume text', () => {
+  const block = buildResumeContextBlock({
+    selectedOption: {
+      id: 'g', label: 'Grant the one-row DELETE', kind: 'grant_authorization',
+      detail: 'deletes 1 row', injectOnResume: 'You are authorized to run the DELETE below, once.',
+    },
+    authorizations: [{ scope: "DELETE FROM users WHERE email = 'seed@test'", conditions: null }],
+  });
+  assert.match(block, /Chosen resolution \[grant_authorization\]: Grant the one-row DELETE — deletes 1 row/);
+  assert.match(block, /You are authorized to run the DELETE below, once\./);
+  assert.match(block, /Authorized one-time operations/);
 });
 
 test('buildResumeContextBlock: empty when nothing given (a bare resume stays bare)', () => {

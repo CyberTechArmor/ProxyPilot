@@ -97,10 +97,20 @@ import {
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
-  decideAuthorization, publicAuthorizationShape,
+  insertAuthorization, decideAuthorization, publicAuthorizationShape,
 } from './authorizations.js';
+import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
+import { explainCard } from './explain.js';
+import { EXPLAIN_MAX_INPUT_CHARS } from './explain-logic.js';
+// ---- Cost-truth: requests (umbrella), consults (second opinion), grouped log ----
+import { getRequest, listRequestsForProject, closeRequest, publicRequestShape } from './requests.js';
+import { listCyclesForRequest } from './cycles.js';
+import { listConsultsForRequest, listConsultsForCycle, countConsultsForCycle, countConsultsForRequest, publicConsultShape } from './consults.js';
+import { buildRequestLog, requestLogArtifact } from './request-log.js';
+import { runConsult } from './consult.js';
+import { consultAllowed } from './consult-logic.js';
 import {
-  getCycle, listCyclesForProject, latestCycle, setInterrupt,
+  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
 import {
@@ -328,6 +338,15 @@ const resumeSchema = z.object({
 const authDecisionSchema = z.object({
   approved: z.boolean(),
   conditions: z.string().trim().max(2000).optional(),
+});
+// "Explain this" — a card's full text + minimal cycle context for the summary lane to
+// rewrite in plain language. Read-only; card_id is opaque (used only for the audit note).
+const explainSchema = z.object({
+  text: z.string().trim().min(1).max(EXPLAIN_MAX_INPUT_CHARS + 4000),
+  kind: z.enum(['blocker', 'authorization', 'deviation', 'rule_question']).optional(),
+  title: z.string().trim().max(400).optional(),
+  status: z.string().trim().max(60).optional(),
+  card_id: z.string().trim().max(160).optional(),
 });
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
@@ -1316,22 +1335,129 @@ export function createMock2Router() {
     if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
     const parsedResume = resumeSchema.safeParse(req.body || {});
     if (!parsedResume.success) return res.status(400).json({ error: 'Invalid resume message/option.' });
+    const optionId = parsedResume.data.option || null;
+    const message = (parsedResume.data.message || '').trim();
+
+    // Resolve the chosen halt option against what the model actually offered, so the
+    // typed kind decides how the choice is applied (task Part 3). The offered options
+    // are the audit-visible record of what was on the card.
+    let offered = [];
+    try { offered = cycle.halt_options_json ? JSON.parse(cycle.halt_options_json) : []; } catch { offered = []; }
+    const chosen = optionId ? resolveSelectedOption(offered, optionId) : null;
+    const offeredIds = (Array.isArray(offered) ? offered : []).map((o) => o?.id).filter(Boolean);
+    const auditBase = {
+      from_cycle: cycle.id,
+      offered_options: offeredIds,
+      chosen_option: chosen?.id || null,
+      chosen_label: chosen?.label || null,
+      chosen_kind: chosen?.kind || null,
+      has_context: !!message,
+      acting_as_admin: req.mock2Access.actingAsAdmin,
+    };
+
+    // The privileged kinds (grant a one-time authorization, override a rule) may only
+    // be chosen by an admin — grant/deny folds into picking/rejecting the option.
+    const actingAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    if (chosen && haltOptionRequiresAdmin(chosen.kind) && !actingAdmin) {
+      return res.status(403).json({ error: `Choosing “${chosen.label}” requires an administrator.` });
+    }
+
+    // Abandon closes the cycle as abandoned — no resume (task Part 3).
+    if (chosen && chosen.kind === 'abandon') {
+      finishCycle(cycle.id, { status: 'abandoned', error: `abandoned by operator${message ? `: ${message}` : ''}` });
+      // Cost-truth: abandoning closes the whole umbrella request.
+      try { if (cycle.request_id) closeRequest(cycle.request_id, 'abandoned'); } catch { /* best effort */ }
+      for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
+        try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: req.user.id }); } catch { /* best effort */ }
+      }
+      logAudit(req.user.id, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { ...auditBase, context: message || null }, req.ip);
+      return res.json({ cycle: publicCycleShape(getCycle(cycle.id)), abandoned: true });
+    }
+
+    // A grant_authorization (or override_rule) option carries the exact scope the
+    // operator is signing off on: create + grant that one-time authorization now, so
+    // the resume injects it (single-use). Admin-gated above. Any typed context becomes
+    // the binding conditions on the grant.
+    if (chosen && haltOptionCarriesAuthorization(chosen)) {
+      try {
+        const auth = insertAuthorization({ projectId: project.id, cycleId: cycle.id, scope: chosen.authorization.scope, reason: chosen.label });
+        decideAuthorization(auth.id, { approved: true, conditions: message || null, by: req.user.id });
+        logAudit(req.user.id, 'MOCK2_AUTHORIZATION_DECISION', 'mock2_authorization', auth.id,
+          { approved: true, via: 'halt_option', option: chosen.id, scope: chosen.authorization.scope, expected_rows: chosen.authorization.expectedRows ?? null }, req.ip);
+      } catch (err) {
+        return res.status(500).json({ error: `Could not grant the authorization: ${err?.message || 'unknown error'}` });
+      }
+    }
+
     let result;
     try {
       result = await retryCycle({
         project, cycle,
         initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
-        message: parsedResume.data.message || '', option: parsedResume.data.option || null,
+        message, option: optionId,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY', 'mock2_cycle', result.cycle?.id || cycle.id,
-      { from_cycle: cycle.id, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { ...auditBase, status: result.status, context: message || null }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });
+  });
+
+  // "Get guidance" — the operator-triggered escalation consult (a Fable 5 SECOND
+  // OPINION) on a blocked cycle. Advisory-only: it never resumes, grants, or switches the
+  // build lane; it returns a diagnosis + ranked paths + suggested resume text attached to
+  // the halt card. Bounded (~$0.50) and logged as its own request segment. The operator
+  // button bypasses the auto caps (they're explicitly asking); its cost is on them.
+  router.post('/projects/:id/cycles/:cycleId/consult', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (!cycle.halt_reason && cycle.status !== 'awaiting_admin' && cycle.status !== 'failed') {
+      return res.status(409).json({ error: 'A second opinion is available on a blocked or failed build.' });
+    }
+    const trigger = 'operator';
+    const gate = consultAllowed({
+      trigger,
+      perHaltCount: countConsultsForCycle(cycle.id),
+      perRequestCount: countConsultsForRequest(cycle.request_id),
+    });
+    if (!gate.allowed) return res.status(409).json({ error: gate.reason });
+
+    // Compile the tool-free digest from what the cycle already carries (no container
+    // reads — bounded by construction). Gate output comes from the stored gate reports.
+    let gateOutput = '';
+    try {
+      const gates = cycle.gates_json ? JSON.parse(cycle.gates_json) : [];
+      gateOutput = (Array.isArray(gates) ? gates : []).map((g) => `${g.name}: ${g.status}${g.report ? ` — ${g.report}` : ''}`).join('\n');
+    } catch { /* ignore */ }
+    const digestParts = {
+      task: cycle.instruction || '',
+      haltReason: cycle.error || cycle.halt_reason || 'blocked',
+      lastErrors: cycle.error || '',
+      gateOutput,
+    };
+
+    let result;
+    try {
+      result = await runConsult({ projectId: project.id, requestId: cycle.request_id, cycleId: cycle.id, trigger, digestParts, requestedBy: req.user.id });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the consult failed' };
+    }
+    // Read-only w.r.t. the build; log that a second opinion was requested.
+    logAudit(req.user.id, 'MOCK2_CONSULT', 'mock2_cycle', cycle.id,
+      { trigger, request_id: cycle.request_id, ok: !!result.ok, cost_cents: result.consult?.cost_cents ?? null }, req.ip);
+    return res.json(result.ok ? { ok: true, consult: result.consult } : { ok: false, error: result.error });
+  });
+
+  // List the consults (second opinions) attached to a cycle — the halt card reads these.
+  router.get('/projects/:id/cycles/:cycleId/consults', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    res.json({ consults: listConsultsForCycle(cycle.id).map(publicConsultShape) });
   });
 
   // Retry the DEPLOY only (install → migrate → build → start → health) for a
@@ -1351,6 +1477,31 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY_DEPLOY', 'mock2_cycle', cycle.id,
       { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ cycle: publicCycleShape(result.cycle) });
+  });
+
+  // "Explain this" — rewrite a blocker / authorization / deviation / rule-question
+  // card in plain language via the summary lane (small/fast model). READ-ONLY: it never
+  // blocks, resumes, grants, or resolves anything; it only reads the card text and logs
+  // that an explanation was VIEWED. Any member (viewer+) may ask. On a model/slot
+  // failure it returns { ok:false } with 200 so the client falls back to the original
+  // text — the operator is never blocked on the explainer (task item 3).
+  router.post('/projects/:id/explain', requireMock2Role('viewer'), async (req, res) => {
+    const parsed = explainSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'text is required to explain a card' });
+    const { text, kind = 'blocker', title = '', status = '', card_id = null } = parsed.data;
+    let result;
+    try {
+      result = await explainCard({ text, title, status, kind });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the explainer failed' };
+    }
+    // Audit log ONLY that an explanation was viewed — no state change to the cycle,
+    // authorization, or deviation this explained.
+    logAudit(req.user.id, 'MOCK2_EXPLAIN_VIEW', 'mock2_project', req.mock2Project.id,
+      { kind, card_id, ok: !!result.ok }, req.ip);
+    return res.json(result.ok
+      ? { ok: true, explanation: result.explanation }
+      : { ok: false, error: result.error || 'could not explain this right now' });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets
@@ -1461,6 +1612,40 @@ export function createMock2Router() {
       events: listCycleEvents(cid),
       generated_at: new Date().toISOString(),
     });
+  });
+
+  // ---- Cost-truth: requests (one ask = one record) ----
+
+  // List a project's requests (umbrella entities), newest first, each with its cumulative
+  // cost roll-up + segment costs derived from its cycles + consults.
+  router.get('/projects/:id/requests', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const requests = listRequestsForProject(pid).map((r) => {
+      const cycles = listCyclesForRequest(r.id);
+      const consults = listConsultsForRequest(r.id).map(publicConsultShape);
+      const log = buildRequestLog({ request: publicRequestShape(r), cycles: cycles.map(publicCycleShape), consults });
+      return { ...publicRequestShape(r), cost: log.cost, segments: log.segments, final_status: log.final_status };
+    });
+    res.json({ requests });
+  });
+
+  // One request's merged, ordered, deduplicated log — the "one entry per request"
+  // history + the idempotent "Download log" artifact (fixes the byte-identical duplicate
+  // export). The artifact hash is over deterministic content only, so a double-export
+  // yields one identical artifact.
+  router.get('/projects/:id/requests/:reqId/log', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const request = getRequest(req.params.reqId);
+    if (!request || request.project_id !== pid) return res.status(404).json({ error: 'Request not found' });
+    const cycles = listCyclesForRequest(request.id).map(publicCycleShape);
+    const consults = listConsultsForRequest(request.id).map(publicConsultShape);
+    const changeRecords = listChangeRecords(pid).filter((r) => cycles.some((c) => Number(c.id) === Number(r.cycle_id)));
+    const cycleIds = new Set(cycles.map((c) => Number(c.id)));
+    const messages = listMessages(pid).map(publicChatMessageShape).filter((m) => cycleIds.has(Number(m.cycle_id)));
+    const events = cycles.flatMap((c) => listCycleEvents(c.id));
+    const log = buildRequestLog({ request: publicRequestShape(request), cycles, changeRecords, messages, events, consults });
+    const artifact = requestLogArtifact(log, { at: new Date().toISOString() });
+    res.json(artifact);
   });
 
   // The whole project's build log — every cycle's events + every chat message +

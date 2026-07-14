@@ -10,40 +10,128 @@
 
 export const HALT_OPTION_LIMIT = 6;
 
+// The TYPED resolution kinds a halt option can carry (task Part 1). Every option is
+// classified so the UI renders it right and the resume path knows how to treat the
+// choice:
+//   - grant_authorization  : grant a scoped ONE-TIME privileged op (carries the exact
+//                            scope + expected row count) — admin only.
+//   - expand_scope         : broaden what this build may touch / hand it missing context.
+//   - run_dependency_first : do a prerequisite (e.g. another cycle) before resuming.
+//   - override_rule        : override a constitution rule for THIS build — admin only.
+//   - abandon              : give up this cycle (closes it as abandoned, no resume).
+export const HALT_OPTION_KINDS = Object.freeze([
+  'grant_authorization', 'expand_scope', 'run_dependency_first', 'override_rule', 'abandon',
+]);
+
+// Kinds that perform a privileged act (grant a one-time authorization, or override a
+// constitution rule) and so may only be CHOSEN by an administrator — the prompt even
+// documents override_rule as "override_rule (admin)". Every other kind, and a
+// free-text "Other" answer, an editor can pick.
+export const ADMIN_ONLY_HALT_KINDS = Object.freeze(['grant_authorization', 'override_rule']);
+
+export function haltOptionRequiresAdmin(kind) {
+  return ADMIN_ONLY_HALT_KINDS.includes(String(kind || ''));
+}
+
+// Kinds whose choice carries a one-time authorization to grant on resume (the scope
+// the operator is signing off on). grant_authorization always does; override_rule may.
+export function haltOptionCarriesAuthorization(option) {
+  return !!(option && (option.kind === 'grant_authorization' || option.kind === 'override_rule') && option.authorization?.scope);
+}
+
+// Coerce the model's kind string onto one of HALT_OPTION_KINDS. Tolerant: the prompt
+// documents override_rule as "override_rule (admin)" (the " (admin)" collapses to a
+// trailing "_admin" we strip); a missing/unknown kind is inferred from the option
+// (an inline authorization scope ⇒ grant_authorization, an "abandon" label ⇒ abandon)
+// and otherwise defaults to the neutral expand_scope so a well-formed option is never
+// dropped for a sloppy kind.
+function normalizeHaltKind(kind, { hasScope = false, label = '' } = {}) {
+  let k = String(kind || '').trim().toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_+|_+$/g, '');
+  k = k.replace(/_admin$/, '');
+  if (HALT_OPTION_KINDS.includes(k)) return k;
+  if (/abandon|give_?up/.test(k) || /\b(abandon|give up)\b/i.test(label)) return 'abandon';
+  if (hasScope) return 'grant_authorization';
+  return 'expand_scope';
+}
+
 // Normalize the model's proposed resolution options (from halt(reason, options)) into
-// [{ id, label, detail }]. Tolerant of a bare string list or {label/detail} objects.
-// Ids are stable, human-meaningful slugs so a selection round-trips through the UI.
+// [{ id, label, kind, detail, risk, injectOnResume, recommended, authorization }].
+// Tolerant of a bare string list, legacy {label, detail} objects, and the enriched
+// shape (kind, risk, injectOnResume, recommended, authorization:{scope,expectedRows}).
+// Ids are stable, human-meaningful slugs so a selection round-trips through the UI;
+// at most ONE option keeps recommended:true (the first that asks for it).
 export function parseHaltOptions(input) {
   const arr = Array.isArray(input) ? input : [];
   const out = [];
+  let recommendedTaken = false;
   for (let i = 0; i < arr.length && out.length < HALT_OPTION_LIMIT; i++) {
     const raw = arr[i];
     let label = '';
     let detail = '';
     let id = '';
+    let kindRaw = '';
+    let inject = '';
+    let wantsRecommended = false;
+    let authorization = null;
     if (typeof raw === 'string') { label = raw.trim(); }
     else if (raw && typeof raw === 'object') {
       label = String(raw.label || raw.title || raw.text || '').trim();
-      detail = String(raw.detail || raw.description || '').trim();
+      // risk/tradeoff is the one-line note; `detail`/`description` kept for back-compat.
+      detail = String(raw.risk || raw.tradeoff || raw.detail || raw.description || '').trim();
       id = String(raw.id || '').trim();
+      kindRaw = raw.kind || raw.type || '';
+      inject = String(raw.injectOnResume || raw.inject || raw.resumeGuidance || raw.resume || '').trim();
+      wantsRecommended = raw.recommended === true || raw.recommend === true;
+      const a = raw.authorization || raw.auth || null;
+      const scope = String((a && (a.scope || a.sql)) || raw.scope || raw.sql || '').trim();
+      if (scope) {
+        const rowsRaw = (a && (a.expectedRows ?? a.rows ?? a.rowCount)) ?? raw.expectedRows ?? raw.rows ?? raw.rowCount;
+        const expectedRows = rowsRaw == null || rowsRaw === '' ? null : String(rowsRaw).trim();
+        authorization = { scope, expectedRows };
+      }
     }
     if (!label) continue;
+    const kind = normalizeHaltKind(kindRaw, { hasScope: !!authorization, label });
     if (!id) id = `opt-${i + 1}-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)}`;
     if (out.some((o) => o.id === id)) id = `${id}-${i + 1}`;
-    out.push({ id, label, detail });
+    let recommended = false;
+    if (wantsRecommended && !recommendedTaken) { recommended = true; recommendedTaken = true; }
+    out.push({ id, label, kind, detail, risk: detail, injectOnResume: inject, recommended, authorization });
   }
   return out;
 }
 
+// Validate a halt's proposed options (task Part 4: "never a bare refusal"). A model
+// halt must offer at least `min` viable options, and any grant_authorization /
+// override_rule option must carry an exact authorization scope (the operator has to
+// see precisely what they'd be signing off on). Returns { ok, error, options } with
+// the normalized options either way, so the caller can feed the error back for a retry.
+export function validateHaltOptions(input, { min = 2 } = {}) {
+  const options = parseHaltOptions(input);
+  if (options.length < min) {
+    return { ok: false, error: `a halt must propose at least ${min} resolution options with tradeoffs — never a bare refusal (got ${options.length})`, options };
+  }
+  for (const o of options) {
+    if (o.kind === 'grant_authorization' || o.kind === 'override_rule') {
+      const v = validateAuthScope(o.authorization?.scope);
+      if (!v.ok) {
+        return { ok: false, error: `option "${o.label}" (${o.kind}) must state the exact authorization scope: ${v.error}`, options };
+      }
+    }
+  }
+  return { ok: true, options };
+}
+
 // Find the option the operator selected (by id or label). Returns the option object
-// or, when the operator typed a free-text choice not in the list, a synthesized one.
+// or, when the operator typed a free-text choice not in the list, a synthesized
+// expand_scope option carrying their words (the "Other" escape hatch).
 export function resolveSelectedOption(options = [], selected) {
   const sel = selected == null ? '' : String(selected).trim();
   if (!sel) return null;
   const list = Array.isArray(options) ? options : [];
   const hit = list.find((o) => o.id === sel || o.label === sel);
   if (hit) return hit;
-  return { id: 'free', label: sel, detail: '' };
+  return { id: 'free', label: sel, kind: 'expand_scope', detail: '', risk: '', injectOnResume: '', recommended: false, authorization: null };
 }
 
 // buildResumeContextBlock — the AUTHORITATIVE operator-guidance turn injected AFTER
@@ -65,7 +153,12 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
     'explicitly permits it):',
   ];
   if (opt) {
-    lines.push('', `Chosen resolution: ${opt.label}${opt.detail ? ` — ${opt.detail}` : ''}`);
+    // Name the typed kind (except the neutral expand_scope) so the model knows what
+    // KIND of direction this is, then the option's exact injectOnResume text if it
+    // provided one — that string is the authoritative "do this" the model proposed.
+    const kindTag = opt.kind && opt.kind !== 'expand_scope' ? ` [${opt.kind}]` : '';
+    lines.push('', `Chosen resolution${kindTag}: ${opt.label}${opt.detail ? ` — ${opt.detail}` : ''}`);
+    if (opt.injectOnResume) lines.push(opt.injectOnResume);
   }
   if (msg) {
     lines.push('', `Operator message: ${msg}`);

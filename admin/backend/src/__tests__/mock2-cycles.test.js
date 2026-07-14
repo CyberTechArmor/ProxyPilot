@@ -177,3 +177,34 @@ test('buildRunnerTask + classifyTurn', () => {
   const stalled = classifyTurn([]);
   assert.equal(stalled.stalled, true);
 });
+
+test('classifyTurn: halt returns enriched, typed resolution options (ADP replay shape)', () => {
+  const halted = classifyTurn([{
+    name: 'halt',
+    input: {
+      reason: 'a stale seed row blocks the data-cleanup change',
+      options: [
+        { label: 'Grant the one-row DELETE', kind: 'grant_authorization', recommended: true, risk: 'removes 1 stale test row', injectOnResume: 'Run the DELETE, once.', authorization: { scope: "DELETE FROM users WHERE email = 'seed@test'", expectedRows: 1 } },
+        { label: 'Run the framework isolation cycle first, then resume', kind: 'run_dependency_first', risk: 'slower' },
+        { label: 'Abandon this change', kind: 'abandon' },
+      ],
+    },
+  }]);
+  assert.equal(halted.halted, true);
+  assert.equal(halted.haltOptions.length, 3);
+  assert.equal(halted.haltOptions[0].kind, 'grant_authorization');
+  assert.equal(halted.haltOptions[0].recommended, true);
+  assert.equal(halted.haltOptions[0].authorization.scope, "DELETE FROM users WHERE email = 'seed@test'");
+  assert.equal(halted.haltOptions[2].kind, 'abandon');
+});
+
+test('RUNNER_TOOLS: halt requires reason + options (2–4 typed resolutions)', () => {
+  const halt = RUNNER_TOOLS.find((t) => t.name === 'halt');
+  assert.ok(halt.input_schema.required.includes('reason'));
+  assert.ok(halt.input_schema.required.includes('options'));
+  const opts = halt.input_schema.properties.options;
+  assert.equal(opts.minItems, 2);
+  assert.equal(opts.maxItems, 4);
+  assert.ok(opts.items.required.includes('kind'));
+  assert.deepEqual(opts.items.properties.kind.enum, ['grant_authorization', 'expand_scope', 'run_dependency_first', 'override_rule', 'abandon']);
+});

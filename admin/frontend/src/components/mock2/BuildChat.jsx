@@ -138,6 +138,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3">
         <ChatMessageList
           scrollRef={scrollRef}
+          projectId={projectId}
           messages={messages}
           openIds={openIds}
           canEdit={canEdit}

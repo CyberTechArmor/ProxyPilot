@@ -20,11 +20,23 @@ import {
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
+import ExplainThis from './ExplainThis';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
   refused_quota: 'text-red-500', awaiting_user: 'text-violet-500', awaiting_admin: 'text-amber-500',
   interrupted: 'text-amber-500', abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
+};
+
+// How each typed halt-resolution kind reads on the choice card. adminOnly kinds
+// (grant an authorization, override a rule) can only be picked by an admin — that's
+// where Grant/Deny folds into choosing/rejecting the option.
+const HALT_KIND_META = {
+  grant_authorization: { label: 'Grant once', adminOnly: true },
+  override_rule: { label: 'Override rule', adminOnly: true },
+  expand_scope: { label: 'Expand scope', adminOnly: false },
+  run_dependency_first: { label: 'Run dependency first', adminOnly: false },
+  abandon: { label: 'Abandon', adminOnly: false },
 };
 
 export default function BuildStatus({
@@ -39,7 +51,8 @@ export default function BuildStatus({
   const [fbRating, setFbRating] = useState(null); // 'up' | 'down' | null — note composer open for this rating
   const [note, setNote] = useState('');
   const [fbBusy, setFbBusy] = useState(false);
-  const [resumeMsg, setResumeMsg] = useState(''); // operator guidance carried on resume
+  const [resumeMsg, setResumeMsg] = useState(''); // operator guidance carried on resume / with a chosen option
+  const [otherText, setOtherText] = useState(''); // free-text "Other" resolution (the escape hatch)
   const [resuming, setResuming] = useState(false);
   const [auths, setAuths] = useState([]); // open one-time authorization requests
   const [authBusy, setAuthBusy] = useState(false);
@@ -56,12 +69,22 @@ export default function BuildStatus({
   const blocked = cycle?.status === 'awaiting_admin' && !!cycle?.halt_reason;
   const HALT_LABELS = {
     model_halt: 'the build reported it was blocked',
+    model_refusal: 'the model declined to continue (safety refusal) — review and redirect it',
     no_tool_calls: 'no progress — repeated turns with no action',
     repeated_output: 'no progress — the same response repeated without changes',
     no_state_change: 'no progress — repeated the same action with no change',
     max_turns: 'reached the step ceiling without finishing',
   };
   const statusLabel = blocked ? 'blocked' : paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
+  // The blocker card's full engineer-facing text, assembled for "Explain this": the
+  // halt reason, the model's error detail, and every proposed option (with its risk +
+  // the exact operation a grant option would run) plus any legacy authorization scopes.
+  const blockerExplainText = [
+    HALT_LABELS[cycle?.halt_reason] ? `The build stopped: ${HALT_LABELS[cycle.halt_reason]}` : null,
+    cycle?.error || null,
+    ...(cycle?.halt_options || []).map((o) => `Option — ${o.label}${o.risk || o.detail ? `: ${o.risk || o.detail}` : ''}${o.authorization?.scope ? ` (it would run: ${o.authorization.scope}${o.authorization.expectedRows != null && o.authorization.expectedRows !== '' ? `, affecting ${o.authorization.expectedRows} row(s)` : ''})` : ''}`),
+    ...auths.map((a) => `Requested one-time permission: ${a.scope}${a.reason ? ` — ${a.reason}` : ''}`),
+  ].filter(Boolean).join('\n');
   // Any non-successful terminal build can be continued (soft retry — it resumes
   // from the checkpoint/working tree in the container, no work lost). A soft
   // pause has its own Resume block and a deploy failure its own Retry deploy /
@@ -116,9 +139,14 @@ export default function BuildStatus({
     if (!cycle) return;
     setResuming(true);
     try {
-      await api.mock2RetryCycle(projectId, cycle.id, extra);
+      const res = await api.mock2RetryCycle(projectId, cycle.id, extra);
       setResumeMsg('');
-      toast({ title: 'Resuming the build', description: extra ? 'Your guidance is included.' : undefined });
+      setOtherText('');
+      if (res?.abandoned) {
+        toast({ title: 'Build abandoned', description: 'The cycle was closed as abandoned.' });
+      } else {
+        toast({ title: 'Resuming the build', description: extra && (extra.option || extra.message) ? 'Your selection is included.' : undefined });
+      }
       if (onRefresh) onRefresh();
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
@@ -227,18 +255,96 @@ export default function BuildStatus({
                 success, a user stop, and a soft budget pause. */}
             {blocked ? (
               <div className="space-y-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
-                <p className="text-xs text-orange-600 flex items-start gap-1">
-                  <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <span>
-                    <span className="font-medium">Blocked — needs attention.</span>{' '}
-                    {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
-                    {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
-                    {' '}Your work so far is checkpointed — add context or resolve the blocker, then resume.
-                  </span>
-                </p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-xs text-orange-600 flex items-start gap-1">
+                    <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      <span className="font-medium">Blocked — needs attention.</span>{' '}
+                      {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
+                      {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
+                      {' '}Your work so far is checkpointed — add context or resolve the blocker, then resume.
+                    </span>
+                  </p>
+                  <ExplainThis
+                    projectId={projectId} kind="blocker" cardId={`blocker-${cycle.id}`}
+                    title={cycle.instruction || ''} status={statusLabel} text={blockerExplainText}
+                    className="shrink-0"
+                  />
+                </div>
 
-                {/* Pending scoped one-time authorization requests (Part 4). */}
-                {auths.length ? (
+                {/* One choice card (task Part 2): the model's 2–4 proposed resolutions
+                    as radio-style choices + a free-text "Other". Picking one resumes the
+                    build automatically, injecting the choice (+ any context) as guidance;
+                    a grant_authorization option shows the exact scope/rows inline and its
+                    selection IS the admin grant. Abandon closes the cycle. */}
+                {canEdit && online && (cycle.halt_options || []).length ? (
+                  <div className="space-y-2.5 rounded-md border border-orange-500/30 bg-background/50 p-2.5">
+                    <p className="text-[11px] font-medium text-orange-600">
+                      Choose how to resolve — your pick resumes the build (add context below if it helps):
+                    </p>
+                    <textarea
+                      className="flex min-h-[44px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                      placeholder="Optional context, included with whichever option you pick (e.g. “the test row is safe to remove”)…"
+                      value={resumeMsg}
+                      disabled={resuming}
+                      onChange={(e) => setResumeMsg(e.target.value)}
+                    />
+                    <div className="flex flex-col gap-1.5" role="radiogroup" aria-label="Resolution options">
+                      {cycle.halt_options.map((o) => {
+                        const meta = HALT_KIND_META[o.kind] || {};
+                        const adminOnly = meta.adminOnly;
+                        const blockedForRole = adminOnly && !isAdmin;
+                        const auth = o.authorization && o.authorization.scope ? o.authorization : null;
+                        return (
+                          <div key={o.id} className="space-y-1">
+                            <Button
+                              variant="outline" size="sm" role="radio" aria-checked={false}
+                              className={`h-auto min-h-11 w-full justify-start whitespace-normal py-2 ${o.recommended ? 'border-emerald-500/50 ring-1 ring-emerald-500/20' : ''}`}
+                              disabled={resuming || blockedForRole}
+                              onClick={() => doResume({ option: o.id, ...(resumeMsg.trim() ? { message: resumeMsg.trim() } : {}) })}
+                            >
+                              {o.kind === 'abandon' ? <Ban className="h-4 w-4 mr-2 shrink-0 text-red-500" />
+                                : o.kind === 'grant_authorization' || o.kind === 'override_rule' ? <ShieldCheck className="h-4 w-4 mr-2 shrink-0" />
+                                  : <Play className="h-4 w-4 mr-2 shrink-0" />}
+                              <span className="text-left min-w-0">
+                                <span className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-medium">{o.label}</span>
+                                  {o.recommended ? <span className="rounded-full bg-emerald-500/15 text-emerald-600 text-[10px] font-medium px-1.5 py-0.5">Recommended</span> : null}
+                                  {meta.label ? <span className="rounded-full bg-muted text-muted-foreground text-[10px] px-1.5 py-0.5">{meta.label}{adminOnly ? ' · admin' : ''}</span> : null}
+                                </span>
+                                {o.risk || o.detail ? <span className="block text-[11px] text-muted-foreground mt-0.5">{o.risk || o.detail}</span> : null}
+                                {auth ? (
+                                  <span className="block mt-1 text-[11px] break-words">
+                                    <code className="break-all">{auth.scope}</code>
+                                    {auth.expectedRows != null && auth.expectedRows !== '' ? <span className="text-muted-foreground"> · expects {auth.expectedRows} row(s)</span> : null}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </Button>
+                            {blockedForRole ? <p className="text-[11px] text-muted-foreground pl-1">An admin must choose this one.</p> : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* Free-text "Other" escape hatch — resumes with the typed guidance, no option. */}
+                    <div className="flex items-end gap-2 pt-0.5">
+                      <textarea
+                        className="flex min-h-[44px] flex-1 rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                        placeholder="Or describe your own resolution…"
+                        value={otherText}
+                        disabled={resuming}
+                        onChange={(e) => setOtherText(e.target.value)}
+                      />
+                      <Button size="sm" className="h-9 shrink-0" disabled={resuming || !otherText.trim()} onClick={() => doResume({ message: otherText.trim() })}>
+                        {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Resume'}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Legacy path (no proposed options): a standalone request_authorization
+                    grant/deny + a plain resume, kept for older halts and breaker stops. */}
+                {!(cycle.halt_options || []).length && auths.length ? (
                   <div className="space-y-2">
                     {auths.map((a) => (
                       <div key={a.id} className="rounded-md border border-orange-500/30 bg-background/50 p-2 space-y-1.5">
@@ -261,26 +367,7 @@ export default function BuildStatus({
                   </div>
                 ) : null}
 
-                {/* Model-proposed resolution options — pick one and it's sent on resume. */}
-                {canEdit && online && (cycle.halt_options || []).length ? (
-                  <div className="space-y-1.5">
-                    <p className="text-[11px] text-muted-foreground">Resolve by choosing one — it&apos;s sent to the build on resume:</p>
-                    <div className="flex flex-col gap-1.5">
-                      {cycle.halt_options.map((o) => (
-                        <Button key={o.id} variant="outline" size="sm" className="h-auto min-h-9 justify-start whitespace-normal py-1.5" disabled={resuming} onClick={() => doResume({ option: o.id, ...(resumeMsg.trim() ? { message: resumeMsg.trim() } : {}) })}>
-                          <Play className="h-4 w-4 mr-1 shrink-0" />
-                          <span className="text-left">
-                            <span className="font-medium">{o.label}</span>
-                            {o.detail ? <span className="block text-[11px] text-muted-foreground">{o.detail}</span> : null}
-                          </span>
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {/* Resume with an optional operator message (the build chat can also send this). */}
-                {canEdit && online ? (
+                {!(cycle.halt_options || []).length && canEdit && online ? (
                   <div className="space-y-1.5">
                     <textarea
                       className="flex min-h-[48px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
@@ -368,7 +455,16 @@ export default function BuildStatus({
               <div className="space-y-2">
                 {deviations.map((d) => (
                   <div key={d.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-                    <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                      {d.detail ? (
+                        <ExplainThis
+                          projectId={projectId} kind="deviation" cardId={`dev-${d.id}`}
+                          title={cycle?.instruction || ''} status="needs an admin decision" text={d.detail}
+                          className="shrink-0"
+                        />
+                      ) : null}
+                    </div>
                     {/* Approve-as-edited: rewrite the deviation / append conditions.
                         The edited text becomes the authoritative APPROVED record. */}
                     <textarea

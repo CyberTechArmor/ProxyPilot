@@ -31,6 +31,9 @@ import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage, shouldStopForBudget } from './quota-logic.js';
 import {
+  budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
+} from './usage-logic.js';
+import {
   getCycle, updateCycle, addCycleUsage, finishCycle,
 } from './cycles.js';
 import { initialGateReports, allGatesGreen, interruptDecision } from './cycle-logic.js';
@@ -38,10 +41,12 @@ import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask,
-  SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason,
+  SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
+  isRefusalStop, REFUSAL_HALT_REASON,
 } from './runner-logic.js';
 import { buildResumeContextBlock } from './unblock-logic.js';
+import { closeRequest } from './requests.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
 import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
@@ -125,6 +130,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   let checkoutDir = null;
   const runStartMs = Date.now();
   let usedTokensThisRun = 0;
+  // Cost-truth: same additive accounting as the hand-rolled runner — the four canonical
+  // classes + the run's spend, plus the flag-gated dollar soft-pause ceiling.
+  let usedCostThisRun = 0;
+  const runUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const budgetDollars = budgetMode(process.env) === 'dollars';
+  const dollarCeilingCents = budgetDollars ? budgetCentsForTokenLegacy(SOFT_PAUSE_TOKENS, ready.model) : null;
   let sessionId = null;
   let lastGateReports = initialGateReports(gateScripts);
   // No-progress circuit breaker threshold (harness safety) — same as the
@@ -197,13 +208,20 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
           return scheduleJobCleanup(cycle.id);
         }
       }
-      // Soft token/time pause — resumable, not a failure (identical semantics).
-      const pauseReason = softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs: Date.now() - runStartMs });
+      // Soft token/dollar/time pause — resumable, not a failure (identical semantics to
+      // the hand-rolled runner; dollar ceiling behind the same MOCK2_BUDGET_DOLLARS flag).
+      const elapsedMs = Date.now() - runStartMs;
+      const pauseReason = budgetDollars
+        ? (budgetPauseReasonCents({ spentCents: usedCostThisRun, ceilingCents: dollarCeilingCents })
+          || softPauseReason({ usedTokens: 0, elapsedMs }))
+        : softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs });
       if (pauseReason) {
         const mins = Math.round((Date.now() - runStartMs) / 60000);
         const detail = pauseReason === 'budget_tokens'
           ? `token budget reached (~${Math.round(usedTokensThisRun / 1000)}k tokens this run)`
-          : `time budget reached (~${mins} min this run)`;
+          : pauseReason === 'budget_cost'
+            ? `cost budget reached (~${dollars(usedCostThisRun)} this run)`
+            : `time budget reached (~${mins} min this run)`;
         await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: paused — ${detail}` });
         updateCycle(cycle.id, { pause_reason: pauseReason });
         finishCycle(cycle.id, { status: 'interrupted', error: `Paused — ${detail}. Resume to continue where it stopped.` });
@@ -247,7 +265,19 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       const cost = costCentsForUsage({ inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: u.cacheReadTokens, cacheWriteTokens: u.cacheWriteTokens }, price);
       const turnTokens = u.inputTokens + u.outputTokens;
       usedTokensThisRun += turnTokens;
+      usedCostThisRun += cost;
+      runUsage.input += u.inputTokens || 0;
+      runUsage.output += u.outputTokens || 0;
+      runUsage.cache_read += u.cacheReadTokens || 0;
+      runUsage.cache_write += u.cacheWriteTokens || 0;
       addCycleUsage(cycle.id, { tokens: turnTokens, costCents: cost });
+      try {
+        updateCycle(cycle.id, {
+          input_tokens: runUsage.input, output_tokens: runUsage.output,
+          cache_read_tokens: runUsage.cache_read, cache_write_tokens: runUsage.cache_write,
+          usage_schema_version: USAGE_SCHEMA_VERSION,
+        });
+      } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
       try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
       logEvent('ai_message', { role: 'assistant', content: round1.summary || '', meta: { round, num_turns: round1.numTurns, input_tokens: u.inputTokens, output_tokens: u.outputTokens, cache_read_tokens: u.cacheReadTokens, cache_write_tokens: u.cacheWriteTokens, cost_cents: cost, total_cost_usd: round1.totalCostUsd, sdk_error: round1.error || null } });
       touchLock(projectId, holder);
@@ -259,6 +289,15 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       if (round1.breakerTripped) {
         try { await pushWorkingTree(containerName, checkoutDir); } catch { /* best effort */ }
         await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: round1.breakerTrigger, reason: `Auto-stopped after no progress in the SDK runner (${haltReasonLabel(round1.breakerTrigger)}).`, logEvent });
+        return scheduleJobCleanup(cycle.id);
+      }
+
+      // Safety refusal (Fable 5's classifier can emit stop_reason "refusal"; Opus 4.8
+      // never does). Map it to the shared halt — needs-attention, resumable — exactly as
+      // the hand-rolled runner does. Never a crash, never a retry loop.
+      if (round1.refusal) {
+        try { await pushWorkingTree(containerName, checkoutDir); } catch { /* best effort */ }
+        await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_refusal', reason: REFUSAL_HALT_REASON, options: [], logEvent });
         return scheduleJobCleanup(cycle.id);
       }
 
@@ -321,6 +360,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       }
     }
     finishCycle(cycle.id, { status: 'succeeded' });
+    try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
     releaseLock(projectId, holder);
     updateProject(projectId, { last_activity_at: nowIso() });
     setJob(cycle.id, {
@@ -348,7 +388,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
 // and return breakerTripped so the caller halts as blocked — the same behavior,
 // same threshold, so a stuck SDK loop can't spin the way the ADP repro did.
 async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, noProgLimit = 3 }) {
-  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null, breakerTripped: false, breakerTrigger: null };
+  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null, breakerTripped: false, breakerTrigger: null, refusal: false };
   const abort = new AbortController();
   const opts = { ...options, abortController: abort };
   let progress = initProgressState();
@@ -386,7 +426,11 @@ async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, n
         };
         out.numTurns = r.num_turns || 0;
         out.totalCostUsd = r.total_cost_usd || msg.total_cost_usd || 0;
-        if (r.success === false || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'))) {
+        // A safety refusal surfaces via stop_reason/subtype "refusal" — flag it so the
+        // caller halts (needs-attention) rather than treating it as a hard error.
+        if (isRefusalStop(r.stop_reason) || String(msg.subtype || '').toLowerCase() === 'refusal') {
+          out.refusal = true;
+        } else if (r.success === false || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'))) {
           out.error = String(r.stop_reason || msg.subtype || 'sdk reported failure');
         }
         if (typeof r.result === 'string' && r.result) out.summary = r.result;

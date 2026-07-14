@@ -36,11 +36,16 @@ function openAiBase(provider, baseUrl) {
 // the per-slot id; tools are the neutral RUNNER_TOOLS; system is the assembled
 // prompt; transcript is the neutral turn list.
 export async function callModelTurn({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = DEFAULT_TIMEOUT_MS,
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null,
 }) {
   const provider = connector?.provider;
+  // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
+  // one: a 16k-token mockup legitimately streams for several minutes, and the
+  // old flat 2-minute timeout aborted it mid-generation ("This operation was
+  // aborted") — a large ask needs a proportionate window (~50ms/token floor).
+  const effectiveTimeoutMs = timeoutMs != null ? timeoutMs : Math.max(DEFAULT_TIMEOUT_MS, Number(maxTokens || 0) * 50);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
   try {
     switch (provider) {
       case 'anthropic':
@@ -55,7 +60,12 @@ export async function callModelTurn({
         return { ok: false, error: `unsupported provider "${provider}"`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
     }
   } catch (err) {
-    return { ok: false, error: `model call failed: ${err?.message || String(err)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+    // Name a timeout as what it is — "This operation was aborted" reads like a
+    // user action when it was our own deadline firing.
+    const msg = err?.name === 'AbortError' || /abort/i.test(String(err?.message || ''))
+      ? `timed out after ${Math.round(effectiveTimeoutMs / 1000)}s waiting for the model response (the request was cancelled server-side)`
+      : (err?.message || String(err));
+    return { ok: false, timedOut: err?.name === 'AbortError' || /abort/i.test(String(err?.message || '')), error: `model call failed: ${msg}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   } finally {
     clearTimeout(timer);
   }

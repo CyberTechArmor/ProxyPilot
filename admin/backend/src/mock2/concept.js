@@ -85,6 +85,43 @@ function scheduleJobCleanup(projectId) {
   setTimeout(() => activeConceptJobs.delete(Number(projectId)), 120000);
 }
 
+// ---- design-phase heartbeat: narrate the long mockup render ----
+//
+// The mockup is ONE long model generation (minutes). Without narration the job
+// message sits frozen and the Builder assumes it broke — especially after a
+// tab switch (the turn always runs server-side; nothing about it depends on
+// the tab staying open). Rotate through honest, stage-flavored messages with
+// the elapsed time so there is something to read while it renders; the chat
+// poll (2.5s) picks each one up.
+const DESIGN_HEARTBEAT_MS = 9000;
+const DESIGN_HEARTBEAT_LINES = Object.freeze([
+  'sketching the screen layout and structure',
+  'writing the mockup HTML — every screen, inline styles, no external assets',
+  'wiring the interactive bits (navigation, dialogs, sample data)',
+  'styling against the locked design system tokens',
+  'filling in realistic sample content',
+  'polishing spacing, states, and edge screens',
+]);
+
+function startDesignHeartbeat(projectId, cycleId, { iterating = false } = {}) {
+  const startedAt = Date.now();
+  const verb = iterating ? 'Reworking the mockup' : 'Designing the mockup';
+  let tick = 0;
+  const update = () => {
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    const line = DESIGN_HEARTBEAT_LINES[tick % DESIGN_HEARTBEAT_LINES.length];
+    tick += 1;
+    setJob(projectId, {
+      phase: 'designing',
+      message: `${verb}… ${line} (${s}s — a full mockup typically takes 2–5 minutes; it keeps building if you switch tabs)`,
+      kind: 'turn', cycleId,
+    });
+  };
+  update();
+  const timer = setInterval(update, DESIGN_HEARTBEAT_MS);
+  return { stop: () => clearInterval(timer) };
+}
+
 // ---- slot readiness (both concept_chat AND mockup, ADR-001 presence-of-creds) ----
 
 function slotReady(slotName) {
@@ -302,7 +339,6 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   //    into the container (the only container write the concept stage performs).
   let mockupNote = null;
   if (decision.generateMockup) {
-    setJob(projectId, { phase: 'designing', message: 'Designing the mockup…', kind: 'turn', cycleId: cycle.id });
     let currentHtml = null;
     if (hasMockup) {
       const cur = await readWorkingFile(containerName, MOCKUP_CURRENT);
@@ -312,11 +348,29 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       brief: decision.brief, currentHtml, projectName: project.name,
       conversation: conversationRecap(listMessages(projectId)),
     });
-    const mockupRes = await callModelTurn({
+    // A full mockup is a LONG single generation (up to 16k tokens — several
+    // minutes). Give it a proportionate window, narrate progress while it
+    // renders (the job heartbeat below is what the Builder reads in the chat —
+    // and it makes clear the work continues server-side across tab switches),
+    // and retry ONCE on a pure timeout before giving up.
+    const mockupCall = () => callModelTurn({
       connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
       system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
       tools: [], transcript: [{ role: 'user', text: mockupTask }], maxTokens: 16000,
+      timeoutMs: 900000,
     });
+    const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
+    let mockupRes;
+    try {
+      mockupRes = await mockupCall();
+      if (!mockupRes.ok && mockupRes.timedOut) {
+        setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
+        insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'The mockup render timed out once — retrying automatically.' });
+        mockupRes = await mockupCall();
+      }
+    } finally {
+      heartbeat.stop();
+    }
     if (mockupRes.ok) {
       recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: mockupRes.usage });
       const html = extractMockupHtml(mockupRes.text).slice(0, MAX_MOCKUP_CHARS);
@@ -414,12 +468,24 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     return scheduleJobCleanup(projectId);
   }
   const html = String(cur.content).slice(0, MAX_MOCKUP_CHARS);
-  const extractRes = await callModelTurn({
-    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
-    system: buildInventoryExtractionPrompt(), tools: [],
-    transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
-    maxTokens: 8000,
-  });
+  // Elapsed-time narration while the extraction runs (it can take a minute or
+  // two on a large mockup — the poll should have movement to show).
+  const extractStarted = Date.now();
+  const extractTicker = setInterval(() => {
+    const s = Math.round((Date.now() - extractStarted) / 1000);
+    setJob(projectId, { phase: 'approving', message: `Extracting the design inventory — every screen, field, and action in the approved mockup… (${s}s; it keeps working if you switch tabs)`, kind: 'approval', cycleId: cycle.id });
+  }, 9000);
+  let extractRes;
+  try {
+    extractRes = await callModelTurn({
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+      system: buildInventoryExtractionPrompt(), tools: [],
+      transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
+      maxTokens: 8000,
+    });
+  } finally {
+    clearInterval(extractTicker);
+  }
   if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
   const parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
   if (!parsed.ok) {

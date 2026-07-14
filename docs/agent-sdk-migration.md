@@ -518,3 +518,170 @@ user journey working end-to-end**, not gates-green alone.
 > 3. Restart the environment with `BUILD_RUNNER=sdk` and run the **same** task; record the
 >    same four metrics from the `result` message usage + event log.
 > 4. Fill the table above and check the Phase 1 box only if the journey works both ways.
+
+---
+
+## Cost-truth: request-as-umbrella, honest usage, tiered model routing
+
+> Added as a self-contained work item (not part of the SDK phases above, but it shares
+> the runner/usage/estimator surfaces so it lives here). Both runners
+> (`runner.js` hand-rolled, `runner-sdk.js`) inherit every change identically.
+
+### North star
+
+One build request is **one record**. **Cost (dollars) is the honest primary metric.**
+Model spend is **tiered** — Fable 5 only where judgment density is highest (the audit
+lane) or where Opus 4.8 is demonstrably stuck (a capped escalation consult), **never a
+default build lane**.
+
+### What's wrong today (observed)
+
+- A single ask fragments into multiple change records (#26/#27, #30/#31, #36/#39,
+  #40/#41/#42).
+- `used_tokens` counts only input+output, but cache traffic is ~82% of cost (13,044
+  shown for a **$1.78** cycle that actually moved **2.01M** tokens).
+- The token basis changed between framework versions (change #30's 1,031,216 includes
+  cache; v3's doesn't) — history mixes incomparable numbers.
+- The estimator runs ~2× high.
+- Duplicate log exports (#40/#41 were byte-identical).
+
+### Located subsystems (the surfaces this work touches)
+
+| Concern | Where |
+|---|---|
+| Cost computation (**do not change** — penny-accurate) | `quota-logic.js` `costCentsForUsage` (cache-aware: read 0.1×, write 1.25×), `DEFAULT_MODEL_PRICES` |
+| Per-turn usage capture | `runner.js` (~L458–465): `u.inputTokens/outputTokens`, `cacheRead/cacheWrite`, `costCentsForUsage`, `addCycleUsage`, `insertLedgerEntry`; SDK: `runner-sdk.js` result `usage` |
+| Cycle model/status lifecycle | `cycle-logic.js` `CYCLE_STATUSES` / `ACTIVE`/`TERMINAL`; `cycles.js` |
+| Change-record sequencing | `change-records.js` `insertChangeRecord` (seq per **project**, hash-chained) |
+| Log export | `routes.js` `GET /projects/:id/cycles/:cycleId/log` and `GET /projects/:id/log`; events in `cycle-events.js` |
+| Token-budget ceiling | `runner-logic.js` `SOFT_PAUSE_TOKENS` + `softPauseReason`; `cycle-logic.js` `shouldStopForBudget` (quota is already cents) |
+| Estimator | `cycle-logic.js` `estimateCycleTokens`; `runner.js` `estimateCycle` (price via `effectivePrice`) |
+| Model-lane config | `connector-logic.js` `MODEL_SLOTS` (concept_chat/mockup/audit/classifier/build_runner/summary/remediation); slots admin-assigned via `connectors.js` `getSlot` |
+
+### Part 1 — Request as the umbrella entity (one request = one log)
+
+- New `request` entity created when the operator submits an ask. Every resulting cycle
+  (define, build, halt, resume, budget-pause continuation, retry, **consult**) carries a
+  `request_id` and a `segment` label.
+- Change-record numbering, UI history, and log export key on the **request**: one entry
+  per request showing its segments (define → build → halted → resumed → succeeded), one
+  cumulative cost roll-up, one final status. **Cycles stay the internal
+  execution/gate/checkpoint unit** (constraint: don't restructure cycles/gates).
+- "Download log" exports the **merged, ordered, deduplicated** request log. The
+  duplicate-export bug is fixed by making export **idempotent per request + content**
+  (a content hash; identical inputs → one identical artifact). Pure builder:
+  `request-log.js` `buildRequestLog()` / `requestLogArtifact()`.
+- Backfill: **new-requests-only** by default; a cheap optional linker attaches existing
+  fragmented cycles to synthetic parents by `(project, contiguous time window)`. If not
+  run, history says "legacy (pre-request)". *(Migration additive; see schema below.)*
+
+### Part 2 — Standardize usage; cost becomes primary
+
+- Canonical usage record, **always all four token classes + cost**:
+  `{ input, output, cache_read, cache_write, cost_cents }`. No bare "tokens" field.
+  Pure: `usage-logic.js` `canonicalUsage()`, `sumUsage()`, `usageCostCents()`
+  (delegates to the untouched `costCentsForUsage`), `breakdownForDisplay()`.
+- **Primary display is dollars everywhere**, with an expandable four-class breakdown;
+  any single token figure is explicitly labeled **"billable in+out"** (`billableInOut()`).
+- Budget ceiling converts **tokens → dollars** (per request/project). The existing
+  `SOFT_PAUSE_TOKENS = 1_000_000` migrates to its **dollar equivalent**
+  `SOFT_PAUSE_COST_CENTS` so behavior doesn't jump: at the build_runner list rate the
+  1M-token envelope ≈ **$X** (computed from the lane price, see `budgetCentsForTokenLegacy`).
+  Budget-pause messages report **dollars**. Cache-heavy and output-heavy runs with equal
+  in+out now trip at **equal spend** (they didn't before — the ceiling ignored cache).
+- **Schema version stamp** on usage: `USAGE_SCHEMA_VERSION = 3`. Pre-v3 records are
+  flagged `comparable:false`, excluded from history mixing and estimator training
+  (`isComparable()`). Change #30 renders as **legacy-basis**.
+
+### Part 3 — Calibrate the estimator from history
+
+- Estimate **cost, not tokens**. Rolling **per-stage-type** calibration
+  (define / build / resume-verify) from recent `(estimate, actual)` pairs, biased
+  **~20% high**, multiplier **clamped** to a sane band. Show **est-vs-actual** on every
+  completed request. **Per-lane pricing** is folded in (audit on Fable 5 costs 2×/token
+  vs Opus, so the estimator multiplies the lane's own model price). Pure:
+  `estimate-logic.js` `calibrateMultiplier()`, `estimateStageCostCents()`.
+
+### Part 4 — Spend visibility
+
+- Per-request: cost per **segment** (define vs build vs resume vs consult).
+- Per-project: cumulative spend + a rolling est-vs-actual accuracy read.
+- Reuses existing display components (constraint: no unrelated UI work).
+
+### Part 5 — Fable 5 in exactly two places
+
+**Prerequisite (built first, gating):** Fable 5 can return `stop_reason: "refusal"`
+from its safety classifiers — a shape Opus 4.8 never produces. The runner maps a refusal
+to the existing **`halt`** state with the refusal text as the reason (needs-attention,
+resumable) — **never a crash or a retry loop**. `runner-logic.js` `classifyTurn` now
+detects `stopReason === 'refusal'` → `{ halted, haltReason, trigger:'model_refusal' }`;
+both runners route it through the existing `haltCycle`. No lane may switch to Fable 5
+until this exists and is tested. *(Tested: `mock2-cost-truth.test.js`.)*
+
+1. **Audit lane → Fable 5** (`claude-fable-5`, $10/$50 per M — already in
+   `DEFAULT_MODEL_PRICES`). Audit cycles are tiny (~$0.07 → ~$0.15) and judgment-dense
+   (rule questions, deviation flags, blocker analysis): the best price/quality trade.
+   Encoded as a **recommended model per slot** (`connector-logic.js`
+   `RECOMMENDED_MODEL_FOR_SLOT`), audit → `claude-fable-5`. **build_runner / remediation /
+   all other lanes keep their current models** (opus/haiku). A guard test asserts no lane
+   except `audit` recommends Fable 5, so *"a config or code path that routes build/
+   remediation to Fable 5 by default"* cannot exist.
+2. **Escalation consult ("second opinion") — bounded, trigger-gated, advisory-only.**
+   A single Fable 5 call that fires only when Opus 4.8 is demonstrably stuck. Pure logic:
+   `consult-logic.js`.
+   - **Deterministic triggers:** (a) same gate fails ≥2 consecutive attempts in a cycle;
+     (b) no-progress breaker trips; (c) a resumed request halts again for the **same**
+     reason; (d) operator clicks **"Get guidance"** on a halt card.
+   - **Hard cost containment:** **no tool access** — it gets a compiled **context digest
+     only** (task, halt/failure reason, last errors/gate output, relevant file excerpts);
+     input capped **~30k tokens**, output capped **~4k tokens** ≈ **$0.50/consult**.
+   - **Caps:** max **1 consult per halt**, max **2 per request**; further consults require
+     the operator button (`consultAllowed()`).
+   - **Advisory-only:** output is a diagnosis + 2–4 ranked paths forward + suggested
+     resume text, attached to the halt card as **"Second opinion (Fable 5)"** and offered
+     as pre-filled resume guidance. It **never** takes over the build, **never** switches
+     the build lane; the operator (or the resuming Opus cycle) executes. Its cost logs as
+     its **own segment** in the request roll-up (Parts 1/4).
+
+### Also (same cycle): data-reset guidance out of the migration chain
+
+Framework guidance that **resets data** ("clear users for re-test") belongs in
+`scripts/` or behind a **scoped operational authorization** (the Part-4 authorization
+mechanism from the halt-resolution work), **not** in the schema migration chain. The ADP
+migration is **not** retro-edited. Delivered as `scripts/mock2-reset-users.sh` documented
+as authorization-gated.
+
+### Schema changes (additive; new migration, never edits an applied one)
+
+- `mock2_requests` (new): `id, project_id, instruction, status, initiated_by,
+  created_at, finished_at` — the umbrella. Cycles gain `request_id` + `segment`.
+- `mock2_cycles`: `+ input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+  (the four canonical classes; the old `used_tokens` stays for back-compat but is
+  relabeled "billable in+out" in the API), `+ usage_schema_version` (stamped `3`),
+  `+ request_id`, `+ segment`.
+- `mock2_consults` (new): `id, request_id, cycle_id, trigger, input_tokens, output_tokens,
+  cost_cents, diagnosis, paths_json, suggested_resume, created_at`.
+- **Budget semantics:** the ceiling is dollars (`SOFT_PAUSE_COST_CENTS`), migrated from
+  the 1M-token envelope at the lane rate; pause messages read dollars.
+
+### Acceptance mapping & evidence
+
+| Acceptance | Where verified |
+|---|---|
+| #42 four-class breakdown reproduces **$1.778** at Opus rates (72 / 12,972 / 1,922,721 / 78,722) | `mock2-cost-truth.test.js` (pure, runs here) ✓ |
+| Budget triggers on **dollars**; equal in+out ⇒ equal-spend trip regardless of cache/output mix | pure test ✓ |
+| Estimates land ~+10–35% of actual; per-lane pricing reflected | `estimate-logic` test ✓ |
+| Simulated Fable 5 `refusal` ⇒ halt with reason, no crash/loop | pure test ✓ |
+| Consult: one stuck cycle fires **exactly one** consult within caps; 3rd refused w/o button; lane never switches | `consult-logic` test ✓ |
+| One request define→build→halt→consult→resume→succeed ⇒ one history entry + one log, consult itemized (~$0.50); double-export identical | `request-log` idempotency test ✓ (pure); end-to-end needs live DB |
+| Audit lane runs on Fable 5 for one real define stage; cost delta visible | **pending operator run** (needs live Incus + Fable 5 connector) |
+| #40/#41/#42 renders as one record ~**$1.85**; #30 legacy-basis; before/after screenshots | **pending operator run** (needs live DB + UI) |
+
+> **Live-validation honesty (same convention as Phase 1 above).** The development
+> container has no better-sqlite3 native module, no Incus, no Fable 5 connector, and no
+> browser, so the three live-data acceptance items (real Fable-5 define stage, the
+> #40/#41/#42 one-record render, and before/after change-history screenshots) are **left
+> pending an operator run** rather than fabricated. Every item that can be proven with
+> pure logic (the #42 cost math, the dollar budget trip, refusal→halt, consult caps,
+> estimator range, export idempotency) is covered by `mock2-cost-truth.test.js` and the
+> per-module tests and runs in CI here.

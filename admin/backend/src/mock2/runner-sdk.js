@@ -40,6 +40,7 @@ import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask,
   SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
+  isRefusalStop, REFUSAL_HALT_REASON,
 } from './runner-logic.js';
 import { buildResumeContextBlock } from './unblock-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
@@ -262,6 +263,15 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         return scheduleJobCleanup(cycle.id);
       }
 
+      // Safety refusal (Fable 5's classifier can emit stop_reason "refusal"; Opus 4.8
+      // never does). Map it to the shared halt — needs-attention, resumable — exactly as
+      // the hand-rolled runner does. Never a crash, never a retry loop.
+      if (round1.refusal) {
+        try { await pushWorkingTree(containerName, checkoutDir); } catch { /* best effort */ }
+        await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_refusal', reason: REFUSAL_HALT_REASON, options: [], logEvent });
+        return scheduleJobCleanup(cycle.id);
+      }
+
       // Sync the SDK's edits back into the container (excluding our .claude/ and the
       // heavy dirs), then run the SAME pinned battery there.
       const pushed = await pushWorkingTree(containerName, checkoutDir);
@@ -348,7 +358,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
 // and return breakerTripped so the caller halts as blocked — the same behavior,
 // same threshold, so a stuck SDK loop can't spin the way the ADP repro did.
 async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, noProgLimit = 3 }) {
-  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null, breakerTripped: false, breakerTrigger: null };
+  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null, breakerTripped: false, breakerTrigger: null, refusal: false };
   const abort = new AbortController();
   const opts = { ...options, abortController: abort };
   let progress = initProgressState();
@@ -386,7 +396,11 @@ async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, n
         };
         out.numTurns = r.num_turns || 0;
         out.totalCostUsd = r.total_cost_usd || msg.total_cost_usd || 0;
-        if (r.success === false || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'))) {
+        // A safety refusal surfaces via stop_reason/subtype "refusal" — flag it so the
+        // caller halts (needs-attention) rather than treating it as a hard error.
+        if (isRefusalStop(r.stop_reason) || String(msg.subtype || '').toLowerCase() === 'refusal') {
+          out.refusal = true;
+        } else if (r.success === false || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'))) {
           out.error = String(r.stop_reason || msg.subtype || 'sdk reported failure');
         }
         if (typeof r.result === 'string' && r.result) out.summary = r.result;

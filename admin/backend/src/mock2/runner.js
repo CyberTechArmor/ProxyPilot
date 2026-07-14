@@ -489,7 +489,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     for (const tc of result.toolCalls || []) {
       logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input || {} } });
     }
-    const decision = classifyTurn(result.toolCalls);
+    const decision = classifyTurn(result.toolCalls, { stopReason: result.stopReason });
 
     // No-progress circuit breaker — fold this turn ONCE. Enforced below on every
     // non-successful path so a stuck cycle auto-halts (blocked) instead of
@@ -501,6 +501,15 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     // public/index.html") so the Builder can see what the runner is doing rather
     // than a static "running". The terminal branches below set their own message.
     setJob(cycle.id, { phase: 'running', message: describeRunnerStep(turn, result.toolCalls) });
+
+    // 4a-0) The turn is a SAFETY REFUSAL (Fable 5's classifier can emit
+    //     stop_reason "refusal"; Opus 4.8 never does). Map it to the existing halt
+    //     state — needs-attention, resumable — with the refusal as the reason. Never a
+    //     crash, never a retry loop, and never the "propose options" nudge.
+    if (decision.refusal) {
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_refusal', reason: decision.haltReason, options: [], logEvent });
+      return scheduleJobCleanup(cycle.id);
+    }
 
     // 4a) The model called halt — it cannot honestly finish (blocked, missing
     //     dependency, out-of-scope fix). End the cycle NON-SUCCESS: no deploy,

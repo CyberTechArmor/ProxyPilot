@@ -69,6 +69,7 @@ export default function BuildStatus({
   const blocked = cycle?.status === 'awaiting_admin' && !!cycle?.halt_reason;
   const HALT_LABELS = {
     model_halt: 'the build reported it was blocked',
+    model_refusal: 'the model declined to continue (safety refusal) — review and redirect it',
     no_tool_calls: 'no progress — repeated turns with no action',
     repeated_output: 'no progress — the same response repeated without changes',
     no_state_change: 'no progress — repeated the same action with no change',

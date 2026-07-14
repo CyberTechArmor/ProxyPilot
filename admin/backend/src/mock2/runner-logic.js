@@ -309,9 +309,17 @@ export function buildRunnerTask(instruction) {
 // halt takes precedence over finish: a turn that pairs both is a blocked turn (the
 // model should not both give up and claim success). Returns
 // { done, halted, haltReason, finishSummary, toolCalls, stalled }.
-export function classifyTurn(toolCalls = []) {
+export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
-  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false };
+  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false, refusal: false, trigger: null };
+  // Fable 5 (audit lane / consult) can return stop_reason "refusal" from its safety
+  // classifiers — a shape Opus 4.8 never produces. Map it to the existing halt state
+  // (needs-attention, resumable) with the refusal as the reason — NEVER a crash or a
+  // retry loop, and NEVER the "propose options" nudge (a refusing model won't). Checked
+  // first so it wins over an empty-turn "stalled" classification.
+  if (isRefusalStop(stopReason)) {
+    return { ...base, refusal: true, haltReason: REFUSAL_HALT_REASON, trigger: 'model_refusal' };
+  }
   // A request for a scoped one-time authorization ends the cycle awaiting an admin
   // (it wants to CONTINUE after a grant, so it's checked before halt).
   const authCall = calls.find((c) => c && c.name === 'request_authorization');
@@ -444,6 +452,7 @@ export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit 
 export function haltReasonLabel(reason) {
   switch (reason) {
     case 'model_halt': return 'the build reported it was blocked';
+    case 'model_refusal': return 'the model declined to continue (safety refusal)';
     case 'no_tool_calls': return 'no progress — repeated turns with no action';
     case 'repeated_output': return 'no progress — the same response repeated without changes';
     case 'no_state_change': return 'no progress — repeated the same action with no change';
@@ -451,6 +460,16 @@ export function haltReasonLabel(reason) {
     default: return String(reason || 'blocked');
   }
 }
+
+// A model turn that ended in a safety refusal (Fable 5's classifier can emit
+// stop_reason "refusal"; Opus 4.8 never does). Pure so both runners test it identically.
+export function isRefusalStop(stopReason) {
+  return String(stopReason || '').trim().toLowerCase() === 'refusal';
+}
+
+// The halt reason surfaced when a turn is a refusal — a needs-attention, resumable halt.
+export const REFUSAL_HALT_REASON =
+  'The model declined to continue (a safety refusal). A human should review and redirect it; your work so far is checkpointed and this is resumable.';
 
 // ---- Claude Agent SDK runner (Phase 1, docs/agent-sdk-migration.md) ----
 

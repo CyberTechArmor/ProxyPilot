@@ -36,7 +36,7 @@ export default function BuildStatus({
   const [view, setView] = useState('build'); // 'build' | 'changes'
   const [deviations, setDeviations] = useState([]); // open framework_deviation queue items (admin)
   const [devBusy, setDevBusy] = useState(false);
-  const [downOpen, setDownOpen] = useState(false); // thumbs-down note composer open
+  const [fbRating, setFbRating] = useState(null); // 'up' | 'down' | null — note composer open for this rating
   const [note, setNote] = useState('');
   const [fbBusy, setFbBusy] = useState(false);
 
@@ -296,28 +296,33 @@ export default function BuildStatus({
             ) : canEdit && needsFeedback ? (
               <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
                 <p className="text-xs font-medium">How did this build go? A rating is required before the next change.</p>
-                {!downOpen ? (
+                {!fbRating ? (
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" className="h-9" disabled={fbBusy} onClick={async () => { setFbBusy(true); try { await onFeedback('up'); } finally { setFbBusy(false); } }}>
-                      {fbBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ThumbsUp className="h-4 w-4 mr-1" />} Looks good
+                    <Button size="sm" className="h-9" disabled={fbBusy} onClick={() => { setNote(''); setFbRating('up'); }}>
+                      <ThumbsUp className="h-4 w-4 mr-1" /> Looks good
                     </Button>
-                    <Button variant="outline" size="sm" className="h-9" disabled={fbBusy} onClick={() => setDownOpen(true)}>
+                    <Button variant="outline" size="sm" className="h-9" disabled={fbBusy} onClick={() => { setNote(''); setFbRating('down'); }}>
                       <ThumbsDown className="h-4 w-4 mr-1" /> Something's off
                     </Button>
                   </div>
                 ) : (
                   <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      {fbRating === 'up'
+                        ? <><ThumbsUp className="h-3.5 w-3.5 text-emerald-500" /> Anything noteworthy? (optional — saved to the build log)</>
+                        : <><ThumbsDown className="h-3.5 w-3.5 text-amber-500" /> What went wrong or could be better? (required)</>}
+                    </p>
                     <textarea
                       className="flex min-h-[64px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      placeholder="What went wrong or could be better? (saved to the build log)"
+                      placeholder={fbRating === 'up' ? 'Optional note…' : 'Describe the problem…'}
                       value={note}
                       onChange={(e) => setNote(e.target.value)}
                     />
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" className="h-9" disabled={fbBusy || !note.trim()} onClick={async () => { setFbBusy(true); try { await onFeedback('down', note.trim()); setDownOpen(false); setNote(''); } catch { /* keep open */ } finally { setFbBusy(false); } }}>
-                        {fbBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Submit feedback
+                      <Button size="sm" className="h-9" disabled={fbBusy || (fbRating === 'down' && !note.trim())} onClick={async () => { setFbBusy(true); try { await onFeedback(fbRating, note.trim()); setFbRating(null); setNote(''); } catch { /* keep open */ } finally { setFbBusy(false); } }}>
+                        {fbBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Submit {fbRating === 'up' ? '👍' : 'feedback'}
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-9" disabled={fbBusy} onClick={() => { setDownOpen(false); setNote(''); }}>Cancel</Button>
+                      <Button variant="ghost" size="sm" className="h-9" disabled={fbBusy} onClick={() => { setFbRating(null); setNote(''); }}>Cancel</Button>
                     </div>
                   </div>
                 )}

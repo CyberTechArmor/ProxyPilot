@@ -248,3 +248,94 @@ export function describeRunnerStep(turn, toolCalls = []) {
 // instead of ending the turn early.
 export const STALL_NUDGE =
   'You did not call a tool. Continue: inspect or edit files, run the gates, and call finish only when every gate is green.';
+
+// ---- Claude Agent SDK runner (Phase 1, docs/agent-sdk-migration.md) ----
+
+// buildRunnerMode — which build runner drives a cycle. Pure so it's testable and
+// so the flag has ONE authoritative reading. 'sdk' selects the Claude Agent SDK
+// runner (runner-sdk.js); anything else (unset / any other value) keeps the
+// hand-rolled loop (runner.js runCycle) — the default, byte-for-byte unchanged.
+// The flag is deliberately opt-in: an install that never sets BUILD_RUNNER behaves
+// exactly as it did before this migration existed.
+export function buildRunnerMode(env = {}) {
+  return String(env.BUILD_RUNNER || '').trim().toLowerCase() === 'sdk' ? 'sdk' : 'handrolled';
+}
+
+// The built-in Claude Agent SDK tools the build runner is allowed to use. These
+// replace the hand-rolled RUNNER_TOOLS: the SDK executes them itself against its
+// working directory (the local checkout), so we don't implement tool execution.
+// Deliberately the read/inspect/edit/run set — no network tools (the constitution
+// and gate battery, not an allowlist here, govern what the change may contain).
+export const SDK_ALLOWED_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob']);
+
+// buildRunnerClaudeMd — render the SAME governance content the hand-rolled system
+// prompt injects (buildRunnerSystemPrompt), but as a CLAUDE.md document that the
+// Agent SDK auto-loads from the working directory (settingSources: ['project']).
+// This is the Phase-1 proof that the constitution is SOURCED FROM CONTEXT, not
+// re-explored: it travels as pinned framework content into a file the SDK reads on
+// its own. Pure so the mapping is unit-testable and can't silently drift from the
+// system-prompt version. `task` is passed to the SDK as the prompt, so it is NOT
+// duplicated here; the administrator-decisions block (when present) rides on the
+// task like it does today.
+export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000 } = {}) {
+  const skillLines = skills.length
+    ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
+    : '- (no skills configured in this framework version)';
+  return `# Mock2 build runner — project constitution & working rules
+
+You are the Mock2 build runner. You make one small, targeted change to this project's
+code, verify it against a fixed gate battery, and stop. You never approve your own
+work and you never release to production — a human reviewer gates production.
+
+The project working tree here is a TypeScript / Express / Drizzle / Zod application
+(the standard scaffold): the app lives under \`src/\` (\`src/server.ts\` binds the
+declared web port and mounts \`src/app.ts\`; feature modules under \`src/\` expose
+routes → service → Drizzle schema; database migrations are numbered SQL files in
+\`migrations/\`). How the app installs, migrates, builds and starts is DECLARED in
+\`mock2.yaml\` under \`run:\` — edit that contract if you change how it runs; never
+rely on the placeholder \`serve.py\` or \`public/\` (those are the pre-build front
+door and are replaced by the app's own runtime once it is deployed). After your
+change passes the gates, ProxyPilot deploys it (install → migrate → build → start)
+so the live URL on port ${webPort} serves the real app — so make the change in the
+TypeScript source, keep it type-clean, and keep the run contract in \`mock2.yaml\`
+accurate.
+
+## Design fidelity (binding — reproduce the approved look)
+The approved design's visual language is captured in \`state/design-tokens.json\`
+(colors, typography, corner radius, spacing, shadow) with a ready stylesheet
+rendered from it at \`state/design.css\`. Read both. The app MUST reproduce that
+look, not a generic default: make the app load that stylesheet (serve it as a
+static asset and link it, or import its tokens into the app's CSS) and style every
+screen with those tokens — the same colors, fonts, radii, and component styling
+the mockup used. Do not invent a different visual style. If the files are absent
+(an older project), fall back to a clean, consistent look.
+
+## Organizational constitution (pinned — this is binding, not advisory)
+${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
+
+## Administrator-approved exceptions (override the constitution for THIS project)
+Your task may contain a section headed "Administrator decisions on framework
+deviations". Those are AUTHORITATIVE: an administrator has explicitly signed off
+on them for this project. An APPROVED item OVERRIDES the pinned constitution and
+you MUST implement it exactly as requested — build the login page, auth flow, or
+whatever was approved, even though the constitution would otherwise forbid it. A
+DENIED item must NOT be built. When an approved exception conflicts with the
+constitution, the approved exception WINS. Do not refuse or silently skip an
+approved exception; implementing it is the required work for this build.
+
+## Available skills
+${skillLines}
+
+## How to work
+1. Read the relevant files to understand the current state.
+2. Make the smallest change that satisfies the requested task. Do not refactor,
+   add features, or touch anything the task did not ask for.
+3. Keep the TypeScript source type-clean and keep \`mock2.yaml\`'s run contract
+   accurate. ProxyPilot runs the pinned verification gate battery for you after you
+   finish — you do not run or approve the gates yourself.
+4. When the change is complete, stop. Report a one-line, plain-language summary of
+   what changed for the change record.
+
+The working directory (${appDir}) is a local checkout; your edits are synced back and
+checkpointed by ProxyPilot, not committed by you.`;
+}

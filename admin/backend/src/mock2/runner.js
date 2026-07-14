@@ -43,14 +43,17 @@ import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
-  softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
+  softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { deployProject, readRunContract } from './deploy.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
-const APP_DIR = '/srv/app';
-const GATES_DIR = '/srv/gates';
+// Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
+// BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
+// layout. Unchanged for the default hand-rolled path.
+export const APP_DIR = '/srv/app';
+export const GATES_DIR = '/srv/gates';
 const nowIso = () => new Date().toISOString();
 
 // Live cycle-job progress, keyed by cycle id (house 202+poll pattern). The poll
@@ -62,11 +65,13 @@ export function getCycleJobStatus(cycleId) {
   return activeCycles.get(Number(cycleId)) || null;
 }
 
-function setJob(cycleId, patch) {
+// Exported (with the container/checkpoint tail below) so the SDK runner drives the
+// same poll UI. The behavior is identical to the hand-rolled path's use of it.
+export function setJob(cycleId, patch) {
   const cur = activeCycles.get(Number(cycleId)) || {};
   activeCycles.set(Number(cycleId), { ...cur, ...patch, updatedAt: Date.now() });
 }
-function scheduleJobCleanup(cycleId) {
+export function scheduleJobCleanup(cycleId) {
   setTimeout(() => activeCycles.delete(Number(cycleId)), 120000);
 }
 
@@ -182,9 +187,19 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
 
   setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
 
-  // Fire-and-forget; runCycle owns its own error handling and always lands the
+  // Which runner drives this cycle. Default (unset) is the hand-rolled loop below —
+  // BYTE-FOR-BYTE unchanged. BUILD_RUNNER=sdk selects the Claude Agent SDK runner
+  // (Phase 1, docs/agent-sdk-migration.md), imported dynamically so a flag-off
+  // install never needs @anthropic-ai/claude-agent-sdk present. Both share the same
+  // args, the same terminal-error handling, and the same gate/checkpoint/deploy tail.
+  const args = { cycle, project, containerName, framework, gateScripts, ready };
+  const driveCycle = buildRunnerMode(process.env) === 'sdk'
+    ? () => import('./runner-sdk.js').then((m) => m.runCycleSdk(args))
+    : () => runCycle(args);
+
+  // Fire-and-forget; the runner owns its own error handling and always lands the
   // cycle terminal + releases the lock.
-  runCycle({ cycle, project, containerName, framework, gateScripts, ready }).catch((err) => {
+  driveCycle().catch((err) => {
     console.error(`[mock2] runner crashed for cycle ${cycle.id}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `runner crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { releaseLock(projectId, { type: 'cycle', id: cycle.id }); } catch { /* ignore */ }
@@ -557,11 +572,13 @@ function safeRel(path) {
 
 // Run a shell script INSIDE the container (base64-streamed to `incus exec -- sh`,
 // so no quoting hazard from model-supplied content). Always resolves.
-function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
+// Exported so the SDK runner (runner-sdk.js) syncs its local checkout in/out of the
+// fenced container through the same host round-trip — unchanged for the default path.
+export function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
-async function execInContainer(containerName, command) {
+export async function execInContainer(containerName, command) {
   const script = `cd '${APP_DIR}' 2>/dev/null || cd /\n${command}\n`;
   const r = await containerSh(containerName, script, { timeoutMs: 180000 });
   return { code: r.code, stdout: (r.stdout || '').slice(0, MAX_TOOL_RESULT_CHARS), stderr: (r.stderr || '').slice(0, 2000) };
@@ -591,7 +608,8 @@ function gateFilename(gate, i) {
 }
 
 // Copy the pinned gate scripts into GATES_DIR (ADR-003). One host round-trip.
-async function copyGatesIntoContainer(containerName, gateScripts) {
+// Exported so the SDK runner copies the SAME pinned battery in at cycle start.
+export async function copyGatesIntoContainer(containerName, gateScripts) {
   let script = `mkdir -p ${GATES_DIR}\n`;
   gateScripts.forEach((g, i) => {
     const f = gateFilename(g, i);
@@ -606,7 +624,8 @@ async function copyGatesIntoContainer(containerName, gateScripts) {
 // Run the whole gate battery, updating the cycle's gates_json + current_gate as
 // each gate runs (the "gates going green" view). Returns the report list. Gate
 // output is stored per gate for the "review, not error" framing.
-async function runGateBattery(cycleId, containerName, gateScripts) {
+// Exported so the SDK runner runs the IDENTICAL pinned battery (same invocation).
+export async function runGateBattery(cycleId, containerName, gateScripts) {
   const reports = gateScripts.map((g) => ({ name: g.name, status: 'pending', started_at: null, report: null }));
   for (let i = 0; i < gateScripts.length; i++) {
     reports[i].status = 'running';
@@ -626,7 +645,7 @@ async function runGateBattery(cycleId, containerName, gateScripts) {
   return reports;
 }
 
-function formatGateReports(reports) {
+export function formatGateReports(reports) {
   return reports.map((g) => `- ${g.name}: ${g.status}${g.report ? `\n    ${g.report.split('\n').slice(-3).join('\n    ')}` : ''}`).join('\n');
 }
 
@@ -635,7 +654,8 @@ function formatGateReports(reports) {
 // Checkpoint the working tree into the bare repo (ADR-006 mount), insert the
 // hash-chained change record, mirror it into the repo, and push to a
 // push_on_checkpoint remote if configured. Returns the inserted record (or null).
-async function checkpointAndRecord({ cycle, project, containerName, holder, gateReports, gateScripts, framework, summary }) {
+// Exported so the SDK runner produces the SAME commit + hash-chained change record.
+export async function checkpointAndRecord({ cycle, project, containerName, holder, gateReports, gateScripts, framework, summary }) {
   const projectId = Number(project.id);
   setJob(cycle.id, { phase: 'checkpoint', message: 'Checkpointing into the bare repo…' });
 
@@ -702,7 +722,8 @@ async function checkpointAndRecord({ cycle, project, containerName, holder, gate
 //   - !ok: install/migrate/build/start/health failed — a distinct, retryable
 //     terminal state (cycle → 'failed', deploy_status → 'deploy_failed'). The
 //     existing editor Retry (CycleCard, cycle.status === 'failed') resumes it.
-async function deployStage({ cycle, project, containerName, holder }) {
+// Exported so the SDK runner deploys through the IDENTICAL Run phase.
+export async function deployStage({ cycle, project, containerName, holder }) {
   const projectId = Number(project.id);
   const webPort = project.web_port || 3000;
 

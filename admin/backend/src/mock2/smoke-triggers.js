@@ -20,15 +20,17 @@
 // so an operator can tune what counts as user-facing / data-semantic without a code
 // change. Globs match the cycle's changed-file paths (relative to the app dir).
 export const DEFAULT_SMOKE_CONFIG = Object.freeze({
-  // Connectors are OFF by default: registered + wired, but never started unless the
-  // operator enables them AND a trigger fires. A disabled-but-triggered connector is
-  // reported as "unavailable" (visible), never a silent pass.
-  browserEnabled: false,
-  dbEnabled: false,
-  // If true, a triggered-but-disabled/unavailable connector FAILS the smoke gate
-  // (constitution "fail-visibly when dependencies are missing"). Default false
-  // because the connectors are opt-in infra — the miss is logged loudly regardless.
-  requireTriggered: false,
+  // Connectors are ON by default (the change-69 lesson: a UI regression shipped
+  // through five green gates because nothing exercised the rendered DOM). A
+  // trigger still gates WHEN they run — a backend-only diff invokes neither.
+  // Operators can opt out per install (SMOKE_BROWSER_ENABLED=0 / SMOKE_DB_ENABLED=0).
+  browserEnabled: true,
+  dbEnabled: true,
+  // A triggered-but-disabled/unavailable connector FAILS the smoke gate
+  // (constitution "fail-visibly when dependencies are missing"): a warranted
+  // rendered-DOM or data-state check that cannot run must never let the cycle
+  // report success. Opt out with SMOKE_REQUIRE_TRIGGERED=0.
+  requireTriggered: true,
   // If true, a failing ALWAYS-ON http layer fails the cycle. Default false so adding
   // the smoke gate does not change outcomes for apps whose conventional admin-path
   // probing we haven't validated — the http result is logged either way. An INVOKED

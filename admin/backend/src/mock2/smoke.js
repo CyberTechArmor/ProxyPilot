@@ -10,10 +10,16 @@
 // (a regex over the changed-file list, far cheaper than a browser), and it spins up
 // only on a hit. Every run/skip + its one-line reason is recorded (no silent skips).
 //
-// Constraints honored here: connectors default-OFF; the DB connector is READ-ONLY;
-// the trigger check is cheaper than starting a connector; nothing here is a standing
-// gate step (a backend-only change invokes zero connectors); playwright is imported
-// lazily so a default install never loads it.
+// Constraints honored here: the trigger check is cheaper than starting a connector;
+// nothing here is a standing gate step (a backend-only change invokes zero
+// connectors); playwright is imported lazily so a disabled install never loads it.
+// Since change-69 (a disabled-admin-inputs UI regression shipped through five green
+// gates) the connectors default ON and a warranted-but-unrunnable connector FAILS
+// the cycle (SMOKE_REQUIRE_TRIGGERED) — never a silent skip that reads as success.
+// The browser connector executes the project's declarative state/ui-checks.json
+// interaction checks (ui-checks.js); the DB connector dry-runs the FULL migration
+// chain on a scratch database and boots the app against it — the app's own
+// database is never written.
 //
 // Terminology (risk R7): nothing here is named "agent".
 
@@ -22,6 +28,11 @@ import {
   smokeConfigFromEnv, evaluateSmokeTriggers, applyEscalations,
   resolveSmokeConnectors, smokeLogLines,
 } from './smoke-triggers.js';
+import { readRunContract } from './deploy.js';
+import {
+  UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
+} from './ui-check-logic.js';
+import { runUiChecks, launchOptions } from './ui-checks.js';
 
 // Run a script inside the container (same base64-streamed pivot as the runner).
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -85,11 +96,51 @@ async function httpSmoke(containerName, webPort) {
 
 // ---- browser connector (lazy Playwright; started only on a hit) ----
 
-// Drive the deployed page and assert the rendered journey. Default assertion: a
-// fresh-install root shows exactly ONE visible form (the superadmin signup) — the
-// "one form, not three" render check. Playwright is imported lazily so a default
-// install never loads it. Never throws — returns { ok, detail }.
-async function driveBrowserConnector({ url, config }) {
+// Read the project's declarative interaction spec (state/ui-checks.json) from
+// the working tree. Returns { exists, text } — parsing/validation is the pure
+// layer's job so a malformed spec fails with ONE authoritative error message.
+async function readUiChecksFile(containerName, appDir) {
+  const script = `if [ -f '${appDir}/${UI_CHECKS_PATH}' ]; then echo '__UI_CHECKS__'; cat '${appDir}/${UI_CHECKS_PATH}'; fi`;
+  const r = await containerSh(containerName, script, { timeoutMs: 20000 });
+  const out = r.stdout || '';
+  if (!out.startsWith('__UI_CHECKS__')) return { exists: false, text: '' };
+  return { exists: true, text: out.slice('__UI_CHECKS__'.length).replace(/^\n/, '') };
+}
+
+// Drive the deployed UI. PRIMARY layer (change-69): execute the project's
+// state/ui-checks.json interaction checks that this diff's changed paths
+// warrant — per-role login (seeded fixture users), enabled/disabled control
+// assertions, type→value-persisted, Replace→secret-enables flows, and a
+// fail-on-any-console-error rule. Falls back to the original render check
+// (visible-form count on the root page) when the project has no spec or no
+// check matches this diff. A spec that exists but does not parse FAILS the
+// connector — a broken test manifest must never read as a pass. Never throws.
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles }) {
+  // 1) Project interaction checks, when declared.
+  if (containerName) {
+    const file = await readUiChecksFile(containerName, appDir);
+    if (file.exists) {
+      const parsed = parseUiChecks(file.text);
+      if (!parsed.ok) return { ok: false, detail: `ui-checks spec invalid: ${parsed.error}` };
+      const matched = checksForChangedFiles(parsed.spec, changedFiles);
+      if (matched.length) {
+        const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: matched });
+        if (run.unavailable) return { ok: false, unavailable: true, detail: run.detail };
+        return {
+          ok: run.ok,
+          detail: run.ok
+            ? `${run.results.length} interaction check(s) passed`
+            : `interaction checks failed — ${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
+          uiChecks: run.results,
+          logLines: uiCheckLogLines(run.results),
+        };
+      }
+      // Spec exists but nothing matches this diff — fall through to the render
+      // check (and say so; the coverage gate is what enforces matching checks).
+    }
+  }
+
+  // 2) Fallback: the original journey render check + console errors on load.
   let chromium;
   try {
     ({ chromium } = await import('playwright'));
@@ -98,14 +149,18 @@ async function driveBrowserConnector({ url, config }) {
   }
   let browser = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(launchOptions());
     const page = await browser.newPage();
+    const consoleErrors = [];
+    page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
+    page.on('pageerror', (err) => { consoleErrors.push(String(err?.message || err).slice(0, 300)); });
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
     // Count VISIBLE forms — the multi-form render regression shows 3 where 1 is right.
     const forms = await page.locator('form:visible').count();
     const expected = Number(config.browserExpectedForms ?? 1);
-    const ok = forms === expected;
-    return { ok, detail: `rendered ${forms} visible form(s), expected ${expected}${ok ? '' : ' — journey render mismatch'}` };
+    const ok = forms === expected && consoleErrors.length === 0;
+    const consoleNote = consoleErrors.length ? ` · ${consoleErrors.length} console error(s): ${consoleErrors[0]}` : '';
+    return { ok, detail: `no matching ui-checks — render fallback: ${forms} visible form(s), expected ${expected}${consoleNote}` };
   } catch (err) {
     return { ok: false, detail: `browser connector error: ${err?.message || err}` };
   } finally {
@@ -113,34 +168,67 @@ async function driveBrowserConnector({ url, config }) {
   }
 }
 
-// ---- DB connector (READ-ONLY; started only on a hit) ----
+// ---- DB connector (migration dry-run on a SCRATCH database; started only on a hit) ----
 
-// Read the live table(s) and assert the expected data state. READ-ONLY: the query is
-// wrapped so it can only SELECT (a default read-only transaction, and we never issue
-// a write). Default assertion: on a fresh install, zero users ⇒ canCreateSuperadmin.
-// Runs psql inside the container against the in-container Postgres. Never throws.
-async function driveDbConnector({ containerName, config }) {
-  // A strictly read-only probe: SET TRANSACTION READ ONLY then a single COUNT. The
-  // DSN is the app's own env (in-container Postgres); we only read.
-  const query = String(config.dbAssertQuery || 'SELECT count(*) AS n FROM users');
-  if (!/^\s*select\b/i.test(query) || /;|--|\b(insert|update|delete|drop|alter|truncate|create|grant)\b/i.test(query)) {
-    return { ok: false, detail: 'db connector: refusing a non read-only query' };
+// A diff that touches migrations/ or the data layer must prove two things
+// before the cycle can succeed: (1) the FULL migration chain applies cleanly to
+// a scratch database created for this run, and (2) the app BOOTS against that
+// result (declared start command, throwaway port, HTTP answer). The deploy step
+// already migrated the LIVE database, so "pending migrations apply" is vacuous
+// by smoke time — a from-zero chain apply is the assertion that actually
+// catches a broken/ordered-wrong/new migration. The app's own database is never
+// touched: everything runs against smoke_mig_<pid>, dropped afterwards. Runs
+// inside the container (psql + the declared run contract). Never throws.
+async function driveDbConnector({ containerName, appDir }) {
+  const contract = await readRunContract(containerName, appDir);
+  if (!contract.hasContract || !contract.migrate) {
+    // Nothing declared to dry-run (placeholder project / no migrate command) —
+    // visible in the log, not a silent pass of something that exists.
+    return { ok: true, detail: 'no run contract / migrate command declared — no migration chain to verify' };
   }
+  const bootPort = 18973; // fixed throwaway port well away from app ports
   const script = `set -a\n. /etc/environment 2>/dev/null || true\nset +a\n`
+    + `cd '${appDir}' 2>/dev/null || { echo "NO_APPDIR"; exit 0; }\n`
     + `DSN="\${DATABASE_URL:-\${DB_URL:-}}"\n`
     + `if [ -z "$DSN" ]; then echo "NO_DSN"; exit 0; fi\n`
-    // psql in a read-only transaction; -tA = tuples only, unaligned.
-    + `psql "$DSN" -v ON_ERROR_STOP=1 -tA -c 'SET TRANSACTION READ ONLY' -c ${shSingleQuote(query)} 2>&1\n`;
-  const r = await containerSh(containerName, script, { timeoutMs: 30000 });
+    + `SMOKEDB="smoke_mig_$$"\n`
+    // A scratch DSN: swap the database name in the app's own DSN.
+    + `SDSN=$(printf '%s' "$DSN" | sed -E "s#/[^/?]+(\\?.*)?\$#/\${SMOKEDB}\\1#")\n`
+    + `psql "$DSN" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \${SMOKEDB}" >/dev/null 2>&1 || { echo "CREATE_FAIL"; exit 0; }\n`
+    + `cleanup() { psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB} WITH (FORCE)" >/dev/null 2>&1 || psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB}" >/dev/null 2>&1; }\n`
+    + `trap cleanup EXIT\n`
+    // (1) full migration chain against the scratch DB.
+    + `if DATABASE_URL="$SDSN" DB_URL="$SDSN" timeout 180 sh -c ${shSingleQuote(String(contract.migrate))} >/tmp/smoke-mig.log 2>&1; then\n`
+    + `  echo "MIGRATE:ok"\n`
+    + `else\n`
+    + `  echo "MIGRATE:fail"\n  tail -c 1500 /tmp/smoke-mig.log\n  exit 0\nfi\n`
+    // (2) boot the app against the migrated scratch DB on a throwaway port.
+    + `( DATABASE_URL="$SDSN" DB_URL="$SDSN" PORT=${bootPort} WEB_PORT=${bootPort} setsid timeout 30 sh -c ${shSingleQuote(String(contract.start))} >/tmp/smoke-boot.log 2>&1 & echo $! > /tmp/smoke-boot.pid )\n`
+    + `code=000\n`
+    + `for i in $(seq 1 20); do\n`
+    + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:${bootPort}/" 2>/dev/null || echo 000)\n`
+    + `  [ "$code" != "000" ] && break\n  sleep 1\ndone\n`
+    + `echo "BOOT:$code"\n`
+    + `[ "$code" = "000" ] && tail -c 800 /tmp/smoke-boot.log\n`
+    + `pid=$(cat /tmp/smoke-boot.pid 2>/dev/null); [ -n "$pid" ] && kill -- -"$pid" >/dev/null 2>&1; rm -f /tmp/smoke-boot.pid\n`;
+  const r = await containerSh(containerName, script, { timeoutMs: 300000 });
   const out = (r.stdout || '').trim();
   if (/NO_DSN/.test(out)) return { ok: false, unavailable: true, detail: 'db connector: no DATABASE_URL in the container environment' };
-  if (r.code !== 0) return { ok: false, detail: `db connector query failed: ${out.slice(-300)}` };
-  // Default assertion: the first numeric line is the row count; expect the configured
-  // value (default 0 users on a fresh install → canCreateSuperadmin true).
-  const n = Number((out.match(/-?\d+/) || [])[0]);
-  const expected = Number(config.dbExpectedCount ?? 0);
-  const ok = Number.isFinite(n) && n === expected;
-  return { ok, detail: `query returned ${Number.isFinite(n) ? n : out.slice(0, 80)}, expected ${expected}${ok ? '' : ' — data-state mismatch'}` };
+  if (/NO_APPDIR/.test(out)) return { ok: false, detail: 'db connector: app dir missing' };
+  if (/CREATE_FAIL/.test(out)) return { ok: false, detail: 'db connector: could not create the scratch database (psql/permissions)' };
+  const migrated = /MIGRATE:ok/.test(out);
+  if (!migrated) {
+    const log = out.split('MIGRATE:fail')[1] || '';
+    return { ok: false, detail: `migration chain failed on a scratch database: ${log.trim().slice(-400) || 'see /tmp/smoke-mig.log'}` };
+  }
+  const boot = (out.match(/BOOT:(\d+)/) || [])[1] || '000';
+  const booted = boot !== '000' && Number(boot) < 500;
+  return {
+    ok: booted,
+    detail: booted
+      ? `migration chain applied cleanly to a scratch database and the app booted against it (GET / → ${boot})`
+      : `migrations applied but the app did NOT boot against the result (GET / → ${boot})`,
+  };
 }
 
 function shSingleQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
@@ -173,10 +261,10 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || `http://127.0.0.1:${webPort}/`;
-    report.browser = { ...(await driveBrowserConnector({ url: target, config })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
-    report.db = { ...(await driveDbConnector({ containerName, config })), reason: resolved.db.reason };
+    report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
   }
 
   // 4) Verdict. The always-on http layer is load-bearing. An invoked connector that
@@ -194,6 +282,7 @@ export async function runSmokeGate({
 
   const logLines = [
     ...smokeLogLines(resolved),
+    ...(report.browser?.logLines || []),
     ...report.rejected.map((r) => `escalation rejected — ${r.why}`),
   ];
   return { ok, report, logLines };

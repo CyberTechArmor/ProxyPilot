@@ -82,13 +82,29 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'finish',
     description:
-      'Declare the targeted change complete AND WORKING. Only call this after run_gates reports every gate green. finish records the cycle as SUCCEEDED and deploys it — never call it for blocked, partial, or not-actually-working work. Provide a one-line, plain-language summary of what changed for the change record.',
+      'Declare the targeted change complete AND WORKING. Only call this after run_gates reports every gate green. finish records the cycle as SUCCEEDED and deploys it — never call it for blocked, partial, or not-actually-working work. Provide a one-line, plain-language summary, the human-runnable acceptance check(s), and your verified-vs-assumed cross-layer assumption list — all three land in the change record.',
     input_schema: {
       type: 'object',
       properties: {
         summary: { type: 'string', description: 'Human-readable "what changed", one line.' },
+        acceptance: {
+          type: 'array',
+          minItems: 1,
+          items: { type: 'string' },
+          description: 'Human-runnable acceptance check(s), ONE PER USER-VISIBLE CHANGE, each in "as <role>, do X, expect Y" form (e.g. "as admin, open Connection Settings, type into Client ID — the value persists and Test connection is clickable"). For a change with no user-visible surface, one entry describing the verification actually performed.',
+        },
+        assumptions: {
+          type: 'object',
+          description: 'Cross-layer assumptions behind this change, split HONESTLY: verified = values you READ the authoritative source for THIS cycle (name the file, e.g. "src/routes/profile.ts returns lowercase role slugs"); assumed = values you relied on without reading. A permission or role-name value in `assumed` is a defect — verify it before finishing. Use empty arrays only when genuinely none exist.',
+          properties: {
+            verified: { type: 'array', items: { type: 'string' }, description: 'Assumptions verified against source this cycle, each naming the file read.' },
+            assumed: { type: 'array', items: { type: 'string' }, description: 'Assumptions NOT verified against source (should be empty for permission/role values).' },
+          },
+          required: ['verified', 'assumed'],
+          additionalProperties: false,
+        },
       },
-      required: ['summary'],
+      required: ['summary', 'acceptance', 'assumptions'],
       additionalProperties: false,
     },
   },
@@ -272,8 +288,12 @@ ${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
 2. Make the smallest change that satisfies the requested task. Do not refactor,
    add features, or touch anything the task did not ask for.
 3. Call run_gates. If any gate is red, fix the cause and run them again.
-4. When every gate is green, call finish with a one-line summary. Do not call
-   finish before the gates are green.
+4. When every gate is green, call finish with a one-line summary, the
+   human-runnable acceptance check(s) ("as <role>, do X, expect Y" — one per
+   user-visible change), and your cross-layer assumptions split into verified
+   (you READ the source this cycle — name the file) vs assumed. Do not call
+   finish before the gates are green, and do not leave a permission or
+   role-name value in "assumed" — verify it.
 
 # If you cannot honestly finish
 If you cannot complete the change — you are blocked, a dependency is missing, the
@@ -314,6 +334,22 @@ export function buildRunnerTask(instruction) {
   return `Task: ${String(instruction || '').trim()}`;
 }
 
+// Render finish's acceptance + assumptions into the block appended to the
+// change record's summary (and mirrored into the cycle event log) — the
+// human-runnable evidence a Reviewer replays. Pure so the record shape is
+// testable and can't drift between runners.
+export function formatAcceptanceBlock(acceptance = [], assumptions = null) {
+  const lines = ['Acceptance:'];
+  for (const a of Array.isArray(acceptance) ? acceptance : []) lines.push(`- ${a}`);
+  const v = assumptions?.verified || [];
+  const s = assumptions?.assumed || [];
+  lines.push(`Assumptions verified:${v.length ? '' : ' (none)'}`);
+  for (const x of v) lines.push(`- ${x}`);
+  lines.push(`Assumptions assumed:${s.length ? '' : ' (none)'}`);
+  for (const x of s) lines.push(`- ${x}`);
+  return lines.join('\n');
+}
+
 // Classify a model turn's outcome for the loop. Given the assistant turn's tool
 // calls and whether the turn produced any, decide what the runner does next.
 //   - a `halt` call → the model cannot honestly finish (blocked); end non-success
@@ -346,7 +382,21 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
   }
   const finishCall = calls.find((c) => c && c.name === 'finish');
   if (finishCall) {
-    return { ...base, done: true, finishSummary: String(finishCall.input?.summary || 'change complete') };
+    const acceptance = Array.isArray(finishCall.input?.acceptance)
+      ? finishCall.input.acceptance.map((s) => String(s || '').trim()).filter(Boolean)
+      : [];
+    const a = finishCall.input?.assumptions;
+    const strList = (v) => (Array.isArray(v) ? v.map((s) => String(s || '').trim()).filter(Boolean) : null);
+    const assumptions = a && typeof a === 'object' && strList(a.verified) && strList(a.assumed)
+      ? { verified: strList(a.verified), assumed: strList(a.assumed) }
+      : null;
+    return {
+      ...base,
+      done: true,
+      finishSummary: String(finishCall.input?.summary || 'change complete'),
+      finishAcceptance: acceptance,
+      finishAssumptions: assumptions,
+    };
   }
   if (calls.length === 0) {
     return { ...base, stalled: true, toolCalls: [] };
@@ -570,8 +620,11 @@ ${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: 
 3. Keep the TypeScript source type-clean and keep \`mock2.yaml\`'s run contract
    accurate. ProxyPilot runs the pinned verification gate battery for you after you
    finish — you do not run or approve the gates yourself.
-4. When the change is complete, stop. Report a one-line, plain-language summary of
-   what changed for the change record.
+4. When the change is complete, stop. Report, for the change record: a one-line
+   plain-language summary of what changed; a human-runnable acceptance check per
+   user-visible change ("as <role>, do X, expect Y"); and your cross-layer
+   assumptions split into verified (you read the source this cycle — name the
+   file) vs assumed. A permission or role-name value left "assumed" is a defect.
 
 ## If you cannot honestly finish
 If you are blocked — a missing dependency, a gate that can't pass for a reason

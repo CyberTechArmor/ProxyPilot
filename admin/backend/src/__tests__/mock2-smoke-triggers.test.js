@@ -138,9 +138,18 @@ test('resolveConnectorRun: fired and enabled → ran; not fired → skipped', ()
 
 // ---- config from env ----
 
-test('smokeConfigFromEnv: connectors default OFF; enable flags + glob overrides parse', () => {
-  assert.equal(smokeConfigFromEnv({}).browserEnabled, false);
-  assert.equal(smokeConfigFromEnv({}).dbEnabled, false);
+test('smokeConfigFromEnv: connectors default ON + required (change-69 lesson); flags + globs parse', () => {
+  // A UI regression shipped through five green gates because nothing exercised
+  // the rendered DOM — the browser/db connectors and requireTriggered are now
+  // default-ON so a warranted-but-unrunnable connector can never silently pass.
+  assert.equal(smokeConfigFromEnv({}).browserEnabled, true);
+  assert.equal(smokeConfigFromEnv({}).dbEnabled, true);
+  assert.equal(smokeConfigFromEnv({}).requireTriggered, true);
+  // Operators can still opt out per install.
+  const off = smokeConfigFromEnv({ SMOKE_BROWSER_ENABLED: '0', SMOKE_DB_ENABLED: 'false', SMOKE_REQUIRE_TRIGGERED: '0' });
+  assert.equal(off.browserEnabled, false);
+  assert.equal(off.dbEnabled, false);
+  assert.equal(off.requireTriggered, false);
   const cfg = smokeConfigFromEnv({ SMOKE_BROWSER_ENABLED: '1', SMOKE_DB_GLOBS: 'db/**, **/*.sql' });
   assert.equal(cfg.browserEnabled, true);
   assert.deepEqual(cfg.dbGlobs, ['db/**', '**/*.sql']);

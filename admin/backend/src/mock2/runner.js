@@ -50,7 +50,7 @@ import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
-  buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
+  buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
@@ -643,6 +643,23 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
+      // Acceptance criteria are REQUIRED on finish (constitution §11): a
+      // human-runnable check per user-visible change + the verified-vs-assumed
+      // assumption split. A finish without them is rejected back to the model;
+      // the no-progress breaker terminates a cycle that keeps refusing.
+      if (!decision.finishAcceptance?.length || !decision.finishAssumptions) {
+        transcript.push({
+          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          content: 'Not finished: finish requires `acceptance` (≥1 human-runnable check — "as <role>, do X, expect Y" — one per user-visible change, or one entry describing the non-UI verification performed) and `assumptions` ({verified:[…], assumed:[…]} — the cross-layer values you READ the source for this cycle, naming the file, vs the ones you assumed). Re-call finish with both.',
+        });
+        logEvent('note', { role: 'system', content: 'Finish rejected — missing acceptance checks / assumptions; asked the build to restate.' });
+        touchLock(projectId, holder);
+        if (progress.tripped) {
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); finish kept omitting acceptance criteria.`, logEvent });
+          return scheduleJobCleanup(cycle.id);
+        }
+        continue;
+      }
       logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}` });
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       lastGateReports = battery;
@@ -663,7 +680,16 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         }
         continue;
       }
-      const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: decision.finishSummary });
+      // The change record carries the acceptance evidence (constitution §11):
+      // summary + the acceptance/assumptions block, so a Reviewer can replay
+      // the human-runnable checks straight from the record.
+      const recordSummary = `${decision.finishSummary}\n\n${formatAcceptanceBlock(decision.finishAcceptance, decision.finishAssumptions)}`;
+      logEvent('acceptance', {
+        role: 'assistant',
+        content: formatAcceptanceBlock(decision.finishAcceptance, decision.finishAssumptions),
+        meta: { acceptance: decision.finishAcceptance, assumptions: decision.finishAssumptions },
+      });
+      const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: recordSummary });
       logEvent('checkpoint', { role: 'system', content: decision.finishSummary || '', meta: { commit_sha: record?.commit_sha || null, seq: record?.seq ?? null } });
 
       // Run phase — deploy the built app so "succeeded" means "serving". Install

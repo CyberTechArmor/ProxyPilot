@@ -75,6 +75,24 @@ admin + sudo. All mutations are audit-logged.
    is offered it automatically. Nothing about this requires updating
    ProxyPilot itself.
 
+## Example component
+
+`docs/features/examples/ldaps-auth.component.json` is a complete, importable
+example — the canonical LDAPS auth module (search-then-bind, bounded connection
+pool, RFC 4515 escaping, group extraction) in `proxypilot-component@1` format.
+Import it via **Projects → Components → Import** (paste the JSON), or:
+
+```bash
+curl -sS -X POST https://<host>/api/mock2/components/import \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF" -b "$COOKIES" \
+  -d "{\"doc\": $(cat docs/features/examples/ldaps-auth.component.json), \
+       \"change_reason\": \"Seed the library with the LDAPS example\"}"
+```
+
+Re-importing after editing the document appends a new annotated version of the
+same component (matched by `key`).
+
 ## UI
 
 `/projects/components` (`admin/frontend/src/pages/ComponentLibrary.jsx`),

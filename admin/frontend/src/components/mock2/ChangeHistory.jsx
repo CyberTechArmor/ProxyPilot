@@ -2,12 +2,16 @@
 // chain-verification badge, per-change troubleshooting detail, and a downloadable
 // build transcript.
 //
-// Each record is one build checkpoint. Expanding it loads that cycle's full LOG
-// (mock2GetCycleLog): the durable event transcript — the task text, every AI
-// message, every tool call/result, gate outcomes, the checkpoint and the deploy —
-// plus the linked chat, gate results, commit and rules touched. This is what you
-// review to see what the AI actually did (and why a change may not be reflected in
-// the app). "Download log" saves the whole thing as JSON for later evaluation.
+// Each record is one build checkpoint. Expanding it loads that cycle's full
+// transcript (mock2GetCycleLog) for INSPECTION — the task text, every AI message,
+// tool call/result, gate outcomes, the checkpoint and the deploy.
+//
+// DOWNLOADS are request-scoped: one build request = ONE log. A request that
+// halted/resumed/retried spans several checkpoints, but "Download log" on any of
+// them fetches the request's merged, deduplicated artifact (mock2GetRequestLog),
+// which is idempotent per content — every checkpoint of the same request saves
+// the same file. Only a legacy record whose cycle predates the request umbrella
+// (request_id null) falls back to its per-cycle log.
 //
 // MOBILE_FIRST: single column, wrapping rows, 44px expand targets; clean at 360px.
 
@@ -101,8 +105,16 @@ function ChangeDetail({ projectId, record }) {
   const events = log?.events || [];
   const rules = Array.isArray(record.rules_touched) ? record.rules_touched : [];
 
+  // One build request = one log: download the request's merged artifact under
+  // its stable, content-hashed filename, so every checkpoint of the same request
+  // yields the SAME file. Per-cycle fallback only for legacy records.
   const download = async () => {
     try {
+      if (record.request_id != null) {
+        const artifact = await api.mock2GetRequestLog(projectId, record.request_id);
+        downloadJson(artifact.filename || `request-${record.request_id}.json`, artifact);
+        return;
+      }
       const full = log || (record.cycle_id != null ? await api.mock2GetCycleLog(projectId, record.cycle_id) : { record });
       downloadJson(`build-log-change-${record.seq}.json`, full);
     } catch (err) {
@@ -119,6 +131,9 @@ function ChangeDetail({ projectId, record }) {
             <GitCommitHorizontal className="h-3.5 w-3.5" />
             <span className="font-mono">{record.commit_sha ? record.commit_sha.slice(0, 8) : 'no commit'}</span>
           </span>
+          {record.request_id != null ? (
+            <span className="rounded-full bg-muted px-2 py-0.5 font-mono">request #{record.request_id}</span>
+          ) : null}
           {record.used_tokens != null || record.used_cost_cents != null ? (
             <span className="inline-flex items-center gap-1">
               <Coins className="h-3.5 w-3.5" />
@@ -127,7 +142,7 @@ function ChangeDetail({ projectId, record }) {
           ) : null}
         </div>
         <Button variant="outline" size="sm" className="h-8" onClick={download}>
-          <Download className="h-3.5 w-3.5 mr-1" /> Download log
+          <Download className="h-3.5 w-3.5 mr-1" /> {record.request_id != null ? 'Download request log' : 'Download log'}
         </Button>
       </div>
 

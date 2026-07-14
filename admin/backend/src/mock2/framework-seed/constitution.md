@@ -8,7 +8,28 @@ about architecture. This document governs the runner, the generated application,
 and every gate; it is independent of any single project's `state/rules.md`.
 
 > Source: *The Mock2 Framework*, v1.1 (Fractionate LLC, July 2026), §3, §6, §9.
-> This is the operator's real v1 content (closing risk R8 for the constitution).
+> This is the operator's real v1 content (closing risk R8 for the constitution),
+> hardened with the lessons from the first build cycles: identity comes only from a
+> verified credential (§4), HTML shells are served only through gated routes (§5),
+> "done" requires the end-to-end journey and a negative security assertion — not just
+> a green compile (§7), and an approved deviation must propagate everywhere (§9).
+
+## 0. How to work in this repo
+
+- **Read `state/rules.md` and any approved deviations in `state/deviations/` BEFORE
+  changing code.** Confirmed rules and approved deviations override the raw request —
+  and, when approved, override this constitution. If the request conflicts with a
+  confirmed rule, follow the rule.
+- **Authority order (highest wins):** an APPROVED deviation → a confirmed rule in
+  `state/rules.md` → this constitution → the raw build request. A DENIED deviation
+  must not be built.
+- **Read before you write.** Explore the current tree first; don't rebuild what
+  exists. Prefer the smallest change that satisfies the confirmed rules.
+- **Targeted edits, not whole-file rewrites.** Whole-file regeneration silently drops
+  a feature's wiring — the exact way a "done" change loses its UI or its auth.
+- **Finish green *and* working.** "Compiles" and "gates green" are not the definition
+  of done (see §7). Wire the UI that drives any new capability and prove the
+  end-to-end round trip.
 
 ## 1. Design principles (non-negotiable)
 
@@ -64,9 +85,18 @@ keeps its shape:
 ## 4. Auth pattern (one implementation, applied identically)
 
 - Single sign-on with multi-factor authentication for human access.
+- **Identity comes only from a verified credential:** a verified JWT (the
+  `Authorization: Bearer` token or the httpOnly access-token cookie), or — on the SSO
+  gateway path — identity headers that the edge proxy (ProxyPilot) injects **after**
+  authenticating. Nothing else establishes who the caller is.
+- **Never trust a client-supplied identity header.** `x-user-role` / `x-tenant-id`
+  from an unauthenticated caller must never grant a role. Any SSO-header fallback in
+  code is valid **only** because ProxyPilot strips those headers from all inbound
+  client requests — do not rely on that guarantee without a test asserting a raw
+  `x-user-role: admin` request (no token, no cookie) is **rejected**.
 - Role-based access control enforced **server-side on every path** — never in the
   client, never advisory. A Tier-2 review pass confirms RBAC is enforced on every
-  route that touches protected data.
+  route that touches protected data. Least privilege by default.
 - Per-tenant isolation (row-level scoping) in the application database.
 
 ## 5. Security posture
@@ -76,6 +106,11 @@ keeps its shape:
   for embedded private keys, cloud credentials, and tokens and fails the build.
 - **Required headers** on every response: `Content-Security-Policy`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and HSTS in production.
+- **HTML documents** (`app.html`, login pages) are served **only** through gated
+  routes — never handed out from the static layer, or the `/` session gate is
+  bypassable.
+- **Token cookies** are `HttpOnly`, `Secure`, `SameSite`. Refresh tokens are stored
+  **only as hashes**, rotated on refresh, and revoked on use.
 - **Encryption:** TLS in transit (Caddy); sensitive columns encrypted at rest.
 - **Logging:** structured and PII-aware; no secrets or full payloads in logs.
 - **Supply chain:** dependency and image scanning in the deterministic gate tier;
@@ -105,9 +140,24 @@ release, however small.
 
 ## 7. Definition of production-ready
 
-Production-ready has exactly one meaning: **every gate is green.** The Reviewer
-confirms gate results and reads surfaced change descriptions — the role is a
-realistic bar for an operational IT lead, not a senior engineer.
+Production-ready means all of:
+
+- The deterministic gates — `typecheck`, `constitution-lint`, `rule-coverage`,
+  `security-scan`, `test` — are **all green**, **and**
+- the **end-to-end / journey gate** passes: the primary user journey runs against a
+  **real build** (the app booted against Postgres, migrated + seeded, driven over real
+  HTTP — e.g. bootstrap → login → gated load of the shell). **Green gates that only
+  prove the code compiles are not "done."**
+- The e2e gate **fails visibly** when its dependencies are missing — never
+  skip-as-pass — and includes at least one **negative security assertion** (e.g. a
+  spoofed `x-user-role: admin` request with no credential is rejected).
+- **Every confirmed rule in `state/rules.md` has ≥1 covering test** (the rule-coverage
+  gate enforces this — it must actually parse confirmed rules, not no-op).
+
+A build stopped at the token/time budget is **"incomplete / resumable," never
+"succeeded."** The Reviewer confirms gate results and reads surfaced change
+descriptions — a realistic bar for an operational IT lead, not a senior engineer —
+but the bar itself is the working journey above, not a green compile.
 
 ## 8. What is deliberately removed
 
@@ -117,3 +167,23 @@ clarify/tasks/analyze phases as user-facing steps, prose UI specifications,
 coverage-percentage targets, multi-agent orchestration, and per-change AI review.
 Each removal survives one test: *does the exact production result survive without
 it?*
+
+## 9. Deviations — approve once, propagate everywhere
+
+A deviation from this constitution requires **platform-administrator approval**,
+recorded in `state/deviations/`. When a deviation is **APPROVED**, it overrides this
+constitution for that project and must be built **exactly as approved and propagated
+everywhere** — the application code, the **UI copy**, and `state/inventory.json`. An
+approved JWT/password deviation means the login page must not still advertise "SSO
+with MFA," and the inventory must describe the auth that was actually built. A
+**DENIED** deviation must not be built. Silently obeying the constitution and
+building nothing when an exception was approved is a defect, not compliance.
+
+## 10. Scope & integration discipline
+
+- When a task is split across budget-paused chunks, the **final chunk must include an
+  integration / wire-up pass.** Do not declare the whole task done until the journey
+  works end-to-end — front end wired to back end, one coherent auth model, no orphaned
+  placeholder screen.
+- A capability is not delivered until something drives it: a new backend route that no
+  screen calls, or a new screen that calls nothing, is unfinished work, not a feature.

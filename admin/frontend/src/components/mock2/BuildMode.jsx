@@ -203,6 +203,7 @@ export default function BuildMode({
         <BuildChat
           projectId={projectId}
           project={project}
+          cycle={cycle}
           canEdit={canEdit}
           online={online}
           active={active}

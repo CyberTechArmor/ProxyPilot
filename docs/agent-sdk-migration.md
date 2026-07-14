@@ -280,6 +280,75 @@ fabricated:
 > a real install (enable `SMOKE_BROWSER_ENABLED` / `SMOKE_DB_ENABLED`, re-run replays 2 &
 > 3, confirm the browser flags the 3-form render and the DB flags the stale user).
 
+## Human feedback channels for blocked/awaiting states
+
+> **North star.** A blocked or awaiting cycle must be able to receive new context and
+> make progress. Before this, the only affordances were Resume and Approve — so a
+> correctly-halted build (the ADP first-user cycle halted with a precise blocker
+> report) had no way to be answered: no message on resume, no way to authorize the
+> one-time data fix it needed, and the deviation queue was approve-only. Harness change
+> only; both runners inherit it.
+
+### Where the machinery lives (pre-change investigation)
+
+- **Resume:** `runner.js` `retryCycle()` → `startCycle()` starts a fresh cycle with the
+  same instruction, continuing from the checkpoint in the container. The route is
+  `POST /projects/:id/cycles/:cycleId/retry`.
+- **The blocked/awaiting model:** a halt is status `awaiting_admin` + `halt_reason`
+  (migration 513); admin decisions on framework deviations live in
+  `mock2_audit_questions` (kind `framework_deviation`), recorded via
+  `resolveFrameworkDeviation()` → `markDeviationDecision()`, and injected into the build
+  task by `buildAdminDecisionsBlock()` (which reads `question.question`).
+- **The rule-question card UI** renders a question's `choices_json` via `ChatMessageList`
+  in `BuildChat.jsx` — reused here to render the model's halt resolution options.
+
+### The four channels
+
+1. **Resume-with-message.** `retryCycle`/`startCycle` accept operator guidance and store
+   it (`resume_context_json`, migration 514); `runCycle` injects it as a distinct,
+   labeled **"Operator guidance on resume"** user turn AFTER the task (SDK runner appends
+   it to the round-0 prompt). The `/retry` route takes `{ message, option }`. A bare
+   resume carries nothing — so a build blocked on a real blocker **re-halts rather than
+   loops** (the halt tool + no-progress breaker still apply).
+2. **Structured unblock options.** `halt(reason, options)` — the model proposes
+   `[{label,detail}]` resolution choices (`parseHaltOptions`, capped); stored
+   (`halt_options_json`), surfaced via `publicCycleShape.halt_options`, and rendered as
+   selectable buttons in the blocked card. The chosen option (id/label) + optional
+   free text is recorded and injected on resume.
+3. **Approve-as-edited.** `resolveFrameworkDeviation` accepts `editedText`/`conditions`;
+   the edited text **replaces the deviation's question text** so it becomes the
+   authoritative APPROVED record the runner is handed (`approveAsEditedText`). The
+   admin deviation card gains an editable box + an "Approve as edited" button.
+4. **Scoped one-time authorization.** `request_authorization(scope, reason)` — a new
+   runner tool distinct from a constitutional deviation. The model requests a narrow
+   privileged op (e.g. deleting a specific stale test-artifact row) from inside a cycle;
+   it is stored in `mock2_authorizations` (migration 514) and the cycle **halts awaiting
+   an admin, like a rule question**. An admin grants/denies (optionally appending
+   conditions) via `POST /projects/:id/authorizations/:authId/decision`. A grant is
+   injected on the next resume (`buildAuthorizationBlock`) and **consumed (single-use)**;
+   ungranted/unused grants **expire with the cycle** (`expireStaleAuthorizations` on a
+   fresh build). Every state change is audit-logged (`MOCK2_AUTHORIZATION_DECISION`).
+
+**Also:** when a cycle is blocked/`awaiting_admin`, the **build chat is unlocked as the
+resume-message input** (typing resumes with that message). And the footer copy that
+mislabeled a governance halt as a "transient error / add billing / raise your rate
+limit" stall now shows only for a genuine retries-exhausted transient — a governance
+halt has its own **"Blocked — needs attention"** card.
+
+### Acceptance
+
+| Criterion | Status |
+|---|---|
+| Halt shows resolution options; admin grants a scoped one-time authorization; resume carries it and the cycle completes (or re-halts for a new reason) | **Wired** — halt `options`, `request_authorization` → grant → resume injection (`buildResumeContextBlock` + `buildAuthorizationBlock`) |
+| A bare resume with no new context re-halts rather than loops | **Met** — resumeContext null ⇒ no injected turn; the halt tool + breaker re-halt |
+| All four channels appear in the audit trail | **Met** — `resume_guidance`/`authorization_request`/`halt` cycle-events + `MOCK2_QUEUE_ITEM_STATUS`/`MOCK2_AUTHORIZATION_DECISION`/`MOCK2_CYCLE_RETRY` audit-log entries |
+
+Pure formats pinned by `mock2-unblock-logic.test.js` (+9). Backend suite 494 pass / 1
+pre-existing fail; frontend builds. The live end-to-end replay of the blocked ADP
+first-user cycle (grant the row-delete authorization, resume, complete) needs a real
+Incus/connector environment — the mechanisms + audit artifacts are proven here; the
+live journey is validated on a real install.
+
 ## Phased roadmap
 
 - [ ] **Phase 1 — Tool + context swap (IN PROGRESS).** SDK build runner behind a

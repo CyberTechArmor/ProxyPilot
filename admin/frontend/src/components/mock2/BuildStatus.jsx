@@ -39,6 +39,11 @@ export default function BuildStatus({
   const [fbRating, setFbRating] = useState(null); // 'up' | 'down' | null — note composer open for this rating
   const [note, setNote] = useState('');
   const [fbBusy, setFbBusy] = useState(false);
+  const [resumeMsg, setResumeMsg] = useState(''); // operator guidance carried on resume
+  const [resuming, setResuming] = useState(false);
+  const [auths, setAuths] = useState([]); // open one-time authorization requests
+  const [authBusy, setAuthBusy] = useState(false);
+  const [devEdit, setDevEdit] = useState({}); // deviation id -> edited text (approve-as-edited)
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
   // A soft-paused cycle ('interrupted' + pause_reason) is a resumable checkpoint,
@@ -89,9 +94,13 @@ export default function BuildStatus({
   const decideDeviation = async (item, status) => {
     setDevBusy(true);
     try {
-      const res = await api.mock2SetQueueItemStatus(item.id, status, status === 'resolved' ? 'approved from project' : 'denied from project');
+      // Approve-as-edited: if the admin edited the deviation text, send it so the
+      // EDITED text becomes the authoritative APPROVED record handed to the runner.
+      const edited = status === 'resolved' ? (devEdit[item.id] || '').trim() : '';
+      const extra = edited ? { editedText: edited } : {};
+      const res = await api.mock2SetQueueItemStatus(item.id, status, status === 'resolved' ? (edited ? 'approved as edited' : 'approved from project') : 'denied from project', extra);
       toast({
-        title: status === 'resolved' ? 'Deviation approved' : 'Deviation denied',
+        title: status === 'resolved' ? (edited ? 'Deviation approved (as edited)' : 'Deviation approved') : 'Deviation denied',
         description: res?.resumed ? 'The build resumes now.' : undefined,
       });
       await loadDeviations();
@@ -99,6 +108,44 @@ export default function BuildStatus({
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not update the deviation', description: err.message });
     } finally { setDevBusy(false); }
+  };
+
+  // Resume the blocked/paused cycle, optionally carrying operator guidance
+  // (a free-text message and/or a chosen halt resolution option).
+  const doResume = async (extra = null) => {
+    if (!cycle) return;
+    setResuming(true);
+    try {
+      await api.mock2RetryCycle(projectId, cycle.id, extra);
+      setResumeMsg('');
+      toast({ title: 'Resuming the build', description: extra ? 'Your guidance is included.' : undefined });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
+    } finally { setResuming(false); }
+  };
+
+  // Load the project's OPEN one-time authorization requests while a build is blocked,
+  // so the card can show them (and let an admin grant/deny in place).
+  const loadAuths = useCallback(async () => {
+    try { const r = await api.mock2ListAuthorizations(projectId); setAuths(r.authorizations || []); }
+    catch (err) { if (!(err instanceof ApiError)) console.error('load authorizations failed:', err); }
+  }, [projectId]);
+  useEffect(() => {
+    if (blocked) loadAuths(); else setAuths([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocked, loadAuths]);
+
+  const decideAuth = async (auth, approved) => {
+    setAuthBusy(true);
+    try {
+      await api.mock2DecideAuthorization(projectId, auth.id, approved, null);
+      toast({ title: approved ? 'Authorization granted (one-time)' : 'Authorization denied' });
+      await loadAuths();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not decide the authorization', description: err.message });
+    } finally { setAuthBusy(false); }
   };
 
   return (
@@ -186,14 +233,67 @@ export default function BuildStatus({
                     <span className="font-medium">Blocked — needs attention.</span>{' '}
                     {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
                     {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
-                    {' '}Your work so far is checkpointed — resolve the blocker, then resume.
+                    {' '}Your work so far is checkpointed — add context or resolve the blocker, then resume.
                   </span>
                 </p>
+
+                {/* Pending scoped one-time authorization requests (Part 4). */}
+                {auths.length ? (
+                  <div className="space-y-2">
+                    {auths.map((a) => (
+                      <div key={a.id} className="rounded-md border border-orange-500/30 bg-background/50 p-2 space-y-1.5">
+                        <p className="text-xs break-words"><span className="font-medium">Requested one-time authorization:</span> <code className="text-[11px] break-all">{a.scope}</code></p>
+                        {a.reason ? <p className="text-[11px] text-muted-foreground break-words">{a.reason}</p> : null}
+                        {isAdmin ? (
+                          <div className="flex flex-wrap gap-2">
+                            <Button size="sm" className="h-9" disabled={authBusy} onClick={() => decideAuth(a, true)}>
+                              {authBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1" />}Grant once
+                            </Button>
+                            <Button variant="outline" size="sm" className="h-9 text-red-500" disabled={authBusy} onClick={() => decideAuth(a, false)}>
+                              <Ban className="h-4 w-4 mr-1" />Deny
+                            </Button>
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground">An admin must grant this before the build can proceed.</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {/* Model-proposed resolution options — pick one and it's sent on resume. */}
+                {canEdit && online && (cycle.halt_options || []).length ? (
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] text-muted-foreground">Resolve by choosing one — it&apos;s sent to the build on resume:</p>
+                    <div className="flex flex-col gap-1.5">
+                      {cycle.halt_options.map((o) => (
+                        <Button key={o.id} variant="outline" size="sm" className="h-auto min-h-9 justify-start whitespace-normal py-1.5" disabled={resuming} onClick={() => doResume({ option: o.id, ...(resumeMsg.trim() ? { message: resumeMsg.trim() } : {}) })}>
+                          <Play className="h-4 w-4 mr-1 shrink-0" />
+                          <span className="text-left">
+                            <span className="font-medium">{o.label}</span>
+                            {o.detail ? <span className="block text-[11px] text-muted-foreground">{o.detail}</span> : null}
+                          </span>
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Resume with an optional operator message (the build chat can also send this). */}
                 {canEdit && online ? (
-                  <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
-                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
-                    Resume build
-                  </Button>
+                  <div className="space-y-1.5">
+                    <textarea
+                      className="flex min-h-[48px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                      placeholder="Optional: add context or an instruction for the resume (e.g. “the test row is safe to remove”)…"
+                      value={resumeMsg}
+                      disabled={resuming}
+                      onChange={(e) => setResumeMsg(e.target.value)}
+                    />
+                    <Button size="sm" className="h-9" disabled={resuming} onClick={() => doResume(resumeMsg.trim() ? { message: resumeMsg.trim() } : null)}>
+                      {resuming ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                      {resumeMsg.trim() ? 'Resume with message' : 'Resume build'}
+                    </Button>
+                  </div>
                 ) : null}
               </div>
             ) : null}
@@ -248,13 +348,17 @@ export default function BuildStatus({
                 Answer the rule question(s) in the build chat — the build starts automatically once every one is confirmed.
               </p>
             ) : null}
-            {cycle.status === 'awaiting_admin' ? (
+            {/* awaiting_admin, EXCLUDING a governance halt (which has its own blocked
+                card above). The "transient error / billing" copy applies only to a
+                real retries-exhausted stall (error present, no halt_reason), never to
+                a governance halt. */}
+            {cycle.status === 'awaiting_admin' && !blocked ? (
               <p className="text-xs text-amber-500 flex items-start gap-1">
                 <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                 {cycle.error
-                  ? 'The build stalled on a transient error — once you’ve fixed the cause (e.g. added billing or raised your model rate limit), retry to continue where it stopped.'
+                  ? 'The build stalled on a transient error (e.g. a model rate limit). Once the cause is cleared, retry to continue where it stopped.'
                   : isAdmin
-                    ? 'A framework deviation needs an admin decision. Approve it to unblock the build, or deny it — either way it’s logged.'
+                    ? 'A framework deviation needs an admin decision. Approve it (optionally as edited) to unblock the build, or deny it — either way it’s logged.'
                     : 'A framework deviation was sent to the admin queue — the build resumes once an admin resolves it.'}
               </p>
             ) : null}
@@ -265,10 +369,19 @@ export default function BuildStatus({
                 {deviations.map((d) => (
                   <div key={d.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
                     <p className="text-xs text-foreground/90 break-words">{d.detail || 'Framework deviation'}</p>
+                    {/* Approve-as-edited: rewrite the deviation / append conditions.
+                        The edited text becomes the authoritative APPROVED record. */}
+                    <textarea
+                      className="flex min-h-[48px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                      placeholder="Optional: edit the deviation or append conditions before approving…"
+                      value={devEdit[d.id] || ''}
+                      disabled={devBusy}
+                      onChange={(e) => setDevEdit((m) => ({ ...m, [d.id]: e.target.value }))}
+                    />
                     <div className="flex flex-wrap gap-2">
                       <Button size="sm" className="h-9" disabled={devBusy} onClick={() => decideDeviation(d, 'resolved')}>
                         {devBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1" />}
-                        Allow
+                        {(devEdit[d.id] || '').trim() ? 'Approve as edited' : 'Allow'}
                       </Button>
                       <Button variant="outline" size="sm" className="h-9 text-red-500" disabled={devBusy} onClick={() => decideDeviation(d, 'dismissed')}>
                         <Ban className="h-4 w-4 mr-1" />Deny

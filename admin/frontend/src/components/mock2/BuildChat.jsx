@@ -19,7 +19,7 @@ import { Loader2, Zap, Hammer } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
-export default function BuildChat({ projectId, project, canEdit, online, active, job, needsFeedback = false, onStarted }) {
+export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, onStarted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
@@ -107,7 +107,26 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
     } finally { setBusy(false); }
   };
 
-  const composerDisabled = busy || active || !online || needsFeedback;
+  // When the cycle is blocked/awaiting an admin, the composer becomes the
+  // resume-message input: what you type is carried into the resumed cycle as operator
+  // guidance (bare resume — empty — is still allowed). Otherwise it starts a new cycle.
+  const resumeMode = cycle?.status === 'awaiting_admin' && !needsFeedback;
+  const composerDisabled = busy || (active && !resumeMode) || !online || needsFeedback;
+
+  const sendResume = async () => {
+    const body = instruction.trim();
+    setBusy(true);
+    try {
+      await api.mock2RetryCycle(projectId, cycle.id, body ? { message: body } : null);
+      toast({ title: 'Resuming the build', description: body ? 'Your message is included as guidance.' : undefined });
+      setInstruction('');
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
+    } finally { setBusy(false); }
+  };
+  const submitComposer = () => (resumeMode ? sendResume() : startBuild());
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -139,20 +158,23 @@ export default function BuildChat({ projectId, project, canEdit, online, active,
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
-                ? (needsFeedback ? 'Rate the last build to continue…' : active ? 'A build is running — wait for it to finish…' : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”')
+                ? (needsFeedback ? 'Rate the last build to continue…'
+                  : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
+                    : active ? 'A build is running — wait for it to finish…'
+                      : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”')
                 : 'Project must be online to run a build.'}
               value={instruction}
               disabled={composerDisabled}
               onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); startBuild(); }
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
               }}
             />
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to run</span>
-              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || !instruction.trim()} onClick={startBuild}>
+              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to {resumeMode ? 'resume' : 'run'}</span>
+              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || (!resumeMode && !instruction.trim())} onClick={submitComposer}>
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
-                Run a cycle
+                {resumeMode ? 'Resume build' : 'Run a cycle'}
               </Button>
             </div>
           </div>

@@ -109,6 +109,23 @@ unit-tested) renders the same governance content the hand-rolled system prompt i
 override clause, the available skills, and the how-to-work steps) as a `CLAUDE.md`
 written into the local checkout. With `settingSources: ['project']` the SDK loads it
 automatically — proving the constitution is **sourced from context, not re-explored**.
+Because it injects the *pinned* `framework.constitution_md`, both runners and the audit
+stay governed by the same text.
+
+**Constitution hardening (adopted as a new framework version).** The org constitution
+seed (`framework-seed/constitution.md`) was hardened with the lessons from the first
+build cycles — kept v1's philosophy (four stages, "restriction is the feature") and
+merged in: identity only from a verified credential + never-trust `x-user-role` with a
+required negative-assertion test (§4); HTML shells only through gated routes + token/
+refresh-hash rules (§5); a redefined "done" that requires the **e2e journey gate with a
+negative security assertion**, fail-visible-not-skip-as-pass, and treats a budget-paused
+build as **incomplete, never succeeded** (§7); approved deviations must **propagate to
+code, UI copy, and `state/inventory.json`** (§9); and a final integration/wire-up pass
+for budget-split tasks (§10). Section numbers the gates reference (§2/§5/§6) are
+unchanged. This publishes a **new** framework version on boot via the existing
+`upgradeFrameworkFromSeed` path; **projects adopt it only through an explicit update
+cycle** (no auto-remediation). **Revert:** `git revert` the seed change (or restore the
+prior `constitution.md`); pinned projects are unaffected until they choose to update.
 
 **Same outputs.** `runner-sdk.js` reuses the exported `runGateBattery`,
 `checkpointAndRecord`, and `deployStage` from `runner.js` — the identical functions the

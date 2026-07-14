@@ -73,7 +73,7 @@ const WRITABLE = new Set([
   'status', 'current_gate', 'gates_json', 'est_tokens', 'est_cost_cents',
   'used_tokens', 'used_cost_cents', 'retries', 'interrupt_request', 'error',
   'started_at', 'finished_at', 'classifier_outcome', 'deploy_status', 'pause_reason',
-  'halt_reason',
+  'halt_reason', 'halt_options_json', 'resume_context_json',
 ]);
 
 export function updateCycle(id, patch = {}) {

@@ -573,4 +573,44 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Human feedback channels for blocked/awaiting states. Two additive cycle
+    // columns + one new table:
+    //  - halt_options_json: when the model halts it can PROPOSE resolution choices
+    //    ([{id,label,detail}]) alongside its reason; the operator picks one (rendered
+    //    with the rule-question card UI) and the choice is injected on resume.
+    //  - resume_context_json: the operator guidance carried into a resumed cycle — a
+    //    free-text message, the selected halt option, and the ids of the one-time
+    //    authorizations granted for this resume — injected as a labeled user turn
+    //    AFTER the original task. NULL on a bare resume and every pre-existing row.
+    //  - mock2_authorizations: SCOPED ONE-TIME operational authorizations, distinct
+    //    from constitutional deviations. A cycle's model may request one (exact scope,
+    //    e.g. a specific SQL statement); an admin grants/denies (optionally appending
+    //    conditions); it is single-use (→ 'used' when injected) and expires with the
+    //    cycle. Fully audit-logged. A disabled host never writes any of this.
+    version: 514,
+    name: 'mock2_human_feedback_channels',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN halt_options_json TEXT;
+        ALTER TABLE mock2_cycles ADD COLUMN resume_context_json TEXT;
+
+        CREATE TABLE mock2_authorizations (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          reason TEXT,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','granted','denied','used','expired')),
+          conditions TEXT,
+          granted_by INTEGER,
+          granted_at TEXT,
+          used_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_authorizations_project ON mock2_authorizations (project_id, status);
+        CREATE INDEX idx_mock2_authorizations_cycle ON mock2_authorizations (cycle_id);
+      `);
+    },
+  },
 ];

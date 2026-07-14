@@ -12,6 +12,8 @@
 // Terminology (risk R7): the AI build component is the runner; the slot that
 // drives it is build_runner. Nothing here — or anywhere in M6 — is named "agent".
 
+import { parseHaltOptions } from './unblock-logic.js';
+
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
 // `tools`, OpenAI `functions`, Gemini function declarations). The runner
@@ -79,13 +81,40 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'halt',
     description:
-      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you and, if you can, what a human must do). Never keep responding without calling a tool when you are stuck — call halt instead.',
+      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you and, if you can, what a human must do). When there are concrete ways a human could unblock you, PROPOSE them in `options` — the operator picks one and it is fed back to you on resume. Never keep responding without calling a tool when you are stuck — call halt instead.',
     input_schema: {
       type: 'object',
       properties: {
         reason: { type: 'string', description: 'Why you cannot complete the change, in plain language.' },
+        options: {
+          type: 'array',
+          description: 'Optional: concrete resolution choices for the operator to pick from, e.g. [{"label":"Delete the stale test row","detail":"safe: it is test-only data"}]. Keep them specific and mutually distinct.',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string', description: 'Short choice label.' },
+              detail: { type: 'string', description: 'One-line explanation of what choosing this does.' },
+            },
+            required: ['label'],
+            additionalProperties: false,
+          },
+        },
       },
       required: ['reason'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'request_authorization',
+    description:
+      'Request a SCOPED, ONE-TIME operational authorization to perform a single privileged act that the constitution/gates otherwise forbid, when it is genuinely required to unblock the change (e.g. deleting a specific stale test-artifact row from the live database). State the EXACT scope (the precise statement or operation, as narrow as possible) and why it is needed. This ends the cycle awaiting an administrator, like a blocking question: an admin grants or denies it, and on resume a granted authorization is handed back to you for single use. Do NOT use this to bypass the constitution generally — only for a narrow, necessary, one-time operation.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'string', description: 'The exact, narrowest operation you need authorized (e.g. a specific SQL statement).' },
+        reason: { type: 'string', description: 'Why this one-time operation is necessary to unblock the change.' },
+      },
+      required: ['scope'],
       additionalProperties: false,
     },
   },
@@ -217,10 +246,21 @@ If you cannot complete the change — you are blocked, a dependency is missing, 
 gate can't pass for a reason outside this change, or the real fix is out of scope —
 call halt(reason) with the specific blocker. halt is a real terminating action: it
 ends the cycle as blocked (a human is notified) without recording success and
-without deploying. Do NOT keep replying without calling a tool, and do NOT repeat
-the same explanation turn after turn — that makes no progress and wastes the budget.
-Every turn must either make progress (a tool call that changes or checks the code),
-call finish (gates green), or call halt (blocked). If you are stuck, halt.
+without deploying. When there are concrete ways a human could unblock you, pass them
+as halt options so the operator can pick one — it is fed back to you on resume.
+If the ONLY thing you need is a narrow, one-time privileged operation the constitution
+forbids (e.g. deleting a specific stale test-artifact row), call
+request_authorization(scope, reason) instead — an admin can grant that exact act for
+single use, and it is handed back to you on resume. Do NOT keep replying without
+calling a tool, and do NOT repeat the same explanation turn after turn — that makes
+no progress and wastes the budget. Every turn must either make progress (a tool call
+that changes or checks the code), call finish (gates green), call halt (blocked), or
+request_authorization (need a one-time grant). If you are stuck, halt.
+
+On a RESUME you may receive an "Operator guidance on resume" turn (a human's message,
+a chosen resolution option, and/or an "Authorized one-time operations" grant). Treat
+it as authoritative direction and act on it — a granted authorization permits EXACTLY
+its stated scope, once.
 
 Make the change; call finish only when the gates are green, or halt if you are blocked.`;
 }
@@ -242,18 +282,25 @@ export function buildRunnerTask(instruction) {
 // { done, halted, haltReason, finishSummary, toolCalls, stalled }.
 export function classifyTurn(toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false };
+  // A request for a scoped one-time authorization ends the cycle awaiting an admin
+  // (it wants to CONTINUE after a grant, so it's checked before halt).
+  const authCall = calls.find((c) => c && c.name === 'request_authorization');
+  if (authCall) {
+    return { ...base, authRequest: { scope: String(authCall.input?.scope || '').trim(), reason: String(authCall.input?.reason || '').trim() } };
+  }
   const haltCall = calls.find((c) => c && c.name === 'halt');
   if (haltCall) {
-    return { done: false, halted: true, haltReason: String(haltCall.input?.reason || 'blocked — no reason given'), finishSummary: null, toolCalls: calls, stalled: false };
+    return { ...base, halted: true, haltReason: String(haltCall.input?.reason || 'blocked — no reason given'), haltOptions: parseHaltOptions(haltCall.input?.options) };
   }
   const finishCall = calls.find((c) => c && c.name === 'finish');
   if (finishCall) {
-    return { done: true, halted: false, haltReason: null, finishSummary: String(finishCall.input?.summary || 'change complete'), toolCalls: calls, stalled: false };
+    return { ...base, done: true, finishSummary: String(finishCall.input?.summary || 'change complete') };
   }
   if (calls.length === 0) {
-    return { done: false, halted: false, haltReason: null, finishSummary: null, toolCalls: [], stalled: true };
+    return { ...base, stalled: true, toolCalls: [] };
   }
-  return { done: false, halted: false, haltReason: null, finishSummary: null, toolCalls: calls, stalled: false };
+  return base;
 }
 
 // A short, human-readable "what the runner is doing right now" line, derived from

@@ -41,6 +41,7 @@ import {
   SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
+import { buildResumeContextBlock } from './unblock-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
 import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
@@ -212,9 +213,16 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         return scheduleJobCleanup(cycle.id);
       }
 
-      // Run the SDK loop for this round.
+      // Run the SDK loop for this round. On round 0 of a RESUME, append the operator
+      // guidance (message / chosen option / granted one-time authorizations) so the
+      // SDK runner carries the same context as the hand-rolled runner.
+      let resumeBlock = '';
+      if (round === 0) {
+        try { const rc = getCycle(cycle.id)?.resume_context_json; resumeBlock = rc ? buildResumeContextBlock(JSON.parse(rc)) : ''; } catch { resumeBlock = ''; }
+        if (resumeBlock) logEvent('resume_guidance', { role: 'user', content: resumeBlock, meta: { runner: 'sdk' } });
+      }
       const prompt = round === 0
-        ? buildRunnerTask(cycle.instruction)
+        ? `${buildRunnerTask(cycle.instruction)}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
         : `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });
 

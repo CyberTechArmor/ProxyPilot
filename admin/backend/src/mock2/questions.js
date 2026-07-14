@@ -85,6 +85,14 @@ export function answerQuestion(id, { answer, answeredBy, rulesMdAnchor = null })
   return getQuestion(id);
 }
 
+// Replace a question's text — used by "approve as edited": an admin rewrites the
+// deviation and/or appends conditions, and the EDITED text becomes the authoritative
+// record the runner is handed (buildAdminDecisionsBlock reads question.question).
+export function updateQuestionText(id, text) {
+  getMock2Db().prepare(`UPDATE mock2_audit_questions SET question = ? WHERE id = ?`).run(String(text ?? ''), Number(id));
+  return getQuestion(id);
+}
+
 // Dismiss a question (an admin resolved the deviation without a rule write, or a
 // stale question is being cleared). Records who/when via answered_by/answered_at.
 export function dismissQuestion(id, { by = null, answer = null } = {}) {

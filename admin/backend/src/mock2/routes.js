@@ -96,6 +96,10 @@ import {
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
 import {
+  getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
+  decideAuthorization, publicAuthorizationShape,
+} from './authorizations.js';
+import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
@@ -308,6 +312,22 @@ const answerQuestionSchema = z.object({
 const queueStatusSchema = z.object({
   status: z.enum(['open', 'in_progress', 'resolved', 'dismissed']),
   resolution: z.string().trim().max(1000).optional(),
+  // Approve-as-edited (framework_deviation): the admin may rewrite the deviation
+  // text and/or append conditions; the edited text becomes the authoritative record.
+  editedText: z.string().trim().max(4000).optional(),
+  conditions: z.string().trim().max(2000).optional(),
+});
+// Resume-with-message: optional operator guidance carried into the resumed cycle,
+// and the id/label of a halt resolution option the operator chose.
+const resumeSchema = z.object({
+  message: z.string().trim().max(8000).optional(),
+  option: z.string().trim().max(200).optional(),
+});
+// Scoped one-time authorization decision (admin): grant (optionally with appended
+// conditions) or deny.
+const authDecisionSchema = z.object({
+  approved: z.boolean(),
+  conditions: z.string().trim().max(2000).optional(),
 });
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
@@ -1239,6 +1259,9 @@ export function createMock2Router() {
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
+      // Pending one-time authorization requests (Part 4) so the blocked card can show
+      // them + an admin Grant/Deny without a separate fetch.
+      authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),
     });
   });
 
@@ -1291,11 +1314,14 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const cycle = getCycle(req.params.cycleId);
     if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const parsedResume = resumeSchema.safeParse(req.body || {});
+    if (!parsedResume.success) return res.status(400).json({ error: 'Invalid resume message/option.' });
     let result;
     try {
       result = await retryCycle({
         project, cycle,
         initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        message: parsedResume.data.message || '', option: parsedResume.data.option || null,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
@@ -1619,6 +1645,31 @@ export function createMock2Router() {
     res.json({ counts: queueCounts() });
   });
 
+  // Scoped one-time operational authorizations (Part 4). Project members can SEE the
+  // pending requests a blocked cycle raised; an admin grants/denies. A grant is
+  // injected on the next resume and consumed (single-use).
+  router.get('/projects/:id/authorizations', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const open = listOpenAuthorizations(project.id).map(publicAuthorizationShape);
+    res.json({ authorizations: open });
+  });
+
+  router.post('/projects/:id/authorizations/:authId/decision', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (!(isReqAdmin(req) || req.mock2Access?.actingAsAdmin)) {
+      return res.status(403).json({ error: 'Only an administrator can grant or deny a one-time authorization.' });
+    }
+    const auth = getAuthorization(req.params.authId);
+    if (!auth || auth.project_id !== project.id) return res.status(404).json({ error: 'Authorization not found' });
+    if (auth.status !== 'open') return res.status(409).json({ error: `This authorization is already "${auth.status}".` });
+    const parsed = authDecisionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'approved (boolean) is required; conditions optional.' });
+    const updated = decideAuthorization(auth.id, { approved: parsed.data.approved, conditions: parsed.data.conditions || null, by: req.user.id });
+    logAudit(req.user.id, 'MOCK2_AUTHORIZATION_DECISION', 'mock2_authorization', auth.id,
+      { project_id: project.id, cycle_id: auth.cycle_id, approved: parsed.data.approved, scope: auth.scope, conditions: parsed.data.conditions || null }, req.ip);
+    res.json({ authorization: publicAuthorizationShape(updated) });
+  });
+
   // Change a queue item's status (admin). Resolving/dismissing a
   // framework_deviation ALSO clears its linked audit question and resumes the
   // blocked Build (a project's answer never writes the framework — ADR-002).
@@ -1627,18 +1678,21 @@ export function createMock2Router() {
     if (!item) return res.status(404).json({ error: 'Queue item not found' });
     const parsed = queueStatusSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: `status must be one of ${QUEUE_STATUSES.join(', ')}` });
-    const { status, resolution } = parsed.data;
+    const { status, resolution, editedText, conditions } = parsed.data;
     const updated = setQueueItemStatus(item.id, status, { resolvedBy: req.user.id, resolution: resolution || null });
     let resumed = false;
     if (item.kind === 'framework_deviation' && item.ref_table === 'mock2_audit_questions' && item.ref_id
         && (status === 'resolved' || status === 'dismissed')) {
       try {
-        const r = await resolveFrameworkDeviation({ questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}`, approved: status === 'resolved' });
+        const r = await resolveFrameworkDeviation({
+          questionId: item.ref_id, user: req.user, resolution: resolution || `deviation ${status}`,
+          approved: status === 'resolved', editedText: editedText || null, conditions: conditions || null,
+        });
         resumed = !!r.resumed;
       } catch (err) { console.warn('[mock2] deviation resolve follow-through failed:', err?.message); }
     }
     logAudit(req.user.id, 'MOCK2_QUEUE_ITEM_STATUS', 'mock2_queue_item', item.id,
-      { kind: item.kind, status, resumed }, req.ip);
+      { kind: item.kind, status, resumed, edited: !!(editedText || conditions) }, req.ip);
     res.json({ item: publicQueueItemShape(updated, { projectName: updated.project_id ? getProject(updated.project_id)?.name || null : null }), resumed });
   });
 

@@ -198,6 +198,11 @@ export function publicCycleShape(row) {
     // Why an 'interrupted' cycle soft-paused on a budget: 'budget_tokens' |
     // 'budget_time' | null. Set → the cycle is a resumable Pause, not a stop.
     pause_reason: row.pause_reason || null,
+    // Why a cycle HALTED without success (needs attention): 'model_halt' |
+    // 'no_tool_calls' | 'repeated_output' | 'no_state_change' | null. Set on an
+    // 'awaiting_admin' cycle → "Blocked — needs attention", distinct from a
+    // retries-exhausted awaiting_admin (halt_reason null) and from a user stop.
+    halt_reason: row.halt_reason || null,
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

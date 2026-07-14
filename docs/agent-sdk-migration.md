@@ -70,6 +70,117 @@ gate battery, checkpoint, and deploy run (in-container, exactly as today). Every
 commit, and change-record is produced by the **same** functions the hand-rolled runner
 calls, so "flag on" yields the same governance outputs as "flag off".
 
+## Runner safety: honest termination + no-progress circuit breaker
+
+> **North star.** A build cycle must always be able to terminate **honestly**, and
+> must never be able to run **without making progress**. A real ADP cycle proved both
+> gaps at once: the model correctly determined it was blocked (the `test` gate re-seeds
+> a user into the serving DB, which it verified empirically) and correctly refused to
+> call `finish` (which records "succeeded" for blocked work) — but `finish` was the
+> **only** cycle-terminating action, and the loop treated a no-tool-call turn as "keep
+> going", so it emitted **118 near-identical refusals and burned ~$4.76** until a human
+> hit Stop. The governance was working; the platform gave honesty no exit and had no
+> runaway guard. This change fixes both. It is a **harness/runner change** — no Mock2
+> application (generated-project) code is touched — and both the hand-rolled and the
+> SDK runners inherit it as a core, non-opt-in behavior.
+
+### Where the machinery lives (pre-change investigation)
+
+- **The build-cycle loop:** `admin/backend/src/mock2/runner.js` `runCycle()` — calls the
+  model (`callModelTurn`), executes `RUNNER_TOOLS`, and ends the cycle. The pure
+  turn-classification is `runner-logic.js` `classifyTurn()`. The SDK variant is
+  `runner-sdk.js` `runCycleSdk()` driving the Agent SDK `query()` loop.
+- **Cycle status recording:** `cycles.js` `finishCycle()` / `updateCycle()`; the status
+  vocabulary + terminal/resumable sets are `cycle-logic.js` (`CYCLE_STATUSES`,
+  `TERMINAL_STATUSES`); the DB CHECK is migration 502 in `migrations.js`. Resumable set
+  for the editor Retry is `runner.js` `RESUMABLE_CYCLE_STATUSES`.
+- **Deploy gating on status:** deploy runs **only** on the `finish` → gates-green →
+  `checkpointAndRecord` → `deployStage` path inside `runCycle`; every non-success
+  terminal (halt, pause, failure) returns before `deployStage`, so a blocked cycle
+  never deploys.
+- **Build-cycle system prompt / instructions:** `runner-logic.js`
+  `buildRunnerSystemPrompt()` (hand-rolled) and `buildRunnerClaudeMd()` (the SDK's
+  auto-loaded CLAUDE.md); the task framing is `buildRunnerTask()`.
+
+### Part 1 — a first-class non-success terminal action (`halt`)
+
+- **New tool `halt(reason)`** in `RUNNER_TOOLS` (`runner-logic.js`), registered so the
+  model can call it. `classifyTurn` recognizes it and it takes precedence over `finish`
+  (a turn can't both give up and claim success).
+- **System-prompt instruction** added to both prompts: *"If you cannot honestly
+  complete the change (blocked, missing dependency, out-of-scope fix required), call
+  halt(reason) — do not keep responding without a tool call."* The ADP model said the
+  only terminating call available was `finish`; now it has, and is told to reach for,
+  `halt`.
+- **Terminal behavior** (`runner.js` `haltCycle()`, exported and shared by both
+  runners): checkpoints WIP (branch + report artifacts recoverable), marks the cycle
+  **blocked** — status `awaiting_admin` + a new `halt_reason` column (migration 513) —
+  which is **not `succeeded`, does not deploy, and is resumable** (the editor Retry
+  already resumes `awaiting_admin`). It records the model's stated reason (`error`),
+  **links any report artifacts** the cycle wrote (`state/changes/*.md`, `state/*.md`),
+  raises a needs-attention queue item (`dedupe mock2-blocked:<id>`), logs a `halt`
+  cycle-event, and notifies with a `blocked` outcome. The UI (`BuildStatus.jsx`) shows a
+  distinct **"Blocked — needs attention"** banner, separate from success, a user stop,
+  and a soft budget pause.
+  - *Status-model note:* we reuse the allowed `awaiting_admin` status + a `halt_reason`
+    marker rather than adding a new `blocked` status token, following the codebase's
+    established idiom (migration 511 reused `interrupted` + `pause_reason` specifically
+    to avoid a CHECK-constraint rebuild of the central `mock2_cycles` table). The
+    user-facing surface still says "Blocked".
+
+### Part 2 — a no-progress circuit breaker
+
+`runner-logic.js` `updateProgress()` (pure, unit-tested) folds each assistant turn and
+trips on **any** of three stuck signals, each reset by a real move (a file edit, or a
+tool call different from the previous turn's), so legitimate multi-step work is never
+tripped:
+- `no_tool_calls` — N consecutive assistant turns with no tool call (the 118 refusals).
+- `repeated_output` — N consecutive near-identical assistant messages that **also** made
+  no new action (a cheap, reliable signal; the refusals were near-verbatim).
+- `no_state_change` — N consecutive turns with no file edit and no new tool call.
+
+**Threshold** is a small single digit, **default 3**, configurable via
+`BUILD_NO_PROGRESS_LIMIT` (clamped ≥2 so it can't trip on one turn). When it trips the
+runner ends the cycle through `haltCycle` (trigger recorded as the `halt_reason`),
+stopping token spend. Wired into `runCycle` on every non-success path (including a
+`finish`-on-red loop) and into `runCycleSdk` (folded per streamed assistant message;
+on trip it **aborts the `query()` stream** via `AbortController` and halts — the SDK
+equivalent of a Stop-hook/maxTurns resolving to the blocked state, not success).
+
+**Max-turns / budget exhaustion** already resolve to a resumable `interrupted` +
+`pause_reason` (`max_turns` / `budget_*`) — **not `succeeded`** — consistent with the
+constitution's "budget-paused ≠ succeeded"; the breaker (default 3) now trips long
+before the `MAX_TURNS` (300) backstop is ever reached.
+
+### Acceptance & the ADP before/after
+
+| Acceptance criterion | Status |
+|---|---|
+| Blocked cycle can `halt(reason)` → non-success, no deploy, resumable, reason + artifacts attached, visible in UI | **Met** (`haltCycle`; UI banner) |
+| Repeated no-tool/near-identical turns auto-terminated within the threshold (single-digit, not 100+) | **Met** — pinned by `mock2-progress-breaker.test.js`: the 118-refusal repro trips at **turn 3** (`no_tool_calls`), not 118 |
+| Max-turns/budget records incomplete/blocked, never succeeded | **Met** (already `interrupted`; breaker trips first) |
+| Normal successful cycles unaffected | **Met** — breaker never trips on multi-step read→edit→gate work (test); flag-off finish path unchanged; backend suite 473 pass / 1 pre-existing fail |
+
+**ADP before/after (real-repro run — required, pending the operator environment).** The
+deterministic proof above replays the exact ADP failure shape (118 near-verbatim,
+no-tool refusals) through the real breaker and shows it stops at **turn 3**. A live
+re-run of the ADP first-user-login cycle (whose blocking condition — the `test` gate
+re-seeds the serving DB — is real and still present) needs an Incus + Anthropic-connector
+environment this dev container lacks, so the live row is recorded here rather than
+fabricated:
+
+| Metric | Before (observed) | After (expected; fill on the operator run) |
+|---|---|---|
+| Turns before stopping | 118 | ≤ 3 (breaker) or 1 (model calls `halt`) |
+| Cost before stopping | ~$4.76 | a few cents |
+| How it ended | human hit Stop | blocked (needs attention), resumable |
+
+> Procedure to fill the "After" column on a real install: re-run the ADP first-user
+> login cycle. Expect one of: (a) the model calls `halt(reason)` and the cycle ends
+> **blocked** with its report attached in ~1 turn; or (b) it emits no-progress turns and
+> the breaker halts it within `BUILD_NO_PROGRESS_LIMIT` (default 3). Record the turn
+> count + cost from the cycle row / event log in the table above.
+
 ## Phased roadmap
 
 - [ ] **Phase 1 — Tool + context swap (IN PROGRESS).** SDK build runner behind a

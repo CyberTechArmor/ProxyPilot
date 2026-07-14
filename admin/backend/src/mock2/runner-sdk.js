@@ -39,12 +39,13 @@ import { insertCycleEvent } from './cycle-events.js';
 import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask,
   SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason,
+  updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
-  checkpointAndRecord, deployStage, formatGateReports, containerSh,
+  checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
 } from './runner.js';
 
 const execFileP = promisify(execFile);
@@ -124,6 +125,9 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   let usedTokensThisRun = 0;
   let sessionId = null;
   let lastGateReports = initialGateReports(gateScripts);
+  // No-progress circuit breaker threshold (harness safety) — same as the
+  // hand-rolled runner; the SDK equivalent aborts the query() stream and halts.
+  const noProgLimit = noProgressLimit(process.env);
 
   try {
     // 1) Materialize a local checkout of the container's working tree.
@@ -225,7 +229,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         ...(sessionId ? { resume: sessionId } : {}),
       };
 
-      const round1 = await runSdkQuery({ query, prompt, options, cycleId: cycle.id, round, logEvent });
+      const round1 = await runSdkQuery({ query, prompt, options, cycleId: cycle.id, round, logEvent, noProgLimit });
       if (round1.sessionId) sessionId = round1.sessionId;
       // Usage accounting — COST is cache-aware; the TOKEN COUNT + soft-pause budget
       // are fresh input+output only (a cache read re-reads the whole prefix; counting
@@ -238,6 +242,16 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
       logEvent('ai_message', { role: 'assistant', content: round1.summary || '', meta: { round, num_turns: round1.numTurns, input_tokens: u.inputTokens, output_tokens: u.outputTokens, cache_read_tokens: u.cacheReadTokens, cache_write_tokens: u.cacheWriteTokens, cost_cents: cost, total_cost_usd: round1.totalCostUsd, sdk_error: round1.error || null } });
       touchLock(projectId, holder);
+
+      // No-progress circuit breaker (harness safety, SDK equivalent): the query
+      // stream was aborted mid-round because the SDK loop was stuck (repeated
+      // no-tool / near-identical turns). End as BLOCKED via the shared halt — never
+      // keep re-prompting. Sync partial edits back first so they're checkpointed.
+      if (round1.breakerTripped) {
+        try { await pushWorkingTree(containerName, checkoutDir); } catch { /* best effort */ }
+        await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: round1.breakerTrigger, reason: `Auto-stopped after no progress in the SDK runner (${haltReasonLabel(round1.breakerTrigger)}).`, logEvent });
+        return scheduleJobCleanup(cycle.id);
+      }
 
       // Sync the SDK's edits back into the container (excluding our .claude/ and the
       // heavy dirs), then run the SAME pinned battery there.
@@ -303,10 +317,19 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
 // logging assistant text / tool calls into the durable transcript. Never throws —
 // a failed query resolves with a best-effort summary + error so the caller decides
 // (gate feedback / pause) rather than crashing the cycle.
-async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent }) {
-  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null };
+//
+// No-progress circuit breaker (SDK equivalent of the hand-rolled runner's): each
+// assistant message is folded into updateProgress; when it trips (repeated no-tool
+// / near-identical / no-state-change), we ABORT the query stream (abortController)
+// and return breakerTripped so the caller halts as blocked — the same behavior,
+// same threshold, so a stuck SDK loop can't spin the way the ADP repro did.
+async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent, noProgLimit = 3 }) {
+  const out = { sessionId: null, summary: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, numTurns: 0, totalCostUsd: 0, error: null, breakerTripped: false, breakerTrigger: null };
+  const abort = new AbortController();
+  const opts = { ...options, abortController: abort };
+  let progress = initProgressState();
   try {
-    for await (const msg of query({ prompt, options })) {
+    for await (const msg of query({ prompt, options: opts })) {
       if (!msg || typeof msg !== 'object') continue;
       if (msg.type === 'system') {
         if (msg.session_id) out.sessionId = msg.session_id;
@@ -316,6 +339,16 @@ async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent })
         const { text, toolCalls } = extractAssistant(msg);
         if (text) { out.summary = text; logEvent('ai_message', { role: 'assistant', content: text, meta: { round, stream: true } }); }
         for (const tc of toolCalls) logEvent('tool_call', { role: 'assistant', content: tc.name, meta: { name: tc.name, input: tc.input, round } });
+        // Fold into the no-progress breaker; abort + halt if the SDK loop is stuck.
+        const p = updateProgress(progress, { toolCalls, text }, noProgLimit);
+        progress = p.state;
+        if (p.tripped) {
+          out.breakerTripped = true;
+          out.breakerTrigger = p.trigger;
+          logEvent('note', { role: 'system', content: `No-progress breaker tripped (${p.trigger}); aborting the SDK round.`, meta: { round, trigger: p.trigger } });
+          try { abort.abort(); } catch { /* ignore */ }
+          break;
+        }
         continue;
       }
       if (msg.type === 'result') {
@@ -336,8 +369,12 @@ async function runSdkQuery({ query, prompt, options, cycleId, round, logEvent })
       }
     }
   } catch (err) {
-    out.error = `sdk query failed: ${err?.message || err}`;
-    logEvent('note', { role: 'system', content: out.error, meta: { round } });
+    // Our own breaker abort surfaces as an AbortError — that's expected, not a
+    // query failure; the caller halts on breakerTripped.
+    if (!out.breakerTripped) {
+      out.error = `sdk query failed: ${err?.message || err}`;
+      logEvent('note', { role: 'system', content: out.error, meta: { round } });
+    }
   }
   return out;
 }

@@ -66,13 +66,26 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'finish',
     description:
-      'Declare the targeted change complete. Only call this after run_gates reports every gate green. Provide a one-line, plain-language summary of what changed for the change record.',
+      'Declare the targeted change complete AND WORKING. Only call this after run_gates reports every gate green. finish records the cycle as SUCCEEDED and deploys it — never call it for blocked, partial, or not-actually-working work. Provide a one-line, plain-language summary of what changed for the change record.',
     input_schema: {
       type: 'object',
       properties: {
         summary: { type: 'string', description: 'Human-readable "what changed", one line.' },
       },
       required: ['summary'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'halt',
+    description:
+      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you and, if you can, what a human must do). Never keep responding without calling a tool when you are stuck — call halt instead.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Why you cannot complete the change, in plain language.' },
+      },
+      required: ['reason'],
       additionalProperties: false,
     },
   },
@@ -199,7 +212,17 @@ ${skillLines}
 4. When every gate is green, call finish with a one-line summary. Do not call
    finish before the gates are green.
 
-Make the change; call finish only when the gates are green.`;
+# If you cannot honestly finish
+If you cannot complete the change — you are blocked, a dependency is missing, the
+gate can't pass for a reason outside this change, or the real fix is out of scope —
+call halt(reason) with the specific blocker. halt is a real terminating action: it
+ends the cycle as blocked (a human is notified) without recording success and
+without deploying. Do NOT keep replying without calling a tool, and do NOT repeat
+the same explanation turn after turn — that makes no progress and wastes the budget.
+Every turn must either make progress (a tool call that changes or checks the code),
+call finish (gates green), or call halt (blocked). If you are stuck, halt.
+
+Make the change; call finish only when the gates are green, or halt if you are blocked.`;
 }
 
 // The first user turn: the canned task instruction. Kept a pure formatter so the
@@ -210,20 +233,27 @@ export function buildRunnerTask(instruction) {
 
 // Classify a model turn's outcome for the loop. Given the assistant turn's tool
 // calls and whether the turn produced any, decide what the runner does next.
+//   - a `halt` call → the model cannot honestly finish (blocked); end non-success
 //   - a `finish` call → the model is done (validate gates separately)
 //   - other tool calls → execute them, continue
 //   - no tool calls → the model stopped without finishing (nudge or fail)
-// Returns { done, finishSummary, toolCalls, stalled }.
+// halt takes precedence over finish: a turn that pairs both is a blocked turn (the
+// model should not both give up and claim success). Returns
+// { done, halted, haltReason, finishSummary, toolCalls, stalled }.
 export function classifyTurn(toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const haltCall = calls.find((c) => c && c.name === 'halt');
+  if (haltCall) {
+    return { done: false, halted: true, haltReason: String(haltCall.input?.reason || 'blocked — no reason given'), finishSummary: null, toolCalls: calls, stalled: false };
+  }
   const finishCall = calls.find((c) => c && c.name === 'finish');
   if (finishCall) {
-    return { done: true, finishSummary: String(finishCall.input?.summary || 'change complete'), toolCalls: calls, stalled: false };
+    return { done: true, halted: false, haltReason: null, finishSummary: String(finishCall.input?.summary || 'change complete'), toolCalls: calls, stalled: false };
   }
   if (calls.length === 0) {
-    return { done: false, finishSummary: null, toolCalls: [], stalled: true };
+    return { done: false, halted: false, haltReason: null, finishSummary: null, toolCalls: [], stalled: true };
   }
-  return { done: false, finishSummary: null, toolCalls: calls, stalled: false };
+  return { done: false, halted: false, haltReason: null, finishSummary: null, toolCalls: calls, stalled: false };
 }
 
 // A short, human-readable "what the runner is doing right now" line, derived from
@@ -247,7 +277,104 @@ export function describeRunnerStep(turn, toolCalls = []) {
 // The nudge appended when a turn stalls (no tool calls) so the model resumes
 // instead of ending the turn early.
 export const STALL_NUDGE =
-  'You did not call a tool. Continue: inspect or edit files, run the gates, and call finish only when every gate is green.';
+  'You did not call a tool. Every turn must make progress (a tool call), call finish (gates green), or call halt(reason) if you are blocked. Do not reply again without calling a tool.';
+
+// ---- no-progress circuit breaker (harness safety, both runners) ----
+//
+// A build cycle must never run without making progress. The ADP repro looped 118
+// near-identical refusals because the model correctly refused to `finish` blocked
+// work but the loop treated a no-tool-call turn as "keep going". This breaker
+// detects a stuck cycle cheaply and auto-terminates it as blocked (halt), instead
+// of re-prompting forever and burning tokens.
+//
+// Threshold is a small single digit (default 3), configurable via
+// BUILD_NO_PROGRESS_LIMIT. It trips on ANY of three signals, each a reliable
+// "stuck" indicator that a healthy build never sustains for N turns in a row:
+//   - no_tool_calls   : N consecutive assistant turns with no tool call.
+//   - repeated_output : N consecutive near-identical assistant messages that also
+//                       made no new action (the 118 refusals were near-verbatim).
+//   - no_state_change : N consecutive turns with no file edit and no NEW tool call
+//                       (same action, or none — the model is spinning).
+// A turn that makes a real move (a write, or a tool call different from the last)
+// resets every counter, so legitimate multi-step work is never tripped.
+export const NO_PROGRESS_LIMIT = 3;
+
+// Read the configured breaker threshold (clamped ≥2 so it can never trip on a
+// single turn). Pure given its env argument.
+export function noProgressLimit(env = {}) {
+  const n = parseInt(env.BUILD_NO_PROGRESS_LIMIT, 10);
+  return Number.isFinite(n) && n >= 2 ? n : NO_PROGRESS_LIMIT;
+}
+
+// A cheap, stable signature of an assistant message for near-identical detection:
+// lowercased, whitespace-collapsed, truncated. The refusals differed only in
+// incidental whitespace, so a truncated normalized signature matches them.
+export function progressSignature(text) {
+  return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+// A stable signature of a turn's tool calls (name + input), so "same action again"
+// is detectable. Empty string when the turn made no tool call.
+export function toolCallSignature(toolCalls = []) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  if (!calls.length) return '';
+  return calls
+    .map((c) => `${c?.name || ''}:${stableInput(c?.input)}`)
+    .join('|')
+    .slice(0, 1000);
+}
+function stableInput(input) {
+  if (input == null || typeof input !== 'object') return String(input ?? '');
+  try { return JSON.stringify(input, Object.keys(input).sort()); } catch { return ''; }
+}
+
+export function initProgressState() {
+  return { noToolTurns: 0, staleTurns: 0, repeatCount: 0, lastMsgSig: null, lastToolSig: null };
+}
+
+// updateProgress — fold one assistant turn into the breaker state and decide
+// whether the cycle is stuck. Pure: returns { state, tripped, trigger }. The
+// caller halts the cycle when tripped, recording `trigger` as the halt_reason.
+export function updateProgress(state, { toolCalls = [], text = '' } = {}, limit = NO_PROGRESS_LIMIT) {
+  const s = { ...initProgressState(), ...(state || {}) };
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const hadTool = calls.length > 0;
+  const hadWrite = calls.some((c) => c?.name === 'write_file' || c?.name === 'Write' || c?.name === 'Edit');
+  const toolSig = toolCallSignature(calls);
+  const msgSig = progressSignature(text);
+
+  // A real move: a file edit, or a tool call different from the previous turn's.
+  const newAction = hadWrite || (!!toolSig && toolSig !== s.lastToolSig);
+
+  s.noToolTurns = hadTool ? 0 : s.noToolTurns + 1;
+  s.staleTurns = newAction ? 0 : s.staleTurns + 1;
+  // Repeated output only counts when the turn ALSO made no new action — so a model
+  // that keeps a stock preamble but is genuinely working is never tripped.
+  if (msgSig && msgSig === s.lastMsgSig && !newAction) s.repeatCount += 1;
+  else s.repeatCount = 0;
+
+  s.lastToolSig = toolSig || s.lastToolSig;
+  s.lastMsgSig = msgSig || s.lastMsgSig;
+
+  let trigger = null;
+  if (s.noToolTurns >= limit) trigger = 'no_tool_calls';
+  else if (s.repeatCount >= limit) trigger = 'repeated_output';
+  else if (s.staleTurns >= limit) trigger = 'no_state_change';
+
+  return { state: s, tripped: !!trigger, trigger };
+}
+
+// Human-readable one-liner for a breaker trip / halt reason.
+export function haltReasonLabel(reason) {
+  switch (reason) {
+    case 'model_halt': return 'the build reported it was blocked';
+    case 'no_tool_calls': return 'no progress — repeated turns with no action';
+    case 'repeated_output': return 'no progress — the same response repeated without changes';
+    case 'no_state_change': return 'no progress — repeated the same action with no change';
+    case 'max_turns': return 'reached the step ceiling without finishing';
+    default: return String(reason || 'blocked');
+  }
+}
 
 // ---- Claude Agent SDK runner (Phase 1, docs/agent-sdk-migration.md) ----
 
@@ -335,6 +462,13 @@ ${skillLines}
    finish — you do not run or approve the gates yourself.
 4. When the change is complete, stop. Report a one-line, plain-language summary of
    what changed for the change record.
+
+## If you cannot honestly finish
+If you are blocked — a missing dependency, a gate that can't pass for a reason
+outside this change, or a fix that is out of scope — say so clearly and stop; do NOT
+repeat the same explanation over and over without making an edit. Completing the
+change means finishing working code; a build that cannot honestly be completed is a
+blocked build for a human to resolve, not a success.
 
 The working directory (${appDir}) is a local checkout; your edits are synced back and
 checkpointed by ProxyPilot, not committed by you.`;

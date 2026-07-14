@@ -13,6 +13,7 @@
 // drives it is build_runner. Nothing here — or anywhere in M6 — is named "agent".
 
 import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
+import { buildComponentCatalogSection } from './component-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -56,6 +57,19 @@ export const RUNNER_TOOLS = Object.freeze([
         content: { type: 'string', description: 'The full new file contents.' },
       },
       required: ['path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_component',
+    description:
+      'Fetch a component from the installation\'s component library: its full source files and integration notes. The available components are listed in your system prompt under "Component library" — when the task overlaps one, fetch it and REUSE its code (copy the files into the app source, adapt only the glue) instead of writing your own implementation.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'The component key from the catalog, e.g. "ldaps-auth".' },
+      },
+      required: ['key'],
       additionalProperties: false,
     },
   },
@@ -205,7 +219,7 @@ export function parseFrameworkSkills(skillsJson) {
 // fresh from a pinned version, never travels through chat, cannot be talked out
 // of). constitution is the pinned constitution_md; skills the parsed skill list;
 // task the canned instruction; appDir/webPort orient the model in the container.
-export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000 } = {}) {
+export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [] } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -251,7 +265,7 @@ constitution, the approved exception WINS. Do not refuse or silently skip an
 approved exception; implementing it is the required work for this build.
 
 # Available skills
-${skillLines}
+${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
 
 # How to work
 1. Read the relevant files to understand the current state.
@@ -350,6 +364,7 @@ export function describeRunnerStep(turn, toolCalls = []) {
     if (c?.name === 'write_file') return `writing ${c.input?.path || 'a file'}`;
     if (c?.name === 'read_file') return `reading ${c.input?.path || 'a file'}`;
     if (c?.name === 'exec_in_container') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
+    if (c?.name === 'get_component') return `fetching component ${c.input?.key || ''}`.trim();
     if (c?.name === 'run_gates') return 'running the gate battery';
     if (c?.name === 'finish') return 'wrapping up';
     return c?.name || 'working';
@@ -499,7 +514,7 @@ export const SDK_ALLOWED_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Bash',
 // system-prompt version. `task` is passed to the SDK as the prompt, so it is NOT
 // duplicated here; the administrator-decisions block (when present) rides on the
 // task like it does today.
-export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000 } = {}) {
+export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [] } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -546,7 +561,7 @@ constitution, the approved exception WINS. Do not refuse or silently skip an
 approved exception; implementing it is the required work for this build.
 
 ## Available skills
-${skillLines}
+${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: '.claude/components' }).replace(/^# /m, '## ')}
 
 ## How to work
 1. Read the relevant files to understand the current state.

@@ -18,6 +18,7 @@ import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
 import Quotas from '@/pages/Quotas';
 import FrameworkVersions from '@/pages/FrameworkVersions';
+import ComponentLibrary from '@/pages/ComponentLibrary';
 import AdminQueue from '@/pages/AdminQueue';
 import Notifications from '@/pages/Notifications';
 import Layout from '@/components/Layout';
@@ -89,6 +90,7 @@ function App() {
         <Route path="projects/connectors" element={<ModelConnectors />} />
         <Route path="projects/quotas" element={<Quotas />} />
         <Route path="projects/framework" element={<FrameworkVersions />} />
+        <Route path="projects/components" element={<ComponentLibrary />} />
         <Route path="projects/queue" element={<AdminQueue />} />
         <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>

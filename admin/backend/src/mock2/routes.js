@@ -93,8 +93,23 @@ import {
 import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
 } from './framework-logic.js';
+// ---- Component library (migration 516) ----
+import {
+  listComponents, getComponent, getComponentByKey, getComponentVersion,
+  listComponentVersions, getCurrentComponentVersion,
+  insertComponent, insertComponentVersion, updateComponentMeta, deleteComponent,
+  insertSubmission, getSubmission, listSubmissions, countPendingSubmissions,
+  approveSubmission, rejectSubmission,
+} from './components.js';
+import {
+  COMPONENT_STATUSES, MAX_COMPONENT_FILES,
+  validateComponentKey, deriveComponentKey, normalizeTags,
+  validateComponentFiles, validateChangeReason,
+  publicComponentShape, publicComponentVersionShape, publicSubmissionShape,
+  buildComponentExport, parseComponentImport,
+} from './component-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, readFileInContainer } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
@@ -348,6 +363,65 @@ const explainSchema = z.object({
   status: z.string().trim().max(60).optional(),
   card_id: z.string().trim().max(160).optional(),
 });
+// ---- Component library Zod schemas ----
+const componentFileSchema = z.object({
+  path: z.string().min(1).max(400),
+  content: z.string().max(250000),
+});
+const componentCreateSchema = z.object({
+  key: z.string().trim().max(64).optional(),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(COMPONENT_STATUSES).optional(),
+  usage_md: z.string().max(20000).optional(),
+  files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
+  change_reason: z.string().trim().max(2000).optional(),
+});
+const componentMetaSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(COMPONENT_STATUSES).optional(),
+}).refine((o) => Object.keys(o).length > 0, 'no fields to update');
+const componentVersionSchema = z.object({
+  files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
+  usage_md: z.string().max(20000).optional(),
+  change_reason: z.string().trim().min(1).max(2000),
+});
+const componentImportSchema = z.object({
+  doc: z.record(z.any()),
+  change_reason: z.string().trim().max(2000).optional(),
+});
+// A submission proposes files either INLINE or by container PATHS (read from the
+// running project container server-side, so "promote what I just built" is one
+// click, not copy-paste).
+const submissionCreateSchema = z.object({
+  component_id: z.union([z.number().int(), z.string()]).optional(),
+  proposed_key: z.string().trim().max(64).optional(),
+  proposed_name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).optional(),
+  category: z.string().trim().max(80).optional(),
+  tags: z.array(z.string()).optional(),
+  usage_md: z.string().max(20000).optional(),
+  notes: z.string().trim().max(4000).optional(),
+  files: z.array(componentFileSchema).max(MAX_COMPONENT_FILES).optional(),
+  paths: z.array(z.string().min(1).max(400)).max(MAX_COMPONENT_FILES).optional(),
+}).refine((o) => (o.files && o.files.length) || (o.paths && o.paths.length), 'files or paths required');
+const submissionReviewSchema = z.object({
+  approved: z.boolean(),
+  reason: z.string().trim().max(2000).optional(),
+  overrides: z.object({
+    key: z.string().trim().max(64).optional(),
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().trim().max(2000).optional(),
+    category: z.string().trim().max(80).optional(),
+    tags: z.array(z.string()).optional(),
+  }).optional(),
+});
+
 const frameworkContentSchema = z.object({
   constitution_md: z.string().min(1),
   skills_json: z.string().min(1),
@@ -1220,6 +1294,290 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_FRAMEWORK_REVERT', 'mock2_framework_version', row.id,
       { version: row.version, reverted_from_version: source.version }, req.ip);
     res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
+  });
+
+  // ============================================================
+  // Component library (migration 516). Reusable, versioned building blocks the
+  // build runner is offered so recurring needs (an LDAPS auth module, …) reuse
+  // ONE audited implementation. Reads are open to any authenticated user (a
+  // project editor browses what exists before proposing); writes are admin;
+  // delete additionally requires sudo. Content is immutable per version — every
+  // change is a NEW version with a REQUIRED annotated change_reason.
+  // ============================================================
+
+  router.get('/components', (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    if (status && !COMPONENT_STATUSES.includes(status)) return res.status(400).json({ error: 'unknown status' });
+    const rows = listComponents({ status }).map((c) => publicComponentShape(c, { currentVersion: getCurrentComponentVersion(c) }));
+    res.json({ components: rows, pending_submissions: isReqAdmin(req) ? countPendingSubmissions() : undefined });
+  });
+
+  router.get('/components/:id', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    res.json({ component: publicComponentShape(row, { currentVersion: getCurrentComponentVersion(row), includeFiles: true }) });
+  });
+
+  router.post('/components', requireAdmin, (req, res) => {
+    const parsed = componentCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid component' });
+    const d = parsed.data;
+    const keyCheck = validateComponentKey(d.key || deriveComponentKey(d.name));
+    if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+    if (getComponentByKey(keyCheck.key)) return res.status(409).json({ error: `A component with key "${keyCheck.key}" already exists — publish a new version of it instead` });
+    const filesCheck = validateComponentFiles(d.files);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const { component, version } = insertComponent({
+      key: keyCheck.key, name: d.name, description: d.description || null,
+      category: d.category || null, tags: normalizeTags(d.tags),
+      status: d.status || 'published', files: filesCheck.files,
+      usage_md: d.usage_md || null,
+      change_reason: (d.change_reason || '').trim() || 'Initial version',
+      createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_CREATE', 'mock2_component', component.id, { key: component.key, files: filesCheck.files.length }, req.ip);
+    res.status(201).json({ component: publicComponentShape(component, { currentVersion: version, includeFiles: true }) });
+  });
+
+  router.patch('/components/:id', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const parsed = componentMetaSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid update' });
+    const d = parsed.data;
+    const updated = updateComponentMeta(row.id, {
+      ...(d.name !== undefined ? { name: d.name } : {}),
+      ...(d.description !== undefined ? { description: d.description || null } : {}),
+      ...(d.category !== undefined ? { category: d.category || null } : {}),
+      ...(d.tags !== undefined ? { tags: normalizeTags(d.tags) } : {}),
+      ...(d.status !== undefined ? { status: d.status } : {}),
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_UPDATE', 'mock2_component', row.id, { key: row.key, fields: Object.keys(d) }, req.ip);
+    res.json({ component: publicComponentShape(updated, { currentVersion: getCurrentComponentVersion(updated) }) });
+  });
+
+  router.delete('/components/:id', requireAdmin, requireSudo, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    deleteComponent(row.id);
+    logAudit(req.user.id, 'MOCK2_COMPONENT_DELETE', 'mock2_component', row.id, { key: row.key }, req.ip);
+    res.json({ ok: true });
+  });
+
+  // Version history — the annotated record of every swap and why.
+  router.get('/components/:id/versions', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    res.json({ versions: listComponentVersions(row.id).map((v) => publicComponentVersionShape(v)) });
+  });
+
+  router.get('/components/:id/versions/:vid', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const v = getComponentVersion(req.params.vid);
+    if (!v || v.component_id !== row.id) return res.status(404).json({ error: 'Version not found' });
+    res.json({ version: publicComponentVersionShape(v, { includeFiles: true }) });
+  });
+
+  // Publish a new version. change_reason is REQUIRED — the library's history
+  // must say why each version exists.
+  router.post('/components/:id/versions', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const parsed = componentVersionSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid version' });
+    const reasonCheck = validateChangeReason(parsed.data.change_reason);
+    if (!reasonCheck.ok) return res.status(400).json({ error: reasonCheck.error });
+    const filesCheck = validateComponentFiles(parsed.data.files);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const version = insertComponentVersion(row.id, {
+      files: filesCheck.files, usage_md: parsed.data.usage_md || null,
+      change_reason: reasonCheck.reason, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_VERSION_PUBLISH', 'mock2_component', row.id, { key: row.key, version: version.version }, req.ip);
+    res.status(201).json({ version: publicComponentVersionShape(version, { includeFiles: true }) });
+  });
+
+  // Revert = a NEW version carrying the old content (same idiom as the
+  // framework registry) — the annotated reason records the rollback.
+  router.post('/components/:id/versions/:vid/revert', requireAdmin, (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const source = getComponentVersion(req.params.vid);
+    if (!source || source.component_id !== row.id) return res.status(404).json({ error: 'Version not found' });
+    const reason = String(req.body?.change_reason || '').trim() || `Revert to v${source.version}`;
+    const version = insertComponentVersion(row.id, {
+      files: JSON.parse(source.files_json), usage_md: source.usage_md,
+      change_reason: reason, revertedFromVersion: source.version,
+      source: 'revert', createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_VERSION_REVERT', 'mock2_component', row.id, { key: row.key, version: version.version, reverted_from: source.version }, req.ip);
+    res.status(201).json({ version: publicComponentVersionShape(version, { includeFiles: true }) });
+  });
+
+  // Export the current version as a portable JSON document (download).
+  router.get('/components/:id/export', (req, res) => {
+    const row = getComponent(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Component not found' });
+    const current = getCurrentComponentVersion(row);
+    if (!current) return res.status(409).json({ error: 'Component has no versions' });
+    const doc = buildComponentExport(row, current);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${row.key}-v${current.version}.component.json"`);
+    res.json(doc);
+  });
+
+  // Import a component document (admin). A NEW key creates the component; a
+  // key that already exists appends a NEW VERSION of it (annotated as an import).
+  router.post('/components/import', requireAdmin, (req, res) => {
+    const parsed = componentImportSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'doc (the exported component JSON) is required' });
+    const check = parseComponentImport(parsed.data.doc);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    const d = check.data;
+    const reason = (parsed.data.change_reason || '').trim() || `Imported component document (${d.key})`;
+    const existing = getComponentByKey(d.key);
+    if (existing) {
+      const version = insertComponentVersion(existing.id, {
+        files: d.files, usage_md: d.usage_md, change_reason: reason,
+        source: 'import', createdBy: req.user.id,
+      });
+      logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', existing.id, { key: d.key, as: 'new_version', version: version.version }, req.ip);
+      return res.status(201).json({ component: publicComponentShape(getComponent(existing.id), { currentVersion: version }), created: false });
+    }
+    const { component, version } = insertComponent({
+      key: d.key, name: d.name, description: d.description, category: d.category,
+      tags: d.tags, files: d.files, usage_md: d.usage_md,
+      change_reason: reason, source: 'import', createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', component.id, { key: d.key, as: 'new_component', version: version.version }, req.ip);
+    res.status(201).json({ component: publicComponentShape(component, { currentVersion: version }), created: true });
+  });
+
+  // ---- submissions: the in-platform promotion path ----
+
+  // Propose code from a project as a component (project editor). Files come
+  // inline OR as container paths (read server-side from the RUNNING project
+  // container, so "promote what the last build wrote" needs no copy-paste).
+  router.post('/projects/:id/component-submissions', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = submissionCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid submission' });
+    const d = parsed.data;
+
+    let targetComponent = null;
+    if (d.component_id != null && d.component_id !== '') {
+      targetComponent = getComponent(d.component_id);
+      if (!targetComponent) return res.status(400).json({ error: 'No such component to propose a version for' });
+    }
+    let proposedKey = null;
+    if (!targetComponent) {
+      const keyCheck = validateComponentKey(d.proposed_key || deriveComponentKey(d.proposed_name));
+      if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+      proposedKey = keyCheck.key;
+    }
+
+    // Resolve the files: inline wins; otherwise read each path from the container.
+    let candidateFiles = d.files || [];
+    if (!candidateFiles.length) {
+      if (project.lifecycle !== 'active') {
+        return res.status(409).json({ error: 'Reading files from the project requires its container to be running — wake the project or paste the files inline' });
+      }
+      candidateFiles = [];
+      for (const p of d.paths || []) {
+        const r = await readFileInContainer(project.container_name, p);
+        if (!r.ok) return res.status(400).json({ error: `Could not read "${p}" from the project: ${r.error}` });
+        candidateFiles.push({ path: p, content: r.content });
+      }
+    }
+    const filesCheck = validateComponentFiles(candidateFiles);
+    if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+
+    const submission = insertSubmission({
+      projectId: project.id, componentId: targetComponent?.id || null,
+      proposedKey, proposedName: d.proposed_name,
+      description: d.description || null, category: d.category || null,
+      tags: normalizeTags(d.tags), files: filesCheck.files,
+      usage_md: d.usage_md || null, notes: d.notes || null, createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMIT', 'mock2_component_submission', submission.id,
+      { project_id: project.id, target_component_id: targetComponent?.id || null, files: filesCheck.files.length }, req.ip);
+    try {
+      postNotification({
+        level: 'info',
+        title: `Component submission: ${d.proposed_name}`,
+        body: `${project.name} proposed ${targetComponent ? `a new version of "${targetComponent.name}"` : `a new component "${d.proposed_name}"`} for the library. Review it under Projects → Components.`,
+        source: 'mock2-component-submission',
+        source_id: submission.id,
+        dedupe_key: `mock2-component-submission:${submission.id}`,
+      });
+    } catch (err) { console.error('[mock2] postNotification failed:', err?.message); }
+    res.status(201).json({ submission: publicSubmissionShape(submission) });
+  });
+
+  // A project's own submissions (member view — track the review outcome).
+  router.get('/projects/:id/component-submissions', requireMock2Role('viewer'), (req, res) => {
+    res.json({ submissions: listSubmissions({ projectId: req.mock2Project.id }).map((s) => publicSubmissionShape(s)) });
+  });
+
+  // The review inbox (admin).
+  router.get('/component-submissions', requireAdmin, (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    if (status && !['pending', 'approved', 'rejected', 'withdrawn'].includes(status)) return res.status(400).json({ error: 'unknown status' });
+    res.json({ submissions: listSubmissions({ status }).map((s) => publicSubmissionShape(s)) });
+  });
+
+  router.get('/component-submissions/:id', requireAdmin, (req, res) => {
+    const row = getSubmission(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Submission not found' });
+    res.json({ submission: publicSubmissionShape(row, { includeFiles: true }) });
+  });
+
+  // Approve into the library (new component, or new version of the targeted
+  // one) or reject with a reason — the submitter sees the outcome + reason.
+  router.post('/component-submissions/:id/review', requireAdmin, (req, res) => {
+    const row = getSubmission(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Submission not found' });
+    if (row.status !== 'pending') return res.status(409).json({ error: `Submission is already ${row.status}` });
+    const parsed = submissionReviewSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid review' });
+    const d = parsed.data;
+
+    if (!d.approved) {
+      const reason = (d.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'A reason is required to reject — the submitter sees it' });
+      const updated = rejectSubmission(row.id, { reviewerId: req.user.id, reason });
+      logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMISSION_REJECT', 'mock2_component_submission', row.id, { reason }, req.ip);
+      return res.json({ submission: publicSubmissionShape(updated) });
+    }
+
+    const overrides = { ...(d.overrides || {}) };
+    if (overrides.key !== undefined) {
+      const keyCheck = validateComponentKey(overrides.key);
+      if (!keyCheck.ok) return res.status(400).json({ error: keyCheck.error });
+      overrides.key = keyCheck.key;
+    }
+    if (overrides.tags !== undefined) overrides.tags = normalizeTags(overrides.tags);
+    // Creating a NEW component whose key already exists is a reviewer mistake —
+    // point them at targeting the existing component instead.
+    if (!row.component_id) {
+      const key = overrides.key || row.proposed_key;
+      if (key && getComponentByKey(key)) {
+        return res.status(409).json({ error: `Key "${key}" already exists — re-review with an overridden key, or have the submitter target that component with a new-version submission` });
+      }
+    }
+    let result;
+    try {
+      result = approveSubmission(row, { reviewerId: req.user.id, reason: (d.reason || '').trim() || null, overrides });
+    } catch (err) {
+      return res.status(409).json({ error: `Could not approve: ${err?.message || 'unknown error'}` });
+    }
+    logAudit(req.user.id, 'MOCK2_COMPONENT_SUBMISSION_APPROVE', 'mock2_component_submission', row.id,
+      { component_id: result.component.id, key: result.component.key, version: result.version.version }, req.ip);
+    res.json({
+      submission: publicSubmissionShape(result.submission),
+      component: publicComponentShape(result.component, { currentVersion: result.version }),
+    });
   });
 
   // ============================================================

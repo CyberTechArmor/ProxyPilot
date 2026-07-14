@@ -46,6 +46,13 @@
 //            canonical token classes + usage_schema_version + request_id/segment,
 //            and mock2_consults (advisory second opinion) — strictly additive,
 //            nullable columns + new tables, reversible, no row rewrites
+//   516 Lib — component library: mock2_components (reusable, named building
+//            blocks — e.g. an LDAPS auth module), mock2_component_versions
+//            (append-only content with a REQUIRED annotated change_reason;
+//            revert = new version, same idiom as the framework registry), and
+//            mock2_component_submissions (a project member proposes code from
+//            their project; an admin approves it into the library or rejects
+//            it with a reason — all through the platform) — additive, new tables
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -679,6 +686,89 @@ export const MOCK2_MIGRATIONS = [
         );
         CREATE INDEX idx_mock2_consults_request ON mock2_consults (request_id);
         CREATE INDEX idx_mock2_consults_cycle ON mock2_consults (cycle_id);
+      `);
+    },
+  },
+  {
+    // Component library (docs/features/component-library.md). Reusable, versioned
+    // building blocks (an LDAPS connection module, a rate limiter, …) the build
+    // runner is told about and can pull verbatim, so repeated needs are met with
+    // ONE audited implementation instead of a fresh AI rewrite each time.
+    //   - mock2_components: the registry row — a stable key, display metadata, and
+    //     a lifecycle status (draft = admin-only WIP, published = offered to every
+    //     build, deprecated = kept for history but no longer offered).
+    //   - mock2_component_versions: append-only content ([{path, content}] files +
+    //     integration notes). change_reason is NOT NULL by design: every version
+    //     carries WHY it exists (the annotated swap/upgrade record). Revert = a
+    //     NEW version carrying old content, same idiom as mock2_framework_versions.
+    //   - mock2_component_submissions: the in-platform promotion path — a project
+    //     editor proposes files from their project as a new component (or a new
+    //     version of an existing one); an admin approves/rejects with a reason.
+    // Additive; a disabled host never writes any of this.
+    version: 516,
+    name: 'mock2_component_library',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_components (
+          id INTEGER PRIMARY KEY,
+          key TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          description TEXT,
+          category TEXT,
+          tags TEXT,
+          status TEXT NOT NULL DEFAULT 'published'
+            CHECK (status IN ('draft','published','deprecated')),
+          current_version_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT,
+          updated_at TEXT
+        );
+
+        CREATE TABLE mock2_component_versions (
+          id INTEGER PRIMARY KEY,
+          component_id INTEGER NOT NULL,
+          version INTEGER NOT NULL,
+          files_json TEXT NOT NULL,
+          usage_md TEXT,
+          change_reason TEXT NOT NULL,
+          reverted_from_version INTEGER,
+          source TEXT NOT NULL DEFAULT 'in_app'
+            CHECK (source IN ('in_app','import','submission','revert')),
+          source_project_id INTEGER,
+          submission_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT,
+          UNIQUE (component_id, version)
+        );
+        CREATE INDEX idx_mock2_component_versions_component
+          ON mock2_component_versions (component_id, version);
+
+        CREATE TABLE mock2_component_submissions (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          component_id INTEGER,
+          proposed_key TEXT,
+          proposed_name TEXT NOT NULL,
+          description TEXT,
+          category TEXT,
+          tags TEXT,
+          files_json TEXT NOT NULL,
+          usage_md TEXT,
+          notes TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','approved','rejected','withdrawn')),
+          review_reason TEXT,
+          reviewed_by INTEGER,
+          reviewed_at TEXT,
+          result_component_id INTEGER,
+          result_version_id INTEGER,
+          created_by INTEGER NOT NULL,
+          created_at TEXT
+        );
+        CREATE INDEX idx_mock2_component_submissions_status
+          ON mock2_component_submissions (status, id);
+        CREATE INDEX idx_mock2_component_submissions_project
+          ON mock2_component_submissions (project_id, id);
       `);
     },
   },

@@ -29,14 +29,14 @@ import { sh } from './host.js';
 import { updateProject } from './projects.js';
 import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
-import { costCentsForUsage, shouldStopForBudget } from './quota-logic.js';
+import { costCentsForUsage } from './quota-logic.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
 import {
   getCycle, updateCycle, addCycleUsage, finishCycle,
 } from './cycles.js';
-import { initialGateReports, allGatesGreen, interruptDecision } from './cycle-logic.js';
+import { initialGateReports, allGatesGreen, interruptDecision, shouldStopForBudget } from './cycle-logic.js';
 import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
@@ -54,6 +54,8 @@ import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
 } from './runner.js';
+import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
+import { parseFilesJson, safeComponentPath } from './component-logic.js';
 
 const execFileP = promisify(execFile);
 const nowIso = () => new Date().toISOString();
@@ -157,13 +159,21 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     // 2) Write the constitution/governance as an auto-loaded CLAUDE.md. It goes in
     //    .claude/ (also auto-loaded) and is EXCLUDED from the push-back, so it is
     //    ephemeral to this run and never enters the project's committed tree.
+    //    The PUBLISHED component library rides along the same way: reference
+    //    copies under .claude/components/<key>/ (+ USAGE.md), advertised in the
+    //    CLAUDE.md catalog — readable by the SDK's own Read tool, never synced
+    //    back. Best-effort: a failed catalog just omits the section.
     const skills = parseFrameworkSkills(framework.skills_json);
+    let componentCatalog = [];
+    try { componentCatalog = listPublishedComponents(); } catch (err) { console.warn('[mock2] component catalog load failed:', err?.message); }
     const claudeMd = buildRunnerClaudeMd({
       constitution: framework.constitution_md, skills, appDir: checkoutDir, webPort: project.web_port || 3000,
+      components: componentCatalog,
     });
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
-    logEvent('note', { role: 'system', content: 'Constitution loaded from .claude/CLAUDE.md (auto-loaded by the SDK, not re-explored).' });
+    await materializeComponents(checkoutDir, componentCatalog);
+    logEvent('note', { role: 'system', content: 'Constitution loaded from .claude/CLAUDE.md (auto-loaded by the SDK, not re-explored).', meta: { components: componentCatalog.length } });
 
     // 3) Drive the SDK loop, then verify the pinned gates. Bounded gate-feedback
     //    rounds: after each pass we sync the edits back and run the SAME battery in
@@ -460,6 +470,32 @@ function extractAssistant(msg) {
     else if (block.type === 'tool_use') toolCalls.push({ name: block.name || 'tool', input: block.input || {} });
   }
   return { text: text.trim(), toolCalls };
+}
+
+// Materialize the published component library as reference copies under
+// .claude/components/<key>/ in the local checkout (each with its files +
+// USAGE.md). .claude/ is excluded from the push-back, so nothing here can leak
+// into the project's committed tree. Paths were validated at insert
+// (component-logic), but re-check defensively before touching the filesystem.
+async function materializeComponents(checkoutDir, catalog = []) {
+  for (const entry of catalog) {
+    try {
+      const found = getPublishedComponentWithVersion(entry.key);
+      if (!found) continue;
+      const base = join(checkoutDir, '.claude', 'components', entry.key);
+      await mkdir(base, { recursive: true });
+      for (const f of parseFilesJson(found.version.files_json)) {
+        const rel = safeComponentPath(f.path);
+        if (!rel) continue;
+        const dest = join(base, rel);
+        await mkdir(join(dest, '..'), { recursive: true });
+        await writeFile(dest, f.content, 'utf8');
+      }
+      if (found.version.usage_md) await writeFile(join(base, 'USAGE.md'), found.version.usage_md, 'utf8');
+    } catch (err) {
+      console.warn(`[mock2] could not materialize component ${entry?.key}:`, err?.message);
+    }
+  }
 }
 
 // ---- container <-> local checkout sync ----

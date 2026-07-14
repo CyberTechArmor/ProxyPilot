@@ -5,9 +5,16 @@
 // Each top-level entry is a request: its instruction, cumulative spend, and its
 // checkpoints nested inside — so a build is reviewed self-contained and compared
 // against the others. Expanding a checkpoint loads that cycle's transcript
-// (mock2GetCycleLog) for step-level inspection; "Download log" on the entry
-// fetches the request's merged, deduplicated artifact (mock2GetRequestLog),
-// idempotent per content — the same request always saves as the same file.
+// (mock2GetCycleLog) for step-level inspection.
+//
+// Downloads, built for offline analysis/comparison:
+//   - the per-row download icon saves THAT request's merged artifact
+//     (mock2GetRequestLog), idempotent per content — the same request always
+//     saves as the same file;
+//   - the per-row checkboxes select multiple entries → "Download selected"
+//     bundles them into one JSON document (browsers block a burst of separate
+//     programmatic downloads, and one bundle diffs/compares cleanly);
+//   - "Download all" bundles every entry the same way.
 //
 // Records whose cycle predates the request umbrella (request_id null) render as
 // standalone single-checkpoint entries with their per-cycle log — legacy only.
@@ -86,7 +93,6 @@ function EventRow({ ev }) {
 // step transcript. The request-level log download lives on the GROUP header —
 // only a legacy record (no request) still offers its per-cycle download here.
 function ChangeDetail({ projectId, record }) {
-  const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [log, setLog] = useState(null); // { cycle, events, messages, ... }
 
@@ -111,36 +117,19 @@ function ChangeDetail({ projectId, record }) {
   const events = log?.events || [];
   const rules = Array.isArray(record.rules_touched) ? record.rules_touched : [];
 
-  // Legacy fallback only: a record with no request downloads its per-cycle log.
-  const downloadLegacy = async () => {
-    try {
-      const full = log || (record.cycle_id != null ? await api.mock2GetCycleLog(projectId, record.cycle_id) : { record });
-      downloadJson(`build-log-change-${record.seq}.json`, full);
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not build the log', description: err.message });
-    }
-  };
-
   return (
     <div className="mt-2 space-y-3 border-t pt-2.5">
-      {/* Commit + spend (+ legacy per-cycle download) */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+      {/* Commit + spend (downloads live on the entry row, not here) */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="inline-flex items-center gap-1">
+          <GitCommitHorizontal className="h-3.5 w-3.5" />
+          <span className="font-mono">{record.commit_sha ? record.commit_sha.slice(0, 8) : 'no commit'}</span>
+        </span>
+        {record.used_tokens != null || record.used_cost_cents != null ? (
           <span className="inline-flex items-center gap-1">
-            <GitCommitHorizontal className="h-3.5 w-3.5" />
-            <span className="font-mono">{record.commit_sha ? record.commit_sha.slice(0, 8) : 'no commit'}</span>
+            <Coins className="h-3.5 w-3.5" />
+            <span className="font-mono">{fmtUsage(record.used_tokens, record.used_cost_cents)}</span>
           </span>
-          {record.used_tokens != null || record.used_cost_cents != null ? (
-            <span className="inline-flex items-center gap-1">
-              <Coins className="h-3.5 w-3.5" />
-              <span className="font-mono">{fmtUsage(record.used_tokens, record.used_cost_cents)}</span>
-            </span>
-          ) : null}
-        </div>
-        {record.request_id == null ? (
-          <Button variant="outline" size="sm" className="h-8" onClick={downloadLegacy}>
-            <Download className="h-3.5 w-3.5 mr-1" /> Download log
-          </Button>
         ) : null}
       </div>
 
@@ -260,8 +249,8 @@ export default function ChangeHistory({ projectId }) {
   const [error, setError] = useState(false);
   const [openGroup, setOpenGroup] = useState(null);   // group key
   const [openRecord, setOpenRecord] = useState(null); // record seq
-  const [downloadingKey, setDownloadingKey] = useState(null);
-  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [selected, setSelected] = useState(() => new Set()); // group keys picked for a bundle
+  const [downloadingKey, setDownloadingKey] = useState(null); // group key | 'selected' | 'all'
   const [page, setPage] = useState(0); // 0-based page of request entries (newest first)
   const PAGE_SIZE = 6;
 
@@ -284,30 +273,61 @@ export default function ChangeHistory({ projectId }) {
 
   useEffect(() => { load(); }, [load]);
 
-  // One build request = one log: the merged artifact under its stable,
-  // content-hashed filename — identical however often it is exported.
-  const downloadRequestLog = async (group) => {
+  // One entry = one log. A request entry fetches its merged, content-hashed
+  // artifact; a legacy (pre-request) entry falls back to its per-cycle log,
+  // wrapped in the same envelope so bundles have one uniform shape to analyze.
+  const fetchGroupLog = async (group) => {
+    if (group.request) {
+      const artifact = await api.mock2GetRequestLog(projectId, group.request.id);
+      return { filename: artifact.filename || `request-${group.request.id}.json`, ...artifact };
+    }
+    const head = group.records[0];
+    const log = head.cycle_id != null
+      ? await api.mock2GetCycleLog(projectId, head.cycle_id)
+      : { record: head };
+    return { filename: `build-log-change-${head.seq}.json`, legacy: true, log };
+  };
+
+  const downloadOne = async (group) => {
     setDownloadingKey(group.key);
     try {
-      const artifact = await api.mock2GetRequestLog(projectId, group.request.id);
-      downloadJson(artifact.filename || `request-${group.request.id}.json`, artifact);
+      const one = await fetchGroupLog(group);
+      downloadJson(one.filename, one);
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not build the request log', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not build the log', description: err.message });
     } finally {
       setDownloadingKey(null);
     }
   };
 
-  const downloadAll = async () => {
-    setDownloadingAll(true);
+  // Bundle several entries into ONE JSON document (a burst of separate
+  // programmatic downloads gets blocked by browsers; one bundle also
+  // diffs/compares cleanly). Sequential fetches — the counts are small.
+  const downloadBundle = async (targetGroups, label) => {
+    setDownloadingKey(label);
     try {
-      const full = await api.mock2GetProjectLog(projectId);
-      downloadJson(`build-log-project-${projectId}.json`, full);
+      const logs = [];
+      for (const g of targetGroups) logs.push(await fetchGroupLog(g));
+      downloadJson(`build-logs-project-${projectId}-${label}-${logs.length}.json`, {
+        project_id: projectId,
+        generated_at: new Date().toISOString(),
+        count: logs.length,
+        logs,
+      });
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not build the full log', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not build the log bundle', description: err.message });
     } finally {
-      setDownloadingAll(false);
+      setDownloadingKey(null);
     }
+  };
+
+  const toggleSelected = (key) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   if (error) return <p className="text-sm text-muted-foreground">Could not load the change history.</p>;
@@ -328,10 +348,23 @@ export default function ChangeHistory({ projectId }) {
             ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> <span className="text-green-600">Hash chain verified ({verification.count} record{verification.count === 1 ? '' : 's'})</span></>
             : <><XCircle className="h-3.5 w-3.5 text-red-500" /> <span className="text-red-500">Chain broken at #{verification?.brokenAt}</span></>}
         </p>
-        <Button variant="outline" size="sm" className="h-8" disabled={downloadingAll} onClick={downloadAll}>
-          {downloadingAll ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
-          Download full log
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {selected.size > 0 ? (
+            <>
+              <Button variant="outline" size="sm" className="h-8" disabled={downloadingKey === 'selected'}
+                onClick={() => downloadBundle(groups.filter((g) => selected.has(g.key)), 'selected')}>
+                {downloadingKey === 'selected' ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
+                Download selected ({selected.size})
+              </Button>
+              <Button variant="ghost" size="sm" className="h-8" onClick={() => setSelected(new Set())}>Clear</Button>
+            </>
+          ) : null}
+          <Button variant="outline" size="sm" className="h-8" disabled={downloadingKey === 'all' || groups.length === 0}
+            onClick={() => downloadBundle(groups, 'all')}>
+            {downloadingKey === 'all' ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
+            Download all
+          </Button>
+        </div>
       </div>
       {records.length === 0 ? (
         <p className="text-xs text-muted-foreground">No change records yet.</p>
@@ -346,40 +379,54 @@ export default function ChangeHistory({ projectId }) {
             const status = g.request?.final_status || g.request?.status || null;
             return (
               <li key={g.key} className="text-xs border rounded-md">
-                <button
-                  type="button"
-                  className="flex w-full items-start gap-2 px-2 py-2 text-left min-h-[44px]"
-                  aria-expanded={open}
-                  onClick={() => { setOpenGroup(open ? null : g.key); setOpenRecord(null); }}
-                >
-                  {open ? <ChevronDown className="h-3.5 w-3.5 mt-0.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 mt-0.5 shrink-0" />}
-                  <span className="min-w-0 flex-1">
-                    <span className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
-                      <span className="font-medium">
-                        {isRequest ? `Build request #${g.request.id}` : `Change #${head.seq}`}
+                {/* Row = select checkbox · expand toggle · download icon. The
+                    checkbox and icon sit OUTSIDE the toggle so a tap on either
+                    never also expands/collapses the entry. */}
+                <div className="flex items-start">
+                  <label className="flex min-h-[44px] cursor-pointer items-center px-2" aria-label={`Select ${isRequest ? `build request ${g.request.id}` : `change ${head.seq}`} for download`}>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={selected.has(g.key)}
+                      onChange={() => toggleSelected(g.key)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-2 py-2 pr-1 text-left min-h-[44px]"
+                    aria-expanded={open}
+                    onClick={() => { setOpenGroup(open ? null : g.key); setOpenRecord(null); }}
+                  >
+                    {open ? <ChevronDown className="h-3.5 w-3.5 mt-0.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 mt-0.5 shrink-0" />}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
+                        <span className="font-medium">
+                          {isRequest ? `Build request #${g.request.id}` : `Change #${head.seq}`}
+                        </span>
+                        <span className="flex items-center gap-2">
+                          {status ? <span className={`font-medium ${REQUEST_STATUS_TONE[status] || 'text-muted-foreground'}`}>{status}</span> : null}
+                          <span className="font-mono text-muted-foreground">{head.commit_sha ? head.commit_sha.slice(0, 8) : '—'}</span>
+                        </span>
                       </span>
-                      <span className="flex items-center gap-2">
-                        {status ? <span className={`font-medium ${REQUEST_STATUS_TONE[status] || 'text-muted-foreground'}`}>{status}</span> : null}
-                        <span className="font-mono text-muted-foreground">{head.commit_sha ? head.commit_sha.slice(0, 8) : '—'}</span>
+                      <span className="block truncate">{instruction}</span>
+                      <span className="mt-0.5 block font-mono text-[11px] text-muted-foreground">
+                        {g.records.length} checkpoint{g.records.length === 1 ? '' : 's'}
+                        {usage ? ` · ${fmtUsage(usage.tokens, usage.cents)}` : ''}
                       </span>
                     </span>
-                    <span className="block truncate">{instruction}</span>
-                    <span className="mt-0.5 block font-mono text-[11px] text-muted-foreground">
-                      {g.records.length} checkpoint{g.records.length === 1 ? '' : 's'}
-                      {usage ? ` · ${fmtUsage(usage.tokens, usage.cents)}` : ''}
-                    </span>
-                  </span>
-                </button>
+                  </button>
+                  <Button
+                    variant="ghost" size="sm"
+                    className="h-11 w-11 shrink-0 p-0"
+                    aria-label={`Download log for ${isRequest ? `build request ${g.request.id}` : `change ${head.seq}`}`}
+                    disabled={downloadingKey === g.key}
+                    onClick={() => downloadOne(g)}
+                  >
+                    {downloadingKey === g.key ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  </Button>
+                </div>
                 {open ? (
                   <div className="space-y-1.5 px-2 pb-2">
-                    {isRequest ? (
-                      <div className="flex justify-end">
-                        <Button variant="outline" size="sm" className="h-8" disabled={downloadingKey === g.key} onClick={() => downloadRequestLog(g)}>
-                          {downloadingKey === g.key ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
-                          Download log
-                        </Button>
-                      </div>
-                    ) : null}
                     <ul className="space-y-1.5">
                       {g.records.map((r) => (
                         <RecordRow

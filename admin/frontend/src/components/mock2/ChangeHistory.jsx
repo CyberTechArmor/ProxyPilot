@@ -227,8 +227,12 @@ function groupByRequest(records, requestsById) {
     groups.get(key).records.push(r);
   }
   const out = [...groups.values()];
-  for (const g of out) g.records.sort((a, b) => b.seq - a.seq); // newest checkpoint first
-  out.sort((a, b) => b.records[0].seq - a.records[0].seq);
+  for (const g of out) g.records.sort((a, b) => Number(b.seq || 0) - Number(a.seq || 0)); // newest checkpoint first
+  // Entries order by MOST RECENT ACTIVITY: the newest checkpoint's hash-chain
+  // seq, descending. Note the three number systems on screen are different:
+  // "Build request #N" is the request id, "#N" on a checkpoint is the chain
+  // seq — request #10 can legitimately contain change #77.
+  out.sort((a, b) => Number(b.records[0].seq || 0) - Number(a.records[0].seq || 0));
   return out;
 }
 
@@ -409,8 +413,12 @@ export default function ChangeHistory({ projectId }) {
                         </span>
                       </span>
                       <span className="block truncate">{instruction}</span>
+                      {/* The visible SORT KEY: entries order by their newest
+                          checkpoint's hash-chain seq (most recent activity
+                          first) — show it so the ordering is self-evident. */}
                       <span className="mt-0.5 block font-mono text-[11px] text-muted-foreground">
                         {g.records.length} checkpoint{g.records.length === 1 ? '' : 's'}
+                        {` · latest #${head.seq}${head.created_at ? ` (${head.created_at.slice(0, 10)})` : ''}`}
                         {usage ? ` · ${fmtUsage(usage.tokens, usage.cents)}` : ''}
                       </span>
                     </span>
@@ -451,7 +459,7 @@ export default function ChangeHistory({ projectId }) {
             <ChevronLeft className="h-3.5 w-3.5 mr-1" /> Newer
           </Button>
           <span className="text-[11px] text-muted-foreground">
-            {start + 1}–{Math.min(start + PAGE_SIZE, groups.length)} of {groups.length} request{groups.length === 1 ? '' : 's'}
+            {start + 1}–{Math.min(start + PAGE_SIZE, groups.length)} of {groups.length} entr{groups.length === 1 ? 'y' : 'ies'} · newest activity first
           </span>
           <Button variant="ghost" size="sm" className="h-8" disabled={clampedPage >= pageCount - 1} onClick={() => { setOpenGroup(null); setOpenRecord(null); setPage(clampedPage + 1); }}>
             Older <ChevronRight className="h-3.5 w-3.5 ml-1" />

@@ -53,6 +53,11 @@
 //            mock2_component_submissions (a project member proposes code from
 //            their project; an admin approves it into the library or rejects
 //            it with a reason — all through the platform) — additive, new tables
+//   517 Acc — acceptance discipline (cycle-94 lesson): mock2_cycles gains
+//            acceptance_json — the machine-readable acceptance state (task
+//            kind, defect tag, red-test-observed, required live checks,
+//            demonstrated) so "gates green" and "acceptance demonstrated" are
+//            distinguishable states in the record — additive, one nullable column
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -769,6 +774,20 @@ export const MOCK2_MIGRATIONS = [
           ON mock2_component_submissions (status, id);
         CREATE INDEX idx_mock2_component_submissions_project
           ON mock2_component_submissions (project_id, id);
+      `);
+    },
+  },
+  {
+    // Acceptance discipline (cycle-94 lesson — a bug-fix cycle "succeeded" with
+    // green gates while the defect was never reproduced). acceptance_json stores
+    // the machine-readable acceptance state stamped at finish: {kind, defect_tag,
+    // red_test_observed, tests, ui_required, demonstrated}. NULLable — every
+    // pre-existing row reads as before; a disabled host never writes it.
+    version: 517,
+    name: 'mock2_cycle_acceptance_state',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN acceptance_json TEXT;
       `);
     },
   },

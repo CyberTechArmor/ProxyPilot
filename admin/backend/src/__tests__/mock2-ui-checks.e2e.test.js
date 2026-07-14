@@ -169,6 +169,67 @@ test('change-69 regression: executor PASSES on the fixed fixture (typed input pe
   }
 });
 
+// ---- cycle-94 live ACCEPTANCE demo: "Test connection turns all three checks
+// green" as an executed check. The broken fixture reproduces the shipped
+// defect: the cert/key false rejection leaves the key check red (SSL alert 40
+// class). Under the hardened harness this check is listed in
+// state/acceptance.json `ui` — the browser connector force-runs it post-deploy
+// and the cycle CANNOT reach "succeeded" while it fails.
+
+function adpSettingsFixture({ keyCheckPasses }) {
+  return `<!doctype html><html><body>
+<h1>Connection Settings</h1>
+<button id="adp-test-connection" type="button">Test connection</button>
+<div id="check-cert">pending</div><div id="check-key">pending</div><div id="check-token">pending</div>
+<script>
+  document.getElementById('adp-test-connection').addEventListener('click', () => {
+    document.getElementById('check-cert').textContent = 'green';
+    document.getElementById('check-key').textContent = ${keyCheckPasses ? "'green'" : "'red: private key does not match the stored certificate'"};
+    document.getElementById('check-token').textContent = ${keyCheckPasses ? "'green'" : "'pending'"};
+  });
+</script></body></html>`;
+}
+
+const ADP_ACCEPTANCE_SPEC = JSON.stringify({
+  checks: [{
+    id: 'adp-test-connection-three-green',
+    name: 'Test connection turns all three checks green',
+    paths: ['src/adp/**', 'public/settings*'],
+    page: '/settings/connections',
+    steps: [
+      { click: '#adp-test-connection' },
+      { expect_text: '#check-cert', contains: 'green' },
+      { expect_text: '#check-key', contains: 'green' },
+      { expect_text: '#check-token', contains: 'green' },
+    ],
+  }],
+});
+
+test('cycle-94 acceptance: the LIVE defect fails the Test-connection check (cannot certify "succeeded")', { skip: !hasPlaywright && 'playwright not installed' }, async () => {
+  const parsed = parseUiChecks(ADP_ACCEPTANCE_SPEC);
+  assert.equal(parsed.ok, true);
+  const { server, url } = await serveFixture(adpSettingsFixture({ keyCheckPasses: false }));
+  try {
+    const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: parsed.spec.checks });
+    assert.equal(run.ok, false, 'the live false rejection must fail the acceptance check');
+    const bad = run.results[0].steps.find((s) => !s.ok);
+    assert.match(bad.detail, /#check-key/, 'the failure names the red check');
+  } finally {
+    server.close();
+  }
+});
+
+test('cycle-94 acceptance: with the defect actually fixed, the same check passes', { skip: !hasPlaywright && 'playwright not installed' }, async () => {
+  const parsed = parseUiChecks(ADP_ACCEPTANCE_SPEC);
+  const { server, url } = await serveFixture(adpSettingsFixture({ keyCheckPasses: true }));
+  try {
+    const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: parsed.spec.checks });
+    assert.equal(run.ok, true, `expected pass, got: ${JSON.stringify(run.results[0].steps.filter((s) => !s.ok))}`);
+  } finally {
+    server.close();
+  }
+});
+
 test('console errors fail a check even when every step passes', { skip: !hasPlaywright && 'playwright not installed' }, async () => {
   const noisy = `<!doctype html><html><body><div id="adp-status">ok</div>
 <script>console.error('TypeError: perms is undefined');</script></body></html>`;

@@ -61,7 +61,11 @@ import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
 import { deployProject, readRunContract } from './deploy.js';
-import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
+import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
+import {
+  ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
+  acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord,
+} from './acceptance-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
@@ -421,6 +425,12 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // Consecutive red gate batteries (cost-truth Part 5.2 trigger a) so a halt after "the
   // same gate failing twice" can auto-fire a consult (flag-gated).
   let gateFailStreak = 0;
+  // Acceptance discipline (cycle-94 lesson). taskKind classifies the ask from
+  // its instruction; redTestObserved records whether ANY battery this cycle
+  // showed the test gate red — the reproduce-first proof a bug-fix cycle must
+  // carry before finish is accepted.
+  const taskKind = classifyTaskKind(cycle.instruction);
+  let redTestObserved = false;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -589,6 +599,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           }
           const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
           lastGateReports = out.gateReports || lastGateReports;
+          if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
           transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
           logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
         }
@@ -600,6 +611,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         if (call.name === 'halt') continue;
         const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
         lastGateReports = out.gateReports || lastGateReports;
+        if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
@@ -638,6 +650,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         if (call.name === 'finish') continue;
         const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
         lastGateReports = out.gateReports || lastGateReports;
+        if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
@@ -658,7 +671,49 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         }
         continue;
       }
-      logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}` });
+      // MACHINE acceptance (cycle-94 lesson — Goodhart guard). Gates green is a
+      // PROXY; finish is only accepted when the acceptance spec exists and, for
+      // a bug-fix task, red→green was demonstrated INSIDE this cycle. Every
+      // rejection reason is actionable feedback; the breaker backstops refusal.
+      const accFile = await readFileInContainer(containerName, ACCEPTANCE_PATH);
+      const accParsed = accFile.ok ? parseAcceptance(accFile.content) : { ok: false, error: 'state/acceptance.json not found' };
+      const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved });
+      if (!verdict.ok) {
+        transcript.push({
+          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          content: `Not finished — acceptance not demonstrated:\n${verdict.reasons.map((r) => `- ${r}`).join('\n')}`,
+        });
+        logEvent('note', { role: 'system', content: `Finish rejected — acceptance not demonstrated: ${verdict.reasons.join(' | ')}` });
+        touchLock(projectId, holder);
+        if (progress.tripped) {
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped: finish kept arriving without demonstrated acceptance (${verdict.reasons[0]}).`, logEvent });
+          return scheduleJobCleanup(cycle.id);
+        }
+        continue;
+      }
+      // The change-record summary must describe THIS cycle's diff — naming files
+      // the cycle did not touch (bundling prior cycles' work) is rejected.
+      const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
+      const changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
+      if (!oc.ok) {
+        transcript.push({
+          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          content: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.`,
+        });
+        logEvent('note', { role: 'system', content: `Finish rejected — summary over-claims (${oc.unmatched.join(', ')}).` });
+        touchLock(projectId, holder);
+        if (progress.tripped) {
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: 'Auto-stopped: finish summary kept over-claiming beyond this cycle\'s diff.', logEvent });
+          return scheduleJobCleanup(cycle.id);
+        }
+        continue;
+      }
+      // Stamp the machine-readable acceptance state (migration 517) so "gates
+      // green" and "acceptance demonstrated" are distinguishable in the record.
+      const accState = acceptanceRecord({ spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved, uiRequired: accParsed.ok ? accParsed.spec.ui : [] });
+      try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
+      logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}`, meta: { acceptance: accState } });
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       lastGateReports = battery;
       logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: !gateScripts.length || allGatesGreen(battery) } });
@@ -728,6 +783,18 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       }
       finishCycle(cycle.id, { status: 'succeeded' });
       try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+      // Anomaly tripwire (heuristic, never blocks): a bug-fix that closed at a
+      // small fraction of its estimate with no reproduced red test / no test
+      // touched is a Goodhart signature — flag it for a human, loudly.
+      try {
+        const commitFiles = record?.commit_sha ? await changedFilesForCommit(containerName, APP_DIR, record.commit_sha) : [];
+        const anomaly = anomalySignals({ kind: taskKind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: commitFiles, redTestObserved });
+        if (anomaly.flag) {
+          const detail = `${project.name}: cycle ${cycle.id} succeeded but looks under-verified — ${anomaly.reasons.join('; ')}. Review the change record and the live behavior.`;
+          safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
+          logEvent('note', { role: 'system', content: `Anomaly tripwire raised for human review: ${anomaly.reasons.join('; ')}`, meta: { anomaly: anomaly.reasons } });
+        }
+      } catch (e) { console.warn('[mock2] anomaly tripwire failed:', e?.message); }
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
       setJob(cycle.id, {
@@ -762,6 +829,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     for (const call of decision.toolCalls) {
       const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
       lastGateReports = out.gateReports || lastGateReports;
+      if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
       if (call.name === 'run_gates') ranGates = true;
       transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
       logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
@@ -931,6 +999,16 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   const sha = await execInContainer(containerName, `git -C ${APP_DIR} rev-parse HEAD 2>/dev/null`);
   const commitSha = (sha.stdout || '').trim().split('\n').pop() || null;
 
+  // 2b) The commit's own diff --stat rides in the record (cycle-94 lesson: the
+  //     record must be accountable to the diff — a reader sees exactly what THIS
+  //     checkpoint changed, so a summary can't silently claim more).
+  let diffStat = '';
+  if (commitSha) {
+    const stat = await execInContainer(containerName, `git -C ${APP_DIR} show --stat --format= ${commitSha} 2>/dev/null | tail -40`);
+    diffStat = (stat.stdout || '').trim();
+  }
+  const recordSummaryText = `${summary || 'checkpoint'}${diffStat ? `\n\nDiff (this checkpoint):\n${diffStat}` : ''}`;
+
   // 3) Insert the hash-chained change record.
   const gatesRun = (gateReports || []).map((g) => ({ name: g.name, result: g.status }));
   let record = null;
@@ -938,7 +1016,7 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
     record = insertChangeRecord({
       projectId, cycleId: cycle.id, initiatedBy: cycle.initiated_by, actingAsAdmin: cycle.acting_as_admin,
       frameworkVersion: framework.version, frameworkVersionId: framework.id,
-      gatesRun, commitSha, summary: summary || 'checkpoint',
+      gatesRun, commitSha, summary: recordSummaryText,
     });
   } catch (e) {
     console.error('[mock2] change record insert failed:', e?.message);

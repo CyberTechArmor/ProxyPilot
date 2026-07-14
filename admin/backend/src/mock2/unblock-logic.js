@@ -166,6 +166,20 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
   if (auths.length) {
     lines.push('', buildAuthorizationBlock(auths));
   }
+  // Cycle-94 lesson: operator guidance asserted "the audit is clean" and "the
+  // work is substantially done"; both were checkable, one was false, and the
+  // build proceeded anyway. Guidance directs WHAT to do — it is not evidence
+  // about the current state of the tree.
+  lines.push(
+    '',
+    'VERIFY CHECKABLE CLAIMS: where this guidance asserts a checkable fact about the current',
+    'state ("the audit is clean", "X is already implemented", "the dependency was merged"),',
+    'verify it against the tree/tooling BEFORE relying on it. If observation CONTRADICTS a',
+    'claimed precondition, do not proceed on the claim: halt(reason, options) stating exactly',
+    'what was claimed, what you observed, and the viable paths forward. A falsified',
+    'precondition is a stopping condition, not a soft note. In particular, "substantially',
+    'done" never exempts you from demonstrating acceptance (reproduce-first for bug fixes).',
+  );
   return lines.join('\n');
 }
 

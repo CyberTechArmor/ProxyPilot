@@ -132,9 +132,22 @@ prior `constitution.md`); pinned projects are unaffected until they choose to up
 hand-rolled runner uses — so the commit, hash-chained change record, and gate battery are
 produced the same way regardless of which runner drove the edits.
 
-**Dependency.** `@anthropic-ai/claude-agent-sdk` is an **optional** dependency and is
-imported **dynamically only when the flag is on**, so a default (flag-off) install and
-run never require it to be present.
+**Dependency.** `@anthropic-ai/claude-agent-sdk` is **not** a `package.json` dependency
+and is imported **dynamically only when the flag is on**, so the default (flag-off)
+install and run never require it. It is kept out of `package.json` on purpose: the SDK
+peers `zod@^4` while the backend pins `zod@^3`, so listing it (even under
+`optionalDependencies`) makes `npm install` fail with an `ERESOLVE` peer conflict and
+breaks the production Docker build. Operators who opt into `BUILD_RUNNER=sdk` install it
+out-of-band:
+
+```bash
+cd admin/backend
+npm install @anthropic-ai/claude-agent-sdk --no-save --legacy-peer-deps
+```
+
+`--legacy-peer-deps` is required for the zod peer mismatch; `--no-save` keeps it out of
+`package.json` so the default build stays clean. If the package is absent when the flag
+is on, the cycle fails with an actionable message (it never crashes the process).
 
 **Sync channel.** The local checkout is synced in/out of the fenced container through
 the same channel `containerSh` already uses — a tarball piped through

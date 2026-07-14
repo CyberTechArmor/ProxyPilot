@@ -86,7 +86,10 @@ calls, so "flag on" yields the same governance outputs as "flag off".
   up its own prior context instead of re-reading the repo cold.
 - [ ] **Phase 3 — Gates as hooks.** Move the deterministic gate battery into SDK
   `PreToolUse` / `PostToolUse` hooks so governance is enforced inside the loop
-  (block-on-red) rather than only re-run after `finish`.
+  (block-on-red) rather than only re-run after `finish`. _Seed landed in Phase 1:_
+  `runner-sdk-hooks.js` already wires a `PostToolUse` audit hook (every mutating tool
+  call → the durable cycle-events log) and a `PreToolUse` guardrail (protected paths +
+  destructive shell). Phase 3 extends this to the full gate battery.
 - [ ] **Phase 4 — Spec-reviewer subagent.** Turn the rule-question / audit reviewer into
   an SDK subagent (`agents`) invoked by the main loop, keeping the human sign-off gate.
 - [ ] **Phase 5 — Retire the hand-rolled loop.** Once Phases 1–4 are proven in
@@ -122,6 +125,28 @@ the same channel `containerSh` already uses — a tarball piped through
 (push), so neither the tarball nor its base64 ever lands on a command line (no E2BIG).
 The local extract/create runs via `tar` in this Node process's namespace (the same
 namespace the SDK's built-in tools operate in).
+
+**Hooks (enforcement + audit).** `runner-sdk-hooks.js` `buildHookOptions(ctx)` drops
+into the `query()` options:
+- `PreToolUse` guardrail — blocks `Edit`/`Write` to governed paths (`.env*`,
+  `state/deviations/`, `state/changes/`, `.github/`, `.claude/`, `CLAUDE.md`) and
+  destructive `Bash` (`rm -rf /`, force-push, `DROP DATABASE`, non-test `TRUNCATE`).
+  The deny shape is pinned to the installed SDK version:
+  `{ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason } }`
+  (verified against the hooks docs — **not** the `{ decision:'block' }` shape older
+  skeletons use), and a hook `deny` wins even under `permissionMode:'bypassPermissions'`.
+- `PostToolUse` audit — every `Edit`/`Write`/`Bash` is recorded into the durable
+  cycle-events transcript (migration 512), **not** a file in the checkout, so nothing
+  is synced back into the project. This is the Phase-3 audit seed.
+
+> **SDK Bash executes on the orchestrator.** A real difference from the hand-rolled
+> runner: the SDK's built-in `Bash`/`Edit`/`Write` run in **this backend process's**
+> namespace against the local checkout, **not inside the fenced container**. The
+> `PreToolUse` guardrail is a mitigation, not a sandbox. Until a later phase sandboxes
+> the SDK itself (e.g. running it inside the container — which reopens the
+> key-never-in-container tension), run `BUILD_RUNNER=sdk` only in a disposable / CI-like
+> environment, and keep the guardrail's protected-path and blocked-command lists tuned
+> to the host.
 
 ### Known Phase-1 limitations (to revisit in later phases)
 

@@ -41,6 +41,7 @@ import {
   SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason,
 } from './runner-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
+import { buildHookOptions } from './runner-sdk-hooks.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, deployStage, formatGateReports, containerSh,
@@ -150,6 +151,16 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     const env = { ...process.env, ANTHROPIC_API_KEY: ready.apiKey };
     if (ready.connector.base_url) env.ANTHROPIC_BASE_URL = String(ready.connector.base_url);
 
+    // Enforcement + audit hooks (docs/agent-sdk-migration.md). PreToolUse blocks
+    // edits to governed paths + destructive shell; PostToolUse audits every
+    // mutating tool call into the durable cycle-events log. ctx carries logEvent so
+    // the records land in our transcript, not a file that would be synced back.
+    const hookCtx = {
+      cycleId: cycle.id, projectId, actorUserId: cycle.initiated_by ?? null,
+      repoRoot: checkoutDir, logEvent, now: () => new Date().toISOString(),
+    };
+    const hookOptions = buildHookOptions(hookCtx);
+
     let battery = lastGateReports;
     let green = false;
     for (let round = 0; round < SDK_MAX_GATE_ROUNDS; round++) {
@@ -206,6 +217,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         settingSources: ['project'], // auto-load .claude/CLAUDE.md from cwd
         maxTurns: SDK_MAX_TURNS_PER_ROUND,
         env,
+        ...hookOptions, // PreToolUse guardrails + PostToolUse audit
         ...(sessionId ? { resume: sessionId } : {}),
       };
 

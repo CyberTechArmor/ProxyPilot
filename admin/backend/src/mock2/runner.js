@@ -41,7 +41,7 @@ import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
-import { buildResumeContextBlock, resolveSelectedOption, validateAuthScope } from './unblock-logic.js';
+import { buildResumeContextBlock, resolveSelectedOption, validateAuthScope, validateHaltOptions } from './unblock-logic.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
@@ -381,6 +381,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // blocked halt instead of re-prompting forever (the ADP 118-turn loop).
   let progressState = initProgressState();
   const noProgLimit = noProgressLimit(process.env);
+  // A model halt must propose 2–4 resolution options (task Part 4). A halt with no
+  // viable options gets ONE retry to supply them; if it still can't, we halt anyway
+  // (harness safety — a stuck cycle must terminate, it can't loop forever).
+  let haltOptionsRetried = false;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -503,6 +507,29 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     //     resumable, surfaced as needs-attention with the model's reason. Answer any
     //     tool call it paired with halt so the transcript stays well-formed.
     if (decision.halted) {
+      // A model halt must carry viable resolution options. If it doesn't and we
+      // haven't already asked, feed the validation error back to the halt tool call
+      // and let the model restate — ONE retry, then we halt regardless.
+      const optCheck = validateHaltOptions(decision.haltOptions);
+      if (!optCheck.ok && !haltOptionsRetried) {
+        haltOptionsRetried = true;
+        for (const call of decision.toolCalls) {
+          if (call.name === 'halt') {
+            transcript.push({
+              role: 'tool', toolCallId: call.id || 'halt', name: 'halt',
+              content: `Not halted: ${optCheck.error}. Re-call halt with 2–4 resolution options — each with a kind (grant_authorization | expand_scope | run_dependency_first | override_rule | abandon), a one-line risk, and exactly what to inject on resume; mark at most one recommended. If a one-time privileged operation is a viable path, include a grant_authorization option carrying the exact scope and expected row count.`,
+            });
+            continue;
+          }
+          const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
+          lastGateReports = out.gateReports || lastGateReports;
+          transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
+          logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
+        }
+        logEvent('note', { role: 'system', content: `Halt rejected — ${optCheck.error}; asked the build to restate with options.`, meta: { retry: true } });
+        continue;
+      }
+      const haltOptions = optCheck.ok ? optCheck.options : decision.haltOptions;
       for (const call of decision.toolCalls) {
         if (call.name === 'halt') continue;
         const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
@@ -510,7 +537,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: decision.haltOptions, logEvent });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: haltOptions, logEvent });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -929,7 +956,9 @@ export async function haltCycle({ cycle, project, containerName, holder, gateRep
   releaseLock(projectId, holder);
 
   if (typeof logEvent === 'function') {
-    try { logEvent('halt', { role: 'system', content: reason, meta: { trigger, artifacts, commit_sha: record?.commit_sha || null } }); } catch { /* best effort */ }
+    // Record the resolution options OFFERED (task Part 3 audit trail: options offered).
+    const offered = (Array.isArray(options) ? options : []).map((o) => ({ id: o.id, label: o.label, kind: o.kind, recommended: !!o.recommended }));
+    try { logEvent('halt', { role: 'system', content: reason, meta: { trigger, artifacts, commit_sha: record?.commit_sha || null, options: offered } }); } catch { /* best effort */ }
   }
 
   safeRaise({

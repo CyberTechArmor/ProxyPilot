@@ -208,9 +208,11 @@ export function publicCycleShape(row) {
     // needs attention", distinct from a retries-exhausted awaiting_admin (halt_reason
     // null) and from a user stop.
     halt_reason: row.halt_reason || null,
-    // Resolution options the model PROPOSED when it halted ([{id,label,detail}]), so
-    // the operator can pick one (rendered with the rule-question card UI) and have it
-    // injected on resume. [] when none proposed.
+    // Resolution options the model PROPOSED when it halted, so the operator can pick
+    // one (rendered as a single rule-question-style choice card) and have it injected
+    // on resume. Each is { id, label, kind, risk/detail, injectOnResume, recommended,
+    // authorization:{scope,expectedRows}|null } — kind is one of grant_authorization |
+    // expand_scope | run_dependency_first | override_rule | abandon. [] when none.
     halt_options: safeJsonArray(row.halt_options_json),
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,

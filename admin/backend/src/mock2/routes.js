@@ -97,10 +97,11 @@ import {
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
-  decideAuthorization, publicAuthorizationShape,
+  insertAuthorization, decideAuthorization, publicAuthorizationShape,
 } from './authorizations.js';
+import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
 import {
-  getCycle, listCyclesForProject, latestCycle, setInterrupt,
+  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
 import {
@@ -1316,19 +1317,71 @@ export function createMock2Router() {
     if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
     const parsedResume = resumeSchema.safeParse(req.body || {});
     if (!parsedResume.success) return res.status(400).json({ error: 'Invalid resume message/option.' });
+    const optionId = parsedResume.data.option || null;
+    const message = (parsedResume.data.message || '').trim();
+
+    // Resolve the chosen halt option against what the model actually offered, so the
+    // typed kind decides how the choice is applied (task Part 3). The offered options
+    // are the audit-visible record of what was on the card.
+    let offered = [];
+    try { offered = cycle.halt_options_json ? JSON.parse(cycle.halt_options_json) : []; } catch { offered = []; }
+    const chosen = optionId ? resolveSelectedOption(offered, optionId) : null;
+    const offeredIds = (Array.isArray(offered) ? offered : []).map((o) => o?.id).filter(Boolean);
+    const auditBase = {
+      from_cycle: cycle.id,
+      offered_options: offeredIds,
+      chosen_option: chosen?.id || null,
+      chosen_label: chosen?.label || null,
+      chosen_kind: chosen?.kind || null,
+      has_context: !!message,
+      acting_as_admin: req.mock2Access.actingAsAdmin,
+    };
+
+    // The privileged kinds (grant a one-time authorization, override a rule) may only
+    // be chosen by an admin — grant/deny folds into picking/rejecting the option.
+    const actingAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    if (chosen && haltOptionRequiresAdmin(chosen.kind) && !actingAdmin) {
+      return res.status(403).json({ error: `Choosing “${chosen.label}” requires an administrator.` });
+    }
+
+    // Abandon closes the cycle as abandoned — no resume (task Part 3).
+    if (chosen && chosen.kind === 'abandon') {
+      finishCycle(cycle.id, { status: 'abandoned', error: `abandoned by operator${message ? `: ${message}` : ''}` });
+      for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
+        try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: req.user.id }); } catch { /* best effort */ }
+      }
+      logAudit(req.user.id, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { ...auditBase, context: message || null }, req.ip);
+      return res.json({ cycle: publicCycleShape(getCycle(cycle.id)), abandoned: true });
+    }
+
+    // A grant_authorization (or override_rule) option carries the exact scope the
+    // operator is signing off on: create + grant that one-time authorization now, so
+    // the resume injects it (single-use). Admin-gated above. Any typed context becomes
+    // the binding conditions on the grant.
+    if (chosen && haltOptionCarriesAuthorization(chosen)) {
+      try {
+        const auth = insertAuthorization({ projectId: project.id, cycleId: cycle.id, scope: chosen.authorization.scope, reason: chosen.label });
+        decideAuthorization(auth.id, { approved: true, conditions: message || null, by: req.user.id });
+        logAudit(req.user.id, 'MOCK2_AUTHORIZATION_DECISION', 'mock2_authorization', auth.id,
+          { approved: true, via: 'halt_option', option: chosen.id, scope: chosen.authorization.scope, expected_rows: chosen.authorization.expectedRows ?? null }, req.ip);
+      } catch (err) {
+        return res.status(500).json({ error: `Could not grant the authorization: ${err?.message || 'unknown error'}` });
+      }
+    }
+
     let result;
     try {
       result = await retryCycle({
         project, cycle,
         initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
-        message: parsedResume.data.message || '', option: parsedResume.data.option || null,
+        message, option: optionId,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY', 'mock2_cycle', result.cycle?.id || cycle.id,
-      { from_cycle: cycle.id, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { ...auditBase, status: result.status, context: message || null }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });

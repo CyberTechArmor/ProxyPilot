@@ -16,7 +16,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban, PauseCircle, Play,
+  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
@@ -30,11 +30,15 @@ const STATUS_TONE = {
 export default function BuildStatus({
   projectId, canEdit, isAdmin, online, project, cycle, job, busy,
   onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll, onRefresh,
+  needsFeedback = false, onFeedback,
 }) {
   const { toast } = useToast();
   const [view, setView] = useState('build'); // 'build' | 'changes'
   const [deviations, setDeviations] = useState([]); // open framework_deviation queue items (admin)
   const [devBusy, setDevBusy] = useState(false);
+  const [fbRating, setFbRating] = useState(null); // 'up' | 'down' | null — note composer open for this rating
+  const [note, setNote] = useState('');
+  const [fbBusy, setFbBusy] = useState(false);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
   // A soft-paused cycle ('interrupted' + pause_reason) is a resumable checkpoint,
@@ -279,6 +283,50 @@ export default function BuildStatus({
                   ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
                   : 'Gates green — change checkpointed into the repo.'}
               </p>
+            ) : null}
+
+            {/* Post-build rating — required before the next cycle. A thumbs-down
+                opens a note (saved to the build log for evaluation). */}
+            {cycle.status === 'succeeded' && cycle.feedback ? (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                {cycle.feedback.rating === 'up'
+                  ? <><ThumbsUp className="h-3.5 w-3.5 text-emerald-500" /> You rated this build good.</>
+                  : <><ThumbsDown className="h-3.5 w-3.5 text-amber-500" /> You flagged this build{cycle.feedback.note ? `: “${cycle.feedback.note}”` : '.'}</>}
+              </p>
+            ) : canEdit && needsFeedback ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="text-xs font-medium">How did this build go? A rating is required before the next change.</p>
+                {!fbRating ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" className="h-9" disabled={fbBusy} onClick={() => { setNote(''); setFbRating('up'); }}>
+                      <ThumbsUp className="h-4 w-4 mr-1" /> Looks good
+                    </Button>
+                    <Button variant="outline" size="sm" className="h-9" disabled={fbBusy} onClick={() => { setNote(''); setFbRating('down'); }}>
+                      <ThumbsDown className="h-4 w-4 mr-1" /> Something's off
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      {fbRating === 'up'
+                        ? <><ThumbsUp className="h-3.5 w-3.5 text-emerald-500" /> Anything noteworthy? (optional — saved to the build log)</>
+                        : <><ThumbsDown className="h-3.5 w-3.5 text-amber-500" /> What went wrong or could be better? (required)</>}
+                    </p>
+                    <textarea
+                      className="flex min-h-[64px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      placeholder={fbRating === 'up' ? 'Optional note…' : 'Describe the problem…'}
+                      value={note}
+                      onChange={(e) => setNote(e.target.value)}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" className="h-9" disabled={fbBusy || (fbRating === 'down' && !note.trim())} onClick={async () => { setFbBusy(true); try { await onFeedback(fbRating, note.trim()); setFbRating(null); setNote(''); } catch { /* keep open */ } finally { setFbBusy(false); } }}>
+                        {fbBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Submit {fbRating === 'up' ? '👍' : 'feedback'}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-9" disabled={fbBusy} onClick={() => { setFbRating(null); setNote(''); }}>Cancel</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             ) : null}
           </div>
         ) : (

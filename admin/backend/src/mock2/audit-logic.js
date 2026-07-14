@@ -322,11 +322,20 @@ export function buildAdminDecisionsBlock(questions = []) {
   const lines = decided.map((d) => (d.approved
     ? `- APPROVED — you MUST implement this even though it deviates from the constitution: ${d.text}`
     : `- DENIED — do NOT implement this; build the compliant remainder instead: ${d.text}`));
+  const anyApproved = decided.some((d) => d.approved);
+  const tail = anyApproved
+    ? ['When you implement an APPROVED deviation, apply it EVERYWHERE — the backend AND',
+       'the user-facing surface: update the screens, the on-page copy, and state/inventory.json',
+       'so nothing still advertises the superseded approach (e.g. a login page must not read',
+       '"single sign-on with MFA" once password/JWT login is the approved reality). Stale',
+       'user-facing copy that contradicts the approved change is a defect.']
+    : [];
   return [
     'Administrator decisions on framework deviations (AUTHORITATIVE for this project —',
     'an administrator has signed these off. An APPROVED item OVERRIDES the pinned',
     'constitution and MUST be built exactly as requested; a DENIED item must not be built):',
     ...lines,
+    ...tail,
   ].join('\n');
 }
 

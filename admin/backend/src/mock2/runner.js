@@ -385,17 +385,19 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       continue;
     }
 
-    // Ledger + usage after every model call (M5 writer). Cache reads/writes are
-    // separate token counts (see model-client) — count and price them too, or a
-    // cached build looks near-free when it isn't.
+    // Ledger + usage after every model call (M5 writer). COST is cache-aware
+    // (reads 0.1×, writes 1.25×), but the TOKEN COUNT and the soft-pause budget
+    // are fresh input + output only: a cache read re-reads the whole cached prefix
+    // every turn, so counting those toward a token budget would balloon the total
+    // (~1M in a few turns) and trip the pause on re-reads instead of real work.
     const u = result.usage;
     const cacheRead = u.cacheReadInputTokens || 0;
     const cacheWrite = u.cacheCreationInputTokens || 0;
     const costCents = costCentsForUsage({ inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, price);
-    const turnTokens = u.inputTokens + u.outputTokens + cacheRead + cacheWrite;
+    const turnTokens = u.inputTokens + u.outputTokens;
     usedTokensThisRun += turnTokens;
     addCycleUsage(cycle.id, { tokens: turnTokens, costCents });
-    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens + cacheRead + cacheWrite, outputTokens: u.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
     // calls) serializes to empty message content, which Anthropic/OpenAI reject —

@@ -131,6 +131,22 @@ export default function BuildMode({
     finally { setBusy(false); }
   };
 
+  // Post-build feedback gate: a succeeded build must be rated (thumbs up/down)
+  // before the next cycle. A thumbs-down carries a required note; both land in the
+  // build log for later evaluation.
+  const needsFeedback = cycle?.status === 'succeeded' && !cycle?.feedback;
+  const submitFeedback = async (rating, note = '') => {
+    if (!cycle) return;
+    try {
+      await api.mock2SubmitCycleFeedback(projectId, cycle.id, { rating, note });
+      toast({ title: rating === 'up' ? 'Thanks — glad it worked' : 'Feedback saved', description: rating === 'down' ? 'Noted in the build log for review.' : undefined });
+      refresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save feedback', description: err.message });
+      throw err;
+    }
+  };
+
   const stopAll = async () => {
     try { await api.mock2StopAllCycles(); await load(); }
     catch (err) { toast({ variant: 'destructive', title: 'Could not stop cycles', description: err.message }); }
@@ -177,6 +193,8 @@ export default function BuildMode({
           onRemediate={remediate}
           onStopAll={stopAll}
           onRefresh={refresh}
+          needsFeedback={needsFeedback}
+          onFeedback={submitFeedback}
         />
       </div>
 
@@ -189,6 +207,7 @@ export default function BuildMode({
           online={online}
           active={active}
           job={job}
+          needsFeedback={needsFeedback}
           onStarted={refresh}
         />
       </div>

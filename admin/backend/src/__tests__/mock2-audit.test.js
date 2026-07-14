@@ -235,6 +235,17 @@ test('buildAdminDecisionsBlock: approved deviations become MUST-implement, denie
   assert.match(block, /DENIED — do NOT implement this.*Auto-provision/);
   assert.doesNotMatch(block, /Which roles/);        // editor answers are not deviations
   assert.doesNotMatch(block, /Still open deviation/); // undecided is not included
+  // An approved deviation must also drive the UI copy + inventory, not just backend.
+  assert.match(block, /state\/inventory\.json/);
+  assert.match(block, /single sign-on with MFA/);
+});
+
+test('buildAdminDecisionsBlock: the UI-copy instruction only appears when something was APPROVED', () => {
+  const deniedOnly = buildAdminDecisionsBlock([
+    { route: 'admin', question: 'Force LDAP login', answer: markDeviationDecision(false) },
+  ]);
+  assert.match(deniedOnly, /DENIED/);
+  assert.doesNotMatch(deniedOnly, /state\/inventory\.json/); // no approval → no UI-copy tail
 });
 
 test('buildAdminDecisionsBlock: no decided deviations → empty string (instruction unchanged)', () => {

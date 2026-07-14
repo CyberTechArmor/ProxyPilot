@@ -112,23 +112,25 @@ export function seedFrameworkV1(createdBy = null) {
   const db = getMock2Db();
   const existing = db.prepare(`SELECT COUNT(*) AS n FROM mock2_framework_versions`).get();
   if (existing && existing.n > 0) return null;
-  // created_by is NOT NULL (migration 501). The boot call passes null, so resolve
-  // the platform's first admin as the seed's author — falling back to 1 so the
-  // insert can never fail the constraint. Without this the seed threw on the NULL,
-  // the boot try/catch swallowed it, and the registry stayed empty ("No framework
-  // version exists to pin. Publish one first.").
-  let author = createdBy;
-  if (author == null) {
-    try {
-      const admin = getDb()
-        .prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC, id ASC LIMIT 1`)
-        .get();
-      author = admin?.id ?? 1;
-    } catch { author = 1; }
-  }
-  let content;
+  // created_by is NOT NULL (migration 501) — resolve a real author (the boot call
+  // passes null) so the insert can never fail the constraint.
+  const author = resolveSeedAuthor(createdBy);
+  const content = readSeedContent();
+  if (!content) return null;
+  const row = insertFrameworkVersion({
+    ...content,
+    changelog: 'Seed v1 — Mock2 Framework v1.1 (constitution, four skills, deterministic gate battery, locked design system). Runtime scaffold still placeholder (R8).',
+    source: 'in_app',
+    createdBy: author,
+  });
+  console.log('[mock2] framework registry seeded with version 1 (Mock2 Framework v1.1 content; runtime scaffold still placeholder — R8)');
+  return row;
+}
+
+// Read the vendored seed's five content fields, or null if any is unreadable.
+function readSeedContent() {
   try {
-    content = {
+    return {
       constitution_md: readSeedFile('constitution.md'),
       skills_json: readSeedFile('skills.json'),
       gates_json: readSeedFile('gates.json'),
@@ -139,12 +141,44 @@ export function seedFrameworkV1(createdBy = null) {
     console.error('[mock2] framework seed: could not read vendored seed:', err?.message);
     return null;
   }
+}
+
+// Resolve a non-null author id (created_by is NOT NULL) — the caller's id, else
+// the platform's first admin, else 1.
+function resolveSeedAuthor(createdBy = null) {
+  if (createdBy != null) return createdBy;
+  try {
+    const admin = getDb().prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC, id ASC LIMIT 1`).get();
+    return admin?.id ?? 1;
+  } catch { return 1; }
+}
+
+// Publish a NEW framework version from the vendored seed when its content differs
+// from the latest published version — the "framework repo → published version"
+// flow. Seed-side fixes (e.g. a corrected gate script) otherwise stay inert: a
+// project builds against its PINNED version, and seedFrameworkV1 only runs on an
+// empty registry, so an edited seed would never reach an existing install. This
+// makes the fix a real new version; projects then adopt it through the normal
+// drift → update-cycle path (explicit consent — nothing auto-remediates a
+// project). Idempotent: a no-op when the seed matches the latest version. Called
+// on boot after seedFrameworkV1.
+export function upgradeFrameworkFromSeed(createdBy = null) {
+  const latest = getCurrentFrameworkVersion();
+  if (!latest) return null; // nothing seeded yet — first boot goes through seedFrameworkV1
+  const content = readSeedContent();
+  if (!content) return null;
+  const unchanged = latest.constitution_md === content.constitution_md
+    && latest.skills_json === content.skills_json
+    && latest.gates_json === content.gates_json
+    && latest.design_system_md === content.design_system_md
+    && String(latest.project_template_ref || '') === content.project_template_ref;
+  if (unchanged) return null;
   const row = insertFrameworkVersion({
     ...content,
-    changelog: 'Seed v1 — Mock2 Framework v1.1 (constitution, four skills, deterministic gate battery, locked design system). Runtime scaffold still placeholder (R8).',
+    changelog: `Seed upgrade — vendored framework content changed since v${latest.version} (gate / skill / constitution fixes). Projects adopt it via an update cycle.`,
     source: 'in_app',
-    createdBy: author,
+    createdBy: resolveSeedAuthor(createdBy),
   });
-  console.log('[mock2] framework registry seeded with version 1 (Mock2 Framework v1.1 content; runtime scaffold still placeholder — R8)');
+  console.log(`[mock2] framework upgraded from seed → version ${row.version} (seed content changed since v${latest.version})`);
   return row;
 }

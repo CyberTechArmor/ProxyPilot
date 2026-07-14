@@ -144,9 +144,11 @@ function recordSpend({ projectId, cycleId, connector, model, usage }) {
   const cacheRead = usage.cacheReadInputTokens || 0;
   const cacheWrite = usage.cacheCreationInputTokens || 0;
   const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, effectivePrice(connector.id, model));
-  addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0) + cacheRead + cacheWrite, costCents: cents });
+  // Cost is cache-aware; the token count is fresh input + output (cache re-reads
+  // would inflate it — see runner.js).
+  addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0), costCents: cents });
   try {
-    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: (usage.inputTokens || 0) + cacheRead + cacheWrite, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
+    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
   } catch (e) { console.warn('[mock2] concept ledger write failed:', e?.message); }
 }
 

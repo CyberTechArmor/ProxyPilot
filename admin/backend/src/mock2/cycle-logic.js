@@ -78,7 +78,11 @@ export function interruptDecision(interruptRequest) {
 // the mid-cycle buffer stop is the real guard.
 export const DEFAULT_TURN_INPUT_TOKENS = 12000;
 export const DEFAULT_TURN_OUTPUT_TOKENS = 3000;
-export const DEFAULT_ESTIMATE_TURNS = 8;
+// Recalibrated up (~2.3×, was 8): observed real builds — especially anything
+// non-trivial like an auth module — run many more than 8 turns, so the old
+// reservation ran well under actual usage. A production-grade feature commonly
+// takes ~18 turns; the safety factor still pads on top.
+export const DEFAULT_ESTIMATE_TURNS = 18;
 export const DEFAULT_SAFETY_FACTOR = 1.5;
 
 // estimateCycleTokens — the buffered token envelope for a cycle. Pure so the

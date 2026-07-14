@@ -48,6 +48,7 @@ import {
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { deployProject, readRunContract } from './deploy.js';
+import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
@@ -523,6 +524,24 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         return scheduleJobCleanup(cycle.id);
       }
       logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
+
+      // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap
+      // HTTP/API layer always runs; the browser + read-only DB connectors are a
+      // relevance-gated escalation (default OFF) that start ONLY when this change's
+      // diff/metadata warrants them. A backend-only change invokes zero connectors.
+      // Every run/skip + reason is logged. With the connectors off and http not
+      // enforced (defaults), ok is always true → the success path is unchanged.
+      if (!deployed.skipped) {
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, logEvent, env: process.env });
+        if (!smoke.ok) {
+          const detail = smokeFailSummary(smoke.report);
+          finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
+          releaseLock(projectId, holder);
+          setJob(cycle.id, { phase: 'smoke_failed', message: `Smoke gate failed — ${detail}`, commit: record?.commit_sha || null });
+          void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
+          return scheduleJobCleanup(cycle.id);
+        }
+      }
       finishCycle(cycle.id, { status: 'succeeded' });
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });

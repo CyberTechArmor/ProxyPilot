@@ -43,6 +43,7 @@ import {
 } from './runner-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
+import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
@@ -296,6 +297,21 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       return scheduleJobCleanup(cycle.id);
     }
     logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
+
+    // e2e/journey SMOKE GATE — identical to the hand-rolled runner (harness parity):
+    // cheap HTTP always; browser + read-only DB connectors only on a relevance hit
+    // (default OFF). Same shared code path, so the run/skip decision is runner-agnostic.
+    if (!deployed.skipped) {
+      const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: 'SDK runner change', instruction: cycle.instruction, logEvent, env: process.env });
+      if (!smoke.ok) {
+        const detail = smokeFailSummary(smoke.report);
+        finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
+        releaseLock(projectId, holder);
+        setJob(cycle.id, { phase: 'smoke_failed', message: `Smoke gate failed — ${detail}`, commit: record?.commit_sha || null });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
+        return scheduleJobCleanup(cycle.id);
+      }
+    }
     finishCycle(cycle.id, { status: 'succeeded' });
     releaseLock(projectId, holder);
     updateProject(projectId, { last_activity_at: nowIso() });

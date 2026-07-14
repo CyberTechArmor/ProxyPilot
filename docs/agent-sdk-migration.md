@@ -181,6 +181,105 @@ fabricated:
 > the breaker halts it within `BUILD_NO_PROGRESS_LIMIT` (default 3). Record the turn
 > count + cost from the cycle row / event log in the table above.
 
+## Smoke gate: relevance-gated browser + read-only DB connectors
+
+> **North star.** The e2e/journey smoke gate should be able to **see the running app
+> and its live data** when — and only when — a change actually warrants it. Add a
+> browser connector (drive the deployed UI) and a read-only Postgres connector
+> (inspect live rows) to the harness, but invoke them **conditionally, on a
+> deterministic relevance trigger, never on every cycle**. The default smoke layer
+> stays cheap HTTP/API; the connectors are a relevance-gated escalation, not a standing
+> step. Harness change only — no Mock2 application code is touched, and both runners
+> inherit it identically.
+
+### Where the machinery lives (pre-change investigation)
+
+- **The smoke gate did not exist yet.** The pinned gate battery is five *shell* gates
+  (`typecheck`, `constitution-lint`, `rule-coverage`, `security-scan`, `test`) in
+  `framework-seed/gates.json`, run in-container before checkpoint/deploy. The
+  constitution *references* an e2e/journey gate (§7) but nothing implemented it; the
+  closest HTTP-level journey check was the deploy **health-check** in `deploy.js`
+  (curl `/`, reject 5xx/000). This change adds the smoke gate as a **post-deploy runner
+  step** (it needs the app deployed and serving to see it), not a sixth shell gate.
+- **MCP wiring for the runner:** none existed. The connectors are wired harness-side and
+  invoked by the runner post-deploy; they are deterministic drivers (a gate must be
+  deterministic, per constitution §1.3), not model-driven MCP calls.
+- **Diff / changed-file + change metadata:** the change record (`change-logic.js`) stores
+  `summary`, `gates_run`, `commit_sha` (no file list). The new `smoke.js`
+  `changedFilesForCommit()` derives the cycle's own changed-file list from the checkpoint
+  commit (`git diff-tree --name-only`); `changeMeta` = the checkpoint `summary` + the
+  cycle instruction (and any `state/inventory.json` screen marks).
+
+### The change
+
+- **Two connectors, registered default-OFF** (`SMOKE_BROWSER_ENABLED` /
+  `SMOKE_DB_ENABLED`, both `false`), wired but never started unless enabled **and**
+  triggered. Starting is **lazy**: the trigger (a regex over the changed-path list —
+  far cheaper than a browser) is evaluated first; a connector spins up only on a hit.
+  `playwright` is imported lazily so a default install never loads it. The DB connector
+  is **read-only** (`SET TRANSACTION READ ONLY` + a SELECT-only guard that refuses any
+  write/DDL/`;`).
+- **Deterministic relevance triggers** (`smoke-triggers.js`, pure + unit-tested):
+  - *Browser* fires when the diff touches user-facing render/flow (`public/**`,
+    `**/*.html|css|jsx|tsx`, view/template/login/signup paths) **or** the change
+    metadata marks a screen/user-journey change → then it drives the deployed page and
+    asserts the rendered journey (default: exactly one visible form on the fresh-install
+    root — "one form, not three").
+  - *DB* fires when the diff touches data/state semantics (`migrations/**`, `**/*.sql`,
+    `schema/seed/bootstrap` paths) **or** the rule under test is about data state
+    (bootstrap / user-existence / first-run) → then it reads the live table(s) and
+    asserts expected state (default: zero users ⇒ `canCreateSuperadmin`).
+  - Neither fires → HTTP/API assertions only; both connectors stay untouched. This is
+    the common case and stays cheap (one curl round-trip). Globs are configurable
+    (`SMOKE_BROWSER_GLOBS` / `SMOKE_DB_GLOBS`).
+- **No arbitrary invocation, justified escalation allowed.** The trigger is deterministic
+  static analysis, so the model never launches a connector arbitrarily. An escalation to
+  a connector that didn't auto-fire is honored **only with a stated reason**
+  (`applyEscalations`); a reason-less escalation is **rejected and flagged**, never
+  honored silently.
+- **No silent skips.** Every smoke run records, per connector, one of `ran` / `skipped`
+  / `unavailable` **with its one-line reason** (`smokeLogLines`), logged as a `smoke`
+  cycle-event on every cycle — so "covered everything" is never implied when a layer was
+  intentionally bypassed. A warranted-but-disabled connector is `unavailable` (visible),
+  not a hidden skip.
+- **Verdict / safety.** The always-on HTTP layer is advisory by default
+  (`SMOKE_GATE_ENFORCING=false`) so adding the gate changes **no** default cycle
+  outcomes; an **invoked** connector (the operator enabled it) that fails its assertion
+  **fails the cycle** (status `failed`, `smoke_failed` job phase) — that's the point:
+  catch the multi-form render / the stale-user state. With both connectors OFF and HTTP
+  not enforced (defaults), `ok` is always true and the success path is byte-for-byte
+  unchanged.
+- **Both runners** call the same `smoke.js smokeAfterDeploy()` after a successful deploy,
+  so the run/skip decision and the assertions are runner-agnostic (hand-rolled + SDK).
+
+### Acceptance & the three ADP replays
+
+| Acceptance criterion | Status |
+|---|---|
+| Backend-only change → zero connector invocations, HTTP-cost only, proven by the run log | **Met** — replay 1 test; both resolve `skipped` with reasons |
+| `public/**` change auto-fires browser; `migrations/**`/bootstrap auto-fires DB; each logs its trigger reason | **Met** — replays 2 & 3 tests |
+| A manual escalation without a logged reason is rejected/flagged | **Met** — `applyEscalations` test |
+| The skip/run decision for each connector is recorded every cycle | **Met** — `smoke` cycle-event with `smokeLogLines` on every cycle |
+
+**Three ADP replays** (pinned in `mock2-smoke-triggers.test.js`):
+
+1. **Pure backend/config change** (`src/service/rateLimit.ts`, `src/config/env.ts`) →
+   both connectors **skip**: `browser: skipped — no user-facing paths in diff` /
+   `db: skipped — no data/state paths in diff`.
+2. **CSS/login-render fix** (`public/login.html`, `public/styles/login.css`) → **browser
+   fires** (`ran — user-facing paths in diff`), DB skips. The browser assertion catches
+   the multi-form render (expects 1 visible form, not 3).
+3. **`usersExist` bootstrap fix** (`migrations/004_seed_guard.sql`, `src/auth/bootstrap.ts`)
+   → **DB fires** (`ran — data/state paths in diff`), browser skips. The DB assertion
+   catches the stale-user state (expects 0 users → `canCreateSuperadmin`).
+
+> The trigger decisions + run/skip logging above are proven deterministically. The live
+> connector **drivers** (Playwright against the deployed URL; read-only `psql` against
+> the in-container Postgres) run only when enabled and require a real Incus/deployed-app
+> environment, which this dev container lacks — so the driver *execution* is validated on
+> a real install (enable `SMOKE_BROWSER_ENABLED` / `SMOKE_DB_ENABLED`, re-run replays 2 &
+> 3, confirm the browser flags the 3-form render and the DB flags the stale user).
+
 ## Phased roadmap
 
 - [ ] **Phase 1 — Tool + context swap (IN PROGRESS).** SDK build runner behind a

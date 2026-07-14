@@ -38,6 +38,10 @@ import {
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { insertCycleEvent } from './cycle-events.js';
+import {
+  insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
+} from './authorizations.js';
+import { buildResumeContextBlock, resolveSelectedOption, validateAuthScope } from './unblock-logic.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
@@ -135,8 +139,14 @@ function quotaVerdict(projectId, estCostCents) {
 //   current framework version → take the lock → copy the pinned gate scripts into
 //   the container → run in the background.
 // Returns { status:'started'|'refused'|'error', cycle, error }.
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0 }) {
+// resumeContext (optional): operator guidance carried into a RESUMED cycle —
+// { message, selectedOption, authorizations:[{scope,conditions}] } — stored on the
+// cycle and injected as a labeled user turn after the task. A fresh (non-resume)
+// build passes null, which also expires any dangling one-time authorizations so a
+// stale grant can never apply to an unrelated later build ("expires with the cycle").
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null }) {
   const projectId = Number(project.id);
+  if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
 
   const ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
@@ -178,6 +188,9 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     projectId, frameworkVersionId: framework.id, stage: 'build', instruction,
     initiatedBy, actingAsAdmin, estTokens, estCostCents, status: 'estimating',
   });
+  // Persist the resume context (operator guidance) so runCycle injects it as a
+  // labeled turn after the task.
+  if (resumeContext) updateCycle(cycle.id, { resume_context_json: JSON.stringify(resumeContext) });
   const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
   if (!lock.ok) {
     finishCycle(cycle.id, { status: 'failed', error: `could not acquire checkout lock: ${lock.reason}` });
@@ -230,17 +243,37 @@ const RESUMABLE_CYCLE_STATUSES = Object.freeze([
   'failed', 'awaiting_admin', 'interrupted', 'abandoned', 'refused_quota',
 ]);
 
-export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0 }) {
+// message (optional): free-text operator guidance injected on resume. option
+// (optional): the id/label of a halt resolution option the operator chose. Any
+// GRANTED, unused one-time authorizations for the project are gathered, injected,
+// and consumed (single-use) on this resume. A bare resume (no message/option/grant)
+// carries no new context, so a build blocked on a real blocker re-halts rather than
+// loops.
+export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0, message = '', option = null }) {
   if (!cycle) return { status: 'error', error: 'No cycle to retry.' };
   if (!RESUMABLE_CYCLE_STATUSES.includes(cycle.status)) {
     return { status: 'error', error: `This cycle is "${cycle.status}" — there is nothing to retry.` };
   }
-  // Clear the retries/quota handoff so it stops nagging in the admin queue (both
-  // dedupe keys the escalation paths use). Best-effort — a missing item is fine.
-  for (const key of [`mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`, `mock2-quota:${project.id}`]) {
-    try { resolveQueueItem(key, { resolution: 'retried by editor' }); } catch { /* best effort */ }
+  // Clear the retries/quota/blocked handoff so it stops nagging in the admin queue.
+  for (const key of [`mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`, `mock2-blocked:${cycle.id}`, `mock2-quota:${project.id}`]) {
+    try { resolveQueueItem(key, { resolution: 'resumed by editor' }); } catch { /* best effort */ }
   }
-  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin });
+  // Assemble the resume context: operator message, chosen halt option, and any
+  // granted one-time authorizations (consumed here — single-use).
+  let selectedOption = null;
+  try {
+    const opts = cycle.halt_options_json ? JSON.parse(cycle.halt_options_json) : [];
+    selectedOption = resolveSelectedOption(opts, option);
+  } catch { selectedOption = resolveSelectedOption([], option); }
+  const granted = listGrantedUnusedAuthorizations(project.id);
+  const authorizations = granted.map((a) => ({ scope: a.scope, conditions: a.conditions }));
+  for (const a of granted) { try { markAuthorizationUsed(a.id); } catch { /* best effort */ } }
+  const msg = String(message || '').trim();
+  const resumeContext = (msg || selectedOption || authorizations.length)
+    ? { message: msg, selectedOption, authorizations }
+    : null;
+
+  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin, resumeContext });
 }
 
 // retryDeploy — re-run ONLY the deploy (install → migrate → build → start →
@@ -327,6 +360,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   const skills = parseFrameworkSkills(framework.skills_json);
   const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000 });
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
+  // On a RESUME, inject the operator guidance (message / chosen option / granted
+  // one-time authorizations) as a distinct labeled user turn AFTER the task.
+  let resumeCtx = null;
+  try { const rc = getCycle(cycle.id)?.resume_context_json; resumeCtx = rc ? JSON.parse(rc) : null; } catch { resumeCtx = null; }
+  if (resumeCtx) {
+    const block = buildResumeContextBlock(resumeCtx);
+    if (block) {
+      transcript.push({ role: 'user', text: block });
+      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope) } });
+    }
+  }
 
   let lastGateReports = initialGateReports(gateScripts);
   // Soft-pause accounting for THIS run (a resume is a fresh cycle, so its own
@@ -466,7 +510,28 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, logEvent });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: decision.haltOptions, logEvent });
+      return scheduleJobCleanup(cycle.id);
+    }
+
+    // 4a-ii) The model requested a scoped one-time authorization — record it and end
+    //     the cycle awaiting an admin (a blocking request, like a rule question). An
+    //     invalid (empty) scope is fed back so the model can restate it, not halted.
+    if (decision.authRequest) {
+      const v = validateAuthScope(decision.authRequest.scope);
+      const authCallId = (decision.toolCalls.find((c) => c.name === 'request_authorization') || {}).id || 'request_authorization';
+      if (!v.ok) {
+        transcript.push({ role: 'tool', toolCallId: authCallId, name: 'request_authorization', content: `Cannot request authorization: ${v.error}.` });
+        continue;
+      }
+      const auth = insertAuthorization({ projectId, cycleId: cycle.id, scope: v.scope, reason: decision.authRequest.reason });
+      logEvent('authorization_request', { role: 'system', content: v.scope, meta: { authorization_id: auth.id, reason: decision.authRequest.reason || '' } });
+      await haltCycle({
+        cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework,
+        trigger: 'authorization_request',
+        reason: `The build requested a one-time authorization: ${v.scope}${decision.authRequest.reason ? ` — ${decision.authRequest.reason}` : ''}`,
+        options: [], logEvent,
+      });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -845,7 +910,7 @@ async function escalateAwaitingAdmin({ cycle, project, containerName, holder, re
 // needs-attention queue item is raised, and the human is notified. Resumable via
 // the existing editor Retry (RESUMABLE_CYCLE_STATUSES includes 'awaiting_admin').
 // Exported so the SDK runner ends a blocked/stuck cycle identically.
-export async function haltCycle({ cycle, project, containerName, holder, gateReports, gateScripts, framework, trigger, reason, logEvent = null }) {
+export async function haltCycle({ cycle, project, containerName, holder, gateReports, gateScripts, framework, trigger, reason, options = [], logEvent = null }) {
   const projectId = Number(project.id);
   setJob(cycle.id, { phase: 'blocked', message: 'Blocked — checkpointing before stopping…' });
 
@@ -859,7 +924,7 @@ export async function haltCycle({ cycle, project, containerName, holder, gateRep
   // Link any report artifacts the cycle wrote (state/changes/*.md, state/*.md).
   const artifacts = await listReportArtifacts(containerName);
 
-  updateCycle(cycle.id, { halt_reason: trigger });
+  updateCycle(cycle.id, { halt_reason: trigger, halt_options_json: JSON.stringify(Array.isArray(options) ? options : []) });
   finishCycle(cycle.id, { status: 'awaiting_admin', error: reason });
   releaseLock(projectId, holder);
 

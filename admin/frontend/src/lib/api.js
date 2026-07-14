@@ -1205,8 +1205,15 @@ export const api = {
   mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
   mock2InterruptCycle: (id, cycleId, action) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/interrupt`, { method: 'POST', body: JSON.stringify({ action }) }),
-  mock2RetryCycle: (id, cycleId) =>
-    request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST' }),
+  // Resume a stalled/blocked cycle. Optional { message, option } carries operator
+  // guidance (a free-text message and/or a chosen halt resolution option) into the
+  // resumed cycle. A bare call resumes with no new context.
+  mock2RetryCycle: (id, cycleId, body = null) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) }),
+  // Scoped one-time authorizations (Part 4).
+  mock2ListAuthorizations: (id) => request(`/mock2/projects/${id}/authorizations`),
+  mock2DecideAuthorization: (id, authId, approved, conditions) =>
+    request(`/mock2/projects/${id}/authorizations/${authId}/decision`, { method: 'POST', body: JSON.stringify({ approved, ...(conditions ? { conditions } : {}) }) }),
   // Retry only the deploy (from the existing checkpoint) for a gates-passed cycle
   // whose deploy failed — no model calls, no gate battery.
   mock2RetryDeploy: (id, cycleId) =>
@@ -1245,8 +1252,10 @@ export const api = {
     return request(`/mock2/queue${q ? `?${q}` : ''}`);
   },
   mock2QueueCounts: () => request('/mock2/queue/counts'),
-  mock2SetQueueItemStatus: (itemId, status, resolution) =>
-    request(`/mock2/queue/${itemId}/status`, { method: 'POST', body: JSON.stringify({ status, resolution }) }),
+  // resolution is the short note; editedText/conditions drive "approve as edited"
+  // (the edited deviation text becomes the authoritative APPROVED record).
+  mock2SetQueueItemStatus: (itemId, status, resolution, extra = {}) =>
+    request(`/mock2/queue/${itemId}/status`, { method: 'POST', body: JSON.stringify({ status, resolution, ...extra }) }),
 
   listCves: () => request('/cves'),
   getCve: (cveId) => request(`/cves/${encodeURIComponent(cveId)}`),

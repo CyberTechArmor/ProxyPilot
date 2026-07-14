@@ -168,6 +168,10 @@ export function retriesExhausted(retries) {
 
 // Client-safe view of a cycle row for the poll endpoint + the "gates going
 // green" view. gates_json is parsed back for the UI.
+function safeJsonArray(json) {
+  try { const v = JSON.parse(json || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+
 export function publicCycleShape(row) {
   if (!row) return null;
   let gates = [];
@@ -199,10 +203,15 @@ export function publicCycleShape(row) {
     // 'budget_time' | null. Set → the cycle is a resumable Pause, not a stop.
     pause_reason: row.pause_reason || null,
     // Why a cycle HALTED without success (needs attention): 'model_halt' |
-    // 'no_tool_calls' | 'repeated_output' | 'no_state_change' | null. Set on an
-    // 'awaiting_admin' cycle → "Blocked — needs attention", distinct from a
-    // retries-exhausted awaiting_admin (halt_reason null) and from a user stop.
+    // 'no_tool_calls' | 'repeated_output' | 'no_state_change' |
+    // 'authorization_request' | null. Set on an 'awaiting_admin' cycle → "Blocked —
+    // needs attention", distinct from a retries-exhausted awaiting_admin (halt_reason
+    // null) and from a user stop.
     halt_reason: row.halt_reason || null,
+    // Resolution options the model PROPOSED when it halted ([{id,label,detail}]), so
+    // the operator can pick one (rendered with the rule-question card UI) and have it
+    // injected on resume. [] when none proposed.
+    halt_options: safeJsonArray(row.halt_options_json),
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

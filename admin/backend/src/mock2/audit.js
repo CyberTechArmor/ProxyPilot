@@ -38,7 +38,7 @@ import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
 import {
-  insertQuestion, getQuestion, answerQuestion, dismissQuestion,
+  insertQuestion, getQuestion, answerQuestion, dismissQuestion, updateQuestionText,
   countOpenEditorQuestions, countOpenAdminQuestions, listQuestionsForCycle,
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
@@ -52,6 +52,7 @@ import {
   isFrameworkDrifted, driftLabel, estimateAuditTokens,
   buildAdminDecisionsBlock, markDeviationDecision,
 } from './audit-logic.js';
+import { approveAsEditedText } from './unblock-logic.js';
 
 const APP_DIR = '/srv/app';
 const RULES_PATH = 'state/rules.md';
@@ -487,15 +488,26 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
 // the framework — the admin either amends the framework via the registry or
 // accepts the deviation for this project), then resume the build if this was the
 // last blocker. Returns { resumed }.
-export async function resolveFrameworkDeviation({ questionId, user, resolution = null, approved = false }) {
+export async function resolveFrameworkDeviation({ questionId, user, resolution = null, approved = false, editedText = null, conditions = null }) {
   const question = getQuestion(questionId);
   if (!question) return { resumed: false };
   // Record the decision with an APPROVED/DENIED marker so the resume path can
   // build the authoritative decisions block for the runner (an approved deviation
   // overrides the constitution; a denied one is skipped). Marker-prefixed answer
   // rather than a free-text note so the parse can't be fooled.
+  //
+  // Approve-as-edited (Part 3): when the admin rewrites the deviation text and/or
+  // appends conditions, the EDITED text becomes the authoritative approved record —
+  // we replace the question text (buildAdminDecisionsBlock reads it) so the runner is
+  // handed exactly what the admin signed off on.
   if (question.status === 'open') {
-    dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(approved, resolution) });
+    if (approved && (editedText || conditions)) {
+      const edit = approveAsEditedText({ originalText: question.question, editedText: editedText || '', conditions: conditions || '' });
+      updateQuestionText(question.id, edit.text);
+      dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(true, edit.resolutionNote) });
+    } else {
+      dismissQuestion(question.id, { by: user?.id ?? null, answer: markDeviationDecision(approved, resolution) });
+    }
   }
   const resumed = await maybeResumeBuild({ projectId: question.project_id, auditCycleId: question.cycle_id, actingAsAdmin: 1 });
   return { resumed };

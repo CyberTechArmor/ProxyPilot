@@ -65,6 +65,11 @@ import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, 
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
 import { reconcileMock2Firewall } from './firewall.js';
+import {
+  listEgressGrants, getEgressGrant, setEgressGrantStatus, setEgressGrantReachable,
+} from './egress-grants.js';
+import { probeHostReachable } from './network.js';
+import { publicEgressGrantShape } from './egress-logic.js';
 // ---- M5: connectors, slots, prices, quotas, git connectors, framework ----
 import {
   listConnectors, getConnector, getConnectorByName, insertConnector, updateConnector,
@@ -854,6 +859,29 @@ export function createMock2Router() {
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
     const log = await readEgressLog(cidr, { limit }).catch((e) => ({ ok: false, error: e?.message, entries: [] }));
     res.json(log);
+  });
+
+  // Declared egress grants for a project — the internal hosts it declared in
+  // mock2.yaml `egress:`, each with its admin-decision status and the host
+  // reachability probe. Any member can see it (it explains why an outbound call
+  // is blocked or allowed); only admins decide (through the queue). Newest first.
+  router.get('/projects/:id/egress', requireMock2Role('viewer'), (req, res) => {
+    const grants = listEgressGrants(req.mock2Project.id).map(publicEgressGrantShape);
+    res.json({ grants });
+  });
+
+  // Re-probe host reachability for a single grant (admin) — the "can the HOST
+  // even route to this destination?" check (acceptance #5), on demand so an admin
+  // can re-test after fixing host routing without re-approving. Records the result
+  // on the grant and returns it.
+  router.post('/projects/:id/egress/:grantId/probe', requireAdmin, async (req, res) => {
+    const grant = getEgressGrant(req.params.grantId);
+    if (!grant || grant.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Egress grant not found' });
+    const probe = await probeHostReachable(grant.host, grant.port).catch((e) => ({ reachable: 'unreachable', error: e?.message }));
+    const updated = setEgressGrantReachable(grant.id, probe.reachable);
+    logAudit(req.user.id, 'MOCK2_EGRESS_GRANT_PROBE', 'mock2_egress_grant', grant.id,
+      { host: grant.host, port: grant.port, reachable: probe.reachable }, req.ip);
+    res.json({ grant: publicEgressGrantShape(updated), reachable: probe.reachable });
   });
 
   // ---- Time tracking ----
@@ -2237,6 +2265,30 @@ export function createMock2Router() {
         });
         resumed = !!r.resumed;
       } catch (err) { console.warn('[mock2] deviation resolve follow-through failed:', err?.message); }
+    }
+    // Egress grant follow-through: resolving the queue item APPROVES the grant
+    // (and probes host reachability so the decision has the "policy vs host-down"
+    // context, acceptance #5); dismissing DENIES it. The fence reconcile then
+    // wires only approved grants. The full audit record — who approved, when,
+    // host/port/reason — is the grant row's decided_by/decided_at plus this log.
+    if (item.kind === 'egress_grant' && item.ref_table === 'mock2_egress_grants' && item.ref_id
+        && (status === 'resolved' || status === 'dismissed')) {
+      try {
+        const grantStatus = status === 'resolved' ? 'approved' : 'denied';
+        const g = setEgressGrantStatus(item.ref_id, grantStatus, { decidedBy: req.user.id });
+        if (g && grantStatus === 'approved') {
+          const probe = await probeHostReachable(g.host, g.port).catch(() => null);
+          if (probe) setEgressGrantReachable(g.id, probe.reachable);
+          // Wire the newly-approved allow-hole into the project's fence now.
+          await reconcileMock2Firewall().catch((e) => console.warn('[mock2] fence reconcile (egress approve) failed:', e?.message));
+          logAudit(req.user.id, 'MOCK2_EGRESS_GRANT_APPROVE', 'mock2_egress_grant', g.id,
+            { host: g.host, port: g.port, protocol: g.protocol, reason: g.reason, reachable: probe?.reachable || null }, req.ip);
+        } else if (g) {
+          // Denied grants are never wired; nothing to reconcile.
+          logAudit(req.user.id, 'MOCK2_EGRESS_GRANT_DENY', 'mock2_egress_grant', g.id,
+            { host: g.host, port: g.port, protocol: g.protocol }, req.ip);
+        }
+      } catch (err) { console.warn('[mock2] egress grant follow-through failed:', err?.message); }
     }
     logAudit(req.user.id, 'MOCK2_QUEUE_ITEM_STATUS', 'mock2_queue_item', item.id,
       { kind: item.kind, status, resumed, edited: !!(editedText || conditions) }, req.ip);

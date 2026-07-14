@@ -39,6 +39,7 @@ const KIND_LABEL = {
   quota_exhausted: 'Quota exhausted',
   provisioning_failed: 'Provisioning failed',
   renewal_failed: 'Renewal failed',
+  egress_grant: 'Egress request',
 };
 
 const KIND_TONE = {
@@ -51,6 +52,7 @@ const KIND_TONE = {
   quota_exhausted: 'bg-red-500/10 text-red-600',
   provisioning_failed: 'bg-red-500/10 text-red-600',
   renewal_failed: 'bg-red-500/10 text-red-600',
+  egress_grant: 'bg-sky-500/10 text-sky-600',
 };
 
 const STATUS_TONE = {

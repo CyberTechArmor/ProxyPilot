@@ -24,6 +24,7 @@ import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
 } from './deploy-logic.js';
+import { parseDeclaredEgress } from './egress-logic.js';
 
 const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
 
@@ -50,6 +51,15 @@ function tail(r) {
 export async function readRunContract(containerName, appDir = '/srv/app') {
   const r = await containerSh(containerName, `cat '${appDir}/mock2.yaml' 2>/dev/null`);
   return parseRunContract(r.stdout || '');
+}
+
+// readDeclaredEgress(containerName, appDir) → the parsed `egress:` list the app
+// declares in mock2.yaml (declared, never discovered — extends ADR-005). The caller syncs
+// it into the grant store (egress-grants.syncDeclaredEgress) so each new
+// declaration becomes a pending admin-queue item and a removed one is revoked.
+export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
+  const r = await containerSh(containerName, `cat '${appDir}/mock2.yaml' 2>/dev/null`);
+  return parseDeclaredEgress(r.stdout || '');
 }
 
 // deployProject({ containerName, appDir, webPort, runContract, onStep }) →

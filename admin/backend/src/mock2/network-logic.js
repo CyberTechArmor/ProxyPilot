@@ -24,6 +24,19 @@
 // (log, don't block by host); the firewall log replaces squid's access log.
 //
 // Terminology (risk R7): nothing here is named "agent".
+//
+// DECLARED EGRESS (extends ADR-005 to egress; fence is ADR-010): the deny-private block below makes internal LAN
+// destinations unreachable by default. An app that genuinely needs one (e.g. an
+// LDAPS directory on the host LAN) declares it in mock2.yaml `egress:`; an admin
+// approves it; only then does `buildFenceEntries` attach the resolved grant and
+// `renderMock2Nft` punch a scoped allow-hole for it BEFORE the deny-private
+// block. Everything not declared+approved still hits deny-private — which now
+// `reject`s (not silently drops) so the container sees an immediate
+// "connection refused" (blocked-by-policy) that is distinguishable from a
+// host-down timeout. The grant/deny/ok log prefixes let the traffic log tell the
+// three apart. See egress-logic.js for the pure grant layer.
+
+import { renderEgressGrantRules, EGRESS_LOG_PREFIX_GRANT } from './egress-logic.js';
 
 // Private / link-local destination ranges a project bridge must NOT reach: this
 // is what preserves isolation now that egress is NAT'd — a container may reach
@@ -71,6 +84,11 @@ export function gatewayForCidr(cidr) {
 // project that has a bridge subnet, a container IP, and a declared web port.
 // A project missing any of those (provisioning, archived, stopped, mid-launch)
 // contributes nothing until the container is up and reconcile runs again.
+//
+// A project may carry `egress`: the list of APPROVED egress grants (each with a
+// resolved `ip`) the firewall shell attached before reconcile. They ride along on
+// the entry so `renderMock2Nft` can punch scoped allow-holes; a project with no
+// approved grants simply gets an empty list and the default deny-private applies.
 export function buildFenceEntries(projects = []) {
   const entries = [];
   for (const p of projects) {
@@ -78,7 +96,10 @@ export function buildFenceEntries(projects = []) {
     const cidr = p.bridge_cidr || (p.id ? bridgeCidrForProject(p.id) : null);
     const gateway = cidr ? gatewayForCidr(cidr) : null;
     if (!cidr || !gateway || !p.container_ip || !p.web_port) continue;
-    entries.push({ id: Number(p.id), cidr, gateway, containerIp: p.container_ip, webPort: Number(p.web_port) });
+    entries.push({
+      id: Number(p.id), cidr, gateway, containerIp: p.container_ip, webPort: Number(p.web_port),
+      egress: Array.isArray(p.egress) ? p.egress : [],
+    });
   }
   return entries;
 }
@@ -103,11 +124,17 @@ export function renderMock2Nft(entries = []) {
     // Inbound to the container: only the declared web port.
     fwd.push(`    ip daddr ${e.containerIp} tcp dport ${e.webPort} accept comment "${tag} web"`);
     fwd.push(`    ip daddr ${e.containerIp} drop comment "${tag} deny-inbound"`);
+    // Declared + admin-approved egress grants FIRST: a scoped allow-hole (with its
+    // own log prefix) to a specific internal host:port, so it survives the
+    // deny-private block that follows. Nothing here unless an admin approved it.
+    for (const line of renderEgressGrantRules(e.cidr, e.id, e.egress)) fwd.push(line);
     // Egress: block + log lateral movement to private ranges, then log + allow
     // internet egress (Incus NAT masquerades it). The log rules match only
-    // ct state new so a connection is recorded once, not per packet.
+    // ct state new so a connection is recorded once, not per packet. deny-private
+    // `reject`s (not drops) so a policy-blocked connection fails fast with
+    // "connection refused" — distinguishable from a real host-down timeout.
     fwd.push(`    ip saddr ${e.cidr} ip daddr ${privateSet} ct state new log prefix "${EGRESS_LOG_PREFIX_DENY} p${e.id}: " comment "${tag} deny-private-log"`);
-    fwd.push(`    ip saddr ${e.cidr} ip daddr ${privateSet} drop comment "${tag} deny-private"`);
+    fwd.push(`    ip saddr ${e.cidr} ip daddr ${privateSet} reject with icmpx type admin-prohibited comment "${tag} deny-private"`);
     fwd.push(`    ip saddr ${e.cidr} ct state new log prefix "${EGRESS_LOG_PREFIX_OK} p${e.id}: " comment "${tag} egress-log"`);
     fwd.push(`    ip saddr ${e.cidr} accept comment "${tag} egress"`);
     // Host-bound: only the bridge's own gateway, only for DNS + DHCP renew.
@@ -166,24 +193,33 @@ export function parseNftEgressLog(text, subnetPrefix, limit = 200) {
   const out = [];
   if (!subnetPrefix) return out;
   for (const line of String(text || '').split('\n')) {
-    if (line.indexOf(EGRESS_LOG_PREFIX_OK) === -1 && line.indexOf(EGRESS_LOG_PREFIX_DENY) === -1) continue;
+    const isGrant = line.indexOf(EGRESS_LOG_PREFIX_GRANT) !== -1;
+    const isDeny = !isGrant && line.indexOf(EGRESS_LOG_PREFIX_DENY) !== -1;
+    // Note: EGRESS_LOG_PREFIX_GRANT/_DENY both start with EGRESS_LOG_PREFIX_OK's
+    // stem only if that were a prefix — it isn't ("-ok" vs "-grant"/"-deny"), so a
+    // plain _OK match is unambiguous once grant/deny are excluded first.
+    const isOk = !isGrant && !isDeny && line.indexOf(EGRESS_LOG_PREFIX_OK) !== -1;
+    if (!isGrant && !isDeny && !isOk) continue;
     const src = /\bSRC=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/.exec(line);
     if (!src || !src[1].startsWith(subnetPrefix)) continue;
     const dst = /\bDST=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/.exec(line);
     const dpt = /\bDPT=(\d+)/.exec(line);
     const proto = /\bPROTO=(\w+)/.exec(line);
-    const denied = line.indexOf(EGRESS_LOG_PREFIX_DENY) !== -1;
     // A leading "<seconds>.<micros>" from `journalctl -o short-unix`; may be absent.
     const tsM = /^\s*(\d{9,}(?:\.\d+)?)/.exec(line);
     const dest = dst ? dst[1] : '';
+    // action: GRANT = allowed to a declared internal host; BLOCK = policy-denied;
+    // OUT = general internet egress. Only BLOCK is `denied` (a failed GRANT/OUT is
+    // host-down, not policy — that distinction is the whole point).
+    const action = isGrant ? 'GRANT' : (isDeny ? 'BLOCK' : 'OUT');
     out.push({
       ts: tsM ? Number(tsM[1]) : null,
       client: src[1],
-      action: denied ? 'BLOCK' : 'OUT',
+      action,
       status: null,
       method: proto ? proto[1] : '',            // TCP / UDP
       url: dest ? `${dest}${dpt ? `:${dpt[1]}` : ''}` : '',
-      denied,
+      denied: isDeny,
     });
   }
   const n = Number(limit) > 0 ? Number(limit) : 200;

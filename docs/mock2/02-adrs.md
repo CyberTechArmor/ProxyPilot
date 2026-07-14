@@ -455,3 +455,53 @@ rehydrate re-adds the disk device and re-clones. Per-project bridges (M4) do not
 change this decision — the mount is orthogonal to the network fence. Delete (M2)
 destroys the container but **keeps** the bare repo and the slug-history
 reservation, so the slug stays un-reusable forever.
+
+## ADR-012 — Declared, admin-approved outbound egress grants
+
+**Context.** ADR-010's fence NATs each project bridge to the internet but blocks
+(and now `reject`s) lateral movement to RFC1918 / link-local ranges — other
+bridges, the host LAN, the control plane. That is the right default, but some
+apps have a legitimate need to reach ONE internal host: an ADP LDAPS directory at
+`ldaps://<lan-ip>:636`, an internal API, a licence server. Hostname allowlisting
+died with squid (ADR-010 implementation note); we needed a way to punch a narrow,
+audited hole in the deny-private block for a specific `host:port` without
+reopening the whole private range.
+
+**Decision.** Egress is **declared, never inferred** — the same discipline as
+ports (ADR-005), extended to egress:
+
+- An app declares what it must reach in `mock2.yaml` under `egress:` — a list of
+  `{host, port, protocol, reason}`. Anything not listed stays blocked.
+- On deploy/provision the declaration is synced into `mock2_egress_grants`
+  (migration 511): each new entry becomes a `pending` grant plus an
+  `egress_grant` admin-queue item; a removed entry is `revoked`.
+- An admin approves or denies each grant through the existing admin-queue flow
+  (resolve → approved, dismiss → denied). Approval stamps who + when on the grant
+  row and is `logAudit`'d (`MOCK2_EGRESS_GRANT_APPROVE` / `_DENY`) — the audit
+  trail the acceptance test requires.
+- Only **approved** grants are wired. On reconcile the firewall resolves each
+  approved host to an IPv4 and `renderEgressGrantRules` emits a scoped
+  allow-hole (`ip saddr <bridge> ip daddr <ip> <proto> dport <port> accept`)
+  **before** the deny-private block, with its own `mock2-egress-grant` log
+  prefix. Revoking (removing the declaration or denying) drops the rule on the
+  next reconcile.
+
+**Failure visibility (acceptance #4).** deny-private changed from `drop` to
+`reject with icmpx type admin-prohibited`, so a policy-blocked connection fails
+fast with "connection refused" — distinguishable in-container from a real
+host-down timeout. The firewall log now carries three actions: `GRANT` (allowed
+to a declared host), `OUT` (general internet), `BLOCK` (policy-denied). A failed
+`GRANT`/`OUT` is therefore host-down, not policy.
+
+**Host reachability preflight (acceptance #5).** Before wiring, ProxyPilot probes
+whether the HOST itself can route to the destination (`probeHostReachable`, a TCP
+connect from the host) and records the result on the grant
+(`ok`/`refused`/`timeout`/`unreachable`/`dns_fail`). If the host can't reach the
+directory, that is reported as the blocker rather than built around; the Details
+"Outbound egress" card surfaces it and admins can re-probe on demand.
+
+**Consequences.** The pure layer (`egress-logic.js`: parse, validate, nft render)
+is unit-tested at the module boundary; the store (`egress-grants.js`), the fence
+wiring (`firewall.js`), and the probe (`network.js`) are the host-acting shells.
+No inference anywhere: a grant exists only because the app declared it, and it is
+wired only because an admin approved it.

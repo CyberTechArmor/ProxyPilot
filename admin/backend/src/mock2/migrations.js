@@ -53,7 +53,12 @@
 //            mock2_component_submissions (a project member proposes code from
 //            their project; an admin approves it into the library or rejects
 //            it with a reason — all through the platform) — additive, new tables
-//   517 Acc — acceptance discipline (cycle-94 lesson): mock2_cycles gains
+//   517 Egress — declared, admin-approved outbound egress: mock2_egress_grants
+//            (an app declares internal hosts it must reach in mock2.yaml
+//            `egress:`; each is a pending grant an admin approves before it is
+//            wired into the project fence) + rebuilds mock2_queue_items to add
+//            the `egress_grant` kind to the CHECK
+//   518 Acc — acceptance discipline (cycle-94 lesson): mock2_cycles gains
 //            acceptance_json — the machine-readable acceptance state (task
 //            kind, defect tag, red-test-observed, required live checks,
 //            demonstrated) so "gates green" and "acceptance demonstrated" are
@@ -778,12 +783,67 @@ export const MOCK2_MIGRATIONS = [
     },
   },
   {
+    // Declared, admin-approved outbound egress grants. Same "declared, never
+    // discovered" discipline as ports: an app declares the internal hosts it must
+    // reach in mock2.yaml `egress:`, each becomes a PENDING grant + an admin-queue
+    // item (kind egress_grant), and only APPROVED grants are wired into the
+    // project's nftables fence at deploy/reconcile (scoped to that project's
+    // bridge). Adding the egress_grant queue kind needs the queue CHECK rebuilt
+    // (SQLite can't ALTER a CHECK) — a plain table rebuild, dedupe_key UNIQUE is
+    // re-declared inline.
+    version: 517,
+    name: 'mock2_egress_grants',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_queue_items_new (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN
+            ('framework_deviation','drift','retries_exhausted','flag','orphaned',
+             'port_drift','quota_exhausted','provisioning_failed','renewal_failed','egress_grant')),
+          ref_table TEXT,
+          ref_id INTEGER,
+          detail TEXT,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','resolved','dismissed')),
+          dedupe_key TEXT UNIQUE,
+          raised_at TEXT,
+          resolved_by INTEGER,
+          resolved_at TEXT,
+          resolution TEXT
+        );
+        INSERT INTO mock2_queue_items_new
+          (id, project_id, kind, ref_table, ref_id, detail, status, dedupe_key, raised_at, resolved_by, resolved_at, resolution)
+          SELECT id, project_id, kind, ref_table, ref_id, detail, status, dedupe_key, raised_at, resolved_by, resolved_at, resolution
+          FROM mock2_queue_items;
+        DROP TABLE mock2_queue_items;
+        ALTER TABLE mock2_queue_items_new RENAME TO mock2_queue_items;
+
+        CREATE TABLE mock2_egress_grants (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          host TEXT NOT NULL,
+          port INTEGER NOT NULL,
+          protocol TEXT NOT NULL DEFAULT 'tcp',
+          reason TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','denied','revoked')),
+          reachable TEXT,
+          requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+          decided_by INTEGER,
+          decided_at TEXT,
+          UNIQUE(project_id, host, port, protocol)
+        );
+        CREATE INDEX idx_mock2_egress_grants_project ON mock2_egress_grants(project_id, status);
+      `);
+    },
+  },
+  {
     // Acceptance discipline (cycle-94 lesson — a bug-fix cycle "succeeded" with
     // green gates while the defect was never reproduced). acceptance_json stores
     // the machine-readable acceptance state stamped at finish: {kind, defect_tag,
     // red_test_observed, tests, ui_required, demonstrated}. NULLable — every
     // pre-existing row reads as before; a disabled host never writes it.
-    version: 517,
+    // (Renumbered 517→518 in the merge: main's egress grants took 517.)
+    version: 518,
     name: 'mock2_cycle_acceptance_state',
     up: (d) => {
       d.exec(`

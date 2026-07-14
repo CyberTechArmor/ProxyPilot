@@ -53,6 +53,11 @@ export function routeForKind(kind) {
 export const QUEUE_KINDS = Object.freeze([
   'framework_deviation', 'drift', 'retries_exhausted', 'flag', 'orphaned',
   'port_drift', 'quota_exhausted', 'provisioning_failed', 'renewal_failed',
+  // A declared outbound-egress grant awaiting admin approval (operational
+  // authorization, audit-logged). It does NOT block the build — the code can
+  // ship; the egress only becomes reachable once approved — so it is not in
+  // AWAITING_ADMIN_QUEUE_KINDS.
+  'egress_grant',
 ]);
 
 export const QUEUE_STATUSES = Object.freeze(['open', 'in_progress', 'resolved', 'dismissed']);

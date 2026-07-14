@@ -25,6 +25,7 @@ import {
   EGRESS_LOG_PREFIX_OK,
   EGRESS_LOG_PREFIX_DENY,
 } from '../mock2/network-logic.js';
+import { EGRESS_LOG_PREFIX_GRANT } from '../mock2/egress-logic.js';
 import { buildContainerSetupScript } from '../mock2/template.js';
 
 // ---- per-project bridge naming + subnet ----
@@ -84,7 +85,7 @@ test('buildFenceEntries: only active projects with a full upstream are fenced', 
   const entries = buildFenceEntries(rows);
   assert.equal(entries.length, 1);
   assert.deepEqual(entries[0], {
-    id: 7, cidr: '10.200.6.0/24', gateway: '10.200.6.1', containerIp: '10.200.6.15', webPort: 3000,
+    id: 7, cidr: '10.200.6.0/24', gateway: '10.200.6.1', containerIp: '10.200.6.15', webPort: 3000, egress: [],
   });
 });
 
@@ -107,7 +108,9 @@ test('renderMock2Nft: dedicated table, NAT+logged egress, web-port-only inbound,
   // Egress: lateral movement to private ranges is blocked + logged, then the rest
   // is logged and accepted (the bridge NAT carries it out). No proxy hole.
   assert.match(nft, new RegExp(`ip saddr 10\\.200\\.6\\.0\\/24 ip daddr \\{ ${PRIVATE_DEST_RANGES.join(', ').replace(/[.]/g, '\\.')} \\} ct state new log prefix "${EGRESS_LOG_PREFIX_DENY} p7: "`));
-  assert.match(nft, /ip saddr 10\.200\.6\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p7 deny-private"/);
+  // deny-private REJECTS (not drops) so a policy-blocked connection fails fast
+  // with "connection refused", distinguishable from a host-down timeout.
+  assert.match(nft, /ip saddr 10\.200\.6\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} reject with icmpx type admin-prohibited comment "mock2 p7 deny-private"/);
   assert.match(nft, new RegExp(`ip saddr 10\\.200\\.6\\.0\\/24 ct state new log prefix "${EGRESS_LOG_PREFIX_OK} p7: "`));
   assert.match(nft, /ip saddr 10\.200\.6\.0\/24 accept comment "mock2 p7 egress"/);
   assert.doesNotMatch(nft, /3128/);   // squid proxy hole is gone
@@ -135,11 +138,33 @@ test('renderMock2Nft: two projects cannot reach each other (private-range block 
   const b = activeProject({ id: 2, bridge_cidr: '10.200.1.0/24', container_ip: '10.200.1.5' });
   const nft = renderMock2Nft(buildFenceEntries([a, b]));
   // Each bridge's egress to any private range (which includes the OTHER bridge's
-  // 10.200.x.0/24, inside 10.0.0.0/8) is dropped — so A can never reach B.
-  assert.match(nft, /ip saddr 10\.200\.0\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p1 deny-private"/);
-  assert.match(nft, /ip saddr 10\.200\.1\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} drop comment "mock2 p2 deny-private"/);
+  // 10.200.x.0/24, inside 10.0.0.0/8) is rejected — so A can never reach B.
+  assert.match(nft, /ip saddr 10\.200\.0\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} reject with icmpx type admin-prohibited comment "mock2 p1 deny-private"/);
+  assert.match(nft, /ip saddr 10\.200\.1\.0\/24 ip daddr \{ [^}]*10\.0\.0\.0\/8[^}]*\} reject with icmpx type admin-prohibited comment "mock2 p2 deny-private"/);
   // And B's container port is doubly covered by B's daddr-drop.
   assert.match(nft, /ip daddr 10\.200\.1\.5 drop/);
+});
+
+test('renderMock2Nft: an approved egress grant punches a scoped allow-hole BEFORE deny-private', () => {
+  // The ADP acceptance case: ldaps to a host-LAN directory on :636. The grant
+  // carries a resolved ip; it must appear (accept + grant-log) in the ruleset
+  // BEFORE the deny-private reject, or the private block would swallow it first.
+  const p = activeProject({ egress: [{ host: '192.168.10.5', ip: '192.168.10.5', port: 636, protocol: 'tcp' }] });
+  const nft = renderMock2Nft(buildFenceEntries([p]));
+  const grantAccept = nft.indexOf('ip daddr 192.168.10.5 tcp dport 636 accept');
+  const grantLog = nft.indexOf(`${EGRESS_LOG_PREFIX_GRANT} p7`);
+  const denyPrivate = nft.indexOf('mock2 p7 deny-private"');
+  assert.ok(grantAccept > 0, 'grant accept rule present');
+  assert.ok(grantLog > 0, 'grant log rule present');
+  assert.ok(grantAccept < denyPrivate, 'grant allow-hole precedes the deny-private reject');
+  assert.ok(grantLog < denyPrivate, 'grant log precedes the deny-private reject');
+});
+
+test('renderMock2Nft: an undeclared internal host stays blocked (no grant → deny-private catches it)', () => {
+  const nft = renderMock2Nft(buildFenceEntries([activeProject()]));
+  // No accept for an arbitrary internal host; the reject rule is the only fate.
+  assert.doesNotMatch(nft, /ip daddr 192\.168\.10\.5 tcp dport 636 accept/);
+  assert.match(nft, /ip daddr \{ [^}]*192\.168\.0\.0\/16[^}]*\} reject/);
 });
 
 // ---- firewall egress log parser ----
@@ -150,11 +175,12 @@ test('parseNftEgressLog: keeps only this subnet, parses SRC/DST/DPT/PROTO + deni
   const log = [
     '1700000000.123 host kernel: mock2-egress-ok p2: IN=m2br2 OUT=eth0 SRC=10.200.1.5 DST=140.82.112.3 LEN=60 PROTO=TCP SPT=51000 DPT=443 WINDOW=1',
     '1700000001.000 host kernel: mock2-egress-deny p2: IN=m2br2 OUT= SRC=10.200.1.5 DST=192.168.1.10 LEN=60 PROTO=TCP SPT=51001 DPT=22 WINDOW=1',
+    '1700000001.500 host kernel: mock2-egress-grant p2: IN=m2br2 OUT=eth0 SRC=10.200.1.5 DST=192.168.10.5 LEN=60 PROTO=TCP SPT=51002 DPT=636 WINDOW=1',
     '1700000002.000 host kernel: mock2-egress-ok p9: IN=m2br9 OUT=eth0 SRC=10.200.9.9 DST=1.1.1.1 PROTO=UDP SPT=5 DPT=53', // different subnet
     'some unrelated kernel line',
   ].join('\n');
   const entries = parseNftEgressLog(log, prefix, 100);
-  assert.equal(entries.length, 2);                    // the 10.200.9.9 row + unrelated dropped
+  assert.equal(entries.length, 3);                    // the 10.200.9.9 row + unrelated dropped
   assert.equal(entries[0].client, '10.200.1.5');
   assert.equal(entries[0].method, 'TCP');
   assert.equal(entries[0].url, '140.82.112.3:443');
@@ -164,6 +190,11 @@ test('parseNftEgressLog: keeps only this subnet, parses SRC/DST/DPT/PROTO + deni
   assert.equal(entries[1].denied, true);
   assert.equal(entries[1].action, 'BLOCK');
   assert.equal(entries[1].url, '192.168.1.10:22');
+  // An approved-grant connection to the declared internal host: action GRANT,
+  // NOT denied (a failed one would then be host-down, not policy).
+  assert.equal(entries[2].action, 'GRANT');
+  assert.equal(entries[2].denied, false);
+  assert.equal(entries[2].url, '192.168.10.5:636');
 });
 
 test('parseNftEgressLog: non-egress lines and empty prefix -> no entries', () => {

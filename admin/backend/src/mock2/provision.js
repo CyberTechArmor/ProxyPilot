@@ -45,6 +45,8 @@ import {
 import { reconcileMock2Firewall } from './firewall.js';
 import { runPortDriftCheck } from './port-check.js';
 import { deployProject } from './deploy.js';
+import { parseDeclaredEgress } from './egress-logic.js';
+import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { projectHasBeenDeployed } from './cycles.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
@@ -271,6 +273,15 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   setStatus(projectId, { phase: 'manifest', message: 'Reading declared topology…' });
   const manifest = await sh(`incus exec ${containerName} -- cat ${APP_DIR}/mock2.yaml 2>/dev/null`);
   const declaredPort = parseManifestWebPort(manifest.stdout) || project.web_port || DEFAULT_WEB_PORT;
+
+  // Sync the app's DECLARED egress (mock2.yaml `egress:`) into the grant store so
+  // each declared host becomes a pending admin-queue item and a removed one is
+  // revoked. Done before the fence reconcile below, so any already-approved grant
+  // is wired this provision. Best-effort — a parse/DB hiccup never fails provision.
+  try {
+    const sync = syncDeclaredEgress(projectId, parseDeclaredEgress(manifest.stdout || ''));
+    if (sync.added.length) await probeEgressGrants(sync.added).catch(() => {});
+  } catch (e) { console.warn('[mock2] egress sync (provision) failed:', e?.message); }
 
   // ---- Run the container setup script (runtime + Postgres + dev server) ----
   // Egress is the bridge's Incus NAT — no proxy env to bake in (squid removed).

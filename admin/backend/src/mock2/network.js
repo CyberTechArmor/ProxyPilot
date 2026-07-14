@@ -26,8 +26,62 @@
 
 import { sh } from './host.js';
 import { bridgeNameForProject, bridgeCidrForProject, gatewayForCidr } from './network-logic.js';
+import { isIpv4, isEgressHost, isEgressPort } from './egress-logic.js';
 
 export { bridgeNameForProject, bridgeCidrForProject, gatewayForCidr };
+
+// resolveEgressHost(host) — turn a declared egress host into a routable IPv4, as
+// seen FROM THE HOST. An IPv4 literal passes through; a hostname is resolved with
+// `getent ahostsv4` on the host (through the nsenter-aware runner), so the IP the
+// fence allows is the one the HOST would route to — not whatever the backend
+// container's resolver returns (they can differ). Returns { ip, error }; ip is
+// null on a resolution failure (never throws). The fence rules are IP-based, so a
+// grant with no resolvable IP is never wired.
+export async function resolveEgressHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!isEgressHost(h)) return { ip: null, error: 'invalid host' };
+  if (isIpv4(h)) return { ip: h, error: null };
+  // getent ahostsv4 prints "<ip> <flags> <name>" lines; take the first IPv4.
+  const r = await sh(`getent ahostsv4 '${h}' 2>/dev/null | head -n1`, { timeoutMs: 8000 }).catch(() => null);
+  const ip = String(r?.stdout || '').trim().split(/\s+/)[0] || '';
+  if (!isIpv4(ip)) return { ip: null, error: 'no A record (from host)' };
+  return { ip, error: null };
+}
+
+// probeHostReachable(host, port, timeoutMs) — can THE HOST route to host:port?
+// The acceptance gate (#5): before wiring a grant into the fence, confirm the
+// ProxyPilot HOST itself can reach the directory — if it can't, that is the
+// blocker to report, not something to build around. The container's egress NATs
+// through the host, so reachability MUST be measured from the host namespace —
+// hence a bash `/dev/tcp` connect run through the nsenter-aware runner (not a
+// Node socket, which would test the backend container's namespace instead).
+// bash's own connect diagnostics are parsed into a stable status the grant stores
+// in `reachable`:
+//   'ok'          — handshake completed (host routes to it; the fence can carry it)
+//   'refused'     — reached the host, port closed (routing works; app/port issue)
+//   'timeout'     — no response in the budget (host-down or filtered upstream)
+//   'unreachable' — no route to host / network unreachable
+//   'dns_fail'    — the hostname did not resolve from the host
+// Never throws. Returns { reachable, ip }.
+export async function probeHostReachable(host, port, timeoutMs = 5000) {
+  if (!isEgressPort(port)) return { reachable: 'unreachable', ip: null, error: 'invalid port' };
+  const { ip, error } = await resolveEgressHost(host);
+  if (!ip) return { reachable: 'dns_fail', ip: null, error };
+  const secs = Math.max(1, Math.ceil((Number(timeoutMs) || 5000) / 1000));
+  // `timeout` returns 124 on expiry; bash prints "Connection refused" /
+  // "No route to host" / "Network is unreachable" / "timed out" to stderr.
+  const probe = `timeout ${secs} bash -c 'exec 3<>/dev/tcp/${ip}/${Number(port)}' 2>&1; echo "RC=$?"`;
+  const r = await sh(probe, { timeoutMs: (secs + 3) * 1000 }).catch((e) => ({ stdout: '', stderr: String(e?.message || '') }));
+  const out = `${r?.stdout || ''}${r?.stderr || ''}`;
+  const rc = (out.match(/RC=(\d+)/) || [])[1];
+  let reachable;
+  if (rc === '0') reachable = 'ok';
+  else if (/connection refused/i.test(out)) reachable = 'refused';
+  else if (/no route to host|network is unreachable|host is unreachable/i.test(out)) reachable = 'unreachable';
+  else if (rc === '124' || /timed out|timeout/i.test(out)) reachable = 'timeout';
+  else reachable = 'unreachable';
+  return { reachable, ip };
+}
 
 // A shape guard for the shell — our derivation only ever produces m2br<int> and
 // 10.x.y.0/24, but validate before interpolating so a corrupted stored value

@@ -42,7 +42,31 @@ import { dirname } from 'path';
 import { sh, runHost } from './host.js';
 import { listProjects } from './projects.js';
 import { buildFenceEntries, renderMock2Nft } from './network-logic.js';
-import { ensureHostEgress } from './network.js';
+import { ensureHostEgress, resolveEgressHost } from './network.js';
+import { listApprovedEgressGrants } from './egress-grants.js';
+
+// attachApprovedEgress(projects) — for each active project, load its APPROVED
+// egress grants and resolve each host to a routable IPv4, attaching the result as
+// `p.egress` so buildFenceEntries/renderMock2Nft can punch the scoped allow-holes.
+// Only approved grants are ever wired (a pending/denied/revoked grant contributes
+// nothing); a grant whose host no longer resolves is dropped from the wiring (it
+// simply falls back to the default deny) rather than emitting a broken rule.
+// Best-effort per project: a DB read failure just yields an empty egress list.
+async function attachApprovedEgress(projects) {
+  for (const p of projects) {
+    if (!p || p.lifecycle !== 'active' || !p.id) { if (p) p.egress = []; continue; }
+    let grants = [];
+    try { grants = listApprovedEgressGrants(p.id); } catch { grants = []; }
+    const wired = [];
+    for (const g of grants) {
+      const { ip } = await resolveEgressHost(g.host);
+      if (!ip) continue;                         // unresolvable → not wired this cycle
+      wired.push({ host: g.host, ip, port: g.port, protocol: g.protocol });
+    }
+    p.egress = wired;
+  }
+  return projects;
+}
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 const FIREWALL_STATE_FILE = `${MOCK2_DATA_DIR}/firewall.json`;
@@ -96,6 +120,9 @@ export async function reconcileMock2Firewall() {
   // sysctl on reboot or never had the Docker rule. Best-effort, independent of
   // the nft apply below.
   await ensureHostEgress().catch((e) => console.warn('[mock2] ensureHostEgress (reconcile) failed:', e?.message));
+
+  // Attach approved+resolved egress grants so the fence wires their allow-holes.
+  await attachApprovedEgress(projects).catch((e) => console.warn('[mock2] attachApprovedEgress failed:', e?.message));
 
   const entries = buildFenceEntries(projects);
   const ruleset = renderMock2Nft(entries);

@@ -54,6 +54,16 @@ run:
   migrate: ${DEFAULT_RUN_CONTRACT.migrate}
   build: ${DEFAULT_RUN_CONTRACT.build}
   start: ${DEFAULT_RUN_CONTRACT.start}
+# Outbound egress the app needs to an INTERNAL host (LAN / control plane). The
+# fence blocks all private-range egress by default; declare each internal host
+# here and an admin must approve it before it is wired. Anything not declared and
+# approved stays blocked. The public internet is always reachable (no entry
+# needed). Uncomment and edit:
+# egress:
+#   - host: 10.0.0.5        # IPv4 or a hostname resolvable from the host
+#     port: 636
+#     protocol: tcp         # tcp | udp (ldaps/tls/https are tcp)
+#     reason: LDAPS directory
 `;
 }
 

@@ -60,7 +60,9 @@ import { formatComponentForModel } from './component-logic.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
-import { deployProject, readRunContract } from './deploy.js';
+import { deployProject, readRunContract, readDeclaredEgress } from './deploy.js';
+import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
+import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
@@ -964,6 +966,24 @@ export async function deployStage({ cycle, project, containerName, holder }) {
   const webPort = project.web_port || 3000;
 
   const runContract = await readRunContract(containerName, APP_DIR);
+
+  // Sync the app's DECLARED egress (mock2.yaml `egress:`) into the grant store:
+  // a newly declared host becomes a pending admin-queue item; a removed one is
+  // revoked. Only already-approved grants are wired by the fence — a fresh
+  // declaration stays blocked until an admin approves it. Best-effort; a parse/DB
+  // hiccup never fails the deploy.
+  try {
+    const declared = await readDeclaredEgress(containerName, APP_DIR);
+    const sync = syncDeclaredEgress(projectId, declared);
+    // Probe host reachability for newly-declared grants so the admin sees whether
+    // the HOST can even route to each destination before approving (acceptance #5).
+    if (sync.added.length) await probeEgressGrants(sync.added).catch(() => {});
+    // A newly ADDED grant is pending (nothing to wire yet — an admin approves it).
+    // A REVOKED grant (removed from the declaration) must have its allow-hole
+    // dropped now, so reconcile the fence when the wired set could have changed.
+    if (sync.revoked.length) await reconcileMock2Firewall().catch(() => {});
+  } catch (e) { console.warn('[mock2] egress sync (deploy) failed:', e?.message); }
+
   if (!runContract.hasContract) {
     updateCycle(cycle.id, { deploy_status: null });
     return { ok: true, skipped: true };

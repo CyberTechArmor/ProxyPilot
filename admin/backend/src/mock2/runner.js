@@ -55,6 +55,8 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
+import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
+import { formatComponentForModel } from './component-logic.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
@@ -374,7 +376,12 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model: ready.model, framework_version: framework.version } });
 
   const skills = parseFrameworkSkills(framework.skills_json);
-  const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000 });
+  // The PUBLISHED component-library catalog (migration 516): the runner is told
+  // what reusable building blocks exist and fetches sources via get_component.
+  // Best-effort — an empty/failed catalog just omits the prompt section.
+  let componentCatalog = [];
+  try { componentCatalog = listPublishedComponents(); } catch (err) { console.warn('[mock2] component catalog load failed:', err?.message); }
+  const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000, components: componentCatalog });
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
   // On a RESUME, inject the operator guidance (message / chosen option / granted
   // one-time authorizations) as a distinct labeled user turn AFTER the task.
@@ -773,6 +780,14 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
       touchLock(cycle.project_id, holder);
       return { content: r.ok ? `wrote ${call.input?.path}` : `error: ${r.error}` };
     }
+    case 'get_component': {
+      // Library lookup is DB-only (no container access) and limited to the
+      // PUBLISHED catalog — the same set the system prompt advertised.
+      const key = String(call.input?.key || '').trim();
+      const found = getPublishedComponentWithVersion(key);
+      if (!found) return { content: `error: no published component with key "${key.slice(0, 80)}" — the available keys are listed in your system prompt` };
+      return { content: formatComponentForModel(found.component, found.version) };
+    }
     case 'run_gates': {
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       return { content: `Gate battery (${gateBatteryVerdict(battery)}):\n${formatGateReports(battery)}`, gateReports: battery };
@@ -803,7 +818,9 @@ export async function execInContainer(containerName, command) {
   return { code: r.code, stdout: (r.stdout || '').slice(0, MAX_TOOL_RESULT_CHARS), stderr: (r.stderr || '').slice(0, 2000) };
 }
 
-async function readFileInContainer(containerName, path) {
+// Exported for the component-submission route ("promote what the last build
+// wrote" reads the proposed files straight out of the running container).
+export async function readFileInContainer(containerName, path) {
   const rel = safeRel(path);
   if (!rel) return { ok: false, error: 'path must be relative and inside the app dir' };
   const script = `p=$(printf '%s' '${b64(rel)}' | base64 -d); cat "${APP_DIR}/$p"`;

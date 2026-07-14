@@ -1197,6 +1197,35 @@ export const api = {
   mock2RevertFramework: (id, changelog) =>
     request(`/mock2/framework/versions/${id}/revert`, { method: 'POST', body: JSON.stringify({ changelog }) }),
 
+  // ---- Component library (migration 516): reusable, versioned building blocks ----
+  mock2ListComponents: (status) =>
+    request(`/mock2/components${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  mock2GetComponent: (id) => request(`/mock2/components/${id}`),
+  mock2CreateComponent: (body) =>
+    request('/mock2/components', { method: 'POST', body: JSON.stringify(body) }),
+  mock2UpdateComponent: (id, body) =>
+    request(`/mock2/components/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  mock2DeleteComponent: (id) =>
+    request(`/mock2/components/${id}`, { method: 'DELETE' }),
+  mock2ListComponentVersions: (id) => request(`/mock2/components/${id}/versions`),
+  mock2GetComponentVersion: (id, vid) => request(`/mock2/components/${id}/versions/${vid}`),
+  mock2PublishComponentVersion: (id, body) =>
+    request(`/mock2/components/${id}/versions`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2RevertComponentVersion: (id, vid, change_reason) =>
+    request(`/mock2/components/${id}/versions/${vid}/revert`, { method: 'POST', body: JSON.stringify({ change_reason }) }),
+  mock2ExportComponent: (id) => request(`/mock2/components/${id}/export`),
+  mock2ImportComponent: (doc, change_reason) =>
+    request('/mock2/components/import', { method: 'POST', body: JSON.stringify({ doc, change_reason }) }),
+  mock2CreateComponentSubmission: (projectId, body) =>
+    request(`/mock2/projects/${projectId}/component-submissions`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2ListProjectComponentSubmissions: (projectId) =>
+    request(`/mock2/projects/${projectId}/component-submissions`),
+  mock2ListComponentSubmissions: (status) =>
+    request(`/mock2/component-submissions${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  mock2GetComponentSubmission: (id) => request(`/mock2/component-submissions/${id}`),
+  mock2ReviewComponentSubmission: (id, body) =>
+    request(`/mock2/component-submissions/${id}/review`, { method: 'POST', body: JSON.stringify(body) }),
+
   // ---- Mock2 M6: cycle runner + checkout lock ----
   mock2StartCycle: (id, instruction) =>
     request(`/mock2/projects/${id}/cycles`, { method: 'POST', body: JSON.stringify({ instruction }) }),

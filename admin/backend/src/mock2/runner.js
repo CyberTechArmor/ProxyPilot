@@ -42,6 +42,10 @@ import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
 import { buildResumeContextBlock, resolveSelectedOption, validateAuthScope, validateHaltOptions } from './unblock-logic.js';
+import { latestOpenRequestId, closeRequest } from './requests.js';
+import { countConsultsForCycle, countConsultsForRequest } from './consults.js';
+import { runConsult } from './consult.js';
+import { consultAutoEnabled, consultTrigger, consultAllowed } from './consult-logic.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
@@ -51,6 +55,9 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
+import {
+  budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
+} from './usage-logic.js';
 import { deployProject, readRunContract } from './deploy.js';
 import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
@@ -144,9 +151,14 @@ function quotaVerdict(projectId, estCostCents) {
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
+  // Cost-truth: attach this cycle to its umbrella request as a SEGMENT. When the caller
+  // doesn't pass one (the audit→build handoff), derive the project's latest open request
+  // (opened by startBuild). Additive + nullable — a null request_id is legacy/harmless.
+  const reqId = requestId != null ? requestId : latestOpenRequestId(projectId);
+  const seg = segment || (resumeContext ? 'resumed' : 'build');
 
   const ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
@@ -174,6 +186,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     const refused = insertCycle({
       projectId, frameworkVersionId: framework.id, stage: 'build', instruction,
       initiatedBy, actingAsAdmin, estTokens, estCostCents, status: 'refused_quota',
+      requestId: reqId, segment: seg,
     });
     finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
     safeRaise({
@@ -187,6 +200,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const cycle = insertCycle({
     projectId, frameworkVersionId: framework.id, stage: 'build', instruction,
     initiatedBy, actingAsAdmin, estTokens, estCostCents, status: 'estimating',
+    requestId: reqId, segment: seg,
   });
   // Persist the resume context (operator guidance) so runCycle injects it as a
   // labeled turn after the task.
@@ -273,7 +287,8 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
     ? { message: msg, selectedOption, authorizations }
     : null;
 
-  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin, resumeContext });
+  // Cost-truth: the resume is a SEGMENT of the SAME request as the cycle being resumed.
+  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin, resumeContext, requestId: cycle.request_id ?? null, segment: 'resumed' });
 }
 
 // retryDeploy — re-run ONLY the deploy (install → migrate → build → start →
@@ -311,6 +326,7 @@ export async function retryDeploy({ project, cycle }) {
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
       } else {
         finishCycle(cycle.id, { status: 'succeeded' });
+        try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
         updateProject(projectId, { last_activity_at: nowIso() });
         setJob(cycle.id, {
           phase: deployed.skipped ? 'succeeded' : 'serving',
@@ -377,6 +393,16 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // clock + token count start at zero — each resume gets a fresh budget window).
   const runStartMs = Date.now();
   let usedTokensThisRun = 0;
+  // Cost-truth: accumulate the four canonical token classes + the run's spend so the
+  // soft-pause can trip on DOLLARS (behind the flag) and the cycle can store the honest
+  // usage basis. usedCostThisRun tracks fractional cents like the ledger.
+  let usedCostThisRun = 0;
+  const runUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  // Soft-pause budget mode (default 'tokens' — behavior unchanged until an operator sets
+  // MOCK2_BUDGET_DOLLARS on the live install). In 'dollars' mode the token ceiling is
+  // replaced by its migrated dollar equivalent at THIS lane's model rate.
+  const budgetDollars = budgetMode(process.env) === 'dollars';
+  const dollarCeilingCents = budgetDollars ? budgetCentsForTokenLegacy(SOFT_PAUSE_TOKENS, ready.model) : null;
   // No-progress circuit breaker state (harness safety) — trips a stuck cycle to a
   // blocked halt instead of re-prompting forever (the ADP 118-turn loop).
   let progressState = initProgressState();
@@ -385,6 +411,9 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // viable options gets ONE retry to supply them; if it still can't, we halt anyway
   // (harness safety — a stuck cycle must terminate, it can't loop forever).
   let haltOptionsRetried = false;
+  // Consecutive red gate batteries (cost-truth Part 5.2 trigger a) so a halt after "the
+  // same gate failing twice" can auto-fire a consult (flag-gated).
+  let gateFailStreak = 0;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -420,17 +449,24 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       }
     }
 
-    // 2b) Soft budget pause (token / wall-clock). A long build isn't a failure —
-    //     when this run crosses a ceiling we checkpoint the WIP and PAUSE it,
-    //     resumable in one click (retryCycle continues from the checkpoint with a
-    //     fresh budget). Stored as 'interrupted' + pause_reason so it reads as a
-    //     Pause, not a stop, and the editor can Resume without an admin.
-    const pauseReason = softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs: Date.now() - runStartMs });
+    // 2b) Soft budget pause (token/dollar + wall-clock). A long build isn't a failure —
+    //     when this run crosses a ceiling we checkpoint the WIP and PAUSE it, resumable
+    //     in one click. Default is the TOKEN ceiling (unchanged). Behind the
+    //     MOCK2_BUDGET_DOLLARS flag the token ceiling is replaced by its migrated DOLLAR
+    //     equivalent so cache-heavy + output-heavy runs pause at equal spend; the
+    //     wall-clock check is identical in both modes.
+    const elapsedMs = Date.now() - runStartMs;
+    const pauseReason = budgetDollars
+      ? (budgetPauseReasonCents({ spentCents: usedCostThisRun, ceilingCents: dollarCeilingCents })
+        || softPauseReason({ usedTokens: 0, elapsedMs }))
+      : softPauseReason({ usedTokens: usedTokensThisRun, elapsedMs });
     if (pauseReason) {
       const mins = Math.round((Date.now() - runStartMs) / 60000);
       const detail = pauseReason === 'budget_tokens'
         ? `token budget reached (~${Math.round(usedTokensThisRun / 1000)}k tokens this run)`
-        : `time budget reached (~${mins} min this run)`;
+        : pauseReason === 'budget_cost'
+          ? `cost budget reached (~${dollars(usedCostThisRun)} this run)`
+          : `time budget reached (~${mins} min this run)`;
       await checkpointAndRecord({ cycle: fresh, project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, summary: `checkpoint: paused — ${detail}` });
       updateCycle(cycle.id, { pause_reason: pauseReason });
       finishCycle(cycle.id, { status: 'interrupted', error: `Paused — ${detail}. Resume to continue where it stopped.` });
@@ -465,7 +501,21 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     const costCents = costCentsForUsage({ inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, price);
     const turnTokens = u.inputTokens + u.outputTokens;
     usedTokensThisRun += turnTokens;
+    usedCostThisRun += costCents;
+    // Cost-truth: accumulate the four canonical classes for this run and persist them on
+    // the cycle (additive — used_tokens/used_cost_cents via addCycleUsage stay as-is).
+    runUsage.input += u.inputTokens || 0;
+    runUsage.output += u.outputTokens || 0;
+    runUsage.cache_read += cacheRead;
+    runUsage.cache_write += cacheWrite;
     addCycleUsage(cycle.id, { tokens: turnTokens, costCents });
+    try {
+      updateCycle(cycle.id, {
+        input_tokens: runUsage.input, output_tokens: runUsage.output,
+        cache_read_tokens: runUsage.cache_read, cache_write_tokens: runUsage.cache_write,
+        usage_schema_version: USAGE_SCHEMA_VERSION,
+      });
+    } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
     try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
@@ -546,7 +596,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
         logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
       }
-      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: haltOptions, logEvent });
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, options: haltOptions, logEvent, consultSignals: { gateFailStreak } });
       return scheduleJobCleanup(cycle.id);
     }
 
@@ -644,6 +694,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         }
       }
       finishCycle(cycle.id, { status: 'succeeded' });
+      try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
       setJob(cycle.id, {
@@ -674,12 +725,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     }
 
     // 6) Execute the requested tools; feed results back.
+    let ranGates = false;
     for (const call of decision.toolCalls) {
       const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
       lastGateReports = out.gateReports || lastGateReports;
+      if (call.name === 'run_gates') ranGates = true;
       transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
       logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
     }
+    // Cost-truth Part 5.2 trigger (a): count CONSECUTIVE red gate batteries so a halt
+    // after "the same gate failing twice" can auto-fire a consult (flag-gated).
+    if (ranGates) gateFailStreak = gateBatteryVerdict(lastGateReports) === 'red' ? gateFailStreak + 1 : 0;
     touchLock(projectId, holder); // any exec/write refreshed the idle timer
   }
 
@@ -946,7 +1002,7 @@ async function escalateAwaitingAdmin({ cycle, project, containerName, holder, re
 // needs-attention queue item is raised, and the human is notified. Resumable via
 // the existing editor Retry (RESUMABLE_CYCLE_STATUSES includes 'awaiting_admin').
 // Exported so the SDK runner ends a blocked/stuck cycle identically.
-export async function haltCycle({ cycle, project, containerName, holder, gateReports, gateScripts, framework, trigger, reason, options = [], logEvent = null }) {
+export async function haltCycle({ cycle, project, containerName, holder, gateReports, gateScripts, framework, trigger, reason, options = [], logEvent = null, consultSignals = null }) {
   const projectId = Number(project.id);
   setJob(cycle.id, { phase: 'blocked', message: 'Blocked — checkpointing before stopping…' });
 
@@ -977,6 +1033,43 @@ export async function haltCycle({ cycle, project, containerName, holder, gateRep
   });
   setJob(cycle.id, { phase: 'blocked', message: `Blocked — ${haltReasonLabel(trigger)}. Needs attention.`, commit: record?.commit_sha || null });
   void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
+
+  // Cost-truth Part 5.2: auto-fire ONE bounded Fable 5 second opinion when the build is
+  // demonstrably stuck — flag-gated (MOCK2_CONSULT, default OFF), so the runner is
+  // byte-identical until an operator opts in. Advisory-only + capped; failures are
+  // swallowed (never blocks the halt).
+  void maybeAutoConsult({ project, cycle: getCycle(cycle.id), haltTrigger: trigger, reason, gateReports, signals: consultSignals || {}, logEvent });
+}
+
+// maybeAutoConsult — the flag-gated auto escalation consult (triggers a/b). Maps the
+// halt trigger + signals to a consult trigger, respects the caps, compiles a tool-free
+// digest, and stores the advisory result as a request segment. Never throws.
+async function maybeAutoConsult({ project, cycle, haltTrigger, reason, gateReports, signals = {}, logEvent = null }) {
+  try {
+    if (!consultAutoEnabled(process.env)) return;
+    const breakerTripped = ['no_tool_calls', 'repeated_output', 'no_state_change'].includes(haltTrigger);
+    const trig = consultTrigger({
+      gateFailStreak: signals.gateFailStreak || 0,
+      breakerTripped,
+      reHaltSameReason: !!signals.reHaltSameReason,
+      operatorRequested: false,
+    });
+    if (!trig) return;
+    const gate = consultAllowed({
+      trigger: trig,
+      perHaltCount: countConsultsForCycle(cycle.id),
+      perRequestCount: countConsultsForRequest(cycle.request_id),
+    });
+    if (!gate.allowed) return;
+    const gateOutput = (Array.isArray(gateReports) ? gateReports : []).map((g) => `${g.name}: ${g.status}`).join('\n');
+    const r = await runConsult({
+      projectId: Number(project.id), requestId: cycle.request_id, cycleId: cycle.id, trigger: trig,
+      digestParts: { task: cycle.instruction || '', haltReason: reason, gateOutput },
+    });
+    if (r.ok && typeof logEvent === 'function') {
+      try { logEvent('consult', { role: 'system', content: r.consult.diagnosis || 'second opinion', meta: { trigger: trig, consult_id: r.consult.id, cost_cents: r.consult.cost_cents } }); } catch { /* best effort */ }
+    }
+  } catch (e) { console.warn('[mock2] auto-consult failed:', e?.message); }
 }
 
 // Report artifacts a cycle wrote, so a halt can link them for the reviewer.

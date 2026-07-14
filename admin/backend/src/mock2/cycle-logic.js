@@ -12,6 +12,8 @@
 // Terminology (risk R7): the AI build component is the RUNNER; the slot that
 // drives it is build_runner. Nothing here is named "agent".
 
+import { USAGE_SCHEMA_VERSION } from './usage-logic.js';
+
 // The mock2_cycles.status vocabulary (migration 502 CHECK), split into the sets
 // the runner branches on. refused_quota / abandoned / failed / succeeded are
 // terminal; awaiting_admin is terminal-until-an-admin-acts (retries exhausted).
@@ -214,6 +216,22 @@ export function publicCycleShape(row) {
     // authorization:{scope,expectedRows}|null } — kind is one of grant_authorization |
     // expand_scope | run_dependency_first | override_rule | abandon. [] when none.
     halt_options: safeJsonArray(row.halt_options_json),
+    // Cost-truth (migration 515): the umbrella request this cycle is a segment of, and
+    // the canonical four-class usage. used_tokens above is the legacy single figure
+    // (label it "billable in+out"); `usage` is the honest basis. cost_cents mirrors
+    // used_cost_cents (cost computation unchanged). schema_version < 3 (or null) ⇒ a
+    // legacy-basis row, flagged non-comparable and excluded from history/estimator.
+    request_id: row.request_id ?? null,
+    segment: row.segment || null,
+    usage: {
+      input: row.input_tokens ?? null,
+      output: row.output_tokens ?? null,
+      cache_read: row.cache_read_tokens ?? null,
+      cache_write: row.cache_write_tokens ?? null,
+      cost_cents: row.used_cost_cents ?? 0,
+      schema_version: row.usage_schema_version ?? null,
+      comparable: Number(row.usage_schema_version || 0) >= USAGE_SCHEMA_VERSION,
+    },
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

@@ -10,6 +10,17 @@
 // the ONLY build-time code path (besides the audit lane) that names Fable 5.
 export const CONSULT_MODEL = 'claude-fable-5';
 
+// Feature flag for AUTO consults (triggers a–c fire from the runner mid-halt). Default
+// OFF so the runner is byte-identical until an operator opts in on the live install. The
+// operator "Get guidance" button (trigger d) is NOT gated by this — it's an explicit,
+// on-demand request through its own route, never touching the runner loop.
+export const CONSULT_FLAG = 'MOCK2_CONSULT';
+
+export function consultAutoEnabled(env = {}) {
+  const v = String(env?.[CONSULT_FLAG] ?? '').trim().toLowerCase();
+  return v === 'on' || v === '1' || v === 'true';
+}
+
 // Deterministic triggers (spec Part 5.2). Auto triggers (a–c) fire from runner signals;
 // 'operator' is the "Get guidance" button on a halt card and bypasses the auto caps.
 export const CONSULT_TRIGGERS = Object.freeze([

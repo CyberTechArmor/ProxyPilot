@@ -102,6 +102,13 @@ import {
 import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
 import { explainCard } from './explain.js';
 import { EXPLAIN_MAX_INPUT_CHARS } from './explain-logic.js';
+// ---- Cost-truth: requests (umbrella), consults (second opinion), grouped log ----
+import { getRequest, listRequestsForProject, closeRequest, publicRequestShape } from './requests.js';
+import { listCyclesForRequest } from './cycles.js';
+import { listConsultsForRequest, listConsultsForCycle, countConsultsForCycle, countConsultsForRequest, publicConsultShape } from './consults.js';
+import { buildRequestLog, requestLogArtifact } from './request-log.js';
+import { runConsult } from './consult.js';
+import { consultAllowed } from './consult-logic.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
 } from './cycles.js';
@@ -1358,6 +1365,8 @@ export function createMock2Router() {
     // Abandon closes the cycle as abandoned — no resume (task Part 3).
     if (chosen && chosen.kind === 'abandon') {
       finishCycle(cycle.id, { status: 'abandoned', error: `abandoned by operator${message ? `: ${message}` : ''}` });
+      // Cost-truth: abandoning closes the whole umbrella request.
+      try { if (cycle.request_id) closeRequest(cycle.request_id, 'abandoned'); } catch { /* best effort */ }
       for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
         try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: req.user.id }); } catch { /* best effort */ }
       }
@@ -1396,6 +1405,59 @@ export function createMock2Router() {
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });
+  });
+
+  // "Get guidance" — the operator-triggered escalation consult (a Fable 5 SECOND
+  // OPINION) on a blocked cycle. Advisory-only: it never resumes, grants, or switches the
+  // build lane; it returns a diagnosis + ranked paths + suggested resume text attached to
+  // the halt card. Bounded (~$0.50) and logged as its own request segment. The operator
+  // button bypasses the auto caps (they're explicitly asking); its cost is on them.
+  router.post('/projects/:id/cycles/:cycleId/consult', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (!cycle.halt_reason && cycle.status !== 'awaiting_admin' && cycle.status !== 'failed') {
+      return res.status(409).json({ error: 'A second opinion is available on a blocked or failed build.' });
+    }
+    const trigger = 'operator';
+    const gate = consultAllowed({
+      trigger,
+      perHaltCount: countConsultsForCycle(cycle.id),
+      perRequestCount: countConsultsForRequest(cycle.request_id),
+    });
+    if (!gate.allowed) return res.status(409).json({ error: gate.reason });
+
+    // Compile the tool-free digest from what the cycle already carries (no container
+    // reads — bounded by construction). Gate output comes from the stored gate reports.
+    let gateOutput = '';
+    try {
+      const gates = cycle.gates_json ? JSON.parse(cycle.gates_json) : [];
+      gateOutput = (Array.isArray(gates) ? gates : []).map((g) => `${g.name}: ${g.status}${g.report ? ` — ${g.report}` : ''}`).join('\n');
+    } catch { /* ignore */ }
+    const digestParts = {
+      task: cycle.instruction || '',
+      haltReason: cycle.error || cycle.halt_reason || 'blocked',
+      lastErrors: cycle.error || '',
+      gateOutput,
+    };
+
+    let result;
+    try {
+      result = await runConsult({ projectId: project.id, requestId: cycle.request_id, cycleId: cycle.id, trigger, digestParts, requestedBy: req.user.id });
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'the consult failed' };
+    }
+    // Read-only w.r.t. the build; log that a second opinion was requested.
+    logAudit(req.user.id, 'MOCK2_CONSULT', 'mock2_cycle', cycle.id,
+      { trigger, request_id: cycle.request_id, ok: !!result.ok, cost_cents: result.consult?.cost_cents ?? null }, req.ip);
+    return res.json(result.ok ? { ok: true, consult: result.consult } : { ok: false, error: result.error });
+  });
+
+  // List the consults (second opinions) attached to a cycle — the halt card reads these.
+  router.get('/projects/:id/cycles/:cycleId/consults', requireMock2Role('viewer'), (req, res) => {
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
+    res.json({ consults: listConsultsForCycle(cycle.id).map(publicConsultShape) });
   });
 
   // Retry the DEPLOY only (install → migrate → build → start → health) for a
@@ -1550,6 +1612,40 @@ export function createMock2Router() {
       events: listCycleEvents(cid),
       generated_at: new Date().toISOString(),
     });
+  });
+
+  // ---- Cost-truth: requests (one ask = one record) ----
+
+  // List a project's requests (umbrella entities), newest first, each with its cumulative
+  // cost roll-up + segment costs derived from its cycles + consults.
+  router.get('/projects/:id/requests', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const requests = listRequestsForProject(pid).map((r) => {
+      const cycles = listCyclesForRequest(r.id);
+      const consults = listConsultsForRequest(r.id).map(publicConsultShape);
+      const log = buildRequestLog({ request: publicRequestShape(r), cycles: cycles.map(publicCycleShape), consults });
+      return { ...publicRequestShape(r), cost: log.cost, segments: log.segments, final_status: log.final_status };
+    });
+    res.json({ requests });
+  });
+
+  // One request's merged, ordered, deduplicated log — the "one entry per request"
+  // history + the idempotent "Download log" artifact (fixes the byte-identical duplicate
+  // export). The artifact hash is over deterministic content only, so a double-export
+  // yields one identical artifact.
+  router.get('/projects/:id/requests/:reqId/log', requireMock2Role('viewer'), (req, res) => {
+    const pid = req.mock2Project.id;
+    const request = getRequest(req.params.reqId);
+    if (!request || request.project_id !== pid) return res.status(404).json({ error: 'Request not found' });
+    const cycles = listCyclesForRequest(request.id).map(publicCycleShape);
+    const consults = listConsultsForRequest(request.id).map(publicConsultShape);
+    const changeRecords = listChangeRecords(pid).filter((r) => cycles.some((c) => Number(c.id) === Number(r.cycle_id)));
+    const cycleIds = new Set(cycles.map((c) => Number(c.id)));
+    const messages = listMessages(pid).map(publicChatMessageShape).filter((m) => cycleIds.has(Number(m.cycle_id)));
+    const events = cycles.flatMap((c) => listCycleEvents(c.id));
+    const log = buildRequestLog({ request: publicRequestShape(request), cycles, changeRecords, messages, events, consults });
+    const artifact = requestLogArtifact(log, { at: new Date().toISOString() });
+    res.json(artifact);
   });
 
   // The whole project's build log — every cycle's events + every chat message +

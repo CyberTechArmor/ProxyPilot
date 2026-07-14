@@ -10,8 +10,9 @@ import assert from 'node:assert/strict';
 import {
   canonicalUsage, usageCostCents, sumUsage, isComparable, billableInOut,
   breakdownForDisplay, budgetCentsForTokenLegacy, budgetPauseReasonCents,
-  priceForModel, USAGE_SCHEMA_VERSION,
+  priceForModel, USAGE_SCHEMA_VERSION, budgetMode,
 } from '../mock2/usage-logic.js';
+import { consultAutoEnabled } from '../mock2/consult-logic.js';
 import {
   calibrateMultiplier, estimateStageCostCents, estAccuracy, projectEstimateAccuracy,
 } from '../mock2/estimate-logic.js';
@@ -252,4 +253,16 @@ test('export is idempotent per request + content (double-export → one identica
 test('costBySegment: per-segment dollars (define vs build vs resume)', () => {
   const by = costBySegment(REQUEST_FIXTURE.cycles);
   assert.ok(by.define > 0 && by.build > by.resumed);
+});
+
+// ---- Feature-flag discipline: both cutovers default OFF ----
+
+test('feature flags default OFF (token budget + auto-consult unchanged until opted in)', () => {
+  assert.equal(budgetMode({}), 'tokens');            // no flag → token behavior
+  assert.equal(budgetMode({ MOCK2_BUDGET_DOLLARS: 'on' }), 'dollars');
+  assert.equal(budgetMode({ MOCK2_BUDGET_DOLLARS: '1' }), 'dollars');
+  assert.equal(budgetMode({ MOCK2_BUDGET_DOLLARS: 'off' }), 'tokens');
+  assert.equal(consultAutoEnabled({}), false);       // no flag → no auto consult
+  assert.equal(consultAutoEnabled({ MOCK2_CONSULT: 'on' }), true);
+  assert.equal(consultAutoEnabled({ MOCK2_CONSULT: 'nope' }), false);
 });

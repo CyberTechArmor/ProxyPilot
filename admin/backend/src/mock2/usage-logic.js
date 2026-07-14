@@ -162,3 +162,17 @@ export function budgetPauseReasonCents({ spentCents = 0, ceilingCents = DEFAULT_
 export function dollars(cents) {
   return `$${(Number(cents || 0) / 100).toFixed(2)}`;
 }
+
+// ---- Feature flag: dollar-budget cutover (default OFF) ----
+//
+// The soft-pause ceiling stays TOKEN-based until an operator flips this on the live
+// install, so behavior is byte-identical by default. Set MOCK2_BUDGET_DOLLARS=on (or 1)
+// to switch the runner's soft-pause ceiling to DOLLARS (budgetPauseReasonCents against
+// the migrated dollar equivalent of the token envelope). Pure so both runners read it
+// one way and it's unit-testable.
+export const BUDGET_DOLLARS_FLAG = 'MOCK2_BUDGET_DOLLARS';
+
+export function budgetMode(env = {}) {
+  const v = String(env?.[BUDGET_DOLLARS_FLAG] ?? '').trim().toLowerCase();
+  return v === 'on' || v === '1' || v === 'true' ? 'dollars' : 'tokens';
+}

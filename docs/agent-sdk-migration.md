@@ -651,31 +651,80 @@ mechanism from the halt-resolution work), **not** in the schema migration chain.
 migration is **not** retro-edited. Delivered as `scripts/mock2-reset-users.sh` documented
 as authorization-gated.
 
-### Schema changes (additive; new migration, never edits an applied one)
+### Schema changes — **shipped as migration 515** (strictly additive + reversible)
+
+Migration `515` (`mock2_cost_truth_request_usage_consults`) adds ONLY new tables and
+NULLable columns — no existing row is rewritten, no column/type changes — so a fresh
+checkout behaves byte-identically until code opts in.
 
 - `mock2_requests` (new): `id, project_id, instruction, status, initiated_by,
-  created_at, finished_at` — the umbrella. Cycles gain `request_id` + `segment`.
+  acting_as_admin, created_at, finished_at` — the umbrella. Cycles gain `request_id` +
+  `segment` (both NULLable; pre-existing cycles stay NULL = legacy/new-requests-only).
 - `mock2_cycles`: `+ input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
-  (the four canonical classes; the old `used_tokens` stays for back-compat but is
-  relabeled "billable in+out" in the API), `+ usage_schema_version` (stamped `3`),
-  `+ request_id`, `+ segment`.
-- `mock2_consults` (new): `id, request_id, cycle_id, trigger, input_tokens, output_tokens,
-  cost_cents, diagnosis, paths_json, suggested_resume, created_at`.
-- **Budget semantics:** the ceiling is dollars (`SOFT_PAUSE_COST_CENTS`), migrated from
-  the 1M-token envelope at the lane rate; pause messages read dollars.
+  (the four canonical classes; the old `used_tokens` stays for back-compat, surfaced as
+  the `usage` object + labeled "billable in+out"), `+ usage_schema_version` (stamped `3`
+  by the runner; NULL on legacy rows ⇒ non-comparable), `+ request_id`, `+ segment`.
+- `mock2_consults` (new): `id, project_id, request_id, cycle_id, trigger, model,
+  input_tokens, output_tokens, cost_cents, diagnosis, paths_json, suggested_resume,
+  requested_by, created_at`.
+
+### Budget semantics — **shipped behind a flag** `MOCK2_BUDGET_DOLLARS` (default OFF)
+
+The runner's soft-pause ceiling stays **token-based** (unchanged) until an operator sets
+`MOCK2_BUDGET_DOLLARS=on|1|true` on the live install. When on, the token ceiling is
+replaced by its **dollar equivalent** (`budgetCentsForTokenLegacy(SOFT_PAUSE_TOKENS,
+laneModel)` — the 1M-token envelope priced at the lane's own model, so behavior doesn't
+jump), checked via `budgetPauseReasonCents` against the run's real spend (cache included);
+pause messages read dollars. Both runners inherit this identically. The four canonical
+token classes are written to the cycle **in both modes** (additive; only the *pause
+decision* is flag-gated).
+
+### Auto-consult — **shipped behind a flag** `MOCK2_CONSULT` (default OFF)
+
+The AUTO escalation consult (triggers a/b — same gate failing twice; no-progress breaker)
+fires from `haltCycle` only when `MOCK2_CONSULT=on`. The operator **"Get guidance"** button
+(trigger d) is NOT gated — it's an on-demand route (`POST …/cycles/:id/consult`) that never
+touches the runner loop. Caps (1/halt, 2/request) enforced from `mock2_consults` counts;
+the button bypasses the auto caps.
+
+### New routes (additive, viewer/editor-gated)
+
+- `GET  /projects/:id/requests` — one row per request with its cost roll-up + segments.
+- `GET  /projects/:id/requests/:reqId/log` — the merged/ordered/deduped request log +
+  the **idempotent** export artifact (content-hashed).
+- `POST /projects/:id/cycles/:cycleId/consult` — operator "Get guidance" (Fable 5 second
+  opinion, advisory-only, ~$0.50, logged as a segment).
+- `GET  /projects/:id/cycles/:cycleId/consults` — consults attached to a cycle.
 
 ### Acceptance mapping & evidence
 
-| Acceptance | Where verified |
+| Acceptance | Status |
 |---|---|
-| #42 four-class breakdown reproduces **$1.778** at Opus rates (72 / 12,972 / 1,922,721 / 78,722) | `mock2-cost-truth.test.js` (pure, runs here) ✓ |
-| Budget triggers on **dollars**; equal in+out ⇒ equal-spend trip regardless of cache/output mix | pure test ✓ |
-| Estimates land ~+10–35% of actual; per-lane pricing reflected | `estimate-logic` test ✓ |
-| Simulated Fable 5 `refusal` ⇒ halt with reason, no crash/loop | pure test ✓ |
-| Consult: one stuck cycle fires **exactly one** consult within caps; 3rd refused w/o button; lane never switches | `consult-logic` test ✓ |
-| One request define→build→halt→consult→resume→succeed ⇒ one history entry + one log, consult itemized (~$0.50); double-export identical | `request-log` idempotency test ✓ (pure); end-to-end needs live DB |
+| #42 four-class breakdown reproduces **$1.778** at Opus rates (72 / 12,972 / 1,922,721 / 78,722) | ✓ pure test `mock2-cost-truth.test.js` |
+| Budget triggers on **dollars**; equal in+out ⇒ equal-spend trip regardless of cache/output mix | ✓ pure test; **wired** in both runners behind `MOCK2_BUDGET_DOLLARS` — needs a live run with the flag on to observe |
+| Estimates land ~+10–35% of actual; per-lane pricing reflected | ✓ pure test (`estimate-logic`); estimator not yet swapped into the live start path (still the token envelope) — **pending** |
+| Simulated Fable 5 `refusal` ⇒ halt with reason, no crash/loop | ✓ pure test; **wired** in both runners (`classifyTurn` → `haltCycle` trigger `model_refusal`) |
+| Consult: one stuck cycle fires **exactly one** consult within caps; 3rd refused w/o button; lane never switches | ✓ pure test; **wired** (auto behind `MOCK2_CONSULT`, operator button always on) — live observation pending |
+| One request define→build→halt→consult→resume→succeed ⇒ one history entry + one log, consult itemized (~$0.50); double-export identical | ✓ pure idempotency test; request entity + grouped-log/export routes **wired** — end-to-end render **pending live DB** |
 | Audit lane runs on Fable 5 for one real define stage; cost delta visible | **pending operator run** (needs live Incus + Fable 5 connector) |
-| #40/#41/#42 renders as one record ~**$1.85**; #30 legacy-basis; before/after screenshots | **pending operator run** (needs live DB + UI) |
+| #40/#41/#42 renders as one record ~**$1.85**; #30 legacy-basis; before/after screenshots | **pending operator run** (needs live DB + the spend UI, which is deliberately left for the live pass) |
+
+**Operator live checklist (run on a real install; report back — do not fabricate):**
+1. Apply migration 515 (automatic on boot when enabled). Confirm existing cycles read
+   unchanged (NULL `request_id`, `usage_schema_version` NULL ⇒ shown legacy-basis).
+2. Run one build ask end-to-end → confirm it renders as **one request** with segments +
+   a cumulative dollar roll-up; **download the log twice** → identical artifact (same
+   `content_hash`).
+3. Set `MOCK2_BUDGET_DOLLARS=on`; confirm a cache-heavy run soft-pauses on **dollars**.
+4. Assign the **audit** slot to a Fable 5 connector; run one define stage; confirm the
+   audit cost is itemized and the delta is visible; confirm a simulated refusal lands as
+   a halt (no loop).
+5. Set `MOCK2_CONSULT=on`; force the same gate to fail twice; confirm **exactly one**
+   auto-consult fires (≤ caps), attaches to the halt card, and logs as a `consult`
+   segment; a 3rd auto attempt is refused without the "Get guidance" button; the build
+   lane never switches models.
+6. Confirm the #40/#41/#42 request totals ~**$1.85** as one record and #30 shows
+   legacy-basis. Screenshot before/after change history into this doc.
 
 > **Live-validation honesty (same convention as Phase 1 above).** The development
 > container has no better-sqlite3 native module, no Incus, no Fable 5 connector, and no

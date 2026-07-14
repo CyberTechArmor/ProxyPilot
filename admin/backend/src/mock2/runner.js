@@ -44,9 +44,11 @@ import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
+  updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { deployProject, readRunContract } from './deploy.js';
+import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
@@ -331,6 +333,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // clock + token count start at zero — each resume gets a fresh budget window).
   const runStartMs = Date.now();
   let usedTokensThisRun = 0;
+  // No-progress circuit breaker state (harness safety) — trips a stuck cycle to a
+  // blocked halt instead of re-prompting forever (the ADP 118-turn loop).
+  let progressState = initProgressState();
+  const noProgLimit = noProgressLimit(process.env);
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -437,10 +443,32 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     }
     const decision = classifyTurn(result.toolCalls);
 
+    // No-progress circuit breaker — fold this turn ONCE. Enforced below on every
+    // non-successful path so a stuck cycle auto-halts (blocked) instead of
+    // re-prompting forever. A turn that makes a real move resets the counters.
+    const progress = updateProgress(progressState, { toolCalls: result.toolCalls, text: result.text }, noProgLimit);
+    progressState = progress.state;
+
     // Surface task-level progress for the poll UI ("Step 3 · writing
     // public/index.html") so the Builder can see what the runner is doing rather
     // than a static "running". The terminal branches below set their own message.
     setJob(cycle.id, { phase: 'running', message: describeRunnerStep(turn, result.toolCalls) });
+
+    // 4a) The model called halt — it cannot honestly finish (blocked, missing
+    //     dependency, out-of-scope fix). End the cycle NON-SUCCESS: no deploy,
+    //     resumable, surfaced as needs-attention with the model's reason. Answer any
+    //     tool call it paired with halt so the transcript stays well-formed.
+    if (decision.halted) {
+      for (const call of decision.toolCalls) {
+        if (call.name === 'halt') continue;
+        const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
+        lastGateReports = out.gateReports || lastGateReports;
+        transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: truncateToolResult(out.content) });
+        logEvent('tool_result', { role: 'tool', content: out.content, meta: { name: call.name } });
+      }
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: 'model_halt', reason: decision.haltReason, logEvent });
+      return scheduleJobCleanup(cycle.id);
+    }
 
     // 4) The model declared finish — verify the gates are actually green before
     //    accepting it (it never approves its own work: we re-run the battery).
@@ -464,9 +492,15 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // accepted. Only reject finish when there ARE gates and one isn't green.
       if (gateScripts.length && !allGatesGreen(battery)) {
         // Not green — feed the finish call its verdict and keep working ("review,
-        // not error"). The next model turn answers with fresh work.
+        // not error"). The next model turn answers with fresh work — UNLESS the
+        // breaker shows the cycle is just re-calling finish on the same red gates
+        // with no new work, in which case halt (blocked) rather than loop.
         transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Gates are not all green yet — you cannot finish. Battery:\n${formatGateReports(battery)}` });
         touchLock(projectId, holder);
+        if (progress.tripped) {
+          await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent });
+          return scheduleJobCleanup(cycle.id);
+        }
         continue;
       }
       const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: decision.finishSummary });
@@ -490,6 +524,24 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         return scheduleJobCleanup(cycle.id);
       }
       logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
+
+      // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap
+      // HTTP/API layer always runs; the browser + read-only DB connectors are a
+      // relevance-gated escalation (default OFF) that start ONLY when this change's
+      // diff/metadata warrants them. A backend-only change invokes zero connectors.
+      // Every run/skip + reason is logged. With the connectors off and http not
+      // enforced (defaults), ok is always true → the success path is unchanged.
+      if (!deployed.skipped) {
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, logEvent, env: process.env });
+        if (!smoke.ok) {
+          const detail = smokeFailSummary(smoke.report);
+          finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
+          releaseLock(projectId, holder);
+          setJob(cycle.id, { phase: 'smoke_failed', message: `Smoke gate failed — ${detail}`, commit: record?.commit_sha || null });
+          void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
+          return scheduleJobCleanup(cycle.id);
+        }
+      }
       finishCycle(cycle.id, { status: 'succeeded' });
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
@@ -504,7 +556,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       return scheduleJobCleanup(cycle.id);
     }
 
-    // 5) The model stalled (no tool call) — nudge and continue.
+    // 4c) No-progress breaker on the non-terminal path — if the cycle is stuck
+    //     (repeated no-tool / near-identical / no-state-change turns), halt it as
+    //     blocked instead of nudging into another wasted turn. This is the guard
+    //     the ADP repro needed: honesty gets an exit AND runaway can't spin.
+    if (progress.tripped) {
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: lastGateReports, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress: ${haltReasonLabel(progress.trigger)}.`, logEvent });
+      return scheduleJobCleanup(cycle.id);
+    }
+
+    // 5) The model stalled (no tool call) — nudge and continue (until the breaker
+    //    above trips). The nudge gives a genuinely-recoverable turn a chance first.
     if (decision.stalled) {
       transcript.push({ role: 'user', text: STALL_NUDGE });
       continue;
@@ -773,6 +835,54 @@ async function escalateAwaitingAdmin({ cycle, project, containerName, holder, re
     detail: `${project.name}: cycle ${cycle.id} exhausted ${MAX_CYCLE_RETRIES} retries — ${reason}. Handoff: ${JSON.stringify(handoff)}`,
   });
   setJob(cycle.id, { phase: 'awaiting_admin', message: `Retries exhausted — handed off to an admin. ${reason}` });
+}
+
+// haltCycle — the NON-SUCCESS terminal (harness safety). A cycle that cannot
+// honestly finish — the model called halt(reason), OR the no-progress breaker
+// tripped — ends here: WIP is checkpointed (branch + any report artifacts stay
+// recoverable), the cycle is marked BLOCKED (status 'awaiting_admin' + halt_reason,
+// so it is NOT 'succeeded' and does NOT deploy), the lock is released, a
+// needs-attention queue item is raised, and the human is notified. Resumable via
+// the existing editor Retry (RESUMABLE_CYCLE_STATUSES includes 'awaiting_admin').
+// Exported so the SDK runner ends a blocked/stuck cycle identically.
+export async function haltCycle({ cycle, project, containerName, holder, gateReports, gateScripts, framework, trigger, reason, logEvent = null }) {
+  const projectId = Number(project.id);
+  setJob(cycle.id, { phase: 'blocked', message: 'Blocked — checkpointing before stopping…' });
+
+  // Best-effort WIP checkpoint + change record so the branch and any report the
+  // cycle wrote are recoverable when a human resumes.
+  let record = null;
+  try {
+    record = await checkpointAndRecord({ cycle, project, containerName, holder, gateReports: gateReports || [], gateScripts, framework, summary: `halt: ${haltReasonLabel(trigger)}` });
+  } catch (e) { console.warn('[mock2] halt checkpoint failed:', e?.message); }
+
+  // Link any report artifacts the cycle wrote (state/changes/*.md, state/*.md).
+  const artifacts = await listReportArtifacts(containerName);
+
+  updateCycle(cycle.id, { halt_reason: trigger });
+  finishCycle(cycle.id, { status: 'awaiting_admin', error: reason });
+  releaseLock(projectId, holder);
+
+  if (typeof logEvent === 'function') {
+    try { logEvent('halt', { role: 'system', content: reason, meta: { trigger, artifacts, commit_sha: record?.commit_sha || null } }); } catch { /* best effort */ }
+  }
+
+  safeRaise({
+    kind: 'retries_exhausted', project_id: projectId, dedupe_key: `mock2-blocked:${cycle.id}`,
+    ref_table: 'mock2_cycles', ref_id: cycle.id,
+    detail: `${project.name}: build BLOCKED (${trigger}) — ${reason}${artifacts.length ? ` · reports: ${artifacts.join(', ')}` : ''}`,
+  });
+  setJob(cycle.id, { phase: 'blocked', message: `Blocked — ${haltReasonLabel(trigger)}. Needs attention.`, commit: record?.commit_sha || null });
+  void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
+}
+
+// Report artifacts a cycle wrote, so a halt can link them for the reviewer.
+// Best-effort; runs in the container relative to APP_DIR (execInContainer cds there).
+async function listReportArtifacts(containerName) {
+  try {
+    const r = await execInContainer(containerName, `ls -1 state/changes/*.md state/changes/*.json state/*.md 2>/dev/null | head -50`);
+    return Array.from(new Set((r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)));
+  } catch { return []; }
 }
 
 // ---- admin stop-all (used by the route) ----

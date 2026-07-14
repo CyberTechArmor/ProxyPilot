@@ -45,13 +45,24 @@ export default function BuildStatus({
   // not a failure — it gets its own label + one-click Resume, distinct from a
   // plain user interrupt.
   const paused = cycle?.status === 'interrupted' && !!cycle?.pause_reason;
-  const statusLabel = paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
+  // A HALTED cycle (the build could not honestly finish, or the no-progress breaker
+  // tripped) is 'awaiting_admin' + halt_reason. Distinct from success, from a user
+  // stop, and from a deviation block (which has no error): needs-attention, resumable.
+  const blocked = cycle?.status === 'awaiting_admin' && !!cycle?.halt_reason;
+  const HALT_LABELS = {
+    model_halt: 'the build reported it was blocked',
+    no_tool_calls: 'no progress — repeated turns with no action',
+    repeated_output: 'no progress — the same response repeated without changes',
+    no_state_change: 'no progress — repeated the same action with no change',
+    max_turns: 'reached the step ceiling without finishing',
+  };
+  const statusLabel = blocked ? 'blocked' : paused ? 'paused' : cycle ? cycle.status.replace(/_/g, ' ') : '';
   // Any non-successful terminal build can be continued (soft retry — it resumes
   // from the checkpoint/working tree in the container, no work lost). A soft
   // pause has its own Resume block and a deploy failure its own Retry deploy /
   // Rebuild controls, so both are excluded here.
   const FAILED_TERMINAL = ['failed', 'abandoned', 'refused_quota', 'interrupted'];
-  const canContinueFailed = !!cycle && !paused && cycle.deploy_status !== 'deploy_failed'
+  const canContinueFailed = !!cycle && !paused && !blocked && cycle.deploy_status !== 'deploy_failed'
     && (FAILED_TERMINAL.includes(cycle.status) || (cycle.status === 'awaiting_admin' && cycle.error));
   const driftAvailable = !!project?.framework_update_available;
 
@@ -149,7 +160,7 @@ export default function BuildStatus({
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="min-w-0">
                 <p className="text-sm font-medium truncate">{cycle.instruction || '(cycle)'}</p>
-                <p className={`text-xs font-medium ${paused ? 'text-amber-500' : STATUS_TONE[cycle.status] || 'text-muted-foreground'}`}>
+                <p className={`text-xs font-medium ${blocked ? 'text-orange-500' : paused ? 'text-amber-500' : STATUS_TONE[cycle.status] || 'text-muted-foreground'}`}>
                   {statusLabel}{cycle.current_gate ? ` · ${cycle.current_gate}` : ''}
                 </p>
               </div>
@@ -161,7 +172,31 @@ export default function BuildStatus({
             {/* The Claude-Code-style task list — what's running and how many steps are left. */}
             <BuildTaskList cycle={cycle} job={job} />
 
-            {cycle.error && !paused ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+            {cycle.error && !paused && !blocked ? <p className="text-xs text-red-500 break-words">{cycle.error}</p> : null}
+
+            {/* Blocked — the build could not honestly finish (it called halt), or
+                the no-progress circuit breaker stopped a stuck loop. Needs human
+                attention; resumable once the blocker is cleared. Distinct from a
+                success, a user stop, and a soft budget pause. */}
+            {blocked ? (
+              <div className="space-y-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
+                <p className="text-xs text-orange-600 flex items-start gap-1">
+                  <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    <span className="font-medium">Blocked — needs attention.</span>{' '}
+                    {HALT_LABELS[cycle.halt_reason] || 'The build stopped without finishing.'}
+                    {cycle.error ? <span className="block mt-1 text-orange-700/90 break-words">{cycle.error}</span> : null}
+                    {' '}Your work so far is checkpointed — resolve the blocker, then resume.
+                  </span>
+                </p>
+                {canEdit && online ? (
+                  <Button size="sm" className="h-9" disabled={busy} onClick={onRetry}>
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                    Resume build
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
 
             {/* Soft-paused on a token/time budget — a resumable checkpoint, not a
                 failure. One-click Resume continues from where it stopped with a

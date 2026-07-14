@@ -554,4 +554,23 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Halt reason. A build cycle that CANNOT honestly finish — the model called
+    // halt(reason) because it is blocked, or the no-progress circuit breaker tripped
+    // (repeated no-tool-call / near-identical / no-state-change turns) — ends as a
+    // needs-attention terminal rather than 'succeeded'. Stored on the allowed
+    // 'awaiting_admin' status (no CHECK-constraint rebuild, same idiom as 511's
+    // pause_reason) tagged with WHY it halted: 'model_halt' | 'no_tool_calls' |
+    // 'repeated_output' | 'no_state_change'. NULL for every retries-exhausted
+    // awaiting_admin and every pre-existing row, so today's semantics are unchanged;
+    // the UI shows a distinct "Blocked — needs attention" when this reason is set.
+    // Additive; a disabled host never writes it.
+    version: 513,
+    name: 'mock2_cycle_halt_reason',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN halt_reason TEXT;
+      `);
+    },
+  },
 ];

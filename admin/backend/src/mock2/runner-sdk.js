@@ -87,7 +87,10 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     return scheduleJobCleanup(cycle.id);
   }
 
-  // Load the SDK lazily so a flag-off install never needs the package present.
+  // Load the SDK lazily so a flag-off install never needs the package present. It
+  // is deliberately NOT a package.json dependency: its `zod@^4` peer conflicts with
+  // the backend's `zod@^3` and would break the default `npm install` (ERESOLVE).
+  // Operators opting into the SDK runner install it out-of-band (see below).
   let query;
   try {
     ({ query } = await import('@anthropic-ai/claude-agent-sdk'));
@@ -95,10 +98,11 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     finishCycle(cycle.id, {
       status: 'failed',
       error: `BUILD_RUNNER=sdk but @anthropic-ai/claude-agent-sdk is not installed: ${err?.message || err}. `
-        + 'Run npm install in admin/backend, or unset BUILD_RUNNER.',
+        + 'Install it in admin/backend with `npm install @anthropic-ai/claude-agent-sdk --no-save --legacy-peer-deps` '
+        + '(the --legacy-peer-deps is required: the SDK peers zod@^4 while the backend pins zod@^3), or unset BUILD_RUNNER.',
     });
     releaseLock(projectId, holder);
-    setJob(cycle.id, { phase: 'failed', message: 'Claude Agent SDK is not installed.' });
+    setJob(cycle.id, { phase: 'failed', message: 'Claude Agent SDK is not installed (see cycle error for the install command).' });
     return scheduleJobCleanup(cycle.id);
   }
 

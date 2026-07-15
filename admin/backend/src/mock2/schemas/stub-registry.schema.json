@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/stub-registry",
+  "title": "Mock2 stub registry (state/stub-registry.json)",
+  "description": "Every APPROVED production simulation. An entry is legitimate only when administrator-approved (state/deviations/), registered here with a severity, and visibly labeled in the running UI. Injected into every cycle's work-file context; the Run stage exposes open entries.",
+  "type": "object",
+  "required": ["schema_version", "stubs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "stubs": { "type": "array", "items": { "$ref": "#/$defs/stub" } }
+  },
+  "$defs": {
+    "stub": {
+      "type": "object",
+      "required": ["subsystem", "file", "severity", "reason", "approval_ref"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": ["integer", "string"] },
+        "subsystem": { "type": "string" },
+        "file": { "type": "string" },
+        "function": { "type": ["string", "null"] },
+        "manifest_id": { "type": ["string", "null"], "description": "the integration manifest entry this stub simulates, if any" },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "critical = fabricated production data/security behavior (blocks succeeded on any touching cycle, UI banner, reconciliation audit); high = user-visible integration simulated (blocking on touched subsystems); medium = approved degraded fallback (surfaced on touched subsystems); low = non-production/administrative (registry + status endpoint only)"
+        },
+        "reason": { "type": "string" },
+        "approval_ref": { "type": "string", "description": "the deviation / admin-queue id that approved it" },
+        "status": { "enum": ["open", "resolved"], "default": "open" },
+        "labeled_in_ui": { "type": "boolean" }
+      }
+    }
+  }
+}

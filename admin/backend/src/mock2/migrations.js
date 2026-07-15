@@ -871,4 +871,83 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Integration truthfulness (AUDIT.md; B.4/B.5). Strictly additive + nullable,
+    // reversible, no row rewrites — behavior is byte-identical until code opts in.
+    //   - mock2_cycles.verification_state: NULL (no external integrations in scope,
+    //     the pre-existing behavior) | 'pending' (all in-fence gates green, live
+    //     verification outstanding — the new pending-operator-verification outcome)
+    //     | 'verified' (all checklist items confirmed/waived). It is the ONLY
+    //     signal that distinguishes "succeeded" from "pending-operator-verification"
+    //     for a cycle that touched a manifest-declared integration.
+    //   - mock2_cycles.integration_gate_json: the B.4 integration-gate result
+    //     (verdict + findings + analyzer limits + the manifest hash it ran against),
+    //     stamped at finish so the record is accountable to what the gate saw.
+    //   - mock2_integration_verifications: append-only operator-verification
+    //     evidence (checklist item + manifest id/hash + operator identity +
+    //     observed result / waiver + supersession chain). Historical rows are
+    //     NEVER mutated; a superseding reverification inserts a NEW row referencing
+    //     the one it supersedes (supersedes_id).
+    //   - mock2_integration_findings: append-only integration-gate / screening /
+    //     migration findings, hash-referenced to the change record or framework
+    //     audit that produced them (source_ref), with a blocking flag and the
+    //     touched-subsystem/reconciliation escalation state.
+    // A disabled host never runs any of this.
+    version: 520,
+    name: 'mock2_integration_truthfulness',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN verification_state TEXT;
+        ALTER TABLE mock2_cycles ADD COLUMN integration_gate_json TEXT;
+
+        CREATE TABLE mock2_integration_verifications (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER,
+          item_id TEXT NOT NULL,
+          manifest_id TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL,
+          subsystem TEXT,
+          operator_id INTEGER NOT NULL,
+          role TEXT NOT NULL DEFAULT 'operator',
+          environment TEXT NOT NULL,
+          endpoint_classification TEXT NOT NULL,
+          observed_result TEXT,
+          waived INTEGER NOT NULL DEFAULT 0,
+          waiver_reason TEXT,
+          evidence_ref TEXT,
+          expires_at TEXT,
+          supersedes_id INTEGER,
+          superseded_at TEXT,
+          content_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_int_verif_project ON mock2_integration_verifications (project_id, item_id);
+        CREATE INDEX idx_mock2_int_verif_cycle ON mock2_integration_verifications (cycle_id);
+
+        CREATE TABLE mock2_integration_findings (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER,
+          origin TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          subsystem TEXT,
+          file TEXT,
+          detail TEXT,
+          severity TEXT,
+          blocking INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'open',
+          framework_version_id INTEGER,
+          source_ref TEXT,
+          content_hash TEXT NOT NULL,
+          resolved_by INTEGER,
+          resolved_reason TEXT,
+          resolved_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_int_findings_project ON mock2_integration_findings (project_id, status);
+        CREATE INDEX idx_mock2_int_findings_subsystem ON mock2_integration_findings (project_id, subsystem);
+      `);
+    },
+  },
 ];

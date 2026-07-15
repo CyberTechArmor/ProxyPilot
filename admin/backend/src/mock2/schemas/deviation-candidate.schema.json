@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/deviation-candidate",
+  "title": "Mock2 finish-time deviation candidate (B.3 screening finding)",
+  "description": "A classified simulation-disclosure match from finish-payload / change-record screening. High and ambiguous (non-negated) candidates are BLOCKING; negated are recorded only. Lexical screening is a safety net — B.4 is the primary source-level detector.",
+  "type": "object",
+  "required": ["schema_version", "source", "tier"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source": { "type": "string", "description": "the field the match was found in, e.g. finish.assumptions.assumed" },
+    "tier": {
+      "enum": ["high", "ambiguous", "negated"],
+      "description": "high = automatic blocking deviation candidate; ambiguous = blocking candidate for admin resolution; negated = remediation/negation, recorded not blocking"
+    },
+    "term": { "type": "string", "description": "the ambiguous term matched (ambiguous tier)" },
+    "matched": { "type": "string", "description": "the exact matched substring" },
+    "span": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[start, end) character offsets of the match in the source field"
+    },
+    "excerpt": { "type": "string", "description": "surrounding text for admin context" },
+    "proposed_classification": { "type": "string", "description": "proposed resolution for the admin" },
+    "reason": { "type": "string" },
+    "resolution": {
+      "type": "object",
+      "description": "admin resolution (appended, never rewriting the candidate)",
+      "properties": {
+        "status": { "enum": ["open", "confirmed_deviation", "false_positive"] },
+        "reason": { "type": "string" },
+        "resolved_by": { "type": ["integer", "string"] },
+        "resolved_at": { "type": "string" }
+      }
+    }
+  }
+}

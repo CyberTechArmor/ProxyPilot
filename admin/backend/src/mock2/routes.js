@@ -131,7 +131,7 @@ import { buildRequestLog, requestLogArtifact } from './request-log.js';
 import { runConsult } from './consult.js';
 import { consultAllowed } from './consult-logic.js';
 import {
-  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle,
+  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle, updateCycle,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
 import {
@@ -148,6 +148,13 @@ import {
 } from './concept.js';
 import { publicChatMessageShape } from './concept-logic.js';
 import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-logic.js';
+// ---- Integration truthfulness (AUDIT.md; B.4/B.5/B.6) ----
+import {
+  reportedCycleOutcome, deployPendingIsHealthy, validateConfirmation, OUTCOME_CODES,
+} from './verification-logic.js';
+import {
+  listActiveVerifications, recordVerification, listOpenIntegrationFindings,
+} from './integration-state.js';
 // ---- M8: audit, rule questions, admin queue (ADR-002/003) ----
 import {
   startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
@@ -345,6 +352,17 @@ const designTemplateImportSchema = z.object({
   source_project_id: z.union([z.number().int(), z.string()]).optional(),
   notes: z.string().trim().max(MAX_IMPORT_NOTES_CHARS).optional(),
 }).refine((o) => o.doc || o.source_project_id != null, 'doc or source_project_id is required');
+// Operator-verification confirmation (B.5): confirm a live check with an OBSERVED
+// RESULT (never a bare checkbox), or an admin waiver with a recorded reason.
+const verifyConfirmSchema = z.object({
+  item_id: z.string().trim().min(1).max(200),
+  environment: z.string().trim().min(1).max(60),
+  observed_result: z.string().trim().max(4000).optional(),
+  waived: z.boolean().optional(),
+  waiver_reason: z.string().trim().max(2000).optional(),
+  evidence_ref: z.string().trim().max(500).optional(),
+  expires_at: z.string().trim().max(40).optional(),
+});
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
   // Length bound applied in the handler against getChatMaxChars() (same ceiling
@@ -2374,6 +2392,95 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_QUEUE_ITEM_STATUS', 'mock2_queue_item', item.id,
       { kind: item.kind, status, resumed, edited: !!(editedText || conditions) }, req.ip);
     res.json({ item: publicQueueItemShape(updated, { projectName: updated.project_id ? getProject(updated.project_id)?.name || null : null }), resumed });
+  });
+
+  // ============================================================
+  // Integration truthfulness (AUDIT.md; B.4/B.5/B.6). The integration-gate
+  // result rides on the cycle (integration_gate_json); this surfaces the
+  // pending-operator-verification checklist + the stub registry + the reported
+  // outcome, and lets an operator confirm a live verification (or an admin waive
+  // one). Confirmation requires an OBSERVED RESULT — a bare checkbox is invalid.
+  // ============================================================
+
+  // The project's integration status: reported outcome of the latest cycle, the
+  // outstanding verification checklist (from the gate result), the active
+  // confirmations, and the open production simulations (stub registry).
+  router.get('/projects/:id/integration-status', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const latest = latestCycle(project.id);
+    let gate = null;
+    try { gate = latest?.integration_gate_json ? JSON.parse(latest.integration_gate_json) : null; } catch { gate = null; }
+    const outcome = latest ? reportedCycleOutcome(latest) : null;
+    res.json({
+      reported_outcome: outcome,
+      outcome_code: outcome ? (OUTCOME_CODES[outcome] ?? null) : null,
+      verification_state: latest?.verification_state || null,
+      checklist: gate?.checklist || [],
+      gate: gate ? { outcome: gate.outcome, reasons: gate.reasons, limits: gate.gate?.limits } : null,
+      confirmations: listActiveVerifications(project.id).map((v) => ({
+        item_id: v.item_id, manifest_id: v.manifest_id, subsystem: v.subsystem,
+        operator_id: v.operator_id, role: v.role, environment: v.environment,
+        endpoint_classification: v.endpoint_classification,
+        observed_result: v.observed_result, waived: !!v.waived, waiver_reason: v.waiver_reason,
+        created_at: v.created_at, content_hash: v.content_hash,
+      })),
+      open_findings: listOpenIntegrationFindings(project.id).map((f) => ({
+        id: f.id, kind: f.kind, subsystem: f.subsystem, file: f.file, severity: f.severity,
+        blocking: !!f.blocking, detail: f.detail, origin: f.origin, created_at: f.created_at,
+      })),
+      deploy_pending_is_healthy: deployPendingIsHealthy(),
+    });
+  });
+
+  // Confirm (operator) or waive (admin) a live-verification checklist item. The
+  // confirmation is validated for a real observed result, hash-linked, and
+  // append-only. When every checklist item on the pending cycle is confirmed or
+  // waived, the cycle advances pending-operator-verification → succeeded.
+  router.post('/projects/:id/cycles/:cycleId/verify', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (cycle.verification_state !== 'pending') return res.status(409).json({ error: 'This cycle is not pending operator verification.' });
+    let gate = null;
+    try { gate = cycle.integration_gate_json ? JSON.parse(cycle.integration_gate_json) : null; } catch { gate = null; }
+    const checklist = gate?.checklist || [];
+    const parsed = verifyConfirmSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid confirmation' });
+    const item = checklist.find((c) => c.item_id === parsed.data.item_id);
+    if (!item) return res.status(404).json({ error: 'No such verification item on this cycle' });
+    const isAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    const record = {
+      project_id: project.id, cycle_id: cycle.id, item_id: item.item_id,
+      manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
+      operator_id: req.user.id, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      environment: parsed.data.environment, endpoint_classification: item.endpoint_classification,
+      observed_result: parsed.data.observed_result || null,
+      waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
+      evidence_ref: parsed.data.evidence_ref || null, expires_at: parsed.data.expires_at || null,
+    };
+    const v = validateConfirmation(record);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    if (record.waived && !isAdmin) return res.status(403).json({ error: 'Only an administrator can waive a verification item.' });
+    const saved = recordVerification(record);
+    // Advance to succeeded once every checklist item has an active confirmation/waiver.
+    const active = new Set(listActiveVerifications(project.id).filter((r) => r.cycle_id === cycle.id).map((r) => r.item_id));
+    const allDone = checklist.every((c) => active.has(c.item_id));
+    let advanced = false;
+    if (allDone) {
+      updateCycle(cycle.id, { verification_state: 'verified' });
+      finishCycle(cycle.id, { status: 'succeeded', error: null });
+      try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+      resolveQueueItem(`mock2-verify:${cycle.id}`, { resolution: 'operator verified', resolvedBy: req.user.id });
+      advanced = true;
+    }
+    logAudit(req.user.id, 'MOCK2_INTEGRATION_VERIFY', 'mock2_cycle', cycle.id,
+      { item_id: item.item_id, waived: record.waived, advanced }, req.ip);
+    res.status(201).json({
+      confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
+      remaining: checklist.filter((c) => !active.has(c.item_id)).map((c) => c.item_id),
+      reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
+      advanced_to_succeeded: advanced,
+    });
   });
 
   return router;

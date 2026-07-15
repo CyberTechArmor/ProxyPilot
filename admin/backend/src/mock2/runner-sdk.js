@@ -53,7 +53,14 @@ import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
+  execInContainer, readFileInContainer,
 } from './runner.js';
+import {
+  evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
+} from './integration-enforcement.js';
+import { recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist } from './integration-state.js';
+import { readDeclaredEgress } from './deploy.js';
+import { listApprovedEgressGrants } from './egress-grants.js';
 import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
 import { parseFilesJson, safeComponentPath } from './component-logic.js';
 import {
@@ -369,6 +376,37 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       return scheduleJobCleanup(cycle.id);
     }
 
+    // INTEGRATION TRUTHFULNESS (harness parity with the hand-rolled runner —
+    // this flag-gated path must never be a bypass). Gates green; analyze the
+    // produced source + screen the disclosures before any success terminal.
+    let integrationDecision = null;
+    try {
+      const snapshot = await readSourceSnapshot({ containerName, appDir: APP_DIR, execInContainer, readFileInContainer });
+      const declaredEgress = await readDeclaredEgress(containerName, APP_DIR).catch(() => []);
+      const approvedGrants = listApprovedEgressGrants(projectId);
+      integrationDecision = evaluateIntegrationTruthfulness({
+        files: snapshot.files, manifestText: snapshot.manifestText, declaredEgress, approvedGrants,
+        finish: { summary: 'SDK runner change', acceptance: [], assumptions: null },
+      });
+      recordIntegrationGate(cycle.id, integrationDecision);
+      logEvent('integration_gate', { role: 'system', content: integrationDecision.outcome, meta: { verdict: integrationDecision.gate.verdict, reasons: integrationDecision.reasons } });
+    } catch (e) {
+      console.warn('[mock2] SDK integration gate crashed:', e?.message);
+      integrationDecision = { blocking: true, outcome: 'blocked-deviation', reasons: [`integration gate could not run: ${e?.message || e}`], gate: { verdict: 'fail' }, egress: { ok: false }, screening: { blocking: false }, checklist: [] };
+    }
+    if (integrationDecision.blocking) {
+      try {
+        recordIntegrationFindings({
+          projectId, cycleId: cycle.id, origin: 'integration_gate', frameworkVersionId: framework.id, sourceRef: `cycle:${cycle.id}`,
+          findings: (integrationDecision.gate?.findings || []).map((f) => ({ ...f, blocking: true, detail: f.message })),
+        });
+      } catch { /* best effort */ }
+      const bs = blockingSummary(integrationDecision);
+      await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: haltReasonForDecision(integrationDecision) || 'integration_gate', reason: bs.reason, options: bs.options, logEvent });
+      void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
+      return scheduleJobCleanup(cycle.id);
+    }
+
     const record = await checkpointAndRecord({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, summary: 'SDK runner change' });
     logEvent('checkpoint', { role: 'system', content: 'SDK runner change', meta: { commit_sha: record?.commit_sha || null, seq: record?.seq ?? null } });
 
@@ -396,6 +434,21 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
         return scheduleJobCleanup(cycle.id);
       }
+    }
+    // B.5 lifecycle branch (parity with the hand-rolled runner): a clean gate
+    // with live-verification-required integrations in scope lands in
+    // pending-operator-verification, not succeeded.
+    const pendingChecklist = integrationDecision?.checklist || [];
+    if (pendingChecklist.length) {
+      openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });
+      updateCycle(cycle.id, { verification_state: 'pending' });
+      finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+      releaseLock(projectId, holder);
+      updateProject(projectId, { last_activity_at: nowIso() });
+      logEvent('pending_verification', { role: 'system', content: `Deployed; ${pendingChecklist.length} live verification item(s) outstanding.`, meta: { checklist: pendingChecklist } });
+      setJob(cycle.id, { phase: 'pending_verification', message: `Deployed — ${pendingChecklist.length} live external verification(s) outstanding.`, commit: record?.commit_sha || null });
+      void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+      return scheduleJobCleanup(cycle.id);
     }
     finishCycle(cycle.id, { status: 'succeeded' });
     try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }

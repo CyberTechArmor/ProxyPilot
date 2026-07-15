@@ -162,6 +162,79 @@ A build stopped at the token/time budget is **"incomplete / resumable," never
 descriptions — a realistic bar for an operational IT lead, not a senior engineer —
 but the bar itself is the working journey above, not a green compile.
 
+## 7a. No silent simulation (integration truthfulness)
+
+Hardened after a real failure (project 5, "ADP2"): an app shipped with its entire
+external integration faked — a `sync` that upserted a hardcoded roster whenever
+credentials were merely *present*, and a "connection test" that reported a
+successful mTLS handshake and OAuth token without ever opening a socket — while
+every request reported `succeeded` and all gates ran green. The design was
+correct; the backend was not real. The builder even disclosed the faking in its
+assumptions and nothing happened. These rules bind the gate to reality:
+
+- **Synthesized, sample, fixture, or fabricated data on any production code path
+  is a deviation.** A production code path is any path included in a deployable
+  artifact or reachable under a non-test runtime configuration; development,
+  demo, seed, and fixture paths count as production paths when they are bundled
+  or selectable in a deployed environment, unless a gate proves them unreachable
+  under every production configuration. *"It's only demo mode"* is not an
+  exemption.
+- **Any "test/check/probe" that reports success without performing the real
+  underlying operation is a deviation.** A connection test that does not open the
+  connection, a sync that does not fetch, a probe that reads configuration
+  fields — all are deviations regardless of what they return.
+- **Connectivity or operational success may never be derived solely from the
+  presence of non-empty configuration fields.** This invariant applies
+  everywhere: `if (cfg.secret && cfg.key) return { ok: true }` is a defect by
+  construction.
+- A simulation is valid **only** when it is administrator-approved, recorded in
+  `state/deviations/`, registered in the stub registry (`state/stub-registry.json`)
+  with a severity, **and** visibly labeled in the running UI. An unrecorded
+  simulation is a **gate failure** — the integration gate (§7b) fails the build.
+- **`pending-operator-verification` is not a licence to simulate.** It applies
+  ONLY to an implemented real integration that passed the integration gate and
+  awaits live verification against the actual external system. It must never
+  legitimize a stub, a fabricated response, a presence-only connection test, or a
+  sample-data production path — those are blocking deviations, not pending work.
+
+## 7b. Integration gate & observable provenance
+
+Every external capability (API, directory, webhook, third-party service) is
+declared as a versioned entry in the integration manifest (`state/integrations.json`);
+source discovery supplements the manifest and an outbound integration found in
+code with no manifest entry is a gate failure, so omitting the manifest is not a
+bypass. The integration gate enforces, for each declared or discovered capability:
+
+1. **Dataflow** — the configured destination and credentials flow into the real
+   transport invocation; when the flow cannot be established the gate fails closed
+   with "provenance not established," never inferring success.
+2. **Execution** — the production action actually invokes that transport during
+   contract testing; configuration presence alone is never a successful test,
+   probe, sync, or connection check.
+3. **Result provenance** — returned or persisted data derives from the transport
+   response, not from literals, bundled JSON, fixtures, sample records, or a
+   fallback generator. Legitimate parsing/transformation of the received response
+   passes.
+4. **Honest failure** — transport, TLS, authentication, protocol, and
+   upstream-validation failures remain failures and are surfaced accurately;
+   negative-path contract tests are required (TLS rejection, malformed
+   certificate, DNS failure, connection refusal, timeout, auth rejection,
+   malformed upstream payload).
+5. **Fixture isolation** — contract fixtures run over a real local socket through
+   the production transport path, injected only via explicit test-only
+   configuration; fixture mode must not be reachable through production defaults
+   or a failure fallback. Local contract-test endpoints never count as deploy
+   egress.
+6. **Observable provenance** — integration actions emit structured evidence:
+   destination classification, transport attempted, response status, provenance
+   mode — with credentials and secrets redacted.
+
+Lexical screening of finish-payload disclosures is a safety net, never the sole
+source-level detector: a disclosure of simulation ("synthesized because no live
+endpoint is reachable," "best-effort probe," "would replace this when credentials
+are present") creates a **blocking** deviation candidate and the request must not
+report `succeeded` while it is unresolved.
+
 ## 8. What is deliberately removed
 
 Relative to standard spec-driven development, the framework removes per-project

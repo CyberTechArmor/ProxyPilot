@@ -90,6 +90,7 @@ import {
   listGitConnectors, getGitConnector, getGitConnectorByName, insertGitConnector,
   updateGitConnector, deleteGitConnector, testGitConnector, shapeGitConnector,
   getProjectRemote, setProjectRemote, clearProjectRemote, shapeProjectRemote, exportProjectZip,
+  exportProjectRepoBundle,
 } from './git-connectors.js';
 import { GIT_PROVIDERS, GIT_AUTH_KINDS, validateGitConnectorInput } from './git-logic.js';
 import {
@@ -1284,8 +1285,9 @@ export function createMock2Router() {
     res.json({ ok: true, cleared });
   });
 
-  // Export as zip = git archive of the bare repo (ADR-006). Any member may
-  // export. Streams application/zip.
+  // Export as zip = git archive of the bare repo's working tree at HEAD (ADR-006).
+  // Any member may export. Streams application/zip. This is the project FILES, no
+  // git history.
   router.get('/projects/:id/export.zip', requireMock2Role('viewer'), async (req, res) => {
     const project = req.mock2Project;
     if (!project.repo_path) return res.status(409).json({ error: 'Project has no repository to export' });
@@ -1294,6 +1296,22 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_PROJECT_EXPORT_ZIP', 'mock2_project', project.id, { bytes: out.buffer.length }, req.ip);
     const fname = `${project.slug || `project-${project.id}`}.zip`;
     res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    res.send(out.buffer);
+  });
+
+  // Download the git repository = a `git bundle` of the bare repo with FULL
+  // history (every ref + commit — the checkpoints and the hash-chained change
+  // records). `git clone <file>.bundle` reconstructs a working repo. Any member
+  // may export. Streams application/octet-stream.
+  router.get('/projects/:id/repo.bundle', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (!project.repo_path) return res.status(409).json({ error: 'Project has no repository to export' });
+    const out = await exportProjectRepoBundle(project.repo_path);
+    if (!out.ok) return res.status(500).json({ error: `Export failed: ${out.error}` });
+    logAudit(req.user.id, 'MOCK2_PROJECT_EXPORT_BUNDLE', 'mock2_project', project.id, { bytes: out.buffer.length }, req.ip);
+    const fname = `${project.slug || `project-${project.id}`}.bundle`;
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     res.send(out.buffer);
   });

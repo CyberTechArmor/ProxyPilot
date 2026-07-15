@@ -1195,6 +1195,8 @@ export const api = {
   mock2ClearProjectRemote: (id) => request(`/mock2/projects/${id}/remote`, { method: 'DELETE' }),
   // Zip export is a binary GET — link to it directly (cookie auth rides along).
   mock2ProjectExportZipUrl: (id) => `/api/mock2/projects/${id}/export.zip`,
+  // Full git repository (git bundle with history) — clone with `git clone <file>.bundle`.
+  mock2ProjectRepoBundleUrl: (id) => `/api/mock2/projects/${id}/repo.bundle`,
 
   // ---- M5: framework registry ----
   mock2ListFrameworkVersions: () => request('/mock2/framework/versions'),

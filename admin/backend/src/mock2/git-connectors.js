@@ -258,3 +258,30 @@ export async function exportProjectZip(repoPath, ref = 'HEAD') {
     return { ok: false, error: `decode failed: ${err?.message}` };
   }
 }
+
+// ---- git repository export (git bundle of the bare repo — FULL history) ----
+//
+// Unlike the zip (a `git archive` of the working tree at HEAD, which drops all
+// history), this exports the whole repository as a single-file `git bundle` with
+// every ref and every commit — the checkpoints, the mirrored change records, the
+// hash-chained history. `git clone <file>.bundle` reconstructs a working repo, so
+// it is the portable, verifiable "download the git" artifact. Same host pivot +
+// base64 wrapping as the zip export (risk R3). Returns { ok, buffer, error }.
+export async function exportProjectRepoBundle(repoPath) {
+  if (!repoPath) return { ok: false, error: 'project has no repo path' };
+  const safeRepo = String(repoPath).replace(/'/g, `'\\''`);
+  // `bundle create -` streams the bundle to stdout; --all bundles every ref.
+  const r = await sh(
+    `git --git-dir='${safeRepo}' bundle create - --all 2>/dev/null | base64 -w0`,
+    { timeoutMs: 120000 },
+  );
+  const b64 = (r.stdout || '').trim();
+  if (r.code !== 0 || !b64) {
+    return { ok: false, error: (r.stderr || 'git bundle produced no output — is the bare repo seeded with at least one commit?').trim().slice(-300) };
+  }
+  try {
+    return { ok: true, buffer: Buffer.from(b64, 'base64') };
+  } catch (err) {
+    return { ok: false, error: `decode failed: ${err?.message}` };
+  }
+}

@@ -618,9 +618,9 @@ export default function ProjectDetail() {
             ) : (
               <p className="text-sm text-muted-foreground">The archived mockup preview is available once the project is online.</p>
             )}
-            <div className="h-[24rem]">
-              <ConceptStage projectId={id} project={project} canEdit={false} archived />
-            </div>
+            {/* The archived ConceptStage self-bounds its conversation (fixed
+                scroll height + collapse/expand), so it stays inside this card. */}
+            <ConceptStage projectId={id} project={project} canEdit={false} archived />
           </CardContent>
         </Card>
       ) : null}

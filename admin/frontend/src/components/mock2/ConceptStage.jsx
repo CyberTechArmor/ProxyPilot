@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -159,6 +160,11 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // A design exists to export pre-approval (live mockup) AND post-approval
   // (the archived mockup is kept — the template reads it from the repo).
   const hasDesign = hasMockup || !!project?.design_approved_at || !!project?.mockup_archive_url;
+
+  // In the read-only Details archive the conversation is bounded and scrolls
+  // inside its own box (self-contained — it must not overflow into the page);
+  // a collapse/expand toggle grows it from the standard height to a taller one.
+  const [archiveExpanded, setArchiveExpanded] = useState(false);
 
   // ---- design template: download + import (design/mockup only, never code) ----
   const [downloading, setDownloading] = useState(false);
@@ -292,13 +298,26 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const composerDisabled = busy || jobActive || !online || approved;
 
   return (
-    <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
+    // Archived (Details tab): the card SIZES TO ITS CONTENT — the conversation
+    // box below owns the height and scroll, so nothing spills into the page.
+    // Live (Concept tab): the card fills the column and the conversation grows.
+    <Card className={`flex flex-col ${archived ? '' : 'min-h-[26rem] lg:min-h-0 lg:flex-1'}`}>
       <CardContent className="flex flex-1 min-h-0 flex-col gap-3 pt-6">
-        {/* Read-only archive header (Details tab, post-approval). */}
+        {/* Read-only archive header (Details tab, post-approval) + collapse/expand. */}
         {archived ? (
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
-            <ClipboardList className="h-3.5 w-3.5" /> Design conversation — read-only history of how the design was decided.
-          </p>
+          <div className="flex items-center justify-between gap-2 shrink-0">
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
+              <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">Design conversation — read-only history of how the design was decided.</span>
+            </p>
+            <Button
+              variant="ghost" size="sm" className="h-8 shrink-0 text-xs"
+              onClick={() => setArchiveExpanded((v) => !v)}
+              aria-expanded={archiveExpanded}
+            >
+              {archiveExpanded ? <><ChevronUp className="h-3.5 w-3.5 mr-1" /> Collapse</> : <><ChevronDown className="h-3.5 w-3.5 mr-1" /> Expand</>}
+            </Button>
+          </div>
         ) : null}
 
         {/* Mockup → Build handoff. Approval extracts the design inventory and
@@ -367,10 +386,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           </div>
         ) : null}
 
-        {/* Conversation — grows to fill the available height */}
+        {/* Conversation. Live: grows to fill the column (flex-1 + min-h-0).
+            Archived: a bounded, self-contained scroll box at a standard height,
+            or a taller one when expanded — never overflowing its card. */}
         <div
           ref={scrollRef}
-          className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
+          className={`space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3 ${
+            archived ? (archiveExpanded ? 'h-[40rem]' : 'h-[20rem]') : 'flex-1 min-h-0'
+          }`}
         >
           {shownMessages.length === 0 ? (
             <div className="text-center py-6 space-y-3">

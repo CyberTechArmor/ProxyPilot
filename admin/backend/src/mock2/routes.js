@@ -75,6 +75,7 @@ import { bridgeCidrForProject } from './network-logic.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import {
   listEgressGrants, getEgressGrant, setEgressGrantStatus, setEgressGrantReachable,
+  insertOperatorEgressGrant, probeEgressGrants,
 } from './egress-grants.js';
 import { probeHostReachable } from './network.js';
 import { publicEgressGrantShape } from './egress-logic.js';
@@ -124,7 +125,7 @@ import {
   buildComponentExport, parseComponentImport,
 } from './component-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, readFileInContainer } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
@@ -979,6 +980,30 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_EGRESS_GRANT_PROBE', 'mock2_egress_grant', grant.id,
       { host: grant.host, port: grant.port, reachable: probe.reachable }, req.ip);
     res.json({ grant: publicEgressGrantShape(updated), reachable: probe.reachable });
+  });
+
+  // Operator-initiated egress grant (admin) — open the build fence to a LAN or
+  // external host:port DIRECTLY, without waiting for the app to declare it in
+  // mock2.yaml. The grant is created already-approved (origin 'operator'); the
+  // fence is reconciled immediately so the container can reach it, and host
+  // reachability is probed so "policy blocked" vs "host can't route" is visible.
+  // This is the lever for an app whose whole job is an external integration: on a
+  // ProxyPilot install that CAN route to the endpoint, the build then verifies the
+  // real handshake in-fence and completes as succeeded.
+  router.post('/projects/:id/egress', requireAdmin, refuseIfArchived, async (req, res) => {
+    const projectId = req.mock2Project.id;
+    const { host, port, protocol = 'tcp', reason = '' } = req.body || {};
+    const created = insertOperatorEgressGrant({ projectId, host, port, protocol, reason, decidedBy: req.user.id });
+    if (!created.ok) return res.status(400).json({ error: created.error });
+    try {
+      await reconcileMock2Firewall();
+    } catch (e) {
+      return res.status(500).json({ error: `Grant saved but the fence reconcile failed: ${e?.message || 'unknown error'}` });
+    }
+    try { await probeEgressGrants([created.grant.id]); } catch { /* best effort — probe is advisory */ }
+    logAudit(req.user.id, 'MOCK2_EGRESS_GRANT_OPERATOR_ADD', 'mock2_egress_grant', created.grant.id,
+      { project_id: projectId, host: created.grant.host, port: created.grant.port, protocol: created.grant.protocol, reason }, req.ip);
+    return res.status(201).json({ grant: publicEgressGrantShape(getEgressGrant(created.grant.id)) });
   });
 
   // ---- Time tracking ----
@@ -2025,6 +2050,30 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY_DEPLOY', 'mock2_cycle', cycle.id,
       { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ cycle: publicCycleShape(result.cycle) });
+  });
+
+  // Accept a BLOCKED build as pending live verification (admin) — the completion
+  // valve. When a cycle is blocked because the sealed fence cannot verify a live
+  // external integration, an admin who ATTESTS the code is real and will be
+  // verified live converts it to pending-operator-verification and deploys it,
+  // WITHOUT another model round and NEVER as "succeeded". The outstanding live
+  // check is recorded and the attestation is audit-logged, so the honesty
+  // guarantee moves from "the fence proves it" to "a named human verifies it live".
+  router.post('/projects/:id/cycles/:cycleId/accept-pending', requireAdmin, refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    const attestation = String(req.body?.attestation || '').trim();
+    let result;
+    try {
+      result = await acceptPendingVerification({ project, cycle, initiatedBy: req.user.id, attestation });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not accept the build as pending verification: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_CYCLE_ACCEPT_PENDING', 'mock2_cycle', cycle.id,
+      { cycle: cycle.id, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(202).json({ cycle: publicCycleShape(result.cycle), warn: result.warn || null });
   });
 
   // "Explain this" — rewrite a blocker / authorization / deviation / rule-question

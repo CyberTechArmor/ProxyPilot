@@ -18,7 +18,7 @@ import { createHash } from 'crypto';
 import {
   analyzeIntegrations, parseIntegrationManifest, INTEGRATION_MANIFEST_PATH,
   bootstrapManifestFromDiscovery, manifestEntryHash, appendManifestEntry,
-  repairManifestPlan,
+  repairManifestPlan, SOFT_INTEGRATION_FINDING_KINDS,
 } from './integration-logic.js';
 import { egressCompleteness, discoverDialedHosts } from './egress-check-logic.js';
 import {
@@ -73,7 +73,15 @@ export function evaluateIntegrationTruthfulness({
       });
     }
   }
-  const gateVerdict = gateFindings.length ? 'fail' : 'pass';
+  // Split off the NON-blocking "real transport but unverifiable in this fence"
+  // findings: real, declared integration code whose live call the sealed fence
+  // cannot prove/exercise (no route to the endpoint). These route the cycle to
+  // pending-operator-verification (a human runs the live check post-deploy), NOT a
+  // block — so an app whose whole purpose is an external integration can still
+  // complete honestly. Everything else keeps the gate red as before.
+  const softGateFindings = gateFindings.filter((f) => SOFT_INTEGRATION_FINDING_KINDS.includes(f.kind));
+  const blockingGateFindings = gateFindings.filter((f) => !SOFT_INTEGRATION_FINDING_KINDS.includes(f.kind));
+  const gateVerdict = blockingGateFindings.length ? 'fail' : 'pass';
 
   // B.7 egress completeness over dialed hosts.
   const dialed = discoverDialedHosts(files);
@@ -92,18 +100,23 @@ export function evaluateIntegrationTruthfulness({
   const blocking = gateVerdict === 'fail' || !egress.ok || screen.blocking || manifestBad;
 
   // When clean AND real integrations that require live verification are in scope,
-  // the cycle routes to pending-operator-verification with this checklist.
+  // the cycle routes to pending-operator-verification with this checklist. A soft
+  // (unverifiable-in-fence) finding forces its subsystem into scope so the operator
+  // is always handed the live check for the real transport the analyzer couldn't
+  // prove — the honesty guarantee shifts from static proof to the live check, it is
+  // never dropped.
+  const softSubsystems = softGateFindings.map((f) => f.subsystem).filter(Boolean);
   const checklist = (!blocking)
-    ? deriveVerificationChecklist({ manifest, subsystems })
+    ? deriveVerificationChecklist({ manifest, subsystems: [...new Set([...subsystems, ...softSubsystems])] })
     : [];
 
   const outcome = blocking
     ? 'blocked-deviation'
-    : (checklist.length ? 'pending-operator-verification' : 'succeeded');
+    : ((checklist.length || softGateFindings.length) ? 'pending-operator-verification' : 'succeeded');
 
   const reasons = [];
   if (gateVerdict === 'fail') {
-    for (const f of gateFindings) reasons.push(`[integration:${f.kind}] ${f.file || ''}${f.function ? `#${f.function}` : ''}: ${f.message}`);
+    for (const f of blockingGateFindings) reasons.push(`[integration:${f.kind}] ${f.file || ''}${f.function ? `#${f.function}` : ''}: ${f.message}`);
   }
   if (!egress.ok) {
     for (const f of egress.findings) reasons.push(`[egress:${f.kind}] ${f.message}`);
@@ -117,7 +130,10 @@ export function evaluateIntegrationTruthfulness({
     schema_version: 1,
     outcome,
     blocking,
-    gate: { verdict: gateVerdict, findings: gateFindings, limits: gate.limits },
+    gate: { verdict: gateVerdict, findings: blockingGateFindings, limits: gate.limits },
+    // Real-but-unverifiable-in-fence transport findings, surfaced separately: they
+    // did NOT block; each becomes a live operator-verification checklist item.
+    pending_findings: softGateFindings,
     egress: { ok: egress.ok, findings: egress.findings, notes: egress.notes },
     screening: { blocking: screen.blocking, candidates: screen.candidates, recorded: screen.recorded },
     manifest: {

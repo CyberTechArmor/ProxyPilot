@@ -1043,4 +1043,20 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Operator-initiated egress grants. An egress grant used to originate ONLY
+    // from the app's mock2.yaml `egress:` declaration, so an operator who knew a
+    // build needed to reach a LAN host (a directory server, an ADP endpoint) had
+    // no lever until the app declared it. This adds an `origin` column so an admin
+    // can add an APPROVED grant directly ('operator'), wired through the same
+    // fence-reconcile path as declared grants. syncDeclaredEgress reconciles ONLY
+    // 'declared' rows, so an operator grant is never revoked by a mock2.yaml sweep.
+    // Additive + NULLable-safe: every pre-existing row defaults to 'declared', so
+    // behavior is unchanged until an operator adds one.
+    version: 523,
+    name: 'mock2_egress_grant_origin',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_egress_grants ADD COLUMN origin TEXT NOT NULL DEFAULT 'declared';`);
+    },
+  },
 ];

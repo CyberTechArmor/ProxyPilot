@@ -1184,6 +1184,16 @@ export const api = {
   mock2ListEgress: (id) => request(`/mock2/projects/${id}/egress`),
   mock2ProbeEgress: (id, grantId) =>
     request(`/mock2/projects/${id}/egress/${grantId}/probe`, { method: 'POST' }),
+  // Operator-initiated egress grant (admin) — open the build fence to a LAN /
+  // external host:port directly, without waiting for the app to declare it in
+  // mock2.yaml. Created already-approved; the fence is reconciled immediately.
+  mock2AddEgress: (id, body) =>
+    request(`/mock2/projects/${id}/egress`, { method: 'POST', body: JSON.stringify(body || {}) }),
+  // Accept a BLOCKED build as pending live verification (admin) — convert an
+  // unverifiable-in-fence integration block to pending-operator-verification and
+  // deploy, with a required attestation; never records "succeeded".
+  mock2AcceptPending: (id, cycleId, attestation) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/accept-pending`, { method: 'POST', body: JSON.stringify({ attestation }) }),
 
   // ---- M5: model connectors, slots, prices ----
   mock2ListConnectors: () => request('/mock2/connectors'),

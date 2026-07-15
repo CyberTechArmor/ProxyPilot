@@ -700,9 +700,19 @@ function isTestPath(path) {
 
 // ---- B.4 analyzer ----
 
-function finding(kind, { file = null, fn = null, message, severity = 'high' }) {
-  return { kind, file, function: fn, message, severity, schema_version: INTEGRATION_GATE_SCHEMA_VERSION };
+function finding(kind, { file = null, fn = null, message, severity = 'high', subsystem = null }) {
+  const f = { kind, file, function: fn, message, severity, schema_version: INTEGRATION_GATE_SCHEMA_VERSION };
+  if (subsystem) f.subsystem = subsystem;
+  return f;
 }
+
+// Finding kinds that are NOT blocking: real, declared integration code the sealed
+// build fence cannot statically prove reaches its transport (or exercise, since it
+// has no route to the endpoint). These route the cycle to
+// pending-operator-verification — a human runs the live check after deploy —
+// instead of a hard block. The enforcement layer excludes them from the blocking
+// gate verdict and turns them into verification-checklist items.
+export const SOFT_INTEGRATION_FINDING_KINDS = Object.freeze(['transport_unverifiable_in_fence']);
 
 // analyzeIntegrations({ files, manifest }) → {
 //   schema_version, verdict: 'pass'|'fail', findings: [...], limits
@@ -791,6 +801,26 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
         // (2) Execution: a connection/test/probe whose success does not depend on
         // an actually-invoked transport (presence-only, or dead-code transport).
         if (isCheckAction && !reachesTransport(fn.name)) {
+          // Live-unverifiable-in-fence downgrade. When the file DOES import a real
+          // transport library AND the capability is DECLARED for live operator
+          // verification AND success is not derived from mere config-field
+          // presence, this is real transport code the sealed-fence static analyzer
+          // cannot prove reaches its call (cross-module/dynamic dispatch; and the
+          // fence has no route to the endpoint to exercise it). Do NOT hard-block
+          // honest code the operator will verify live — emit a NON-blocking finding
+          // that routes to pending-operator-verification. A genuine fake (no
+          // transport library imported, config-presence-only success, or a
+          // catch→success) is caught by the checks above and stays blocking, and
+          // the mandatory live verification catches anything that slips through.
+          const fileImportsTransport = importsTransportModule(imports);
+          const liveRequired = entry.live_verification?.required === true;
+          if (fileImportsTransport && liveRequired && !isPresenceOnlyCheck(fn.body)) {
+            findings.push(finding('transport_unverifiable_in_fence', {
+              file: f.path, fn: fn.name, severity: 'medium', subsystem: entry.subsystem,
+              message: `"${fn.name}" uses ${entry.transport} (its file imports a real transport client library) but the sealed build fence cannot statically prove or exercise the live call — the endpoint is unreachable from inside the fence. The code is real and the integration is declared for live verification, so this is NOT a block: it routes to pending-operator-verification, and an operator runs the live ${entry.transport} check against the real system after deploy.`,
+            }));
+            continue;
+          }
           findings.push(finding('execution_without_transport', {
             file: f.path, fn: fn.name,
             message: `"${fn.name}" reports success without invoking ${entry.transport} on a reachable path — configuration-field presence (or an unreachable/dead-code transport call) is never a successful connection, test, or probe. Perform the real handshake and surface its failures.`,

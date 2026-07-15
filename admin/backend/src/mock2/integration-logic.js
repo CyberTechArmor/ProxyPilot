@@ -43,6 +43,7 @@ const KNOWN_LIMITS = Object.freeze([
   'Provenance is established structurally (response identifier flows into the returned/persisted value); an obfuscated laundering of a literal through many assignments may exceed the conservative depth and fail closed rather than pass.',
   'Fabrication findings require POSITIVE canned-data evidence (a reachable hardcoded record set or bundled fixture data): a declared subsystem\'s ordinary local persistence (session tokens, audit rows, settings, cache bookkeeping) is app code, not integration output. Programmatically generated fake data with no literal/bundled source is out of this analyzer\'s reach (the no-simulation test guard and disclosure screen cover that).',
   'Class and object-literal methods are extracted alongside top-level functions; property-assigned arrow methods (`foo: () => {}`) are not followed.',
+  'Transport through a known client LIBRARY (ldapts, ldapjs, axios, got, undici, pg, …) is recognized via the file\'s imports + instance I/O-verb calls (.bind/.search/.unbind/.request/.post/.query/…); a library not on the known list may under-detect as no-transport (conservative — such a check fails closed as execution_without_transport, never passes silently).',
 ]);
 
 function analyzerLimits() {
@@ -417,6 +418,46 @@ function hasTransportCall(text) {
   return TRANSPORT_PATTERNS.some((p) => t.includes(p));
 }
 
+// ---- library-aware transport detection ----
+//
+// Real transport very often goes through a client LIBRARY: `ldapts`' Client
+// performs the actual LDAPS handshake in `client.bind()` / `client.search()` /
+// `client.unbind()`; axios/got/undici carry HTTP(S) in `.get()`/`.post()`/
+// `.request()`. Those methods are defined in node_modules — outside the
+// analyzed file set — so the lexical patterns and the same-subsystem call graph
+// never saw them, and every checker built on a library client mass-flagged as
+// execution_without_transport (a real 4-finding case on genuine ldapts code).
+//
+// The rule: when a FILE imports a known transport-performing module (relative
+// imports never count), an instance I/O-verb call in a function body counts as
+// a transport invocation. A presence-only check still has neither the import
+// nor the call, so it stays caught.
+const TRANSPORT_MODULES_RE = new RegExp(
+  '^(node:)?(https?|http2|tls|net|dgram)$'
+  + '|^(ldapts|ldapjs|axios|got|undici|node-fetch|cross-fetch|ky|superagent|needle'
+  + '|pg|postgres|mysql2?|ioredis|redis|mongodb|mongoose|amqplib|kafkajs|nats'
+  + '|soap|ws|socket\\.io-client|nodemailer|ssh2|basic-ftp|net-snmp)(/|$)'
+  + '|^@grpc/',
+);
+
+export function importsTransportModule(imports = []) {
+  return (Array.isArray(imports) ? imports : []).some((m) => TRANSPORT_MODULES_RE.test(String(m || '').trim()));
+}
+
+// Instance I/O verbs a transport client exposes. Deliberately protocol-flavored
+// (LDAP ops, HTTP verbs, DB/queue verbs) — and only consulted for functions in
+// files that import a transport module, so `map.get(...)` in ordinary code
+// never reads as transport.
+const IO_VERB_CALL_RE = /\.(bind|unbind|search|starttls|exop|modify|modifyDN|request|fetch|get|post|put|patch|delete|head|send|sendMail|query|connect|publish|subscribe)\s*\(/;
+
+// Does this function perform transport itself? Lexical fingerprints always
+// count; library instance calls count when the function's FILE imports a
+// transport module (fn.libTransport, stamped by the analyzer).
+function fnPerformsTransport(fn) {
+  if (hasTransportCall(fn?.body)) return true;
+  return !!fn?.libTransport && IO_VERB_CALL_RE.test(String(fn?.body || ''));
+}
+
 // Local identifiers a function body calls (bare `name(` call sites) — the edges
 // of a within-subsystem call graph.
 function calledIdentifiers(body) {
@@ -428,10 +469,12 @@ function calledIdentifiers(body) {
 }
 
 // buildTransportReachability(fns) → (name) => boolean. A function "reaches a
-// transport" if its own body performs one OR it calls (transitively, within the
-// provided function set) a function that does. This is what makes dead-code
-// transport (E5) and helper-laundered literals (ADP2's starterRecords) decidable
-// without name matching: an unreachable helper is simply never on a path.
+// transport" if its own body performs one (lexical fingerprint, or a library
+// instance I/O call in a transport-importing file) OR it calls (transitively,
+// within the provided function set) a function that does. This is what makes
+// dead-code transport (E5) and helper-laundered literals (ADP2's
+// starterRecords) decidable without name matching: an unreachable helper is
+// simply never on a path.
 function buildTransportReachability(fns) {
   const byName = new Map(fns.map((f) => [f.name, f]));
   const memo = new Map();
@@ -440,7 +483,7 @@ function buildTransportReachability(fns) {
     const fn = byName.get(name);
     if (!fn || seen.has(name)) return false;
     seen.add(name);
-    let reaches = hasTransportCall(fn.body);
+    let reaches = fnPerformsTransport(fn);
     if (!reaches) {
       for (const callee of calledIdentifiers(fn.body)) {
         if (callee !== name && resolve(callee, seen)) { reaches = true; break; }
@@ -638,7 +681,12 @@ function discoverOutboundSubsystems(files) {
     if (isTestPath(f.path)) continue;
     const sub = subsystemForPath(f.path);
     if (!sub) continue;
-    if (hasTransportCall(stripComments(f.content))) {
+    const code = stripComments(f.content);
+    // Same library awareness as the reachability graph: a subsystem dialing out
+    // through ldapts/axios/… is an outbound integration even when no lexical
+    // fingerprint appears — omitting the manifest is not a bypass.
+    const lib = importsTransportModule(extractImports(f.content));
+    if (hasTransportCall(code) || (lib && IO_VERB_CALL_RE.test(code))) {
       if (!bySub.has(sub)) bySub.set(sub, []);
       bySub.get(sub).push(f.path);
     }
@@ -697,7 +745,12 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
     const testOnlyKeys = entry.fixtures?.test_only_config || [];
     // One call graph across ALL of the subsystem's analyzable files, so a
     // transport helper in transport.ts is reachable from an action in service.ts.
-    const allFns = analyzable.flatMap((f) => extractFunctions(f.content).map((fn) => ({ ...fn, path: f.path })));
+    // Each function is stamped with whether its FILE imports a transport module,
+    // so library-client I/O calls (ldapts bind/search, axios post, …) count.
+    const allFns = analyzable.flatMap((f) => {
+      const libTransport = importsTransportModule(extractImports(f.content));
+      return extractFunctions(f.content).map((fn) => ({ ...fn, path: f.path, libTransport }));
+    });
     const reachesTransport = buildTransportReachability(allFns);
     const reachesCanned = buildCannedReachability(allFns);
 

@@ -140,11 +140,12 @@ export function resolveSelectedOption(options = [], selected) {
 // operator's free-text message, the resolution option they chose, and any scoped
 // one-time authorizations granted for THIS resume. Returns '' when there's nothing to
 // add (a bare resume stays a bare resume).
-export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [] } = {}) {
+export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [] } = {}) {
   const msg = String(message || '').trim();
   const opt = selectedOption && selectedOption.label ? selectedOption : null;
   const auths = (Array.isArray(authorizations) ? authorizations : []).filter((a) => a && a.scope);
-  if (!msg && !opt && !auths.length) return '';
+  const waived = (Array.isArray(waivers) ? waivers : []).filter(Boolean);
+  if (!msg && !opt && !auths.length && !waived.length) return '';
 
   const lines = [
     'Operator guidance on resume (AUTHORITATIVE — a human is directing this build after it',
@@ -162,6 +163,12 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
   }
   if (msg) {
     lines.push('', `Operator message: ${msg}`);
+  }
+  if (waived.length) {
+    // A waiver named here is REAL: the orchestrator applies it at the
+    // enforcement layer (acceptanceVerdict) for this resumed cycle — it is never
+    // merely narrated. Only structured admin-granted waivers reach this list.
+    lines.push('', `Enforced waivers for this resumed cycle (applied at the finish gate itself — these are in effect, not just described): ${waived.map((w) => String(w.rule || w)).join(', ')}.`);
   }
   if (auths.length) {
     lines.push('', buildAuthorizationBlock(auths));

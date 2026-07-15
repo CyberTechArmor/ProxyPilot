@@ -18,6 +18,7 @@ import { createHash } from 'crypto';
 import {
   analyzeIntegrations, parseIntegrationManifest, INTEGRATION_MANIFEST_PATH,
   bootstrapManifestFromDiscovery, manifestEntryHash, appendManifestEntry,
+  repairManifestPlan,
 } from './integration-logic.js';
 import { egressCompleteness, discoverDialedHosts } from './egress-check-logic.js';
 import {
@@ -225,6 +226,26 @@ export async function readSourceSnapshot({ containerName, appDir = '/srv/app', e
 // real provenance — the loop is broken because the finding class changes). io is
 // injected from runner.js (execInContainer/readFileInContainer/writeFileInContainer)
 // so this stays a thin, mockable seam. { ok, entry, hash } or { ok:false, error }.
+// repairManifestInContainer — the self-healing path for a MALFORMED
+// state/integrations.json (the manifest-invalid dead end): archive the broken
+// text (never destroyed), rewrite a valid scaffold salvaging every entry that
+// individually validates, and commit. The pure decision is
+// integration-logic.repairManifestPlan; this is the thin container glue.
+// Returns { ok, repaired, salvaged, dropped } or { ok:false, error }.
+export async function repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer }) {
+  const cur = await readFileInContainer(containerName, INTEGRATION_MANIFEST_PATH);
+  const plan = repairManifestPlan(cur.ok ? cur.content : '');
+  if (!plan.needed) return { ok: true, repaired: false, reason: plan.reason, salvaged: [], dropped: [] };
+  const archived = await writeFileInContainer(containerName, plan.archive, cur.content || '');
+  if (!archived.ok) return { ok: false, error: `could not archive the broken manifest to ${plan.archive}: ${archived.error}` };
+  const w = await writeFileInContainer(containerName, INTEGRATION_MANIFEST_PATH, plan.text);
+  if (!w.ok) return { ok: false, error: `could not write the repaired ${INTEGRATION_MANIFEST_PATH}: ${w.error}` };
+  try {
+    await execInContainer(containerName, `git add ${INTEGRATION_MANIFEST_PATH} ${plan.archive} && git -c user.name=ProxyPilot -c user.email=mock2@proxypilot.local commit -q -m 'mock2: repair invalid integration manifest' || true`);
+  } catch { /* best effort — the write is the load-bearing part */ }
+  return { ok: true, repaired: true, salvaged: plan.salvaged, dropped: plan.dropped, archive: plan.archive };
+}
+
 export async function backfillManifestEntryInContainer({ containerName, entry, execInContainer, readFileInContainer, writeFileInContainer }) {
   const cur = await readFileInContainer(containerName, INTEGRATION_MANIFEST_PATH);
   const appended = appendManifestEntry(cur.ok ? cur.content : '', entry);

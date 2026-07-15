@@ -159,13 +159,14 @@ import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-l
 import {
   reportedCycleOutcome, deployPendingIsHealthy, validateConfirmation, OUTCOME_CODES,
   deriveVerificationChecklist, verificationTransition, capabilityCheckStatus,
+  failureBugfixInstruction,
 } from './verification-logic.js';
 import {
   listActiveVerifications, recordVerification, listOpenIntegrationFindings,
   recordIntegrationResolution, listIntegrationResolutions, priorBlockedSignatures,
   projectChecklistItems,
 } from './integration-state.js';
-import { blockingSummary, backfillManifestEntryInContainer } from './integration-enforcement.js';
+import { blockingSummary, backfillManifestEntryInContainer, repairManifestInContainer } from './integration-enforcement.js';
 import { validateManifestEntry } from './integration-logic.js';
 import { waiverEligible } from './resolution-logic.js';
 import { execInContainer, writeFileInContainer, containerSh } from './runner.js';
@@ -421,6 +422,10 @@ const queueStatusSchema = z.object({
 const resumeSchema = z.object({
   message: z.string().trim().max(8000).optional(),
   option: z.string().trim().max(200).optional(),
+  // Enforced rule waivers (ADMIN only — checked in the handler): applied at the
+  // real enforcement layer (acceptanceVerdict) of the resumed cycle and stamped
+  // into its acceptance record; never a narrated claim.
+  waivers: z.array(z.enum(['reproduce_first'])).max(1).optional(),
 });
 // Scoped one-time authorization decision (admin): grant (optionally with appended
 // conditions) or deny.
@@ -1858,6 +1863,7 @@ export function createMock2Router() {
     if (!parsedResume.success) return res.status(400).json({ error: 'Invalid resume message/option.' });
     const optionId = parsedResume.data.option || null;
     const message = (parsedResume.data.message || '').trim();
+    const waivers = parsedResume.data.waivers || [];
 
     // Resolve the chosen halt option against what the model actually offered, so the
     // typed kind decides how the choice is applied (task Part 3). The offered options
@@ -1881,6 +1887,12 @@ export function createMock2Router() {
     const actingAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
     if (chosen && haltOptionRequiresAdmin(chosen.kind) && !actingAdmin) {
       return res.status(403).json({ error: `Choosing “${chosen.label}” requires an administrator.` });
+    }
+    // A rule waiver (e.g. reproduce_first) is an admin act — it is APPLIED at the
+    // resumed cycle's enforcement layer, so granting it is equivalent in weight
+    // to an override_rule halt option.
+    if (waivers.length && !actingAdmin) {
+      return res.status(403).json({ error: 'Waiving a finish-gate rule requires an administrator.' });
     }
 
     // Abandon closes the cycle as abandoned — no resume (task Part 3).
@@ -1915,14 +1927,14 @@ export function createMock2Router() {
       result = await retryCycle({
         project, cycle,
         initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
-        message, option: optionId,
+        message, option: optionId, waivers,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not retry the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_CYCLE_RETRY', 'mock2_cycle', result.cycle?.id || cycle.id,
-      { ...auditBase, status: result.status, context: message || null }, req.ip);
+      { ...auditBase, status: result.status, context: message || null, waivers }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
     });
@@ -2805,6 +2817,107 @@ export function createMock2Router() {
       resumed = await retryCycle({ project: getProject(project.id), cycle: getCycle(cycle.id), initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, message: `Declared integration "${result.entry.id}" in the manifest — re-run the gate against it.` });
     } catch (err) { console.warn('[mock2] backfill resume failed:', err?.message); }
     res.status(201).json({ declared: { id: result.entry.id, subsystem: result.entry.subsystem, hash: result.hash }, resume: resumed?.status || 'not_resumed' });
+  });
+
+  // Repair a MALFORMED state/integrations.json (the manifest-invalid dead end).
+  // Self-healing, never destructive: the broken text is archived to
+  // state/integrations.invalid.json, every entry that still validates is
+  // salvaged, and a valid schema_version + entries[] scaffold is committed. If a
+  // cycle is blocked on the manifest, it is resumed so the gate re-reads it.
+  // Editor-gated; the project must be online.
+  router.post('/projects/:id/integrations/repair-manifest', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online to repair the manifest.' });
+    const containerName = project.container_name || containerNameForProject(project.id);
+    let result;
+    try {
+      result = await repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer });
+    } catch (err) {
+      return res.status(500).json({ error: `Repair failed: ${err?.message || 'unknown error'}` });
+    }
+    if (!result.ok) return res.status(409).json({ error: result.error });
+    if (!result.repaired) return res.json({ repaired: false, reason: result.reason });
+    logAudit(req.user.id, 'MOCK2_INTEGRATION_MANIFEST_REPAIR', 'mock2_project', project.id,
+      { salvaged: result.salvaged.map((e) => e.id), dropped: result.dropped, archive: result.archive }, req.ip);
+    // Resume a cycle blocked on the invalid manifest so the gate re-reads it.
+    let resumed = null;
+    try {
+      const latest = latestCycle(project.id);
+      if (latest && ['awaiting_admin', 'failed'].includes(latest.status)) {
+        resumed = await retryCycle({ project: getProject(project.id), cycle: latest, initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, message: 'The integration manifest was repaired (broken text archived to state/integrations.invalid.json) — re-run the gate against it.' });
+      }
+    } catch (err) { console.warn('[mock2] manifest-repair resume failed:', err?.message); }
+    res.status(201).json({
+      repaired: true,
+      salvaged: result.salvaged.map((e) => e.id),
+      dropped: result.dropped,
+      archived_to: result.archive,
+      resume: resumed?.status || 'not_resumed',
+    });
+  });
+
+  // Operator reports a live capability check FAILED against the real system
+  // (B.5 `live_check_failed → building`). This is the honest downstream of
+  // pending-operator-verification: the operator ran the check with real
+  // credentials and it did not work — which is a genuine, reproducible defect
+  // report. The failure is recorded append-only, the pending cycle's
+  // verification_state moves to 'failed', and a REAL bug-fix build opens
+  // carrying the observation (the new cycle legitimately has a defect to
+  // reproduce against the in-fence contract fixture).
+  router.post('/projects/:id/capability-checks/report-failure', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = verifyConfirmSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid failure report' });
+    const observed = String(parsed.data.observed_result || '').trim();
+    if (!observed) return res.status(400).json({ error: 'Report what you OBSERVED when the check failed (the error message, status, behavior) — that observation is what the bug-fix build reproduces.' });
+    const items = projectChecklistItems(project.id);
+    const item = items.find((c) => c.item_id === parsed.data.item_id);
+    if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
+
+    // Append-only failure evidence (migration-522 table — same hash-linked record
+    // class as backfills/waivers; routed_to 'building' per the lifecycle).
+    const saved = recordIntegrationResolution({
+      project_id: project.id, cycle_id: null, kind: 'live_check_failed',
+      finding_class: 'live-check-failed', finding_kind: 'live_check_failed',
+      subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
+      reason: `${parsed.data.environment}: ${observed}`, routed_to: 'building',
+      decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+    });
+
+    // The pending cycle(s) carrying this item stop being "pending" — the live
+    // check failed. Their build work is intact; the new bug-fix cycle owns the fix.
+    const affected = [];
+    for (const cyc of listCyclesForProject(project.id, { limit: 200 })) {
+      if (cyc.verification_state !== 'pending') continue;
+      let gate = null;
+      try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
+      if ((gate?.checklist || []).some((c) => c.item_id === item.item_id)) {
+        updateCycle(cyc.id, { verification_state: 'failed' });
+        finishCycle(cyc.id, { status: 'failed', error: `Live verification failed for "${item.item_id}" — a bug-fix build was opened with the operator's observation.` });
+        affected.push(cyc.id);
+      }
+    }
+
+    // Open the REAL bug-fix build through the normal audit-first pipeline. The
+    // instruction deliberately reads as a defect (classifyTaskKind → bugfix), so
+    // the new cycle must reproduce red→green against the contract fixture.
+    let build = null;
+    try {
+      build = await startBuild({
+        project: getProject(project.id),
+        instruction: failureBugfixInstruction({ item, observed }),
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `The failure was recorded, but the bug-fix build could not start: ${err?.message || 'unknown error'}` });
+    }
+    logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECK_FAILED', 'mock2_project', project.id,
+      { item_id: item.item_id, environment: parsed.data.environment, affected_cycles: affected, build_status: build?.status || null }, req.ip);
+    res.status(202).json({
+      failure: { id: saved.id, item_id: item.item_id, content_hash: saved.content_hash },
+      affected_cycles: affected,
+      bugfix: { status: build?.status || 'error', cycle: build?.cycle ? publicCycleShape(build.cycle) : null, error: build?.error || null },
+    });
   });
 
   // PATCH B.2 — waiver: an admin confirms a provenance-not-established finding is

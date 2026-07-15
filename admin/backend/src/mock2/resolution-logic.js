@@ -107,8 +107,8 @@ export const RESOLUTION_OPTIONS = Object.freeze([
   },
   {
     id: 'fix_manifest', kind: 'fix_manifest', resolves: ['manifest-invalid'],
-    label: 'Fix the integration manifest',
-    detail: 'state/integrations.json is present but does not parse/validate. Correct it (schema_version + entries[]) so the gate can read the declared capabilities.',
+    label: 'Repair the integration manifest',
+    detail: 'state/integrations.json is present but does not parse/validate. Use "Repair manifest" (POST /integrations/repair-manifest): the broken text is archived to state/integrations.invalid.json, every entry that still validates is salvaged, and a valid schema_version + entries[] scaffold is written — then the build resumes and the gate re-reads the declared capabilities.',
   },
 ]);
 

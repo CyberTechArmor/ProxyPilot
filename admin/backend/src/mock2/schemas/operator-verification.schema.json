@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/operator-verification",
+  "title": "Mock2 operator-verification evidence (mock2_integration_verifications row)",
+  "description": "Append-only, hash-linked confirmation that an implemented real integration was verified against the live external system (or an admin waiver). Historical rows are never mutated; a superseding reverification inserts a new row with supersedes_id. Operators confirm; admins waive.",
+  "type": "object",
+  "required": ["schema_version", "item_id", "manifest_id", "manifest_hash", "operator_id", "environment", "endpoint_classification", "content_hash", "created_at"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "item_id": { "type": "string", "description": "checklist item id, e.g. workforce-provider:sync-workers" },
+    "manifest_id": { "type": "string" },
+    "manifest_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "content hash of the manifest entry — a change supersedes this record" },
+    "subsystem": { "type": ["string", "null"] },
+    "operator_id": { "type": ["integer", "string"], "description": "the confirming operator or waiving admin" },
+    "role": { "enum": ["operator", "admin"] },
+    "environment": { "type": "string", "description": "where verification was performed, e.g. production, staging" },
+    "endpoint_classification": { "enum": ["public", "private", "local", "unknown"] },
+    "observed_result": {
+      "type": ["string", "null"],
+      "description": "REQUIRED for a confirmation — the actual observation (status, sample volume, endpoint). A bare checkbox value (true/ok/yes/done) is invalid."
+    },
+    "waived": { "type": "boolean", "default": false },
+    "waiver_reason": { "type": ["string", "null"], "description": "REQUIRED for a waiver (admin only)" },
+    "evidence_ref": { "type": ["string", "null"], "description": "reference to redacted evidence / log" },
+    "expires_at": { "type": ["string", "null"], "description": "reverification trigger; supersession fires at/after this time" },
+    "supersedes_id": { "type": ["integer", "null"], "description": "the verification row this reverification replaces (append-only supersession)" },
+    "superseded_at": { "type": ["string", "null"] },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "created_at": { "type": "string" }
+  }
+}

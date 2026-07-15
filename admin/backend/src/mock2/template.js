@@ -213,6 +213,24 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
       content: `# Project rules\n\nRule answers append here (Phase M8).\n`,
     },
     {
+      // Integration manifest (B.2): the versioned declaration of every external
+      // capability (API, directory, webhook). Define appends confirmed entries;
+      // the integration gate + egress check + verification checklist all key off
+      // it, and source discovery backstops it (an undeclared outbound integration
+      // is a gate failure — omitting the manifest is not a bypass). Seeded empty
+      // so the path exists and rides the hash-chained history.
+      path: 'state/integrations.json',
+      content: `${JSON.stringify({ schema_version: 1, entries: [] }, null, 2)}\n`,
+    },
+    {
+      // Stub registry (B.6): every APPROVED production simulation, with its
+      // severity + approval reference. Empty by default — the only legitimate way
+      // an entry appears is an admin-approved deviation. Injected into every
+      // cycle's work-file context so shipped stubs are never invisible.
+      path: 'state/stub-registry.json',
+      content: `${JSON.stringify({ schema_version: 1, stubs: [] }, null, 2)}\n`,
+    },
+    {
       // state/mockups/ is where the Stage-1 concept loop writes the interactive
       // HTML mockup (current.html + <id>.html), served at /_preview by the dev
       // server. Seed a .gitkeep so the directory (and the preview path) exist

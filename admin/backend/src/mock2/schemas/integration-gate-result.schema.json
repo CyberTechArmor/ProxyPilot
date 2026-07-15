@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/integration-gate-result",
+  "title": "Mock2 integration-gate result (mock2_cycles.integration_gate_json)",
+  "description": "The composite integration-truthfulness decision stamped on a cycle at finish (integration gate B.4 + egress completeness B.7 + finish screening B.3), content-hashed and accountable to the change record.",
+  "type": "object",
+  "required": ["schema_version", "outcome", "blocking", "gate", "egress", "screening", "content_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "outcome": { "enum": ["succeeded", "pending-operator-verification", "blocked-deviation"] },
+    "blocking": { "type": "boolean" },
+    "gate": {
+      "type": "object",
+      "required": ["verdict", "findings"],
+      "properties": {
+        "verdict": { "enum": ["pass", "fail"] },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/gateFinding" } },
+        "limits": {
+          "type": "object",
+          "description": "documented analyzer capability boundaries (fail-closed transparency)",
+          "properties": {
+            "supported_languages": { "type": "array", "items": { "type": "string" } },
+            "transport_patterns": { "type": "array", "items": { "type": "string" } },
+            "known_limits": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "egress": {
+      "type": "object",
+      "required": ["ok", "findings"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "findings": { "type": "array" },
+        "notes": { "type": "array" }
+      }
+    },
+    "screening": {
+      "type": "object",
+      "required": ["blocking", "candidates"],
+      "properties": {
+        "blocking": { "type": "boolean" },
+        "candidates": { "type": "array" },
+        "recorded": { "type": "array" }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "error": { "type": ["string", "null"] },
+        "entry_hashes": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "id": { "type": "string" }, "hash": { "type": "string" } } }
+        },
+        "bootstrapped_from_discovery": { "type": "array" }
+      }
+    },
+    "checklist": { "type": "array", "description": "pending-operator-verification items (empty unless outcome is pending-operator-verification)" },
+    "touched_subsystems": { "type": "array", "items": { "type": "string" } },
+    "reasons": { "type": "array", "items": { "type": "string" } },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "gateFinding": {
+      "type": "object",
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "execution_without_transport", "fabricated_output", "error_converted_to_success",
+            "fixture_reachable_in_production", "provenance_not_established", "contract_test_missing",
+            "undeclared_integration"
+          ]
+        },
+        "file": { "type": ["string", "null"] },
+        "function": { "type": ["string", "null"] },
+        "message": { "type": "string" },
+        "severity": { "type": "string" },
+        "schema_version": { "const": 1 }
+      }
+    }
+  }
+}

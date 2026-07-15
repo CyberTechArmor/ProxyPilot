@@ -68,6 +68,14 @@ import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord,
 } from './acceptance-logic.js';
+import {
+  evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
+} from './integration-enforcement.js';
+import { listApprovedEgressGrants } from './egress-grants.js';
+import { stubContextForCycle } from './stub-logic.js';
+import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH } from './integration-state.js';
+import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-scan.js';
+import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
@@ -375,6 +383,14 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   updateCycle(cycle.id, { status: 'running', started_at: nowIso(), gates_json: JSON.stringify(initialGateReports(gateScripts)) });
   setJob(cycle.id, { phase: 'running', message: 'Runner working…' });
 
+  // Migration scan (first cycle under the integration-truthfulness harness).
+  // Idempotent; records non-blocking suspected-legacy-stub / analysis-incomplete
+  // findings for the existing tree, which become blocking on the touched-subsystem
+  // / reconciliation rules enforced at finish. Best-effort — never blocks start.
+  try {
+    await scanProjectForLegacyStubs({ project, frameworkVersionId: framework.id, execInContainer, readFileInContainer, appDir: APP_DIR });
+  } catch (e) { console.warn('[mock2] migration scan failed:', e?.message); }
+
   // The durable transcript for this cycle (downloadable later). logEvent is
   // best-effort — insertCycleEvent already swallows its own errors.
   const logEvent = (kind, { role = null, content = null, meta = null } = {}) =>
@@ -389,6 +405,26 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   try { componentCatalog = listPublishedComponents(); } catch (err) { console.warn('[mock2] component catalog load failed:', err?.message); }
   const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000, components: componentCatalog });
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
+  // Stub-registry context (B.6): EVERY cycle receives a concise global list of
+  // unresolved production simulations, so a later instruction-scoped cycle can no
+  // longer build on top of a shipped stub blind (AUDIT.md A.4). Cycles whose
+  // instruction implicates an affected subsystem additionally receive the FULL
+  // registry records + remediation context. Best-effort; a missing registry is
+  // simply an empty list.
+  try {
+    const reg = await readFileInContainer(containerName, STUB_REGISTRY_PATH);
+    const openStubs = reg.ok ? listOpenStubs(reg.content) : [];
+    if (openStubs.length) {
+      const instr = String(cycle.instruction || '').toLowerCase();
+      const implicated = [...new Set(openStubs.map((s) => s.subsystem))].filter((s) => instr.includes(String(s).toLowerCase()));
+      const ctx = stubContextForCycle({ stubs: openStubs, subsystems: implicated });
+      const parts = [`Unresolved production simulations recorded for this project (do not build on top of these blind; a critical/high one on a subsystem you touch blocks "succeeded"):\n${ctx.global}`];
+      if (ctx.block) parts.push(`Full records for the subsystem(s) this task touches:\n${ctx.block}`);
+      const block = parts.join('\n\n');
+      transcript.push({ role: 'user', text: block });
+      logEvent('stub_context', { role: 'system', content: block, meta: { open: openStubs.length, implicated } });
+    }
+  } catch (e) { console.warn('[mock2] stub context injection failed:', e?.message); }
   // On a RESUME, inject the operator guidance (message / chosen option / granted
   // one-time authorizations) as a distinct labeled user turn AFTER the task.
   let resumeCtx = null;
@@ -735,6 +771,67 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         }
         continue;
       }
+      // INTEGRATION TRUTHFULNESS (AUDIT.md; B.3/B.4/B.5/B.7). Gates are green —
+      // but every gate runs inside the fence and cannot see a simulated external
+      // capability, which is exactly why the ADP2 fake shipped as "succeeded".
+      // Before this cycle can reach a success terminal, analyze the produced
+      // source for fabricated data / no-I/O tests / undeclared egress, and screen
+      // the finish disclosures. A BLOCKING decision ends the cycle as a blocking
+      // deviation (never "succeeded"); a clean decision whose in-scope manifest
+      // integrations require live verification routes to pending-operator-
+      // verification instead of succeeded. Fail-closed by construction: the
+      // analyzer emits provenance_not_established rather than inferring success.
+      let integrationDecision = null;
+      try {
+        const snapshot = await readSourceSnapshot({ containerName, appDir: APP_DIR, execInContainer, readFileInContainer });
+        const declaredEgress = await readDeclaredEgress(containerName, APP_DIR).catch(() => []);
+        const approvedGrants = listApprovedEgressGrants(projectId);
+        integrationDecision = evaluateIntegrationTruthfulness({
+          files: snapshot.files, manifestText: snapshot.manifestText, declaredEgress, approvedGrants,
+          finish: { summary: decision.finishSummary, acceptance: decision.finishAcceptance, assumptions: decision.finishAssumptions },
+          changedFiles: changedThisCycle,
+        });
+        // A suspected legacy stub recorded at migration time CROSSES into blocking
+        // when this cycle touches its subsystem (or the framework has reconciled).
+        const legacyBlocking = blockingLegacyFindings({
+          projectId, touchedSubsystems: touchedSubsystemsOf(changedThisCycle),
+          currentFrameworkVersionId: framework.id,
+        });
+        if (legacyBlocking.length && !integrationDecision.blocking) {
+          integrationDecision.blocking = true;
+          integrationDecision.outcome = 'blocked-deviation';
+          for (const f of legacyBlocking) {
+            integrationDecision.reasons.push(`[legacy:${f.kind}] ${f.subsystem || ''}: ${typeof f.detail === 'string' ? f.detail : (f.detail?.message || 'suspected legacy stub now in scope')}`);
+          }
+        }
+        recordIntegrationGate(cycle.id, integrationDecision);
+        logEvent('integration_gate', { role: 'system', content: integrationDecision.outcome, meta: { verdict: integrationDecision.gate.verdict, egress_ok: integrationDecision.egress.ok, screening_blocking: integrationDecision.screening.blocking, legacy_blocking: legacyBlocking.length, reasons: integrationDecision.reasons } });
+      } catch (e) {
+        // Fail closed on an analysis error too: a crash must not read as clean.
+        console.warn('[mock2] integration gate crashed:', e?.message);
+        integrationDecision = { blocking: true, outcome: 'blocked-deviation', reasons: [`integration gate could not run: ${e?.message || e}`], gate: { verdict: 'fail' }, egress: { ok: false }, screening: { blocking: false }, checklist: [] };
+      }
+      if (integrationDecision.blocking) {
+        try {
+          recordIntegrationFindings({
+            projectId, cycleId: cycle.id, origin: 'integration_gate', frameworkVersionId: framework.id,
+            sourceRef: `cycle:${cycle.id}`,
+            findings: [
+              ...(integrationDecision.gate?.findings || []).map((f) => ({ ...f, blocking: true, detail: f.message })),
+              ...(integrationDecision.egress?.findings || []).map((f) => ({ kind: f.kind, subsystem: null, detail: f.message, severity: 'high', blocking: true })),
+              ...(integrationDecision.screening?.candidates || []).map((c) => ({ kind: `disclosure_${c.tier}`, detail: `${c.source}: ${c.excerpt}`, severity: c.tier === 'high' ? 'critical' : 'high', blocking: true })),
+            ],
+          });
+        } catch (e) { console.warn('[mock2] integration findings persist failed:', e?.message); }
+        const bs = blockingSummary(integrationDecision);
+        transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Cannot finish — ${bs.reason}\n${bs.findings.map((r) => `- ${r}`).join('\n')}` });
+        await haltCycle({
+          cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework,
+          trigger: haltReasonForDecision(integrationDecision) || 'integration_gate', reason: bs.reason, options: bs.options, logEvent,
+        });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
+        return scheduleJobCleanup(cycle.id);
+      }
       // The change record carries the acceptance evidence (constitution §11):
       // summary + the acceptance/assumptions block, so a Reviewer can replay
       // the human-runnable checks straight from the record.
@@ -782,6 +879,35 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'smoke_failed' });
           return scheduleJobCleanup(cycle.id);
         }
+      }
+      // B.5 lifecycle branch. When the integration gate passed AND in-scope
+      // manifest integrations require live verification, the deploy is allowed
+      // (the operator needs the running app to verify) but the cycle does NOT
+      // report "succeeded" — it lands in pending-operator-verification with a
+      // checklist derived from the manifest, and the request stays open until an
+      // operator records observed results (or an admin waives). Otherwise it is a
+      // normal success (no external integrations in scope).
+      const pendingChecklist = integrationDecision?.checklist || [];
+      if (pendingChecklist.length) {
+        openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });
+        updateCycle(cycle.id, { verification_state: 'pending' });
+        // Stored status 'awaiting_user' + verification_state 'pending' → the
+        // reported outcome is 'pending-operator-verification' (verification-logic).
+        finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+        releaseLock(projectId, holder);
+        updateProject(projectId, { last_activity_at: nowIso() });
+        logEvent('pending_verification', { role: 'system', content: `Deployed; ${pendingChecklist.length} live verification item(s) outstanding.`, meta: { checklist: pendingChecklist } });
+        setJob(cycle.id, {
+          phase: 'pending_verification',
+          message: `Deployed — ${pendingChecklist.length} live external verification${pendingChecklist.length === 1 ? '' : 's'} outstanding. Confirm each against the real system to complete.`,
+          commit: record?.commit_sha || null,
+        });
+        safeRaise({
+          kind: 'flag', project_id: projectId, dedupe_key: `mock2-verify:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id,
+          detail: `${project.name}: cycle ${cycle.id} is pending operator verification — ${pendingChecklist.map((c) => c.item_id).join(', ')}. The app is deployed for verification but the capability is not generally available until confirmed.`,
+        });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+        return scheduleJobCleanup(cycle.id);
       }
       finishCycle(cycle.id, { status: 'succeeded' });
       try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }

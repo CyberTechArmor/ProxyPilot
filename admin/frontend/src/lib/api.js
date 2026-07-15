@@ -1293,6 +1293,12 @@ export const api = {
   mock2ExportDesignTemplate: (id) => request(`/mock2/projects/${id}/design-template`),
   mock2ImportDesignTemplate: (id, body) =>
     request(`/mock2/projects/${id}/design-template/import`, { method: 'POST', body: JSON.stringify(body) }),
+  // Integration truthfulness (AUDIT.md; B.4/B.5/B.6): the reported outcome, the
+  // pending-operator-verification checklist, active confirmations, open findings,
+  // and the operator confirm/waive action (an observed result is required).
+  mock2GetIntegrationStatus: (id) => request(`/mock2/projects/${id}/integration-status`),
+  mock2VerifyIntegrationItem: (id, cycleId, body) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/verify`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- Mock2 M8: audit, rule questions, admin queue ----
   mock2ListQuestions: (id) => request(`/mock2/projects/${id}/questions`),

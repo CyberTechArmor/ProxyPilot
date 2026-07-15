@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/migration-finding",
+  "title": "Mock2 migration / integration finding (mock2_integration_findings row)",
+  "description": "Append-only, content-hashed finding from the integration gate, finish screening, or the first-cycle migration scan of an existing project. Non-blocking migration findings become blocking when a cycle touches the affected subsystem or at the next framework-version reconciliation. Analysis that cannot conclude is recorded as analysis_incomplete — never as 'no stubs found'.",
+  "type": "object",
+  "required": ["schema_version", "kind", "blocking"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "origin": { "enum": ["integration_gate", "screening", "migration"], "description": "which pass produced it" },
+    "kind": {
+      "enum": [
+        "suspected_legacy_stub", "analysis_incomplete", "undeclared_integration", "migration_scan_clean",
+        "execution_without_transport", "fabricated_output", "error_converted_to_success",
+        "fixture_reachable_in_production", "provenance_not_established", "contract_test_missing",
+        "undeclared_private_egress", "egress_grant_not_approved", "undeclared_dynamic_destination",
+        "disclosure_high", "disclosure_ambiguous"
+      ]
+    },
+    "project_id": { "type": ["integer", "null"] },
+    "cycle_id": { "type": ["integer", "null"] },
+    "subsystem": { "type": ["string", "null"] },
+    "file": { "type": ["string", "null"] },
+    "detail": { "description": "string message or structured object", "type": ["string", "object", "null"] },
+    "severity": { "type": ["string", "null"] },
+    "blocking": { "type": "boolean", "description": "false when recorded at migration time; crosses to true on touched-subsystem / reconciliation" },
+    "status": { "enum": ["open", "resolved", "dismissed"], "default": "open" },
+    "framework_version_id": { "type": ["integer", "null"], "description": "the version the finding was recorded under (reconciliation escalation compares against the current version)" },
+    "source_ref": { "type": ["string", "null"], "description": "hash/id reference to the change record or framework audit that produced it" },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "created_at": { "type": "string" },
+    "resolved_by": { "type": ["integer", "null"] },
+    "resolved_reason": { "type": ["string", "null"] },
+    "resolved_at": { "type": ["string", "null"] }
+  }
+}

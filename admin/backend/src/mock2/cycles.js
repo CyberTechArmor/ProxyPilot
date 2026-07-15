@@ -88,6 +88,9 @@ const WRITABLE = new Set([
   // canonical token classes, and the usage schema stamp. All additive + nullable.
   'request_id', 'segment',
   'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'usage_schema_version',
+  // Integration truthfulness (migration 520): the pending-operator-verification
+  // signal and the B.4 gate result stamped at finish.
+  'verification_state', 'integration_gate_json',
 ]);
 
 export function updateCycle(id, patch = {}) {

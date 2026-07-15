@@ -87,6 +87,53 @@ export function deriveVerificationChecklist({ manifest = { entries: [] }, subsys
   return items;
 }
 
+// capabilityCheckStatus({ checklistItems, activeVerifications }) — PATCH2 B.2:
+// the CAPABILITY-scoped, confirmation-netted live-check status for a project.
+// Given the full set of live-verification checklist items (deduped by item_id,
+// across the whole manifest — NOT filtered to a cycle's touched subsystems) and
+// the active (non-superseded) confirmations/waivers, partition into outstanding
+// vs verified. An item is VERIFIED when an active verification exists for its
+// item_id whose manifest_hash still matches the item's (a manifest change leaves
+// it outstanding again — the supersession model). production_ready is true only
+// when nothing is outstanding. Pure so ambient status is computed the same way
+// everywhere (work-file context, Run-stage badge, status endpoint).
+export function capabilityCheckStatus({ checklistItems = [], activeVerifications = [] } = {}) {
+  // Latest active verification per item_id (a later confirmation supersedes an
+  // earlier one; callers pass only non-superseded rows, but dedupe defensively).
+  const verifiedByItem = new Map();
+  for (const v of activeVerifications || []) {
+    if (!v || !v.item_id) continue;
+    verifiedByItem.set(v.item_id, v);
+  }
+  // Dedupe checklist items by item_id, keeping the LAST occurrence (the most
+  // recently produced — its manifest_hash is current).
+  const items = new Map();
+  for (const it of checklistItems || []) {
+    if (it && it.item_id) items.set(it.item_id, it);
+  }
+  const outstanding = [];
+  const verified = [];
+  for (const it of items.values()) {
+    const v = verifiedByItem.get(it.item_id);
+    const isVerified = !!v && (!it.manifest_hash || !v.manifest_hash || v.manifest_hash === it.manifest_hash);
+    if (isVerified) {
+      verified.push({ ...it, verified_by: v.operator_id ?? null, waived: !!v.waived, verified_at: v.created_at ?? null });
+    } else {
+      // A stale confirmation (manifest changed since) is reported so the UI can
+      // say "re-verify" rather than silently treating it as never-verified.
+      outstanding.push({ ...it, stale_verification: !!v });
+    }
+  }
+  return {
+    schema_version: VERIFICATION_SCHEMA_VERSION,
+    outstanding,
+    verified,
+    production_ready: outstanding.length === 0,
+    outstanding_count: outstanding.length,
+    verified_count: verified.length,
+  };
+}
+
 // validateConfirmation(record) — an operator confirmation (or admin waiver) is
 // valid only with a real OBSERVED RESULT (never a bare checkbox), an identity, an
 // environment, and an endpoint classification. Operators confirm; admins waive.

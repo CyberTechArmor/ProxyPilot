@@ -153,11 +153,12 @@ import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-l
 // ---- Integration truthfulness (AUDIT.md; B.4/B.5/B.6) ----
 import {
   reportedCycleOutcome, deployPendingIsHealthy, validateConfirmation, OUTCOME_CODES,
-  deriveVerificationChecklist, verificationTransition,
+  deriveVerificationChecklist, verificationTransition, capabilityCheckStatus,
 } from './verification-logic.js';
 import {
   listActiveVerifications, recordVerification, listOpenIntegrationFindings,
   recordIntegrationResolution, listIntegrationResolutions, priorBlockedSignatures,
+  projectChecklistItems,
 } from './integration-state.js';
 import { blockingSummary, backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { validateManifestEntry } from './integration-logic.js';
@@ -2505,10 +2506,25 @@ export function createMock2Router() {
     let gate = null;
     try { gate = latest?.integration_gate_json ? JSON.parse(latest.integration_gate_json) : null; } catch { gate = null; }
     const outcome = latest ? reportedCycleOutcome(latest) : null;
+    // PATCH2 B.2 — CAPABILITY-scoped live-check status: the outstanding/verified
+    // split across the WHOLE project (not the latest cycle), netted against active
+    // confirmations. This is ambient status — a capability's pending checks
+    // persist across cycles and gate the app's production-ready flag, independent
+    // of whichever cycle last ran.
+    const capStatus = capabilityCheckStatus({
+      checklistItems: projectChecklistItems(project.id),
+      activeVerifications: listActiveVerifications(project.id),
+    });
     res.json({
       reported_outcome: outcome,
       outcome_code: outcome ? (OUTCOME_CODES[outcome] ?? null) : null,
       verification_state: latest?.verification_state || null,
+      // App-level production readiness (capability-scoped): true only when NO
+      // capability has an outstanding live check. A calm "N live checks remain",
+      // never a blocker.
+      production_ready: capStatus.production_ready,
+      outstanding_checks: capStatus.outstanding,
+      verified_checks: capStatus.verified,
       checklist: gate?.checklist || [],
       gate: gate ? { outcome: gate.outcome, reasons: gate.reasons, limits: gate.gate?.limits } : null,
       confirmations: listActiveVerifications(project.id).map((v) => ({
@@ -2574,6 +2590,61 @@ export function createMock2Router() {
       remaining: checklist.filter((c) => !active.has(c.item_id)).map((c) => c.item_id),
       reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
       advanced_to_succeeded: advanced,
+    });
+  });
+
+  // PATCH2 B.2 — verify a CAPABILITY's live check independently of any build
+  // cycle. Verification is a property of the capability's lifecycle, not gated
+  // behind a pending cycle: the operator confirms/waives an outstanding check from
+  // the project-wide set at any time (observed result required, hash-linked,
+  // append-only). When a capability's check clears, any pending cycle whose whole
+  // checklist is now satisfied advances to succeeded, and production_ready flips
+  // once nothing is outstanding.
+  router.post('/projects/:id/capability-checks/verify', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const parsed = verifyConfirmSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid confirmation' });
+    const items = projectChecklistItems(project.id);
+    const item = items.find((c) => c.item_id === parsed.data.item_id);
+    if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
+    const isAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    const record = {
+      project_id: project.id, cycle_id: null, item_id: item.item_id,
+      manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
+      operator_id: req.user.id, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      environment: parsed.data.environment, endpoint_classification: item.endpoint_classification || 'unknown',
+      observed_result: parsed.data.observed_result || null,
+      waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
+      evidence_ref: parsed.data.evidence_ref || null, expires_at: parsed.data.expires_at || null,
+    };
+    const v = validateConfirmation(record);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    if (record.waived && !isAdmin) return res.status(403).json({ error: 'Only an administrator can waive a verification item.' });
+    const saved = recordVerification(record);
+    // Recompute capability-scoped status and advance any pending cycle now fully
+    // verified. A pending cycle → succeeded once its whole checklist is satisfied.
+    const active = new Set(listActiveVerifications(project.id).map((r) => r.item_id));
+    const advanced = [];
+    for (const cyc of listCyclesForProject(project.id, { limit: 200 })) {
+      if (cyc.verification_state !== 'pending') continue;
+      let gate = null;
+      try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
+      const cl = gate?.checklist || [];
+      if (cl.length && cl.every((c) => active.has(c.item_id))) {
+        updateCycle(cyc.id, { verification_state: 'verified' });
+        finishCycle(cyc.id, { status: 'succeeded', error: null });
+        try { if (cyc.request_id) closeRequest(cyc.request_id, 'succeeded'); } catch { /* best effort */ }
+        advanced.push(cyc.id);
+      }
+    }
+    const capStatus = capabilityCheckStatus({ checklistItems: items, activeVerifications: listActiveVerifications(project.id) });
+    logAudit(req.user.id, 'MOCK2_CAPABILITY_VERIFY', 'mock2_project', project.id,
+      { item_id: item.item_id, waived: record.waived, advanced_cycles: advanced }, req.ip);
+    res.status(201).json({
+      confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
+      production_ready: capStatus.production_ready,
+      outstanding_checks: capStatus.outstanding.map((c) => c.item_id),
+      advanced_cycles: advanced,
     });
   });
 

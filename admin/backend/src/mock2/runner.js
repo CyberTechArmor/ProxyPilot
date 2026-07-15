@@ -73,7 +73,8 @@ import {
 } from './integration-enforcement.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
-import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH, priorBlockedSignatures } from './integration-state.js';
+import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
+import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
 import { CONTRACT_FIXTURE_PATH_RE } from './scaffold.js';
@@ -428,6 +429,22 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       logEvent('stub_context', { role: 'system', content: block, meta: { open: openStubs.length, implicated } });
     }
   } catch (e) { console.warn('[mock2] stub context injection failed:', e?.message); }
+  // PATCH2 B.2 — AMBIENT capability-verification status: the project's outstanding
+  // live checks are surfaced to the cycle as context, NOT as a blocker. A cycle
+  // that does not touch those capabilities must not be dragged into their
+  // verification; it is told they exist so it doesn't re-declare or re-flag them.
+  try {
+    const capStatus = capabilityCheckStatus({
+      checklistItems: projectChecklistItems(projectId),
+      activeVerifications: listActiveVerifications(projectId),
+    });
+    if (capStatus.outstanding.length) {
+      const lines = capStatus.outstanding.map((c) => `- ${c.item_id} (${c.subsystem || 'capability'}): ${c.description || 'live external verification outstanding'}`).join('\n');
+      const block = `Ambient status — these capabilities already await a LIVE operator verification a human runs against the real system (NOT your job this cycle, NOT a blocker; do not re-declare or re-flag them, and do not stub them):\n${lines}`;
+      transcript.push({ role: 'user', text: block });
+      logEvent('capability_status', { role: 'system', content: block, meta: { outstanding: capStatus.outstanding.map((c) => c.item_id) } });
+    }
+  } catch (e) { console.warn('[mock2] capability status injection failed:', e?.message); }
   // On a RESUME, inject the operator guidance (message / chosen option / granted
   // one-time authorizations) as a distinct labeled user turn AFTER the task.
   let resumeCtx = null;
@@ -683,12 +700,18 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
 
     // 4) The model declared finish — verify the gates are actually green before
     //    accepting it (it never approves its own work: we re-run the battery).
-    if (decision.done) {
-      // The turn may pair `finish` with other tool calls — answer EVERY tool_use
-      // (providers reject a follow-up with an unmatched tool_use id). Execute the
-      // non-finish calls, then verify the battery.
+    if (decision.done || decision.pendingVerification) {
+      // PATCH2 B.1: `finish` (→ succeeded) and `pending_verification` (→ a calm
+      // pending-operator-verification) share the SAME validation flow (acceptance,
+      // gate battery, integration gate). termName/termId make every rejected-turn
+      // tool_result match whichever terminal tool the builder actually called, so
+      // a pending_verification turn is never answered with an unmatched finish id.
+      const termName = decision.pendingVerification ? 'pending_verification' : 'finish';
+      const termId = (result.toolCalls.find((c) => c && c.name === termName) || {}).id || termName;
+      // The turn may pair the terminal call with other tool calls — answer EVERY
+      // tool_use (providers reject a follow-up with an unmatched tool_use id).
       for (const call of decision.toolCalls) {
-        if (call.name === 'finish') continue;
+        if (call.name === termName) continue;
         const out = await executeTool({ call, cycle, containerName, holder, gateScripts });
         lastGateReports = out.gateReports || lastGateReports;
         if (out.gateReports) redTestObserved = redTestObserved || batteryHasRedTestGate(out.gateReports);
@@ -701,7 +724,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // the no-progress breaker terminates a cycle that keeps refusing.
       if (!decision.finishAcceptance?.length || !decision.finishAssumptions) {
         transcript.push({
-          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          role: 'tool', toolCallId: termId, name: termName,
           content: 'Not finished: finish requires `acceptance` (≥1 human-runnable check — "as <role>, do X, expect Y" — one per user-visible change, or one entry describing the non-UI verification performed) and `assumptions` ({verified:[…], assumed:[…]} — the cross-layer values you READ the source for this cycle, naming the file, vs the ones you assumed). Re-call finish with both.',
         });
         logEvent('note', { role: 'system', content: 'Finish rejected — missing acceptance checks / assumptions; asked the build to restate.' });
@@ -721,7 +744,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved });
       if (!verdict.ok) {
         transcript.push({
-          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          role: 'tool', toolCallId: termId, name: termName,
           content: `Not finished — acceptance not demonstrated:\n${verdict.reasons.map((r) => `- ${r}`).join('\n')}`,
         });
         logEvent('note', { role: 'system', content: `Finish rejected — acceptance not demonstrated: ${verdict.reasons.join(' | ')}` });
@@ -739,7 +762,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
       if (!oc.ok) {
         transcript.push({
-          role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish',
+          role: 'tool', toolCallId: termId, name: termName,
           content: `Not finished — the summary names files this cycle did NOT change (${oc.unmatched.join(', ')}). The change record must describe THIS cycle's diff only — do not bundle prior cycles' work. Files actually changed: ${changedThisCycle.slice(0, 20).join(', ') || '(none)'}. Re-call finish with a summary scoped to this diff.`,
         });
         logEvent('note', { role: 'system', content: `Finish rejected — summary over-claims (${oc.unmatched.join(', ')}).` });
@@ -766,7 +789,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         // not error"). The next model turn answers with fresh work — UNLESS the
         // breaker shows the cycle is just re-calling finish on the same red gates
         // with no new work, in which case halt (blocked) rather than loop.
-        transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Gates are not all green yet — you cannot finish. Battery:\n${formatGateReports(battery)}` });
+        transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: `Gates are not all green yet — you cannot finish. Battery:\n${formatGateReports(battery)}` });
         touchLock(projectId, holder);
         if (progress.tripped) {
           await haltCycle({ cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework, trigger: progress.trigger, reason: `Auto-stopped after ${noProgLimit} turns with no progress (${haltReasonLabel(progress.trigger)}); gates still red.`, logEvent });
@@ -841,7 +864,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           ? 'resolution_ineffective'
           : (haltReasonForDecision(integrationDecision) || 'integration_gate');
         const findingLines = (bs.findings || integrationDecision.reasons || []);
-        transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Cannot finish — ${bs.reason}\n${findingLines.map((r) => `- ${r}`).join('\n')}${bs.requires_resolution ? `\n\n${bs.requires_resolution}` : ''}` });
+        transcript.push({ role: 'tool', toolCallId: termId, name: termName, content: `Cannot finish — ${bs.reason}\n${findingLines.map((r) => `- ${r}`).join('\n')}${bs.requires_resolution ? `\n\n${bs.requires_resolution}` : ''}` });
         await haltCycle({
           cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework,
           trigger, reason: bs.reason, options: bs.options, logEvent,
@@ -897,15 +920,20 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           return scheduleJobCleanup(cycle.id);
         }
       }
-      // B.5 lifecycle branch. When the integration gate passed AND in-scope
-      // manifest integrations require live verification, the deploy is allowed
-      // (the operator needs the running app to verify) but the cycle does NOT
-      // report "succeeded" — it lands in pending-operator-verification with a
-      // checklist derived from the manifest, and the request stays open until an
-      // operator records observed results (or an admin waives). Otherwise it is a
-      // normal success (no external integrations in scope).
+      // B.5/PATCH2 B.1 lifecycle branch. The integration gate passed (real code),
+      // so a build with outstanding LIVE external checks the fence cannot run is a
+      // CALM completion, not a block. It reaches here two ways:
+      //   - the builder returned `pending_verification` directly (the first-class
+      //     terminal move), OR
+      //   - the builder called `finish` and this cycle's integrations still carry
+      //     in-scope live checks (the existing auto-route).
+      // Either way the deploy is allowed (the operator needs the running app to
+      // verify) and the cycle lands in pending-operator-verification with the live
+      // checklist — NEVER as a needs-attention flag. If the builder declared
+      // pending but nothing is actually outstanding, it is simply a success.
       const pendingChecklist = integrationDecision?.checklist || [];
-      if (pendingChecklist.length) {
+      const wantsPending = decision.pendingVerification === true;
+      if (pendingChecklist.length || (wantsPending && pendingChecklist.length)) {
         openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });
         updateCycle(cycle.id, { verification_state: 'pending' });
         // Stored status 'awaiting_user' + verification_state 'pending' → the
@@ -913,18 +941,23 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         finishCycle(cycle.id, { status: 'awaiting_user', error: null });
         releaseLock(projectId, holder);
         updateProject(projectId, { last_activity_at: nowIso() });
-        logEvent('pending_verification', { role: 'system', content: `Deployed; ${pendingChecklist.length} live verification item(s) outstanding.`, meta: { checklist: pendingChecklist } });
+        logEvent('pending_verification', { role: 'system', content: `Built and verified in-fence; ${pendingChecklist.length} live external check(s) remain before production sign-off.`, meta: { checklist: pendingChecklist, builder_declared: wantsPending } });
         setJob(cycle.id, {
           phase: 'pending_verification',
-          message: `Deployed — ${pendingChecklist.length} live external verification${pendingChecklist.length === 1 ? '' : 's'} outstanding. Confirm each against the real system to complete.`,
+          // Calm completion copy (B.1) — this is not "Blocked / needs attention".
+          message: `Built and verified in-fence — ${pendingChecklist.length} live check${pendingChecklist.length === 1 ? '' : 's'} remain before production sign-off. Confirm each against the real system when you have credentials.`,
           commit: record?.commit_sha || null,
         });
-        safeRaise({
-          kind: 'flag', project_id: projectId, dedupe_key: `mock2-verify:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id,
-          detail: `${project.name}: cycle ${cycle.id} is pending operator verification — ${pendingChecklist.map((c) => c.item_id).join(', ')}. The app is deployed for verification but the capability is not generally available until confirmed.`,
-        });
+        // NOTE: no admin-attention `flag` is raised — pending-operator-verification
+        // is ambient capability status (Run-stage badge + status endpoint), NOT a
+        // blocker. It is surfaced through verification_state, not the `!` overlay.
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
         return scheduleJobCleanup(cycle.id);
+      }
+      // The builder declared pending but no live check is actually outstanding —
+      // that is a plain success (nothing to verify), reported calmly.
+      if (wantsPending) {
+        logEvent('note', { role: 'system', content: 'pending_verification requested, but no live external checks are outstanding — recording as succeeded.' });
       }
       finishCycle(cycle.id, { status: 'succeeded' });
       try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }

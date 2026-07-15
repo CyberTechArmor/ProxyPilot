@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/build-outcome",
+  "title": "Mock2 build outcome (enumerated) — pending-operator-verification is first-class",
+  "description": "PATCH2 B.1. The terminal outcomes a build cycle can reach, and the builder's terminal moves that produce them. pending-operator-verification is a first-class RETURNABLE outcome (the builder's `pending_verification` tool), a calm completion — NOT routed through the deviation/blocker queue. It is reachable only when the integration gate passed for real, implemented code.",
+  "type": "object",
+  "properties": {
+    "reported_outcomes": {
+      "type": "array",
+      "description": "verification-logic.REPORTED_OUTCOMES — the structured build outcomes with stable codes (OUTCOME_CODES)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "outcome": { "enum": ["succeeded", "pending-operator-verification", "blocked-deviation", "gate-rejected", "migration-analysis-incomplete", "resolution-ineffective"] },
+          "code": { "type": "integer" }
+        }
+      },
+      "examples": [
+        [
+          { "outcome": "succeeded", "code": 0 },
+          { "outcome": "pending-operator-verification", "code": 70 },
+          { "outcome": "blocked-deviation", "code": 71 },
+          { "outcome": "gate-rejected", "code": 72 },
+          { "outcome": "migration-analysis-incomplete", "code": 73 },
+          { "outcome": "resolution-ineffective", "code": 74 }
+        ]
+      ]
+    },
+    "builder_terminal_moves": {
+      "type": "array",
+      "description": "the tools a build cycle can conclude with (runner-logic.RUNNER_TOOLS)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "tool": { "enum": ["finish", "pending_verification", "halt", "request_authorization"] },
+          "produces": { "type": "string" },
+          "framing": { "enum": ["success", "calm-completion", "blocker", "awaiting-admin"] }
+        }
+      },
+      "examples": [
+        [
+          { "tool": "finish", "produces": "succeeded (deploys)", "framing": "success" },
+          { "tool": "pending_verification", "produces": "pending-operator-verification (deploys; live checks remain)", "framing": "calm-completion" },
+          { "tool": "halt", "produces": "blocked-deviation", "framing": "blocker" },
+          { "tool": "request_authorization", "produces": "awaiting_admin (scoped one-time grant)", "framing": "awaiting-admin" }
+        ]
+      ]
+    },
+    "invariant": {
+      "type": "string",
+      "const": "pending-operator-verification is valid ONLY when the integration gate passed for real, implemented code; a stub / canned success / fabricated-data path can never reach it — it blocks."
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/capability-live-check",
+  "title": "Mock2 capability-scoped live-check status (verification-logic.capabilityCheckStatus)",
+  "description": "PATCH2 B.2. The project-wide, confirmation-netted live-verification status. Live checks are a property of the CAPABILITY (manifest entry), not the cycle: they persist across cycles, are ambient status on the Run stage, and gate the app's production_ready flag. Derived from the project's checklist items (deduped by item_id) and the active (non-superseded) confirmations/waivers.",
+  "type": "object",
+  "required": ["schema_version", "outstanding", "verified", "production_ready"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "production_ready": { "type": "boolean", "description": "true only when NO capability has an outstanding live check" },
+    "outstanding_count": { "type": "integer" },
+    "verified_count": { "type": "integer" },
+    "outstanding": { "type": "array", "items": { "$ref": "#/$defs/item" }, "description": "capabilities awaiting a live external check" },
+    "verified": { "type": "array", "items": { "$ref": "#/$defs/item" }, "description": "capabilities whose live check is confirmed/waived with a matching manifest hash" }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["item_id", "manifest_id"],
+      "additionalProperties": true,
+      "properties": {
+        "item_id": { "type": "string", "description": "<manifest_id>:<action>" },
+        "manifest_id": { "type": "string" },
+        "manifest_hash": { "type": "string", "description": "the manifest entry hash the check is bound to; a change re-opens it" },
+        "subsystem": { "type": ["string", "null"] },
+        "action": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"], "description": "what the operator verifies against the live system" },
+        "endpoint_classification": { "enum": ["public", "private", "local", "unknown"] },
+        "stale_verification": { "type": "boolean", "description": "outstanding items only: a prior confirmation exists but its manifest hash no longer matches (re-verify)" },
+        "verified_by": { "type": ["integer", "null"], "description": "verified items only" },
+        "waived": { "type": "boolean", "description": "verified items only: confirmed via an admin waiver rather than an observed result" },
+        "verified_at": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

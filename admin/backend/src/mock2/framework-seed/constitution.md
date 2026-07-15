@@ -196,6 +196,24 @@ assumptions and nothing happened. These rules bind the gate to reality:
   awaits live verification against the actual external system. It must never
   legitimize a stub, a fabricated response, a presence-only connection test, or a
   sample-data production path — those are blocking deviations, not pending work.
+- **`pending-operator-verification` is a calm completion, not a blocker.** When
+  all in-fence gates are green and the code is real, but a declared integration
+  needs a LIVE external check the sealed fence cannot run (an ADP Test Connection,
+  an LDAPS bind against the production directory), the correct end state is
+  `pending-operator-verification` — returned directly, never routed through the
+  deviation/blocker queue. It reads as "Built and verified in-fence — N live
+  checks remain before production sign-off," with the live checklist; it is NOT
+  "Blocked — needs attention." The live checks are a property of the
+  **capability**: they persist across cycles, are ambient status on the Run
+  stage, and an operator confirms/waives them independently of any build — a cycle
+  that does not touch that capability is never dragged into its verification. The
+  app is production-ready only when no capability has an outstanding live check.
+- **Injecting production credentials / opening fence egress to verify in-cycle is
+  a deliberate, rare admin action — never a routine completion option.** It is
+  available only through an explicit, scoped, admin-granted authorization (the
+  `request_authorization` path), with its own confirmation and audit record. A
+  normal healthy build that awaits live verification must not present credential
+  injection as one of its buttons.
 
 ## 7b. Integration gate & observable provenance
 

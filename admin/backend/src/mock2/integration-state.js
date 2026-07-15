@@ -167,6 +167,27 @@ export function listActiveVerifications(projectId) {
     .all(Number(projectId));
 }
 
+// projectChecklistItems(projectId) — PATCH2 B.2: every live-verification checklist
+// item the project's cycles have produced, deduped by item_id keeping the LATEST
+// (highest cycle id — its manifest_hash is current). This is the CAPABILITY-scoped
+// set (a capability's live checks persist across cycles), the input to
+// verification-logic.capabilityCheckStatus. Read from each cycle's stored gate
+// result; best-effort on an unreadable json.
+export function projectChecklistItems(projectId) {
+  const rows = getMock2Db()
+    .prepare(`SELECT id, integration_gate_json FROM mock2_cycles WHERE project_id = ? AND integration_gate_json IS NOT NULL ORDER BY id ASC`)
+    .all(Number(projectId));
+  const byItem = new Map();
+  for (const r of rows) {
+    let d;
+    try { d = JSON.parse(r.integration_gate_json); } catch { continue; }
+    for (const it of (d?.checklist || [])) {
+      if (it && it.item_id) byItem.set(it.item_id, it); // later cycle wins
+    }
+  }
+  return [...byItem.values()];
+}
+
 // ---- blocked-deviation resolutions (PATCH B.1 backfill + B.2 waiver) ----
 
 // recordIntegrationResolution — append-only, content-hashed record of a resolution

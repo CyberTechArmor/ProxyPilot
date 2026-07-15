@@ -1367,6 +1367,11 @@ export const api = {
   // bug-fix build. body: { item_id, reason }.
   mock2DeferCapabilityCheck: (id, body) =>
     request(`/mock2/projects/${id}/capability-checks/defer`, { method: 'POST', body: JSON.stringify(body) }),
+  // Escape hatch: abandon the outstanding live verification for a project. Builds
+  // stay deployed; the pending live-check obligation is dropped so the card goes
+  // away. Uses only cycle updates (no actor insert) — the guaranteed way out.
+  mock2AbandonVerification: (id) =>
+    request(`/mock2/projects/${id}/verification/abandon`, { method: 'POST' }),
   // Self-heal a malformed state/integrations.json: archive the broken text,
   // salvage valid entries, write a valid scaffold, resume any blocked cycle.
   mock2RepairIntegrationManifest: (id) =>

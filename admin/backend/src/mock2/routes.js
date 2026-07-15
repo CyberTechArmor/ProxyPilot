@@ -3044,7 +3044,7 @@ export function createMock2Router() {
         reason, routed_to: 'pending-operator-verification',
         decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
       });
-      logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECK_DEFERRED', 'mock2_project', project.id,
+      logAudit(mock2ActorId(req), 'MOCK2_CAPABILITY_CHECK_DEFERRED', 'mock2_project', project.id,
         { item_id: item.item_id, reason }, req.ip);
       return res.status(201).json({
         deferred: { id: saved.id, item_id: item.item_id, content_hash: saved.content_hash },
@@ -3053,6 +3053,36 @@ export function createMock2Router() {
     } catch (err) {
       console.error('[mock2] capability-check defer failed:', err?.stack || err?.message || err);
       return res.status(500).json({ error: `Could not record the deferral: ${err?.message || 'unknown error'}` });
+    }
+  });
+
+  // ESCAPE HATCH — operator ABANDONS the outstanding live verification for a
+  // project ("I can't verify these and I want out of this state"). The builds stay
+  // DEPLOYED; only their pending live-check obligation is dropped: every pending
+  // cycle is marked abandoned and its checklist emptied, so the verification card
+  // goes away. Deliberately uses ONLY cycle updates (no insert into a NOT NULL
+  // actor column), so it works even when the acting-user id can't be resolved —
+  // i.e. it is the guaranteed way out when confirm/defer error. Editor+.
+  router.post('/projects/:id/verification/abandon', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const abandoned = [];
+    try {
+      for (const cyc of listCyclesForProject(project.id, { limit: 500 })) {
+        if (cyc.verification_state !== 'pending') continue;
+        let gate = null;
+        try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
+        const clearedGate = gate ? JSON.stringify({ ...gate, checklist: [] }) : cyc.integration_gate_json;
+        updateCycle(cyc.id, { verification_state: 'abandoned', integration_gate_json: clearedGate });
+        finishCycle(cyc.id, { status: 'abandoned', error: 'Live verification abandoned by the operator — the build stays deployed; the outstanding live checks were dropped.' });
+        try { if (cyc.request_id) closeRequest(cyc.request_id, 'abandoned'); } catch { /* best effort */ }
+        try { resolveQueueItem(`mock2-verify:${cyc.id}`, { resolution: 'verification abandoned by operator' }); } catch { /* best effort */ }
+        abandoned.push(cyc.id);
+      }
+      logAudit(mock2ActorId(req), 'MOCK2_VERIFICATION_ABANDON', 'mock2_project', project.id, { abandoned_cycles: abandoned }, req.ip);
+      return res.json({ ok: true, abandoned_cycles: abandoned });
+    } catch (err) {
+      console.error('[mock2] verification abandon failed:', err?.stack || err?.message || err);
+      return res.status(500).json({ error: `Could not abandon verification: ${err?.message || 'unknown error'}` });
     }
   });
 

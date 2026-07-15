@@ -26,6 +26,22 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
   const [status, setStatus] = useState(null); // integration-status payload
   const [forms, setForms] = useState({});     // item_id -> { environment, observed }
   const [busyItem, setBusyItem] = useState(null);
+  const [abandoning, setAbandoning] = useState(false);
+
+  // Escape hatch: drop the outstanding live checks entirely. The build stays
+  // deployed; this card goes away. Works even when confirm/defer error, because it
+  // never writes an actor row.
+  const abandonAll = async () => {
+    setAbandoning(true);
+    try {
+      const res = await api.mock2AbandonVerification(projectId);
+      toast({ title: 'Live checks dropped', description: `The build stays deployed; ${res?.abandoned_cycles?.length || 0} pending check group(s) were abandoned.` });
+      await load();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not abandon', description: err.message });
+    } finally { setAbandoning(false); }
+  };
 
   const load = useCallback(async () => {
     try { setStatus(await api.mock2GetIntegrationStatus(projectId)); }
@@ -185,6 +201,19 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
           Confirming records your observed result (append-only evidence, never a checkbox) and marks the build fully
           verified once every check clears. Reporting a failure opens a real bug-fix build carrying your observation.
         </p>
+        {canEdit ? (
+          <div className="flex items-center justify-between gap-2 border-t pt-3">
+            <p className="text-[11px] text-muted-foreground">
+              Can’t deal with this now? Drop the live checks entirely — the build stays deployed.
+            </p>
+            <Button variant="ghost" size="sm" className="h-9 text-red-500 shrink-0" disabled={abandoning}
+              title="Abandon the outstanding live verification. The build stays deployed; these checks are dropped and this card goes away."
+              onClick={abandonAll}>
+              {abandoning ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Ban className="h-4 w-4 mr-1" />}
+              Abandon — drop live checks
+            </Button>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

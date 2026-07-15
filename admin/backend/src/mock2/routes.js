@@ -2733,26 +2733,31 @@ export function createMock2Router() {
     const v = validateConfirmation(record);
     if (!v.ok) return res.status(400).json({ error: v.error });
     if (record.waived && !isAdmin) return res.status(403).json({ error: 'Only an administrator can waive a verification item.' });
-    const saved = recordVerification(record);
-    // Advance to succeeded once every checklist item has an active confirmation/waiver.
-    const active = new Set(listActiveVerifications(project.id).filter((r) => r.cycle_id === cycle.id).map((r) => r.item_id));
-    const allDone = checklist.every((c) => active.has(c.item_id));
-    let advanced = false;
-    if (allDone) {
-      updateCycle(cycle.id, { verification_state: 'verified' });
-      finishCycle(cycle.id, { status: 'succeeded', error: null });
-      try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
-      resolveQueueItem(`mock2-verify:${cycle.id}`, { resolution: 'operator verified', resolvedBy: req.user.id });
-      advanced = true;
+    try {
+      const saved = recordVerification(record);
+      // Advance to succeeded once every checklist item has an active confirmation/waiver.
+      const active = new Set(listActiveVerifications(project.id).filter((r) => r.cycle_id === cycle.id).map((r) => r.item_id));
+      const allDone = checklist.every((c) => active.has(c.item_id));
+      let advanced = false;
+      if (allDone) {
+        updateCycle(cycle.id, { verification_state: 'verified' });
+        finishCycle(cycle.id, { status: 'succeeded', error: null });
+        try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+        resolveQueueItem(`mock2-verify:${cycle.id}`, { resolution: 'operator verified', resolvedBy: req.user.id });
+        advanced = true;
+      }
+      logAudit(req.user.id, 'MOCK2_INTEGRATION_VERIFY', 'mock2_cycle', cycle.id,
+        { item_id: item.item_id, waived: record.waived, advanced }, req.ip);
+      return res.status(201).json({
+        confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
+        remaining: checklist.filter((c) => !active.has(c.item_id)).map((c) => c.item_id),
+        reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
+        advanced_to_succeeded: advanced,
+      });
+    } catch (err) {
+      console.error('[mock2] cycle verify failed:', err?.stack || err?.message || err);
+      return res.status(500).json({ error: `Could not record the confirmation: ${err?.message || 'unknown error'}` });
     }
-    logAudit(req.user.id, 'MOCK2_INTEGRATION_VERIFY', 'mock2_cycle', cycle.id,
-      { item_id: item.item_id, waived: record.waived, advanced }, req.ip);
-    res.status(201).json({
-      confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
-      remaining: checklist.filter((c) => !active.has(c.item_id)).map((c) => c.item_id),
-      reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
-      advanced_to_succeeded: advanced,
-    });
   });
 
   // PATCH2 B.2 — verify a CAPABILITY's live check independently of any build
@@ -2782,32 +2787,39 @@ export function createMock2Router() {
     const v = validateConfirmation(record);
     if (!v.ok) return res.status(400).json({ error: v.error });
     if (record.waived && !isAdmin) return res.status(403).json({ error: 'Only an administrator can waive a verification item.' });
-    const saved = recordVerification(record);
-    // Recompute capability-scoped status and advance any pending cycle now fully
-    // verified. A pending cycle → succeeded once its whole checklist is satisfied.
-    const active = new Set(listActiveVerifications(project.id).map((r) => r.item_id));
-    const advanced = [];
-    for (const cyc of listCyclesForProject(project.id, { limit: 200 })) {
-      if (cyc.verification_state !== 'pending') continue;
-      let gate = null;
-      try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
-      const cl = gate?.checklist || [];
-      if (cl.length && cl.every((c) => active.has(c.item_id))) {
-        updateCycle(cyc.id, { verification_state: 'verified' });
-        finishCycle(cyc.id, { status: 'succeeded', error: null });
-        try { if (cyc.request_id) closeRequest(cyc.request_id, 'succeeded'); } catch { /* best effort */ }
-        advanced.push(cyc.id);
+    // The DB write + advance is wrapped so a persistence error surfaces its real
+    // cause instead of an opaque 500 the operator can't act on.
+    try {
+      const saved = recordVerification(record);
+      // Recompute capability-scoped status and advance any pending cycle now fully
+      // verified. A pending cycle → succeeded once its whole checklist is satisfied.
+      const active = new Set(listActiveVerifications(project.id).map((r) => r.item_id));
+      const advanced = [];
+      for (const cyc of listCyclesForProject(project.id, { limit: 200 })) {
+        if (cyc.verification_state !== 'pending') continue;
+        let gate = null;
+        try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
+        const cl = gate?.checklist || [];
+        if (cl.length && cl.every((c) => active.has(c.item_id))) {
+          updateCycle(cyc.id, { verification_state: 'verified' });
+          finishCycle(cyc.id, { status: 'succeeded', error: null });
+          try { if (cyc.request_id) closeRequest(cyc.request_id, 'succeeded'); } catch { /* best effort */ }
+          advanced.push(cyc.id);
+        }
       }
+      const capStatus = capabilityCheckStatus({ checklistItems: items, activeVerifications: listActiveVerifications(project.id) });
+      logAudit(req.user.id, 'MOCK2_CAPABILITY_VERIFY', 'mock2_project', project.id,
+        { item_id: item.item_id, waived: record.waived, advanced_cycles: advanced }, req.ip);
+      return res.status(201).json({
+        confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
+        production_ready: capStatus.production_ready,
+        outstanding_checks: capStatus.outstanding.map((c) => c.item_id),
+        advanced_cycles: advanced,
+      });
+    } catch (err) {
+      console.error('[mock2] capability-check verify failed:', err?.stack || err?.message || err);
+      return res.status(500).json({ error: `Could not record the confirmation: ${err?.message || 'unknown error'}` });
     }
-    const capStatus = capabilityCheckStatus({ checklistItems: items, activeVerifications: listActiveVerifications(project.id) });
-    logAudit(req.user.id, 'MOCK2_CAPABILITY_VERIFY', 'mock2_project', project.id,
-      { item_id: item.item_id, waived: record.waived, advanced_cycles: advanced }, req.ip);
-    res.status(201).json({
-      confirmation: { id: saved.id, item_id: saved.item_id, content_hash: saved.content_hash },
-      production_ready: capStatus.production_ready,
-      outstanding_checks: capStatus.outstanding.map((c) => c.item_id),
-      advanced_cycles: advanced,
-    });
   });
 
   // The class-matched resolution options for a blocked cycle (PATCH B.1). Reads the
@@ -2983,6 +2995,44 @@ export function createMock2Router() {
       affected_cycles: affected,
       bugfix: { status: build?.status || 'error', cycle: build?.cycle ? publicCycleShape(build.cycle) : null, error: build?.error || null },
     });
+  });
+
+  // Operator DEFERS a live capability check — "I can't run this against the real
+  // system right now" (no production access from here, the app isn't reachable/
+  // deployed yet, credentials not available). This is the honest third option next
+  // to confirm ("it works") and report-failure ("it's broken"): the code is real
+  // and the build is DONE (pending-operator-verification is a calm, complete,
+  // non-blocking state), the operator simply cannot verify it in this environment.
+  // It records an append-only deferral note with a reason and LEAVES the cycle
+  // pending — it never advances to succeeded, never marks failed, never opens a
+  // bug-fix build. Editor+; a reason is required (no silent skip).
+  router.post('/projects/:id/capability-checks/defer', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const itemId = String(req.body?.item_id || '').trim();
+    const reason = String(req.body?.reason || '').trim();
+    if (!itemId) return res.status(400).json({ error: 'item_id is required.' });
+    if (!reason) return res.status(400).json({ error: 'A short reason is required — e.g. "no route to the directory from here" or "app not deployed yet".' });
+    const items = projectChecklistItems(project.id);
+    const item = items.find((c) => c.item_id === itemId);
+    if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
+    try {
+      const saved = recordIntegrationResolution({
+        project_id: project.id, cycle_id: null, kind: 'live_check_deferred',
+        finding_class: 'live-check-deferred', finding_kind: 'live_check_deferred',
+        subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
+        reason, routed_to: 'pending-operator-verification',
+        decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+      });
+      logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECK_DEFERRED', 'mock2_project', project.id,
+        { item_id: item.item_id, reason }, req.ip);
+      return res.status(201).json({
+        deferred: { id: saved.id, item_id: item.item_id, content_hash: saved.content_hash },
+        note: 'Recorded — this build stays pending your live verification. Nothing else is required; verify it when you can reach the real system.',
+      });
+    } catch (err) {
+      console.error('[mock2] capability-check defer failed:', err?.stack || err?.message || err);
+      return res.status(500).json({ error: `Could not record the deferral: ${err?.message || 'unknown error'}` });
+    }
   });
 
   // PATCH B.2 — waiver: an admin confirms a provenance-not-established finding is

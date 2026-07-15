@@ -12,6 +12,8 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { createHash } from 'node:crypto';
+
 // ---- limits (bounds the prompt/DB cost of a single component) ----
 
 export const MAX_COMPONENT_FILES = 40;
@@ -272,9 +274,11 @@ export function buildComponentCatalogSection(components = [], { access = 'tool',
 working directory (with the integration notes in \`${dir}/<key>/USAGE.md\`). Copy the
 files you need into the app source and adapt only the glue (imports, config, wiring);
 never import from \`${dir}/\` directly — it is ephemeral to this run and is not synced back.`
-    : `Fetch a component's full source and integration notes with the get_component tool
-(pass its key). Copy the files into the app source and adapt only the glue (imports,
-config, wiring).`;
+    : `Adopt a component with the materialize_component tool (pass its key): the platform
+copies its files verbatim into the app source server-side — byte-exact at any size, the
+contents never transit your context — and returns a path/size/sha256 manifest. Inspect
+first with get_component (integration notes + file manifest; small components include
+their sources inline). Then adapt only the glue (imports, config, wiring).`;
   return `
 
 # Component library (reuse before you rebuild)
@@ -290,9 +294,40 @@ ${lines}
 ${how}`;
 }
 
+// ---- manifest + server-side materialization (the pure halves) ----
+//
+// File CONTENT must never be forced through a token-limited tool result to be
+// adopted — that path truncates (the get_component budget here, and the
+// runner's own tool-result cap besides). Instead the platform materializes a
+// component's files INTO the app source server-side (runner.js, over the same
+// channel write_file uses) and the model works from the MANIFEST: each file's
+// path, byte size, and sha256 — enough to know exactly what landed and to
+// read/adapt the real files from disk afterward.
+
+export function sha256Hex(content) {
+  return createHash('sha256').update(String(content ?? ''), 'utf8').digest('hex');
+}
+
+// [{path, bytes, sha256}] for a version's files — the identity of the content
+// without the content.
+export function buildComponentManifest(files = []) {
+  return (Array.isArray(files) ? files : [])
+    .filter((f) => f && typeof f.path === 'string' && typeof f.content === 'string')
+    .map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.content, 'utf8'), sha256: sha256Hex(f.content) }));
+}
+
+export function formatManifestLines(manifest = []) {
+  return manifest.map((m) => `- ${m.path} (${m.bytes} bytes, sha256 ${m.sha256})`).join('\n');
+}
+
 // Format one component (metadata + files + notes) as a get_component tool
-// result. Bounded to MAX_COMPONENT_PROMPT_CHARS so a huge component can't blow
-// the context (same R5 discipline as tool-result truncation).
+// result. Small components (full render within MAX_COMPONENT_PROMPT_CHARS)
+// return files inline exactly as before. A component that would exceed the
+// budget is NEVER cut mid-file: it returns the metadata + full file MANIFEST
+// + notes, and directs the runner to materialize_component — which delivers
+// every file verbatim regardless of size. The manifest leads and usage_md
+// trails so the runner's own tool-result cap can only ever cost notes, not
+// the file list.
 export function formatComponentForModel(component, version) {
   if (!component || !version) return 'error: component not found';
   const files = parseFilesJson(version.files_json);
@@ -300,11 +335,82 @@ export function formatComponentForModel(component, version) {
   if (component.description) out += `${component.description}\n`;
   if (version.usage_md) out += `\n## Integration notes\n${version.usage_md}\n`;
   out += `\n## Files (${files.length})\n`;
-  for (const f of files) {
-    out += `\n--- ${f.path} ---\n${f.content}\n`;
-    if (out.length > MAX_COMPONENT_PROMPT_CHARS) {
-      return `${out.slice(0, MAX_COMPONENT_PROMPT_CHARS)}\n…[truncated — component exceeds the tool-result budget; fetch individual files with read_file after copying, or ask the operator to split the component]`;
-    }
+  for (const f of files) out += `\n--- ${f.path} ---\n${f.content}\n`;
+  if (out.length <= MAX_COMPONENT_PROMPT_CHARS) return out;
+
+  const manifest = buildComponentManifest(files);
+  const total = manifest.reduce((n, m) => n + m.bytes, 0);
+  let alt = `Component ${component.key} v${version.version} — ${component.name}\n`;
+  if (component.description) alt += `${component.description}\n`;
+  alt += `\n## Files (${files.length}, ${total} bytes total — inline contents withheld: they exceed the ${MAX_COMPONENT_PROMPT_CHARS}-char tool budget)\n`;
+  alt += `${formatManifestLines(manifest)}\n`;
+  alt += `\nThese files are NOT in this result and are NOT yet on disk. To adopt this component, call materialize_component with key "${component.key}" — the platform writes every file verbatim into the app source (byte-exact, sizes and hashes above), then read/adapt them with read_file/write_file.\n`;
+  if (version.usage_md) alt += `\n## Integration notes\n${version.usage_md}\n`;
+  return alt;
+}
+
+// The in-container script halves of materialization. Paths were validated at
+// import (safeComponentPath) but may contain spaces/quotes, so each rides
+// base64 and is only ever expanded inside double quotes.
+
+const b64path = (p) => Buffer.from(String(p), 'utf8').toString('base64');
+
+// Which target paths already exist (they are KEPT unless overwrite is asked).
+export function buildPathsExistScript(paths = [], { appDir = '/srv/app' } = {}) {
+  return `cd "${appDir}" || exit 1
+for b in ${paths.map(b64path).join(' ')}; do
+  p=$(printf '%s' "$b" | base64 -d)
+  if [ -e "$p" ]; then echo "EXISTS $p"; else echo "ABSENT $p"; fi
+done
+`;
+}
+
+export function parsePathsExistOutput(stdout) {
+  const existing = new Set();
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^EXISTS (.+)$/);
+    if (m) existing.add(m[1]);
   }
+  return existing;
+}
+
+// Byte-exactness check for the files just written: sha256 each in-container,
+// compared (in Node) against the stored content's hash from the manifest.
+export function buildManifestVerifyScript(paths = [], { appDir = '/srv/app' } = {}) {
+  return `cd "${appDir}" || exit 1
+for b in ${paths.map(b64path).join(' ')}; do
+  p=$(printf '%s' "$b" | base64 -d)
+  if [ -f "$p" ]; then sha256sum -- "$p"; else echo "MISSING  $p"; fi
+done
+`;
+}
+
+// sha256sum lines ("<hex>  <path>") → Map path → hex; MISSING lines → null.
+export function parseShaVerifyOutput(stdout) {
+  const out = new Map();
+  for (const line of String(stdout || '').split('\n')) {
+    let m = line.match(/^([0-9a-f]{64})\s[\s*](.+)$/);
+    if (m) { out.set(m[2], m[1]); continue; }
+    m = line.match(/^MISSING\s+(.+)$/);
+    if (m) out.set(m[1], null);
+  }
+  return out;
+}
+
+// The materialize_component tool result: what landed where, verbatim-verified —
+// paths, sizes, hashes, and per-file status. Never file contents.
+export function formatMaterializeResult({ component, version, manifest = [], statuses = {} }) {
+  const st = (p) => statuses[p] || 'unknown';
+  const count = (s) => manifest.filter((m) => st(m.path) === s).length;
+  const written = count('written');
+  const kept = count('kept');
+  const failed = manifest.length - written - kept;
+  let out = `Materialized component ${component.key} v${version.version} — ${component.name}\n`;
+  out += `${written} written, ${kept} kept (already existed — pass overwrite=true to replace), ${failed} failed\n`;
+  out += `\n## Files (${manifest.length})\n`;
+  for (const m of manifest) out += `- [${st(m.path)}] ${m.path} (${m.bytes} bytes, sha256 ${m.sha256})\n`;
+  out += `\nEvery [written] file is on disk verbatim (sha256-verified against the library copy). `;
+  out += `Read/adapt them with read_file/write_file and wire the glue per the integration notes (get_component "${component.key}").\n`;
+  if (failed > 0) out += `\nWARNING: ${failed} file(s) did not land intact — re-run materialize_component, or stop and report if it persists. Do NOT reconstruct their contents from memory.\n`;
   return out;
 }

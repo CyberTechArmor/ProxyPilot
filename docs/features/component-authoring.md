@@ -66,9 +66,16 @@ Each element of `files` is `{ "path": string, "content": string }`.
   - max **200 000 chars** per file,
   - max **600 000 chars** total.
 
-Note the runner-side budget too: a `get_component` tool result is truncated at
-60 000 chars, so a component near the size limits is served to builds
-truncated. Prefer small, focused components; split a sprawling module.
+Large components are delivered to builds **in full**: the runner's
+`materialize_component` tool writes every file verbatim into the project
+source server-side (byte-exact, sha256-verified — contents never pass through
+the model's context), so the 600k import ceiling is the only size limit.
+`get_component` returns sources inline only while the render fits its 60 000
+char budget; past that it returns the integration notes plus a complete file
+manifest (path, bytes, sha256) and defers the contents to
+`materialize_component` — never a silent mid-file cutoff. Small, focused
+components are still preferable: the notes and manifest are what the model
+actually reasons over.
 
 ## Packaging rules (what goes in `files`)
 

@@ -163,18 +163,24 @@ test('buildComponentCatalogSection: tool mode names get_component; files mode na
   assert.doesNotMatch(files, /get_component/);
 });
 
-test('formatComponentForModel: files + notes, truncates at the prompt budget', () => {
+test('formatComponentForModel: small inline as before; over budget → full manifest, never a cutoff', () => {
   const component = { key: 'k-x', name: 'X', description: 'd' };
   const version = { version: 1, usage_md: 'notes', files_json: JSON.stringify([{ path: 'a.ts', content: 'hello' }]) };
   const out = formatComponentForModel(component, version);
   assert.match(out, /Component k-x v1/);
   assert.match(out, /## Integration notes\nnotes/);
   assert.match(out, /--- a\.ts ---\nhello/);
+  assert.doesNotMatch(out, /materialize_component/); // small components unchanged
 
+  // Over the budget: NO truncated file bodies — a manifest (path/bytes/sha256)
+  // plus the directive to materialize_component, which delivers files whole.
   const huge = { version: 1, files_json: JSON.stringify([{ path: 'big.ts', content: 'x'.repeat(MAX_COMPONENT_PROMPT_CHARS + 1000) }]) };
-  const truncated = formatComponentForModel(component, huge);
-  assert.ok(truncated.length <= MAX_COMPONENT_PROMPT_CHARS + 200);
-  assert.match(truncated, /truncated/);
+  const manifested = formatComponentForModel(component, huge);
+  assert.ok(manifested.length <= MAX_COMPONENT_PROMPT_CHARS);
+  assert.doesNotMatch(manifested, /truncated/);
+  assert.doesNotMatch(manifested, /xxxxxxxxxx/); // no content fragments
+  assert.match(manifested, /- big\.ts \(\d+ bytes, sha256 [0-9a-f]{64}\)/);
+  assert.match(manifested, /materialize_component/);
 
   assert.equal(formatComponentForModel(null, null), 'error: component not found');
 });

@@ -176,7 +176,7 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
     // resumed build has to rediscover them blind — the real engine of the
     // "resolve → re-halt on the same block" loop: the gate is deterministic,
     // so the resume converges only if it targets these specific items.
-    lines.push('', `The previous run was BLOCKED by the integration gate on the following specific findings. Resolve EACH one (fix the named file/function, or — for behavior an operator explicitly confirmed, like serving cached last-synced data — implement it honestly: surface the transport failure and label cached data as cached; never convert an error into success). The gate re-runs at finish and must find none of these:`);
+    lines.push('', `The previous run was BLOCKED by the integration gate on the following specific findings. First VERIFY each against the current code — the gate re-evaluates fresh at finish, so a finding may already be moot. For each REAL one, fix the named file/function (for behavior an operator explicitly confirmed, like serving cached last-synced data, implement it honestly: surface the transport failure and label cached data as cached; never convert an error into success). For a finding that is NOT real — the code is genuinely local/correct — leave the code alone; do NOT restructure correct code to appease a detector (that is the named anti-pattern), just run the gates and finish:`);
     for (const f of found) lines.push(`- ${f}`);
   }
   if (auths.length) {

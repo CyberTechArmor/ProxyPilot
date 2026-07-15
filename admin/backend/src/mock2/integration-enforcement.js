@@ -17,7 +17,7 @@
 import { createHash } from 'crypto';
 import {
   analyzeIntegrations, parseIntegrationManifest, INTEGRATION_MANIFEST_PATH,
-  bootstrapManifestFromDiscovery, manifestEntryHash,
+  bootstrapManifestFromDiscovery, manifestEntryHash, appendManifestEntry,
 } from './integration-logic.js';
 import { egressCompleteness, discoverDialedHosts } from './egress-check-logic.js';
 import {
@@ -25,6 +25,10 @@ import {
 } from './screening-logic.js';
 import { deriveVerificationChecklist } from './verification-logic.js';
 import { touchedSubsystems } from './stub-logic.js';
+import {
+  resolutionOptionsFor, findingSetSignature, loopBreakerVerdict,
+  resolutionIneffectiveSummary, collectFindings,
+} from './resolution-logic.js';
 
 const EMPTY_MANIFEST = '{"schema_version":1,"entries":[]}';
 // Bound the snapshot so a runaway tree can't blow the analyzer or the record.
@@ -45,13 +49,30 @@ export function contentHash(obj) {
 // Returns a structured, schema-versioned decision. NEVER throws.
 export function evaluateIntegrationTruthfulness({
   files = [], manifestText = '', declaredEgress = [], approvedGrants = [],
-  finish = {}, changedFiles = null,
+  finish = {}, changedFiles = null, fixtureToolingPresent = true,
 } = {}) {
   const parsed = parseIntegrationManifest(manifestText && manifestText.trim() ? manifestText : EMPTY_MANIFEST);
   const manifest = parsed.ok ? parsed.manifest : { schema_version: 1, entries: [] };
 
   // B.4 source analysis (fails closed) + undeclared-integration discovery.
   const gate = analyzeIntegrations({ files, manifest });
+  // The gate's own findings, plus (B.3) a fixture-tooling-missing finding when the
+  // project has integrations to verify but cannot stand up an in-fence contract
+  // fixture server — so the honest path is provably walkable rather than silently
+  // forcing a stub. Emitted as its own class with its own resolving option.
+  const gateFindings = [...gate.findings];
+  if (!fixtureToolingPresent) {
+    const needsFixtures = (manifest.entries || []).some((e) => e.live_verification?.required || e.contract_test)
+      || gate.findings.some((f) => f.kind === 'undeclared_integration');
+    if (needsFixtures) {
+      gateFindings.push({
+        kind: 'fixture_tooling_missing', file: null, function: null, severity: 'high',
+        schema_version: 1,
+        message: 'This project has external integrations to verify but provides no in-fence contract-fixture server (real local TLS socket, test-only injection). The honest path — real transport code verified against a local fixture — cannot be walked, so the gate must not let the build silently stub. Provision the fixture tooling.',
+      });
+    }
+  }
+  const gateVerdict = gateFindings.length ? 'fail' : 'pass';
 
   // B.7 egress completeness over dialed hosts.
   const dialed = discoverDialedHosts(files);
@@ -67,7 +88,7 @@ export function evaluateIntegrationTruthfulness({
 
   const subsystems = touchedSubsystems((changedFiles || files.map((f) => f.path)) || []);
 
-  const blocking = gate.verdict === 'fail' || !egress.ok || screen.blocking || manifestBad;
+  const blocking = gateVerdict === 'fail' || !egress.ok || screen.blocking || manifestBad;
 
   // When clean AND real integrations that require live verification are in scope,
   // the cycle routes to pending-operator-verification with this checklist.
@@ -80,8 +101,8 @@ export function evaluateIntegrationTruthfulness({
     : (checklist.length ? 'pending-operator-verification' : 'succeeded');
 
   const reasons = [];
-  if (gate.verdict === 'fail') {
-    for (const f of gate.findings) reasons.push(`[integration:${f.kind}] ${f.file || ''}${f.function ? `#${f.function}` : ''}: ${f.message}`);
+  if (gateVerdict === 'fail') {
+    for (const f of gateFindings) reasons.push(`[integration:${f.kind}] ${f.file || ''}${f.function ? `#${f.function}` : ''}: ${f.message}`);
   }
   if (!egress.ok) {
     for (const f of egress.findings) reasons.push(`[egress:${f.kind}] ${f.message}`);
@@ -95,7 +116,7 @@ export function evaluateIntegrationTruthfulness({
     schema_version: 1,
     outcome,
     blocking,
-    gate: { verdict: gate.verdict, findings: gate.findings, limits: gate.limits },
+    gate: { verdict: gateVerdict, findings: gateFindings, limits: gate.limits },
     egress: { ok: egress.ok, findings: egress.findings, notes: egress.notes },
     screening: { blocking: screen.blocking, candidates: screen.candidates, recorded: screen.recorded },
     manifest: {
@@ -108,6 +129,9 @@ export function evaluateIntegrationTruthfulness({
     touched_subsystems: subsystems,
     reasons,
   };
+  // The finding-set signature is persisted with the gate result so the B.4 loop
+  // breaker can compare THIS block against prior blocks of the same request.
+  record.finding_signature = findingSetSignature(record);
   record.content_hash = contentHash({ outcome, reasons, gate: record.gate, egress: record.egress, screening: record.screening });
   return record;
 }
@@ -121,23 +145,57 @@ export function haltReasonForDecision(record) {
   return 'integration_gate';
 }
 
-// A concise admin-visible reason + the resolution options for a blocking decision
-// (every blocking path must carry an explicit reason + options — no silent halt).
-export function blockingSummary(record) {
+// A concise admin-visible reason + the CLASS-MATCHED resolution options for a
+// blocking decision (PATCH B.1): every finding class present is offered at least
+// one option that can actually resolve it — the deadlock fix. When the SAME
+// finding set has survived N consecutive resolutions (B.4 loop breaker), the
+// blocker is marked resolution-ineffective, the full finding list is surfaced
+// inline, the repeated options are suppressed, and a free-text / admin resolution
+// is required. priorSignatures are the earlier blocked-deviation finding-set
+// signatures for THIS request (chronological). Every blocking path carries an
+// explicit reason — no silent halt.
+export function blockingSummary(record, { priorSignatures = [] } = {}) {
+  const { options, classes, uncovered } = resolutionOptionsFor(record);
+  const signature = findingSetSignature(record);
+  const loop = loopBreakerVerdict({ priorSignatures, currentSignature: signature });
+
+  if (loop.ineffective) {
+    const s = resolutionIneffectiveSummary(record, loop);
+    return {
+      state: 'resolution-ineffective',
+      reason: s.reason,
+      findings: s.findings,
+      classes,
+      signature,
+      loop,
+      // Stop auto-offering the same options; require an explicit human resolution.
+      options: [{
+        id: 'record_resolution', kind: 'free_text_or_admin_override',
+        label: 'Record a free-text resolution or admin override',
+        detail: s.requires,
+      }],
+      requires_resolution: s.requires,
+      // A class with NO resolving option is itself a harness defect — surface it.
+      uncovered,
+    };
+  }
+
   const n = record.reasons.length;
   const head = record.screening?.blocking && record.gate?.verdict !== 'fail'
     ? 'Finish disclosed a production simulation'
     : record.gate?.verdict === 'fail'
       ? 'The integration gate found a simulated/undeclared external capability'
-      : 'Egress for a built external capability is undeclared';
+      : !record.egress?.ok
+        ? 'Egress for a built external capability is undeclared'
+        : 'The integration truthfulness gate is blocking';
   return {
-    reason: `${head} — ${n} finding${n === 1 ? '' : 's'}. The request cannot report "succeeded" until resolved.`,
+    reason: `${head} — ${n} finding${n === 1 ? '' : 's'} across ${classes.length} class${classes.length === 1 ? '' : 'es'} (${classes.join(', ')}). The request cannot report "succeeded" until resolved.`,
     findings: record.reasons,
-    options: [
-      { id: 'implement_real', label: 'Implement the real integration', kind: 'run_dependency_first', detail: 'Replace the simulation with real transport code + in-fence contract fixtures; the integration gate must pass and the capability moves to pending-operator-verification.' },
-      { id: 'approve_simulation', label: 'Approve as a recorded simulation', kind: 'grant_authorization', detail: 'An admin approves the simulation, records it in state/deviations/, registers it in the stub registry with a severity, and it must be visibly labeled in the running UI.', recommended: false },
-      { id: 'declare_egress', label: 'Declare + approve the egress', kind: 'expand_scope', detail: 'Add the mock2.yaml egress entry and approve the grant (private hosts) so the capability can reach its destination.' },
-    ],
+    classes,
+    signature,
+    loop,
+    options,
+    uncovered,
   };
 }
 
@@ -158,4 +216,24 @@ export async function readSourceSnapshot({ containerName, appDir = '/srv/app', e
   }
   const man = await readFileInContainer(containerName, INTEGRATION_MANIFEST_PATH);
   return { files, manifestText: man.ok ? man.content : '' };
+}
+
+// backfillManifestEntryInContainer — PATCH B.1: write an operator-confirmed
+// manifest entry into the project's state/integrations.json in the fenced
+// container and return the committed entry + its hash. The resume then re-runs
+// the gate against it (an `undeclared` capability becomes one the gate checks for
+// real provenance — the loop is broken because the finding class changes). io is
+// injected from runner.js (execInContainer/readFileInContainer/writeFileInContainer)
+// so this stays a thin, mockable seam. { ok, entry, hash } or { ok:false, error }.
+export async function backfillManifestEntryInContainer({ containerName, entry, execInContainer, readFileInContainer, writeFileInContainer }) {
+  const cur = await readFileInContainer(containerName, INTEGRATION_MANIFEST_PATH);
+  const appended = appendManifestEntry(cur.ok ? cur.content : '', entry);
+  if (!appended.ok) return { ok: false, error: appended.error };
+  const w = await writeFileInContainer(containerName, INTEGRATION_MANIFEST_PATH, appended.text);
+  if (!w.ok) return { ok: false, error: `could not write ${INTEGRATION_MANIFEST_PATH}: ${w.error}` };
+  // Commit the declaration so it rides the hash-chained history (best-effort).
+  try {
+    await execInContainer(containerName, `git add ${INTEGRATION_MANIFEST_PATH} && git -c user.name=ProxyPilot -c user.email=mock2@proxypilot.local commit -q -m 'mock2: declare integration ${String(appended.entry.id).replace(/[^a-zA-Z0-9_.-]/g, '')}' || true`);
+  } catch { /* best effort — the write is the load-bearing part */ }
+  return { ok: true, entry: appended.entry, hash: manifestEntryHash(appended.entry) };
 }

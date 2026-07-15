@@ -19,11 +19,13 @@ const manifest = parseIntegrationManifest(MANIFEST_OK).manifest;
 test('reported outcomes are documented with stable, non-colliding codes', () => {
   assert.deepEqual(Object.keys(REPORTED_OUTCOMES).sort(), [
     'blocked-deviation', 'gate-rejected', 'migration-analysis-incomplete',
-    'pending-operator-verification', 'succeeded',
+    'pending-operator-verification', 'resolution-ineffective', 'succeeded',
   ].sort());
   const codes = Object.values(OUTCOME_CODES);
   assert.equal(new Set(codes).size, codes.length); // no collisions
   assert.equal(OUTCOME_CODES.succeeded, 0);
+  // PATCH B.4: the loop-breaker outcome has its own stable, non-colliding code.
+  assert.equal(OUTCOME_CODES['resolution-ineffective'], 74);
 });
 
 test('reportedCycleOutcome maps stored status + verification_state to the structured outcome', () => {
@@ -106,6 +108,37 @@ test('invariant: pending-operator-verification never legitimizes a failed integr
   const t = verificationTransition({ state: 'building', event: 'gates_green_with_integrations', integrationGateVerdict: 'fail' });
   assert.equal(t.ok, false);
   assert.match(t.reason, /integration gate|blocking deviation/i);
+});
+
+// ---- PATCH B.1/B.2 transitions from blocked-deviation ----
+
+test('PATCH B.2: a provenance waiver routes blocked-deviation → pending-operator-verification (never succeeded)', () => {
+  const t = verificationTransition({ state: 'blocked-deviation', event: 'provenance_waived', waiverEligible: true });
+  assert.equal(t.ok, true);
+  assert.equal(t.next, 'pending-operator-verification');
+  assert.notEqual(t.next, 'succeeded');
+});
+
+test('PATCH B.2 invariant: a waiver is REFUSED for a positively-fabricated finding', () => {
+  const t = verificationTransition({ state: 'blocked-deviation', event: 'provenance_waived', waiverEligible: false });
+  assert.equal(t.ok, false);
+  assert.match(t.reason, /fabricated|refused/i);
+});
+
+test('PATCH B.1: backfilling the manifest returns blocked-deviation → building (the gate re-runs)', () => {
+  const t = verificationTransition({ state: 'blocked-deviation', event: 'manifest_backfilled' });
+  assert.equal(t.ok, true);
+  assert.equal(t.next, 'building');
+});
+
+test('PATCH B.4: the loop breaker trips blocked-deviation → resolution-ineffective', () => {
+  const t = verificationTransition({ state: 'blocked-deviation', event: 'loop_breaker_tripped' });
+  assert.equal(t.ok, true);
+  assert.equal(t.next, 'resolution-ineffective');
+});
+
+test('reportedCycleOutcome surfaces resolution-ineffective from its halt_reason', () => {
+  assert.equal(reportedCycleOutcome({ status: 'awaiting_admin', halt_reason: 'resolution_ineffective' }), 'resolution-ineffective');
 });
 
 // ---- invalidation / supersession ----

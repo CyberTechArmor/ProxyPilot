@@ -86,6 +86,26 @@ export function recordIntegrationFindings({ projectId, cycleId = null, origin, f
   return out;
 }
 
+// priorBlockedSignatures — the finding-set signatures of EARLIER blocked cycles
+// in the same request (chronological), read from each cycle's stored gate result.
+// The B.4 loop breaker compares the current block against these. Excludes the
+// current cycle. Best-effort: an unreadable gate json contributes nothing.
+export function priorBlockedSignatures(requestId, currentCycleId) {
+  if (requestId == null) return [];
+  const rows = getMock2Db()
+    .prepare(`SELECT id, integration_gate_json FROM mock2_cycles WHERE request_id = ? AND id <> ? ORDER BY id ASC`)
+    .all(Number(requestId), Number(currentCycleId || 0));
+  const sigs = [];
+  for (const r of rows) {
+    if (!r.integration_gate_json) continue;
+    try {
+      const d = JSON.parse(r.integration_gate_json);
+      if (d && d.blocking && d.finding_signature) sigs.push(d.finding_signature);
+    } catch { /* skip unreadable */ }
+  }
+  return sigs;
+}
+
 export function listOpenIntegrationFindings(projectId, { subsystem = null } = {}) {
   const db = getMock2Db();
   if (subsystem) {
@@ -144,5 +164,59 @@ export function recordVerification(record) {
 export function listActiveVerifications(projectId) {
   return getMock2Db()
     .prepare(`SELECT * FROM mock2_integration_verifications WHERE project_id = ? AND superseded_at IS NULL ORDER BY id`)
+    .all(Number(projectId));
+}
+
+// ---- blocked-deviation resolutions (PATCH B.1 backfill + B.2 waiver) ----
+
+// recordIntegrationResolution — append-only, content-hashed record of a resolution
+// action on a blocked-deviation finding (migration 522). kind:
+//   'manifest_backfill' — an operator declared an undeclared capability; the
+//      committed manifest entry is stored (manifest_entry_json + hash), routed_to
+//      'building' (the resume re-runs the gate against it).
+//   'analysis_limitation_waiver' — an admin confirmed unprovable-but-real code;
+//      the inspected file/function + the analyzer's stated limitation are stored,
+//      routed_to 'pending-operator-verification' (NEVER 'succeeded'). A manifest
+//      hash is stored so a manifest change re-opens the waiver.
+export function recordIntegrationResolution(rec) {
+  const db = getMock2Db();
+  const payload = {
+    project_id: Number(rec.project_id), cycle_id: rec.cycle_id == null ? null : Number(rec.cycle_id),
+    kind: String(rec.kind), finding_class: rec.finding_class || null, finding_kind: rec.finding_kind || null,
+    subsystem: rec.subsystem || null, file: rec.file || null, inspected: rec.inspected || null,
+    analyzer_limitation: rec.analyzer_limitation || null,
+    manifest_id: rec.manifest_id || null, manifest_hash: rec.manifest_hash || null,
+    manifest_entry_json: rec.manifest_entry_json ? (typeof rec.manifest_entry_json === 'string' ? rec.manifest_entry_json : JSON.stringify(rec.manifest_entry_json)) : null,
+    reason: rec.reason || null, routed_to: rec.routed_to || null,
+    decided_by: Number(rec.decided_by), role: rec.role || 'operator',
+  };
+  const hash = contentHash(payload);
+  const info = db.prepare(`
+    INSERT INTO mock2_integration_resolutions
+      (project_id, cycle_id, kind, finding_class, finding_kind, subsystem, file, inspected,
+       analyzer_limitation, manifest_id, manifest_hash, manifest_entry_json, reason, routed_to,
+       decided_by, role, content_hash, created_at)
+    VALUES (@project_id, @cycle_id, @kind, @finding_class, @finding_kind, @subsystem, @file, @inspected,
+       @analyzer_limitation, @manifest_id, @manifest_hash, @manifest_entry_json, @reason, @routed_to,
+       @decided_by, @role, @content_hash, @created_at)
+  `).run({ ...payload, content_hash: hash, created_at: nowIso() });
+  return db.prepare(`SELECT * FROM mock2_integration_resolutions WHERE id = ?`).get(info.lastInsertRowid);
+}
+
+export function listIntegrationResolutions(projectId, { cycleId = null } = {}) {
+  const db = getMock2Db();
+  if (cycleId != null) {
+    return db.prepare(`SELECT * FROM mock2_integration_resolutions WHERE project_id = ? AND cycle_id = ? ORDER BY id`).all(Number(projectId), Number(cycleId));
+  }
+  return db.prepare(`SELECT * FROM mock2_integration_resolutions WHERE project_id = ? ORDER BY id`).all(Number(projectId));
+}
+
+// Active (non-superseded-by-manifest-change) analysis-limitation waivers for a
+// project — a waiver whose stored manifest_hash still matches the current entry
+// hash is live; a changed hash re-opens it (B.2 reverification trigger, enforced
+// by the caller via verification-logic.supersessionNeeded).
+export function listProvenanceWaivers(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_integration_resolutions WHERE project_id = ? AND kind = 'analysis_limitation_waiver' ORDER BY id`)
     .all(Number(projectId));
 }

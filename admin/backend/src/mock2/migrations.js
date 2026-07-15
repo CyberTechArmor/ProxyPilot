@@ -73,6 +73,9 @@
 //   521 Fw  — framework export/import: widen mock2_framework_versions.source
 //            CHECK to include 'import' (table rebuild — an imported framework
 //            version records honest provenance)
+//   522 Res — blocked-deviation resolution records (PATCH): mock2_integration_
+//            resolutions (append-only, hash-linked) for manifest backfills (B.1)
+//            and analysis-limitation waivers (B.2)
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -995,6 +998,48 @@ export const MOCK2_MIGRATIONS = [
           FROM mock2_framework_versions;
         DROP TABLE mock2_framework_versions;
         ALTER TABLE mock2_framework_versions_new RENAME TO mock2_framework_versions;
+      `);
+    },
+  },
+  {
+    // PATCH — the blocked-deviation resolution records (B.1 manifest backfill +
+    // B.2 analysis-limitation waiver). Both are APPEND-ONLY + content-hashed,
+    // hash-referencing the cycle they resolved, consistent with the migration-520
+    // integration records (never rewritten). Additive; a disabled host never runs it.
+    //   - mock2_integration_resolutions: one row per operator/admin resolution
+    //     action on a blocked-deviation finding — the manifest-backfill entry that
+    //     was committed, or the analysis-limitation waiver (with the inspected
+    //     file/function, the analyzer's stated limitation, and the manifest hash
+    //     that will re-open it). kind distinguishes them; routed_to records the
+    //     lifecycle target (building for backfill, pending-operator-verification
+    //     for a waiver — a waiver NEVER routes to succeeded).
+    version: 522,
+    name: 'mock2_integration_resolutions',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_integration_resolutions (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER,
+          kind TEXT NOT NULL,
+          finding_class TEXT,
+          finding_kind TEXT,
+          subsystem TEXT,
+          file TEXT,
+          inspected TEXT,
+          analyzer_limitation TEXT,
+          manifest_id TEXT,
+          manifest_hash TEXT,
+          manifest_entry_json TEXT,
+          reason TEXT,
+          routed_to TEXT,
+          decided_by INTEGER NOT NULL,
+          role TEXT NOT NULL DEFAULT 'operator',
+          content_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_int_resolutions_project ON mock2_integration_resolutions (project_id, kind);
+        CREATE INDEX idx_mock2_int_resolutions_cycle ON mock2_integration_resolutions (cycle_id);
       `);
     },
   },

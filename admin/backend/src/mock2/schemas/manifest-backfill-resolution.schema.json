@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/manifest-backfill-resolution",
+  "title": "Mock2 manifest-backfill resolution (mock2_integration_resolutions, kind=manifest_backfill)",
+  "description": "PATCH B.1. An append-only, content-hashed record that an operator declared an undeclared external capability by committing a manifest entry to state/integrations.json. The resume re-runs the gate against it (an `undeclared` finding becomes a real-provenance check), breaking the deadlock. Historical records are never rewritten.",
+  "type": "object",
+  "required": ["kind", "project_id", "finding_class", "manifest_id", "manifest_hash", "routed_to", "decided_by", "content_hash", "created_at"],
+  "additionalProperties": true,
+  "properties": {
+    "kind": { "const": "manifest_backfill" },
+    "project_id": { "type": "integer" },
+    "cycle_id": { "type": ["integer", "null"], "description": "the blocked cycle this resolution acted on" },
+    "finding_class": { "const": "undeclared" },
+    "finding_kind": { "const": "undeclared_integration" },
+    "subsystem": { "type": ["string", "null"] },
+    "manifest_id": { "type": "string", "description": "the id of the committed manifest entry" },
+    "manifest_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "content hash of the committed entry (a change re-opens verification)" },
+    "manifest_entry_json": { "type": ["string", "object"], "description": "the committed, schema-validated manifest entry" },
+    "routed_to": { "const": "building", "description": "the resume returns to building so the gate re-runs against the declaration" },
+    "reason": { "type": ["string", "null"] },
+    "decided_by": { "type": "integer" },
+    "role": { "enum": ["operator", "editor", "admin"] },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "created_at": { "type": "string" }
+  }
+}

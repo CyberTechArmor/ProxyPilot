@@ -110,6 +110,31 @@ export function manifestEntryHash(entry) {
   return createHash('sha256').update(JSON.stringify(canonicalEntry(entry))).digest('hex');
 }
 
+// validateManifestEntry(entry) — validate one operator-confirmed manifest entry
+// (PATCH B.1 backfill) against the SAME rules as a full manifest parse. Returns
+// { ok, entry } (canonicalized) or { ok:false, error }.
+export function validateManifestEntry(entry) {
+  const err = validateEntry(entry, 0);
+  if (err) return { ok: false, error: err };
+  return { ok: true, entry: canonicalEntry(entry) };
+}
+
+// appendManifestEntry(manifestText, entry) — return the new integrations.json text
+// with `entry` appended (PATCH B.1). Pure: takes the current file text (may be
+// empty/absent), validates the entry, and rejects a duplicate id. { ok, text } or
+// { ok:false, error }.
+export function appendManifestEntry(manifestText, entry) {
+  const v = validateManifestEntry(entry);
+  if (!v.ok) return { ok: false, error: v.error };
+  const parsed = parseIntegrationManifest(manifestText && String(manifestText).trim() ? manifestText : '{"schema_version":1,"entries":[]}');
+  if (!parsed.ok) return { ok: false, error: `current ${INTEGRATION_MANIFEST_PATH} is invalid: ${parsed.error}` };
+  if (parsed.manifest.entries.some((e) => e.id === v.entry.id)) {
+    return { ok: false, error: `a manifest entry with id "${v.entry.id}" already exists` };
+  }
+  const next = { schema_version: MANIFEST_SCHEMA_VERSION, entries: [...parsed.manifest.entries, v.entry] };
+  return { ok: true, text: `${JSON.stringify(next, null, 2)}\n`, entry: v.entry };
+}
+
 // ---- source model (tiny, dependency-free) ----
 
 function langOf(path) {

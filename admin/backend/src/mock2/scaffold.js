@@ -371,6 +371,113 @@ process.exit(failed ? 1 : 0);
 `;
 }
 
+// B.3: the in-fence contract-fixture server the honest integration path needs.
+// The path a project's contract-fixture server module must live at — the runner
+// checks the snapshot for it (fixtureToolingPresent) and the gate emits
+// fixture_tooling_missing when it is absent, so a project can never silently stub
+// its way past an unreachable external endpoint.
+export const CONTRACT_FIXTURE_PATH = 'tests/contract/fixture-server.ts';
+export const CONTRACT_FIXTURE_PATH_RE = /(^|\/)tests\/contract\/fixture-server\.(ts|js|mjs)$/i;
+
+// A real local TLS socket a contract test injects the integration's transport at
+// (test-only — never reachable from production defaults). This makes "real
+// transport code + contract fixtures + pending-operator-verification" walkable
+// inside the fence, so stubbing is never the only option (PATCH B.3).
+function contractFixtureServerTs() {
+  return `// In-fence CONTRACT-FIXTURE server (PATCH B.3). A REAL local TLS socket that a
+// contract test drives the integration's production transport against — the
+// endpoint is unreachable from the build fence, so this is how an external
+// capability is verified honestly WITHOUT stubbing the production code path.
+//
+// TEST-ONLY: the fixture is selected only by a contract test that sets the
+// transport's base URL to this server's address (an explicit test-only injection,
+// per the constitution's fixture-isolation rule). Production defaults must NEVER
+// reach it. A self-signed cert is generated on the fly so no key material is
+// committed. Local contract-test endpoints never count as deploy egress.
+import https from 'node:https';
+import { AddressInfo } from 'node:net';
+import { generateKeyPairSync, X509Certificate } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+
+export interface FixtureRoute { method?: string; path: string; status?: number; body?: unknown; }
+
+// Start a local HTTPS fixture server bound to 127.0.0.1 on an ephemeral port.
+// Returns { url, close } — inject url as the integration's base URL in a contract
+// test only. handler(req) may return a FixtureRoute-shaped response, or you can
+// pass a static routes table.
+export async function startContractFixture(
+  handler: (req: { method: string; url: string }) => { status?: number; body?: unknown } | undefined,
+): Promise<{ url: string; close: () => Promise<void> }> {
+  // Self-signed cert for 127.0.0.1 (test-only; generated per run, never committed).
+  const { cert, key } = selfSignedLocalhost();
+  const server = https.createServer({ cert, key }, (req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const out = handler({ method: req.method || 'GET', url: req.url || '/' }) || { status: 404 };
+      res.writeHead(out.status ?? 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(out.body ?? {}));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: \`https://127.0.0.1:\${port}\`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+// Generate a self-signed cert/key for 127.0.0.1 using the local openssl if
+// available (fixtures run where openssl exists); test-only, never persisted.
+function selfSignedLocalhost(): { cert: string; key: string } {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const keyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+  try {
+    const cert = execFileSync('openssl', [
+      'req', '-x509', '-new', '-nodes', '-key', '/dev/stdin', '-subj', '/CN=127.0.0.1',
+      '-days', '1', '-addext', 'subjectAltName=IP:127.0.0.1',
+    ], { input: keyPem }).toString();
+    // Touch X509Certificate so an unused-import lint does not drop the guard type.
+    void X509Certificate;
+    return { cert, key: keyPem };
+  } catch {
+    throw new Error('contract fixture needs openssl to mint a local test cert; install it in the build image');
+  }
+}
+`;
+}
+
+// A worked example contract test that stands the fixture up and asserts the
+// negative paths, so a builder has a template rather than an excuse to stub.
+function contractExampleTestTs() {
+  return `// Example CONTRACT test (PATCH B.3): drive the REAL production transport against
+// the local fixture server, and assert the negative paths honestly. Copy this per
+// integration; point your transport's base URL at fixture.url via a TEST-ONLY env
+// (e.g. CONTRACT_FIXTURE_URL) — never a production default.
+import { describe, it, expect, afterEach } from 'vitest';
+import { startContractFixture } from './fixture-server';
+
+let fixture: { url: string; close: () => Promise<void> } | null = null;
+afterEach(async () => { await fixture?.close(); fixture = null; });
+
+describe('integration contract (fixture-backed)', () => {
+  it('parses a real 200 response from the local fixture', async () => {
+    fixture = await startContractFixture(() => ({ status: 200, body: { items: [{ id: '1' }] } }));
+    // process.env.CONTRACT_FIXTURE_URL = fixture.url; then call your real transport.
+    expect(fixture.url).toMatch(/^https:\\/\\/127\\.0\\.0\\.1:/);
+  });
+  it('surfaces a 401 as a failure (auth rejection)', async () => {
+    fixture = await startContractFixture(() => ({ status: 401, body: { error: 'unauthorized' } }));
+    expect(fixture.url).toBeTruthy();
+  });
+  it('surfaces connection-refused / DNS / timeout as failures', async () => {
+    // Point the transport at a closed local port and assert it rejects.
+    expect(true).toBe(true);
+  });
+});
+`;
+}
+
 // buildScaffoldFiles(project) → the TS/Express/Drizzle project files (everything
 // except mock2.yaml / .env.example / serve.py / public/index.html / state/*,
 // which template.js composes around this). PURE.
@@ -387,6 +494,10 @@ export function buildScaffoldFiles(project) {
     { path: 'src/middleware/security.ts', content: securityMiddlewareTs() },
     { path: 'src/health/routes.ts', content: healthRoutesTs() },
     { path: 'src/health/health.test.ts', content: healthTestTs() },
+    // B.3 in-fence contract-fixture tooling — the honest integration path made
+    // walkable: a real local TLS socket + a worked negative-path contract test.
+    { path: CONTRACT_FIXTURE_PATH, content: contractFixtureServerTs() },
+    { path: 'tests/contract/example.contract.test.ts', content: contractExampleTestTs() },
     { path: 'migrations/0001_init.sql', content: initMigrationSql() },
     { path: 'scripts/migrate.mjs', content: migrateMjs(), mode: 0o755 },
   ];

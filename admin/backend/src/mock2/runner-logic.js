@@ -284,16 +284,26 @@ approved exception; implementing it is the required work for this build.
 ${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
 
 # How to work
-1. Read the relevant files to understand the current state.
-2. Make the smallest change that satisfies the requested task. Do not refactor,
-   add features, or touch anything the task did not ask for.
-3. Call run_gates. If any gate is red, fix the cause and run them again.
-4. When every gate is green, call finish with a one-line summary, the
+1. Write state/acceptance.json FIRST — what "done" means for THIS task: {task,
+   kind: bugfix|feature|chore, defect_tag + regression tests for a bug fix,
+   integration contract test when the change touches an external integration,
+   ui: the state/ui-checks.json ids that must pass against the deployed app}.
+   For a BUG FIX, reproduce first: write the defect-tagged regression test so
+   it FAILS against the current behavior, run run_gates to record the red, then
+   fix and drive it green — finish is rejected without that observed red.
+2. Read the relevant files to understand the current state.
+3. Make the smallest change that satisfies the requested task. Do not refactor,
+   add features, or touch anything the task did not ask for. When a gate fires
+   falsely, propose the gate/allowlist change as a reviewed act — NEVER reword
+   or restructure product code just to slip past a detector pattern.
+4. Call run_gates. If any gate is red, fix the cause and run them again.
+5. When every gate is green, call finish with a one-line summary, the
    human-runnable acceptance check(s) ("as <role>, do X, expect Y" — one per
    user-visible change), and your cross-layer assumptions split into verified
    (you READ the source this cycle — name the file) vs assumed. Do not call
    finish before the gates are green, and do not leave a permission or
-   role-name value in "assumed" — verify it.
+   role-name value in "assumed" — verify it. The summary must describe THIS
+   cycle's diff only — naming files this cycle did not change is rejected.
 
 # If you cannot honestly finish
 If you cannot complete the change — you are blocked, a dependency is missing, the
@@ -614,17 +624,26 @@ approved exception; implementing it is the required work for this build.
 ${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: '.claude/components' }).replace(/^# /m, '## ')}
 
 ## How to work
-1. Read the relevant files to understand the current state.
-2. Make the smallest change that satisfies the requested task. Do not refactor,
-   add features, or touch anything the task did not ask for.
-3. Keep the TypeScript source type-clean and keep \`mock2.yaml\`'s run contract
+1. Write \`state/acceptance.json\` FIRST — what "done" means for THIS task: {task,
+   kind: bugfix|feature|chore, defect_tag + regression tests for a bug fix,
+   integration contract test for external-integration changes, ui check ids}.
+   For a BUG FIX, reproduce first: write the defect-tagged regression test so it
+   fails against the current behavior; the harness must observe it red before a
+   green battery counts.
+2. Read the relevant files to understand the current state.
+3. Make the smallest change that satisfies the requested task. Do not refactor,
+   add features, or touch anything the task did not ask for. Never reword or
+   restructure product code just to slip past a gate's detector pattern —
+   propose the gate/allowlist change as a reviewed act instead.
+4. Keep the TypeScript source type-clean and keep \`mock2.yaml\`'s run contract
    accurate. ProxyPilot runs the pinned verification gate battery for you after you
    finish — you do not run or approve the gates yourself.
-4. When the change is complete, stop. Report, for the change record: a one-line
-   plain-language summary of what changed; a human-runnable acceptance check per
-   user-visible change ("as <role>, do X, expect Y"); and your cross-layer
-   assumptions split into verified (you read the source this cycle — name the
-   file) vs assumed. A permission or role-name value left "assumed" is a defect.
+5. When the change is complete, stop. Report, for the change record: a one-line
+   plain-language summary of what THIS run changed (never prior cycles' work); a
+   human-runnable acceptance check per user-visible change ("as <role>, do X,
+   expect Y"); and your cross-layer assumptions split into verified (you read
+   the source this cycle — name the file) vs assumed. A permission or role-name
+   value left "assumed" is a defect.
 
 ## If you cannot honestly finish
 If you are blocked — a missing dependency, a gate that can't pass for a reason

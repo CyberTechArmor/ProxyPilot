@@ -58,6 +58,11 @@
 //            `egress:`; each is a pending grant an admin approves before it is
 //            wired into the project fence) + rebuilds mock2_queue_items to add
 //            the `egress_grant` kind to the CHECK
+//   518 Acc — acceptance discipline (cycle-94 lesson): mock2_cycles gains
+//            acceptance_json — the machine-readable acceptance state (task
+//            kind, defect tag, red-test-observed, required live checks,
+//            demonstrated) so "gates green" and "acceptance demonstrated" are
+//            distinguishable states in the record — additive, one nullable column
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -828,6 +833,21 @@ export const MOCK2_MIGRATIONS = [
           UNIQUE(project_id, host, port, protocol)
         );
         CREATE INDEX idx_mock2_egress_grants_project ON mock2_egress_grants(project_id, status);
+      `);
+    },
+  },
+  {
+    // Acceptance discipline (cycle-94 lesson — a bug-fix cycle "succeeded" with
+    // green gates while the defect was never reproduced). acceptance_json stores
+    // the machine-readable acceptance state stamped at finish: {kind, defect_tag,
+    // red_test_observed, tests, ui_required, demonstrated}. NULLable — every
+    // pre-existing row reads as before; a disabled host never writes it.
+    // (Renumbered 517→518 in the merge: main's egress grants took 517.)
+    version: 518,
+    name: 'mock2_cycle_acceptance_state',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN acceptance_json TEXT;
       `);
     },
   },

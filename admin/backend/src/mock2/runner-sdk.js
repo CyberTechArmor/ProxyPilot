@@ -56,6 +56,10 @@ import {
 } from './runner.js';
 import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
 import { parseFilesJson, safeComponentPath } from './component-logic.js';
+import {
+  ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
+  acceptanceVerdict, acceptanceRecord,
+} from './acceptance-logic.js';
 
 const execFileP = promisify(execFile);
 const nowIso = () => new Date().toISOString();
@@ -143,6 +147,11 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   // No-progress circuit breaker threshold (harness safety) — same as the
   // hand-rolled runner; the SDK equivalent aborts the query() stream and halts.
   const noProgLimit = noProgressLimit(process.env);
+  // Acceptance discipline (cycle-94, parity with the hand-rolled runner): a
+  // bug-fix cycle must show the test gate RED at least once before green counts.
+  const taskKind = classifyTaskKind(cycle.instruction);
+  let redTestObserved = false;
+  let pendingFeedback = null; // acceptance feedback carried into the next round
 
   try {
     // 1) Materialize a local checkout of the container's working tree.
@@ -251,7 +260,8 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       }
       const prompt = round === 0
         ? `${buildRunnerTask(cycle.instruction)}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
-        : `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
+        : pendingFeedback || `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
+      pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });
 
       const options = {
@@ -322,10 +332,28 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       }
       battery = await runGateBattery(cycle.id, containerName, gateScripts);
       lastGateReports = battery;
+      redTestObserved = redTestObserved || batteryHasRedTestGate(battery);
       logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: !gateScripts.length || allGatesGreen(battery), round } });
       // A framework with zero gates is vacuously green (placeholder content, R8).
-      green = !gateScripts.length || allGatesGreen(battery);
-      if (green) break;
+      const gatesGreen = !gateScripts.length || allGatesGreen(battery);
+      if (gatesGreen) {
+        // Gates green is a PROXY (cycle-94): the cycle only counts as green when
+        // the acceptance spec exists and, for a bug-fix, red→green was
+        // demonstrated inside this cycle. Otherwise feed the reasons into the
+        // next round instead of certifying unverified work.
+        let accText = null;
+        try { accText = await readFile(join(checkoutDir, ACCEPTANCE_PATH), 'utf8'); } catch { accText = null; }
+        const accParsed = accText != null ? parseAcceptance(accText) : { ok: false, error: 'state/acceptance.json not found' };
+        const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved });
+        if (verdict.ok) {
+          const accState = acceptanceRecord({ spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved, uiRequired: accParsed.ok ? accParsed.spec.ui : [] });
+          try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch { /* best effort */ }
+          green = true;
+          break;
+        }
+        pendingFeedback = `The gates are green but ACCEPTANCE is not demonstrated:\n${verdict.reasons.map((r) => `- ${r}`).join('\n')}\nAddress these, then stop.`;
+        logEvent('note', { role: 'system', content: `Green gates without demonstrated acceptance — continuing: ${verdict.reasons.join(' | ')}`, meta: { round } });
+      }
     }
 
     // 4) Terminal: gates green → checkpoint + change record + deploy (IDENTICAL to

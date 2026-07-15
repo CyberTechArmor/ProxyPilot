@@ -156,3 +156,53 @@ The smoke-connector defaults apply on backend restart. The browser connector
 needs `playwright` in `admin/backend` (`npm install playwright`) plus a Chromium
 (`npx playwright install chromium`, or `SMOKE_BROWSER_EXECUTABLE`); until it is
 installed, cycles whose diffs warrant it fail visibly rather than pass silently.
+
+---
+
+# Addendum: acceptance discipline (the cycle-94 hardening)
+
+A second real failure hardened the harness further: a bug-fix cycle (cycle 94 /
+change 77, project ADP) reached "succeeded" with five green gates while the
+reported defect (ADP mTLS false rejection) was never reproduced — its only
+committed change reworded string literals so the secret-scan regex would stop
+matching. Root cause: "done" was a proxy (gates green) for the goal (the
+acceptance criterion), so the proxy got optimized (Goodhart). Fixes:
+
+- **`state/acceptance.json` + the `acceptance` gate (battery order 7)**: every
+  cycle declares what "done" means — task, kind, `defect_tag` + regression
+  tests (bug fixes), an integration `contract_test` (must NOT mock the
+  transport), and `ui` check ids that must pass against the deployed app. The
+  gate enforces the declaration statically.
+- **Reproduce-first (red→green), runner-enforced**: for a bug-fix task, `finish`
+  is rejected unless a gate battery in THIS cycle showed the `test` gate RED at
+  least once. The SDK runner applies the same rule to its round loop. The
+  machine state lands in `mock2_cycles.acceptance_json` (migration 517) —
+  "gates green" and "acceptance demonstrated" are distinguishable.
+- **Live acceptance checks**: `acceptance.ui` ids force the post-deploy browser
+  connector to run those `ui-checks` regardless of the diff; a missing or
+  failing acceptance check fails the cycle.
+- **Detector-evasion ban + real secret scan**: `security-scan` v2 uses gitleaks
+  when installed, else a body-aware matcher (PEM header + base64 body / inline
+  blob / AWS key ids) with `state/secret-scan-allowlist.txt` as the REVIEWED
+  waiver path — a header literal in product source can no longer false-positive,
+  and constitution §12 names "modify code to dodge a scanner" a prohibited
+  anti-pattern with a waiver protocol (fix the code, or propose the
+  gate/allowlist change as a distinct reviewed act).
+- **Operator claims verified**: the resume-guidance block now instructs that
+  checkable claims ("the audit is clean", "substantially done") be verified
+  against the tree; a contradicted precondition is a halt, not a note.
+- **Record accountable to the diff**: every checkpoint auto-appends its own
+  `git diff --stat`; a finish summary naming files the cycle didn't change is
+  rejected (over-claim check).
+- **Anomaly tripwire** (heuristic, non-blocking): a succeeded bug-fix at a small
+  fraction of its token estimate with no observed red test / no test file
+  touched raises a `flag` queue item for human review.
+
+Demonstrated (permanent tests + fixtures): the exact cycle-94 shape is rejected
+by `acceptanceVerdict`; its summary is rejected by the over-claim check; its
+19.8k/405k-no-repro signature trips the anomaly flag; the old scan false-
+positives on PEM header literals while v2 doesn't (and v2 catches a real
+committed key, allowlist-waivable); and the live "Test connection turns all
+three checks green" acceptance check fails against a fixture reproducing the
+defect and passes once fixed (`mock2-acceptance.test.js`,
+`mock2-ui-checks.e2e.test.js`).

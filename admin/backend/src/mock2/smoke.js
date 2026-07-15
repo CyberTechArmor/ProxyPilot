@@ -33,6 +33,7 @@ import {
   UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
 } from './ui-check-logic.js';
 import { runUiChecks, launchOptions } from './ui-checks.js';
+import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';
 
 // Run a script inside the container (same base64-streamed pivot as the runner).
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -115,23 +116,41 @@ async function readUiChecksFile(containerName, appDir) {
 // (visible-form count on the root page) when the project has no spec or no
 // check matches this diff. A spec that exists but does not parse FAILS the
 // connector — a broken test manifest must never read as a pass. Never throws.
-async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles }) {
-  // 1) Project interaction checks, when declared.
+async function driveBrowserConnector({ url, config, containerName, appDir, changedFiles, requiredIds = [] }) {
+  // 1) Project interaction checks, when declared. The run set is the UNION of
+  //    the diff-matched checks and the ACCEPTANCE-REQUIRED ids (cycle-94: the
+  //    task's live acceptance — e.g. "Test connection turns all three checks
+  //    green" — must be exercised regardless of which paths the diff touched).
+  //    A required id with no matching check is a hard failure, not a skip.
   if (containerName) {
     const file = await readUiChecksFile(containerName, appDir);
+    const required = Array.isArray(requiredIds) ? requiredIds.filter(Boolean) : [];
+    if (!file.exists && required.length) {
+      return { ok: false, detail: `acceptance requires live ui check(s) [${required.join(', ')}] but ${UI_CHECKS_PATH} does not exist` };
+    }
     if (file.exists) {
       const parsed = parseUiChecks(file.text);
       if (!parsed.ok) return { ok: false, detail: `ui-checks spec invalid: ${parsed.error}` };
+      const missing = required.filter((id) => !parsed.spec.checks.some((c) => c.id === id));
+      if (missing.length) {
+        return { ok: false, detail: `acceptance ui check(s) not defined in ${UI_CHECKS_PATH}: ${missing.join(', ')}` };
+      }
       const matched = checksForChangedFiles(parsed.spec, changedFiles);
-      if (matched.length) {
-        const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: matched });
+      const byId = new Map(matched.map((c) => [c.id, c]));
+      for (const id of required) {
+        if (!byId.has(id)) byId.set(id, parsed.spec.checks.find((c) => c.id === id));
+      }
+      const toRun = [...byId.values()];
+      if (toRun.length) {
+        const run = await runUiChecks({ baseUrl: url, spec: parsed.spec, checks: toRun });
         if (run.unavailable) return { ok: false, unavailable: true, detail: run.detail };
+        const acceptanceFailed = run.results.filter((r) => required.includes(r.id) && !r.ok);
         return {
           ok: run.ok,
           detail: run.ok
-            ? `${run.results.length} interaction check(s) passed`
-            : `interaction checks failed — ${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
-          uiChecks: run.results,
+            ? `${run.results.length} interaction check(s) passed${required.length ? ` (incl. ${required.length} acceptance check(s))` : ''}`
+            : `${acceptanceFailed.length ? 'ACCEPTANCE check failed — ' : 'interaction checks failed — '}${uiCheckFailSummary(run.results) || run.detail || 'see results'}`,
+          uiChecks: run.results.map((r) => ({ ...r, acceptance: required.includes(r.id) })),
           logLines: uiCheckLogLines(run.results),
         };
       }
@@ -249,10 +268,26 @@ export async function runSmokeGate({
   // 1) The cheap default layer — always runs, no connector.
   const http = await httpSmoke(containerName, webPort);
 
+  // 1b) The task's ACCEPTANCE spec may require live ui checks (cycle-94: the
+  //     stated acceptance must be exercised against the deployed app, not live
+  //     in prose). Required ids force the browser connector via a logged
+  //     escalation even when the diff alone wouldn't warrant it.
+  let acceptanceUi = [];
+  try {
+    const accRaw = await containerSh(containerName, `cat '${appDir}/${ACCEPTANCE_PATH}' 2>/dev/null`, { timeoutMs: 15000 });
+    if ((accRaw.stdout || '').trim()) {
+      const parsedAcc = parseAcceptance(accRaw.stdout);
+      if (parsedAcc.ok) acceptanceUi = parsedAcc.spec.ui;
+    }
+  } catch { /* best effort — finish-time enforcement owns spec validity */ }
+  const allEscalations = acceptanceUi.length
+    ? [...escalations, { connector: 'browser', reason: `acceptance requires live ui check(s): ${acceptanceUi.join(', ')}` }]
+    : escalations;
+
   // 2) Deterministic relevance decision (cheaper than starting a connector), plus
   //    any justified, logged escalation. A reason-less escalation is rejected.
   const auto = evaluateSmokeTriggers({ changedFiles, changeMeta, config });
-  const { decision, rejected } = applyEscalations(auto, escalations);
+  const { decision, rejected } = applyEscalations(auto, allEscalations);
   const resolved = resolveSmokeConnectors({ decision, config });
 
   // 3) Invoke ONLY the connectors resolved to 'ran' (fired AND enabled). Lazy: a
@@ -261,7 +296,7 @@ export async function runSmokeGate({
 
   if (resolved.browser.disposition === 'ran') {
     const target = url || `http://127.0.0.1:${webPort}/`;
-    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles })), reason: resolved.browser.reason };
+    report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };

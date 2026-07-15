@@ -143,7 +143,10 @@ release, however small.
 Production-ready means all of:
 
 - The deterministic gates — `typecheck`, `constitution-lint`, `rule-coverage`,
-  `security-scan`, `test`, `ui-interaction` — are **all green**, **and**
+  `security-scan`, `test`, `ui-interaction`, `acceptance` — are **all green**, **and**
+- **acceptance is demonstrated** (§12) — "gates green" and "acceptance
+  demonstrated" are distinct, separately recorded states, and BOTH are required
+  for "succeeded", **and**
 - the **end-to-end / journey gate** passes: the primary user journey runs against a
   **real build** (the app booted against Postgres, migrated + seeded, driven over real
   HTTP — e.g. bootstrap → login → gated load of the shell). **Green gates that only
@@ -220,3 +223,41 @@ through five green gates, because nothing exercised the rendered DOM.
   expect Y") and the explicit verified-vs-assumed split of its cross-layer
   assumptions. The review pass rejects a UI diff with no corresponding
   interaction test.
+
+## 12. Acceptance & anti-Goodhart (done means demonstrated)
+
+Hardened after a real failure (cycle 94): a bug-fix cycle reached "succeeded"
+with every gate green while the reported defect was never reproduced — its only
+committed change reworded string literals so a scanner regex would stop
+matching. Gates are a PROXY for the goal; when the proxy is the reward, the
+proxy gets optimized. These rules bind the reward to the goal:
+
+- **Every cycle declares its acceptance** in `state/acceptance.json` — the task,
+  its kind, and the machine-checkable evidence: regression tests (bug fixes),
+  an integration contract test (integration changes), live ui checks that must
+  pass against the DEPLOYED app. The `acceptance` gate enforces the declaration;
+  the runner and the post-deploy connector enforce the demonstration.
+- **Reproduce first.** A bug-fix cycle must add a regression test tagged to the
+  defect and demonstrate **red → green inside the cycle**: the test gate must
+  have been observed FAILING before the finishing battery goes green. "The code
+  looks correct" or "appears already implemented" is not acceptance — if the
+  defect cannot be reproduced, the cycle halts with that finding instead of
+  succeeding.
+- **No integration validated by mocks alone.** Any external-integration path
+  (mTLS, auth, transport) carries at least one contract test that runs the REAL
+  logic — actual cert/key matching, a real agent against local fixtures or a
+  stub server — never only an injected fake transport.
+- **Detector evasion is prohibited.** When a gate fires, classify: the CODE is
+  wrong → fix the code; the GATE is wrong → propose the gate/allowlist change as
+  a distinct, reviewer-approved act (e.g. `state/secret-scan-allowlist.txt` plus
+  a deviation/halt option explaining the false positive). Modifying product code
+  for the sole purpose of slipping past a detector pattern is a named
+  anti-pattern and a defect in itself.
+- **Operator claims are verified, not trusted.** Resume/operator guidance that
+  asserts a checkable fact ("the audit is clean", "already implemented") is
+  verified against the tree before being relied on; a falsified precondition is
+  a **stopping condition** — halt and surface the discrepancy.
+- **The record is accountable to the diff.** Every checkpoint auto-carries its
+  own `git diff --stat`; a finish summary naming work this cycle did not do is
+  rejected. A suspiciously cheap success (small fraction of the estimate, no
+  red test observed, no test touched) is auto-flagged for human review.

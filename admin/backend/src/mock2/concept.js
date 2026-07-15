@@ -50,6 +50,10 @@ import {
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
   renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH,
 } from './concept-logic.js';
+import {
+  projectHasDesign, buildDesignTemplate, mockupIdForImport, buildImportSeedMessage,
+  designImportRecord, parseDesignImport, buildInitialBuildInstruction,
+} from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
 
@@ -239,6 +243,116 @@ async function maybePushRemote(projectId) {
       if (!push.ok) console.warn(`[mock2] concept push_on_checkpoint failed for ${projectId}: ${push.error}`);
     }
   } catch (e) { console.warn('[mock2] concept push_on_checkpoint error:', e?.message); }
+}
+
+// ---- design template (export/import — the design/mockup only, never code) ----
+
+// Read a design artifact from wherever it currently lives: the live container's
+// working tree when the project is online (the source of truth mid-Concept),
+// falling back to the bare repo (every mockup write checkpoints there, and it
+// is the state that survives stopped/archived projects — ADR-006). relPath is
+// always an orchestrator constant, never caller input. base64-wrapped so the
+// content survives the string-capturing runner (same idiom as exportProjectZip).
+async function readDesignFile(project, relPath) {
+  if (project.lifecycle === 'active') {
+    const containerName = project.container_name || containerNameForProject(project.id);
+    const r = await readWorkingFile(containerName, relPath);
+    if (r.ok && r.content) return { ok: true, content: r.content };
+  }
+  if (project.repo_path) {
+    const safeRepo = String(project.repo_path).replace(/'/g, `'\\''`);
+    const r = await sh(`git --git-dir='${safeRepo}' show 'HEAD:${relPath}' 2>/dev/null | base64 -w0`, { timeoutMs: 30000 });
+    const b64 = (r.stdout || '').trim();
+    if (r.code === 0 && b64) {
+      try {
+        return { ok: true, content: Buffer.from(b64, 'base64').toString('utf8') };
+      } catch { /* fall through to the error below */ }
+    }
+  }
+  return { ok: false, error: `could not read ${relPath} from the container or the repository` };
+}
+
+// exportDesignTemplate — assemble the portable design-template document for a
+// project: the current/archived mockup HTML (state/mockups/current.html is kept
+// after approval precisely so the design stays reachable), the design tokens
+// when approval extracted them, and the design conversation + original prompt
+// from the chat. No application code is ever included. Works for active,
+// stopped, and archived projects (bare-repo fallback). { ok, doc, error }.
+export async function exportDesignTemplate(project) {
+  if (!projectHasDesign(project)) {
+    return { ok: false, error: 'This project has no design mockup to export yet — generate one in the design chat first.' };
+  }
+  const mock = await readDesignFile(project, MOCKUP_CURRENT);
+  if (!mock.ok || !isPlausibleMockup(mock.content)) {
+    return { ok: false, error: mock.error || 'the stored mockup is not readable HTML' };
+  }
+  let designTokens = null;
+  const tok = await readDesignFile(project, DESIGN_TOKENS_PATH);
+  if (tok.ok) {
+    try { designTokens = JSON.parse(tok.content); } catch { designTokens = null; }
+  }
+  const doc = buildDesignTemplate({
+    project, mockupHtml: mock.content, designTokens,
+    messages: listMessages(project.id), exportedAt: nowIso(),
+  });
+  return { ok: true, doc };
+}
+
+// importDesignTemplate — seed a project's Concept stage from a parsed template
+// (parseDesignTemplate ran in the route). Pure container writes + a checkpoint,
+// no model call and no quota spend: the imported HTML becomes the current
+// mockup (served at /_preview/ immediately), the template's original prompt +
+// the Builder's notes seed the chat transcript as a user turn (so iteration
+// keeps the intent), and the design_import record is stored so the initial
+// build after approval quotes the original brief. Editor-gated by the route;
+// takes the checkout lock like any other concept write (ADR-004).
+export async function importDesignTemplate({ project, template, notes = '', source = 'file', sourceName = null, user, actingAsAdmin = 0 }) {
+  const projectId = Number(project.id);
+  if (project.lifecycle !== 'active') {
+    return { ok: false, error: `The project must be online to import a design (it is "${project.lifecycle}"). Bring it online first.` };
+  }
+  if (project.design_approved_at) {
+    return { ok: false, error: 'The design is already approved — a design template can only be imported while the project is still in Concept.' };
+  }
+  const holder = { type: 'user', id: user.id };
+  const lock = acquireLock({ projectId, requester: holder, role: actingAsAdmin ? 'admin' : (user.role === 'admin' ? 'admin' : 'editor') });
+  if (!lock.ok) {
+    return { ok: false, error: lock.reason || 'This project is checked out by another writer. Request a takeover to continue.' };
+  }
+
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const mockupId = mockupIdForImport(Date.now());
+  const html = template.mockup_html;
+  const w1 = await writeWorkingFile(containerName, mockupFileName(mockupId), html);
+  const w2 = await writeWorkingFile(containerName, MOCKUP_CURRENT, html);
+  if (!w1.ok || !w2.ok) {
+    return { ok: false, error: `The imported mockup couldn't be saved: ${w1.error || w2.error}` };
+  }
+  touchLock(projectId, holder);
+  const sha = await checkpoint(containerName, `mock2: imported design template ${mockupId}`);
+  await maybePushRemote(projectId);
+
+  const record = designImportRecord({
+    template, notes, source, sourceName,
+    importedBy: user.id, importedAt: nowIso(), mockupId,
+  });
+  updateProject(projectId, {
+    current_mockup_id: mockupId,
+    design_import_json: JSON.stringify(record),
+    last_activity_at: nowIso(),
+  });
+
+  // Seed the conversation. The brief rides as a 'user' turn (it IS the
+  // Builder's intent, restated) so buildConceptTranscript replays it to the
+  // model on every later turn; the system note is the human-facing receipt.
+  getOrCreateChat(projectId);
+  const seed = buildImportSeedMessage({ originalPrompt: template.original_prompt, notes, sourceName: record.source_name });
+  if (seed) insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: seed });
+  insertMessage({
+    projectId, kind: 'system',
+    body: `Imported the design template${record.source_name ? ` from "${record.source_name}"` : ''} — the mockup is live at the preview${sha ? ` (checkpoint ${sha.slice(0, 8)})` : ''}. Iterate it in chat, or approve the design when it feels right.`,
+  });
+  return { ok: true, mockupId, record };
 }
 
 // ---- a concept chat turn ----
@@ -588,7 +702,15 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   //    can't start (no runner model, quota, …) we say so and leave Build unlocked
   //    for a manual press.
   try {
-    const res = await startBuild({ project: getProject(projectId), instruction: INITIAL_BUILD_INSTRUCTION, user, actingAsAdmin });
+    // An imported design carries its original brief + the Builder's import
+    // notes into the initial build (design-template-logic.js) — for a
+    // home-grown design this is INITIAL_BUILD_INSTRUCTION verbatim.
+    const fresh = getProject(projectId);
+    const instruction = buildInitialBuildInstruction({
+      base: INITIAL_BUILD_INSTRUCTION,
+      designImport: parseDesignImport(fresh?.design_import_json),
+    });
+    const res = await startBuild({ project: fresh, instruction, user, actingAsAdmin });
     if (res.status === 'started') {
       insertMessage({ projectId, kind: 'system', body: 'Starting the initial build from the approved design — auditing it against the rules and framework first.' });
     } else if (res.status !== 'refused') {

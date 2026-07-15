@@ -1285,6 +1285,14 @@ export const api = {
     request(`/mock2/projects/${id}/chat`, { method: 'POST', body: JSON.stringify(mode ? { message, mode } : { message }) }),
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
+  // Design template — the design/mockup only (mockup HTML + original brief +
+  // conversation + tokens), never code. Export returns the portable JSON doc
+  // (the caller blob-downloads it); import seeds THIS project's Concept stage
+  // from an uploaded doc ({ doc }) or another project ({ source_project_id }),
+  // with optional { notes } (changes/context carried into the initial build).
+  mock2ExportDesignTemplate: (id) => request(`/mock2/projects/${id}/design-template`),
+  mock2ImportDesignTemplate: (id, body) =>
+    request(`/mock2/projects/${id}/design-template/import`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- Mock2 M8: audit, rule questions, admin queue ----
   mock2ListQuestions: (id) => request(`/mock2/projects/${id}/questions`),

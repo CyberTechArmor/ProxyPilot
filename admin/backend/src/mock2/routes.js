@@ -90,7 +90,7 @@ import {
   listGitConnectors, getGitConnector, getGitConnectorByName, insertGitConnector,
   updateGitConnector, deleteGitConnector, testGitConnector, shapeGitConnector,
   getProjectRemote, setProjectRemote, clearProjectRemote, shapeProjectRemote, exportProjectZip,
-  exportProjectRepoBundle,
+  exportProjectRepoBundle, pushProjectRemote,
 } from './git-connectors.js';
 import { GIT_PROVIDERS, GIT_AUTH_KINDS, validateGitConnectorInput } from './git-logic.js';
 import {
@@ -134,13 +134,16 @@ import { runConsult } from './consult.js';
 import { consultAllowed } from './consult-logic.js';
 import {
   getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle, updateCycle,
+  countRunningCycles,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
-import { listChangeRecords, verifyProjectChain } from './change-records.js';
+import { listChangeRecords, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
+import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages } from './chats.js';
@@ -163,7 +166,7 @@ import {
 import { blockingSummary, backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { validateManifestEntry } from './integration-logic.js';
 import { waiverEligible } from './resolution-logic.js';
-import { execInContainer, writeFileInContainer } from './runner.js';
+import { execInContainer, writeFileInContainer, containerSh } from './runner.js';
 // ---- M8: audit, rule questions, admin queue (ADR-002/003) ----
 import {
   startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
@@ -2104,6 +2107,81 @@ export function createMock2Router() {
       };
     });
     res.json({ records, verification: verifyProjectChain(req.mock2Project.id) });
+  });
+
+  // ---- Restore (roll the project back to a checkpoint — append-only) ----
+
+  // Every checkpoint in the change history is a point in time. Restore makes a
+  // chosen one the CURRENT state — code and (when that checkpoint carries a
+  // snapshot) the in-container database — by appending a NEW checkpoint whose
+  // tree is the old one's. Nothing is rewritten: git history and the hash
+  // chain keep every later change, and the next build simply works off the
+  // restored HEAD. The default, with no restore, is the latest checkpoint
+  // ("what was currently built").
+  const restoreSchema = z.object({ seq: z.coerce.number().int().positive() });
+  router.post('/projects/:id/restore', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = restoreSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'seq (the checkpoint number to restore to) is required' });
+    const seq = parsed.data.seq;
+
+    const records = listChangeRecords(project.id);
+    const record = records.find((r) => Number(r.seq) === seq) || null;
+    const latestSeq = records.reduce((m, r) => Math.max(m, Number(r.seq || 0)), 0);
+    const check = validateRestoreRequest({
+      record, latestSeq,
+      runningCycles: countRunningCycles(project.id),
+      lifecycle: project.lifecycle,
+    });
+    if (!check.ok) return res.status(409).json({ error: check.error });
+    const lock = getLock(project.id);
+    if (lock && (lock.holder_cycle_id != null || lock.holder_user_id != null)) {
+      return res.status(409).json({ error: 'This project is checked out by another writer. Wait, or request a takeover.' });
+    }
+    const framework = getCurrentFrameworkVersion();
+    if (!framework) return res.status(409).json({ error: 'No framework version exists to pin the restore record to.' });
+
+    const containerName = containerNameForProject(project);
+    const script = buildRestoreScript({
+      commitSha: record.commit_sha,
+      message: `mock2: restore to checkpoint #${seq} (${String(record.commit_sha).slice(0, 8)})`,
+    });
+    const r = await containerSh(containerName, script, { timeoutMs: 300000 });
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`.trim();
+    if (r.code !== 0) {
+      return res.status(502).json({ error: `Restore failed inside the container: ${out.slice(-400)}` });
+    }
+    const { sha: restoredSha, db } = parseRestoreOutput(r.stdout);
+    if (!restoredSha) return res.status(502).json({ error: `Restore did not produce a commit: ${out.slice(-400)}` });
+
+    // The hash-chained record + its repo mirror (ADR-006) — the same discipline
+    // as every other checkpoint, so the restore itself is auditable history.
+    const summary = restoreSummary({ seq, commitSha: record.commit_sha, db });
+    let newRecord = null;
+    try {
+      newRecord = insertChangeRecord({
+        projectId: Number(project.id), cycleId: null, initiatedBy: req.user.id,
+        actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        frameworkVersion: framework.version, frameworkVersionId: framework.id,
+        commitSha: restoredSha, summary,
+      });
+    } catch (e) {
+      console.error('[mock2] restore change record insert failed:', e?.message);
+    }
+    if (newRecord) {
+      try {
+        await writeFileInContainer(containerName, `state/changes/${newRecord.seq}.json`, JSON.stringify(changeRecordMirror(newRecord), null, 2));
+        await containerSh(containerName, buildCheckpointScript({ message: `mock2: change record ${newRecord.seq}` }), { timeoutMs: 60000 });
+      } catch (e) { console.warn('[mock2] restore change-record mirror failed:', e?.message); }
+    }
+    try {
+      const remote = getProjectRemote(project.id);
+      if (remote?.push_on_checkpoint) await pushProjectRemote(project);
+    } catch (e) { console.warn('[mock2] restore push_on_checkpoint failed:', e?.message); }
+
+    logAudit(req.user.id, 'MOCK2_PROJECT_RESTORE', 'mock2_project', project.id,
+      { to_seq: seq, target_sha: record.commit_sha, restored_sha: restoredSha, db }, req.ip);
+    res.json({ restored: true, to_seq: seq, record_seq: newRecord?.seq ?? null, restored_sha: restoredSha, db });
   });
 
   // ---- Build log (downloadable transcript — "what actually happened") ----

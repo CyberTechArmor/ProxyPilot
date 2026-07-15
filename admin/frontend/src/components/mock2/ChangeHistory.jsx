@@ -18,6 +18,13 @@
 //
 // Records whose cycle predates the request umbrella (request_id null) render as
 // standalone single-checkpoint entries with their per-cycle log — legacy only.
+// (A restore's own record is also cycle-less and renders the same way.)
+//
+// RESTORE: every checkpoint is a point in time. With canRestore, an expanded
+// checkpoint offers "Restore to this checkpoint" — the server appends a NEW
+// checkpoint whose code + database snapshot match the chosen one, and the next
+// build works off it. The newest seq wears the "current" chip (the default,
+// with no restore, is what was last built).
 //
 // MOBILE_FIRST: single column, wrapping rows, 44px expand targets; clean at 360px.
 
@@ -27,6 +34,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import {
   ShieldCheck, XCircle, ChevronDown, ChevronRight, ChevronLeft, GitCommitHorizontal, Loader2, Coins, Download,
+  RotateCcw,
 } from 'lucide-react';
 import { fmtUsage } from './ProjectTimeCard';
 
@@ -92,7 +100,13 @@ function EventRow({ ev }) {
 // One checkpoint's inspection panel: gates, rules touched, and that cycle's own
 // step transcript. The request-level log download lives on the GROUP header —
 // only a legacy record (no request) still offers its per-cycle download here.
-function ChangeDetail({ projectId, record }) {
+// The "current" chip — the checkpoint the next build works off (always the
+// newest one, unless a restore has made an older tree current again).
+function CurrentChip() {
+  return <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 whitespace-nowrap">current</span>;
+}
+
+function ChangeDetail({ projectId, record, isCurrent = false, canRestore = false, restoring = false, onRestore = null }) {
   const [loading, setLoading] = useState(true);
   const [log, setLog] = useState(null); // { cycle, events, messages, ... }
 
@@ -132,6 +146,32 @@ function ChangeDetail({ projectId, record }) {
           </span>
         ) : null}
       </div>
+
+      {/* Restore — every checkpoint is a point in time; restoring appends a NEW
+          checkpoint whose code + database snapshot match this one, and the next
+          build works off it. The newest checkpoint IS the current state, so it
+          offers no button. */}
+      {canRestore ? (
+        isCurrent ? (
+          <p className="text-[11px] text-muted-foreground">
+            This checkpoint is the current state — the next build works off it.
+          </p>
+        ) : record.commit_sha ? (
+          <div className="space-y-1">
+            <Button
+              variant="outline" size="sm" className="min-h-[44px] w-full sm:w-auto"
+              disabled={restoring}
+              onClick={onRestore}
+            >
+              {restoring ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="mr-1 h-3.5 w-3.5" />}
+              Restore to this checkpoint
+            </Button>
+            <p className="text-[11px] text-muted-foreground">
+              Rolls code and database back to this point in time as a new checkpoint — nothing above is deleted.
+            </p>
+          </div>
+        ) : null
+      ) : null}
 
       {/* Rules touched */}
       {rules.length ? (
@@ -188,7 +228,7 @@ function ChangeDetail({ projectId, record }) {
 }
 
 // One checkpoint row inside a request group (expandable to ChangeDetail).
-function RecordRow({ projectId, record, open, onToggle }) {
+function RecordRow({ projectId, record, open, onToggle, isCurrent = false, canRestore = false, restoring = false, onRestore = null }) {
   return (
     <li className="text-xs border rounded-md">
       <button
@@ -200,7 +240,10 @@ function RecordRow({ projectId, record, open, onToggle }) {
         {open ? <ChevronDown className="h-3.5 w-3.5 mt-0.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 mt-0.5 shrink-0" />}
         <span className="min-w-0 flex-1">
           <span className="flex items-center justify-between gap-2">
-            <span className="font-mono">#{record.seq}</span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="font-mono">#{record.seq}</span>
+              {isCurrent ? <CurrentChip /> : null}
+            </span>
             <span className="font-mono text-muted-foreground truncate">{record.commit_sha ? record.commit_sha.slice(0, 8) : '—'}</span>
           </span>
           <span className="block truncate">{record.summary}</span>
@@ -209,7 +252,14 @@ function RecordRow({ projectId, record, open, onToggle }) {
           ) : null}
         </span>
       </button>
-      {open ? <div className="px-2 pb-2"><ChangeDetail projectId={projectId} record={record} /></div> : null}
+      {open ? (
+        <div className="px-2 pb-2">
+          <ChangeDetail
+            projectId={projectId} record={record}
+            isCurrent={isCurrent} canRestore={canRestore} restoring={restoring} onRestore={onRestore}
+          />
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -246,7 +296,7 @@ function sumGroupUsage(records) {
   return any ? { tokens, cents } : null;
 }
 
-export default function ChangeHistory({ projectId }) {
+export default function ChangeHistory({ projectId, canRestore = false }) {
   const { toast } = useToast();
   const [data, setData] = useState(null); // { records, verification } | null
   const [requestsById, setRequestsById] = useState(new Map());
@@ -325,6 +375,34 @@ export default function ChangeHistory({ projectId }) {
     }
   };
 
+  // Restore — roll the project back to a checkpoint. Append-only on the server
+  // (a NEW checkpoint restores that point's code + database snapshot), so the
+  // history list only ever grows; reload shows the new "current".
+  const [restoringSeq, setRestoringSeq] = useState(null);
+  const restore = async (record) => {
+    if (!window.confirm(
+      `Restore the project to checkpoint #${record.seq}?\n\n` +
+      'Code and database roll back to that point in time as a NEW checkpoint — nothing is deleted, ' +
+      'and the next build works off the restored state.',
+    )) return;
+    setRestoringSeq(record.seq);
+    try {
+      const r = await api.mock2RestoreCheckpoint(projectId, record.seq);
+      toast({
+        title: `Restored to checkpoint #${record.seq}`,
+        description: r.db === 'restored'
+          ? `Code and database now match that point in time (new checkpoint #${r.record_seq ?? '—'}).`
+          : `Code now matches that point in time (new checkpoint #${r.record_seq ?? '—'})${r.db === 'no_snapshot' ? ' — that checkpoint predates database snapshots, so the database was left as-is' : ''}.`,
+      });
+      setOpenGroup(null); setOpenRecord(null); setPage(0);
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Restore failed', description: err.message });
+    } finally {
+      setRestoringSeq(null);
+    }
+  };
+
   const toggleSelected = (key) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -338,6 +416,9 @@ export default function ChangeHistory({ projectId }) {
   if (!data) return <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading change history…</p>;
 
   const { records = [], verification } = data;
+  // The newest chain seq IS the current state — what the next build works off
+  // by default (a restore appends a new checkpoint, so this stays true).
+  const latestSeq = records.reduce((m, r) => Math.max(m, Number(r.seq || 0)), 0);
   const groups = groupByRequest(records, requestsById);
   const pageCount = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);
@@ -408,6 +489,7 @@ export default function ChangeHistory({ projectId }) {
                           {isRequest ? `Build request #${g.request.id}` : `Change #${head.seq}`}
                         </span>
                         <span className="flex items-center gap-2">
+                          {Number(head.seq) === latestSeq ? <CurrentChip /> : null}
                           {status ? <span className={`font-medium ${REQUEST_STATUS_TONE[status] || 'text-muted-foreground'}`}>{status}</span> : null}
                           <span className="font-mono text-muted-foreground">{head.commit_sha ? head.commit_sha.slice(0, 8) : '—'}</span>
                         </span>
@@ -443,6 +525,10 @@ export default function ChangeHistory({ projectId }) {
                           record={r}
                           open={openRecord === r.seq}
                           onToggle={() => setOpenRecord(openRecord === r.seq ? null : r.seq)}
+                          isCurrent={Number(r.seq) === latestSeq}
+                          canRestore={canRestore}
+                          restoring={restoringSeq === r.seq}
+                          onRestore={() => restore(r)}
                         />
                       ))}
                     </ul>

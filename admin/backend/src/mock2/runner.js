@@ -23,6 +23,7 @@ import { getMock2Db } from './db.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
+import { buildDbSnapshotScript } from './restore-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -1166,6 +1167,15 @@ export function formatGateReports(reports) {
 export async function checkpointAndRecord({ cycle, project, containerName, holder, gateReports, gateScripts, framework, summary }) {
   const projectId = Number(project.id);
   setJob(cycle.id, { phase: 'checkpoint', message: 'Checkpointing into the bare repo…' });
+
+  // 0) Snapshot the in-container Postgres (ADR-008) into the working clone so
+  //    THIS checkpoint commit carries the database at this point in time —
+  //    that's what makes a later restore bring the data back, not just the
+  //    code. Best-effort: the script always exits 0 (no Postgres → skip).
+  const dbSnap = await containerSh(containerName, buildDbSnapshotScript({ appDir: APP_DIR }), { timeoutMs: 120000 });
+  if (dbSnap.code !== 0) {
+    console.warn(`[mock2] db snapshot non-zero for cycle ${cycle.id}: ${(dbSnap.stdout || dbSnap.stderr || '').trim().slice(-300)}`);
+  }
 
   // 1) Commit + push into the bare repo (over the ADR-011 mount).
   const commitScript = buildCheckpointScript({ appDir: APP_DIR, message: summary || 'checkpoint: mock2 cycle' });

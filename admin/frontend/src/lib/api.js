@@ -1272,6 +1272,10 @@ export const api = {
   mock2RequestTakeover: (id) => request(`/mock2/projects/${id}/lock/takeover`, { method: 'POST' }),
   mock2ForceReleaseLock: (id) => request(`/mock2/projects/${id}/lock/force-release`, { method: 'POST' }),
   mock2GetChangeRecords: (id) => request(`/mock2/projects/${id}/change-records`),
+  // Roll the project back to checkpoint `seq` (append-only: a NEW checkpoint
+  // restores that point's code + database; the next build works off it).
+  mock2RestoreCheckpoint: (id, seq) =>
+    request(`/mock2/projects/${id}/restore`, { method: 'POST', body: JSON.stringify({ seq }) }),
   // Downloadable build transcript. THE log surface is per-REQUEST (one build
   // request = one merged, deduplicated log artifact, idempotent per content —
   // the same request always downloads as the same file); the per-cycle log

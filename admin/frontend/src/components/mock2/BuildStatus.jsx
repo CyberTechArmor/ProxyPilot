@@ -203,7 +203,7 @@ export default function BuildStatus({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {view === 'changes' ? <ChangeHistory projectId={projectId} /> : (
+        {view === 'changes' ? <ChangeHistory projectId={projectId} canRestore={!!canEdit && !!online && !active} /> : (
         <>{/* ---- Build panel ---- */}
         {/* Drift banner (ADR-003) — the framework moved since the last build. */}
         {driftAvailable ? (

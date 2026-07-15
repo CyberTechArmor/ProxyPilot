@@ -189,7 +189,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
-  const openImport = async () => {
+  // Open the import dialog, optionally landing on a specific source tab (the
+  // empty-state shortcut preselects the project picker).
+  const openImport = async (source = null) => {
+    if (source) setImportSource(source);
     setImportOpen(true);
     if (importProjects === null) {
       try {
@@ -335,7 +338,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               </Button>
             ) : null}
             {editable && !approved && online ? (
-              <Button variant="outline" size="sm" className="h-9" onClick={openImport} disabled={jobActive || busy}>
+              <Button variant="outline" size="sm" className="h-9" onClick={() => openImport()} disabled={jobActive || busy}>
                 <FileUp className="h-3.5 w-3.5 mr-1" />
                 Import design
               </Button>
@@ -370,13 +373,35 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
         >
           {shownMessages.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-6">
-              {archived
-                ? 'No design conversation was recorded.'
-                : online
-                  ? 'No messages yet. Tell the design partner what you want to build.'
-                  : 'Bring the project online to start the conversation.'}
-            </p>
+            <div className="text-center py-6 space-y-3">
+              <p className="text-sm text-muted-foreground">
+                {archived
+                  ? 'No design conversation was recorded.'
+                  : online
+                    ? 'No messages yet. Tell the design partner what you want to build.'
+                    : 'Bring the project online to start the conversation.'}
+              </p>
+              {/* Fresh-project shortcut: start from a design you already have —
+                  copy another project's mockup or upload a downloaded design
+                  template — instead of describing the app from scratch. */}
+              {editable && !approved && online && !hasMockup ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    Already have a mockup? Start from an existing design instead:
+                  </p>
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-2">
+                    <Button variant="outline" size="sm" className="h-11 sm:h-9 w-full sm:w-auto" onClick={() => openImport('project')} disabled={jobActive || busy}>
+                      <FolderGit2 className="h-3.5 w-3.5 mr-1" />
+                      Use another project's design
+                    </Button>
+                    <Button variant="outline" size="sm" className="h-11 sm:h-9 w-full sm:w-auto" onClick={() => openImport('file')} disabled={jobActive || busy}>
+                      <FileUp className="h-3.5 w-3.5 mr-1" />
+                      Upload a design template
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           ) : (
             shownMessages.map((m) => (
               m.kind === 'rule_question'

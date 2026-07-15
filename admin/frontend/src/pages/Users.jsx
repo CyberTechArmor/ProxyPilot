@@ -21,10 +21,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder } from 'lucide-react';
+import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder, Network, UserCog } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
-import PasskeyConfirmButton from '@/components/PasskeyConfirmButton';
+import LdapConnections from '@/components/LdapConnections';
 
 export default function UsersPage() {
   const { user: authUser } = useAuth();
@@ -37,8 +38,10 @@ export default function UsersPage() {
   const [newUserForm, setNewUserForm] = useState({ username: '', displayName: '', role: 'user' });
   const [deleteUserOpen, setDeleteUserOpen] = useState(false);
   const [userToDelete, setUserToDelete] = useState(null);
-  const [deleteTotpCode, setDeleteTotpCode] = useState('');
   const [deletingUser, setDeletingUser] = useState(false);
+  const [roleDialogUser, setRoleDialogUser] = useState(null);
+  const [roleToAssign, setRoleToAssign] = useState('user');
+  const [assigningRole, setAssigningRole] = useState(false);
   const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [userAccess, setUserAccess] = useState([]);
@@ -112,22 +115,21 @@ export default function UsersPage() {
     }
   };
 
-  const handleDeleteUser = async (passkeyAssertion = null) => {
+  // Deletion is protected by the sudo gate — if the grant is stale the
+  // global sudo modal prompts for password+TOTP (or passkey) and the
+  // request is replayed automatically. No per-dialog TOTP entry.
+  const handleDeleteUser = async () => {
     if (!userToDelete) return;
-    if (!passkeyAssertion && deleteTotpCode.length !== 6) return;
 
     setDeletingUser(true);
     try {
-      await api.deleteUser(userToDelete.id, passkeyAssertion
-        ? { passkeyAssertion }
-        : { totpCode: deleteTotpCode });
+      await api.deleteUser(userToDelete.id);
       toast({
         title: 'Success',
         description: 'User deleted successfully',
       });
       setDeleteUserOpen(false);
       setUserToDelete(null);
-      setDeleteTotpCode('');
       fetchUsers();
     } catch (error) {
       toast({
@@ -137,6 +139,33 @@ export default function UsersPage() {
       });
     } finally {
       setDeletingUser(false);
+    }
+  };
+
+  const openRoleDialog = (user) => {
+    setRoleDialogUser(user);
+    setRoleToAssign(user.role === 'pending' ? 'user' : user.role);
+  };
+
+  const handleAssignRole = async () => {
+    if (!roleDialogUser) return;
+    setAssigningRole(true);
+    try {
+      await api.updateUser(roleDialogUser.id, { role: roleToAssign });
+      toast({
+        title: 'Success',
+        description: `Role "${roleToAssign}" assigned to ${roleDialogUser.username}`,
+      });
+      setRoleDialogUser(null);
+      fetchUsers();
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: error.message,
+      });
+    } finally {
+      setAssigningRole(false);
     }
   };
 
@@ -262,6 +291,19 @@ export default function UsersPage() {
         </p>
       </div>
 
+      <Tabs defaultValue="users">
+        <TabsList className="grid w-full grid-cols-2 sm:inline-grid sm:w-auto">
+          <TabsTrigger value="users" className="min-h-[44px] sm:min-h-0 gap-2">
+            <Users className="h-4 w-4" />
+            Users
+          </TabsTrigger>
+          <TabsTrigger value="ldaps" className="min-h-[44px] sm:min-h-0 gap-2">
+            <Network className="h-4 w-4" />
+            LDAPS
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="users" className="mt-4">
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -307,10 +349,19 @@ export default function UsersPage() {
                         <span className="text-sm text-muted-foreground">({user.displayName})</span>
                       )}
                       <span className={`text-xs px-2 py-0.5 rounded-full ${
-                        user.role === 'admin' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300' : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                        user.role === 'admin'
+                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                          : user.role === 'pending'
+                            ? 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300'
+                            : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
                       }`}>
-                        {user.role}
+                        {user.role === 'pending' ? 'no role assigned' : user.role}
                       </span>
+                      {user.authSource === 'ldap' && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                          LDAP
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-muted-foreground">
                       <span className={user.totpEnabled ? 'text-green-500' : 'text-yellow-500'}>
@@ -323,7 +374,18 @@ export default function UsersPage() {
                     </div>
                   </div>
                   <div className="flex gap-1 shrink-0">
-                    {user.role !== 'admin' && (
+                    {user.role === 'pending' && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-11 sm:h-9"
+                        onClick={() => openRoleDialog(user)}
+                      >
+                        <UserCog className="h-4 w-4 mr-2" />
+                        Assign Role
+                      </Button>
+                    )}
+                    {user.role !== 'admin' && user.role !== 'pending' && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -334,15 +396,17 @@ export default function UsersPage() {
                         <Settings className="h-4 w-4" />
                       </Button>
                     )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
-                      onClick={() => handleResetPassword(user.id)}
-                      title="Reset password"
-                    >
-                      <RefreshCw className="h-4 w-4" />
-                    </Button>
+                    {user.authSource !== 'ldap' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-11 w-11 sm:h-9 sm:w-9 p-0"
+                        onClick={() => handleResetPassword(user.id)}
+                        title="Reset password"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -350,7 +414,6 @@ export default function UsersPage() {
                       onClick={() => {
                         setUserToDelete(user);
                         setDeleteUserOpen(true);
-                        setDeleteTotpCode('');
                       }}
                       disabled={user.id === authUser?.id}
                       title="Delete user"
@@ -364,6 +427,12 @@ export default function UsersPage() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="ldaps" className="mt-4">
+          <LdapConnections />
+        </TabsContent>
+      </Tabs>
 
       {/* Create User Dialog */}
       <Dialog open={createUserOpen} onOpenChange={setCreateUserOpen}>
@@ -460,7 +529,9 @@ export default function UsersPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete User Dialog */}
+      {/* Delete User Dialog. Sudo-gated server-side — if the sudo grant
+          is stale the global modal collects password+TOTP (or passkey)
+          and the delete is replayed, so no second factor is entered here. */}
       <Dialog open={deleteUserOpen} onOpenChange={setDeleteUserOpen}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
           <DialogHeader>
@@ -469,35 +540,55 @@ export default function UsersPage() {
               Are you sure you want to delete <strong>{userToDelete?.username}</strong>? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <PasskeyConfirmButton
-              hasPasskey={typeof window !== 'undefined' && localStorage.getItem('pp_has_passkey') === 'true'}
-              onAssertion={(assertion) => handleDeleteUser(assertion)}
-              disabled={deletingUser}
-              className="w-full"
-              label="Verify with passkey"
-            />
-            <div className="space-y-2">
-              <Label>Your TOTP Code</Label>
-              <Input
-                value={deleteTotpCode}
-                onChange={(e) => setDeleteTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="Enter your 6-digit code"
-                maxLength={6}
-              />
-            </div>
-          </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setDeleteUserOpen(false)}>Cancel</Button>
             <Button
               variant="destructive"
-              onClick={() => handleDeleteUser()}
-              disabled={deletingUser || deleteTotpCode.length !== 6}
+              onClick={handleDeleteUser}
+              disabled={deletingUser}
             >
               {deletingUser ? (
                 <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Deleting...</>
               ) : (
                 'Delete User'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Assign Role Dialog (pending LDAP-provisioned accounts) */}
+      <Dialog open={!!roleDialogUser} onOpenChange={(v) => { if (!v) setRoleDialogUser(null); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Assign Role</DialogTitle>
+            <DialogDescription>
+              <strong>{roleDialogUser?.username}</strong> signed in via LDAP and has no role yet.
+              Until one is assigned they can only see their profile page.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Role</Label>
+            <Select value={roleToAssign} onValueChange={setRoleToAssign}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="user">User (Limited Access)</SelectItem>
+                <SelectItem value="admin">Admin (Full Access)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Users require specific service access. Admins have full access to all services.
+            </p>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setRoleDialogUser(null)}>Cancel</Button>
+            <Button onClick={handleAssignRole} disabled={assigningRole}>
+              {assigningRole ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Assigning...</>
+              ) : (
+                'Assign Role'
               )}
             </Button>
           </DialogFooter>

@@ -637,6 +637,20 @@ export default function Profile() {
         </p>
       </div>
 
+      {/* Pending-role notice: LDAP sign-ins land here until an admin
+          assigns them a role. */}
+      {profile?.role === 'pending' && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+          <p className="font-medium text-amber-600 dark:text-amber-400">
+            Your account has no role assigned yet.
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            You signed in successfully, but an administrator has to assign you a role before
+            you can access anything beyond this page.
+          </p>
+        </div>
+      )}
+
       {/* Account Info */}
       <Card>
         <CardHeader>
@@ -650,6 +664,12 @@ export default function Profile() {
             <span className="text-muted-foreground">Username</span>
             <span className="font-medium">{profile?.username}</span>
           </div>
+          {profile?.authSource === 'ldap' && (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Sign-in</span>
+              <span className="font-medium">Directory (LDAP)</span>
+            </div>
+          )}
           <div className="flex justify-between">
             <span className="text-muted-foreground">TOTP Status</span>
             <span className={profile?.totpEnabled ? 'text-green-500' : 'text-yellow-500'}>
@@ -663,7 +683,22 @@ export default function Profile() {
         </CardContent>
       </Card>
 
-      {/* Change Password */}
+      {/* Change Password — local accounts only; LDAP passwords are
+          managed in the directory. */}
+      {profile?.authSource === 'ldap' ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Key className="h-5 w-5" />
+              Password
+            </CardTitle>
+            <CardDescription>
+              Your password is managed by your organization's directory (LDAP). Change it
+              there — it cannot be changed from ProxyPilot.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -741,6 +776,7 @@ export default function Profile() {
           </form>
         </CardContent>
       </Card>
+      )}
 
       {/* TOTP Setup */}
       <Card>

@@ -550,15 +550,36 @@ export const api = {
     body: JSON.stringify(data),
   }),
 
-  deleteUser: (id, totpOrPayload) => {
-    const body = typeof totpOrPayload === 'string'
-      ? { totpCode: totpOrPayload }
-      : (totpOrPayload || {});
-    return request(`/user/users/${id}`, {
-      method: 'DELETE',
-      body: JSON.stringify(body),
-    });
-  },
+  // Deletion is protected by the sudo gate server-side (the modal
+  // prompts automatically on a stale grant) — no per-request TOTP.
+  deleteUser: (id) => request(`/user/users/${id}`, {
+    method: 'DELETE',
+    body: '{}',
+  }),
+
+  // LDAPS directory connections (Admin only). bindPassword/caCert are
+  // write-only: omit them on update to keep the stored values.
+  getLdapConnections: () => request('/ldap/connections'),
+
+  createLdapConnection: (data) => request('/ldap/connections', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  updateLdapConnection: (id, data) => request(`/ldap/connections/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+
+  deleteLdapConnection: (id) => request(`/ldap/connections/${id}`, {
+    method: 'DELETE',
+    body: '{}',
+  }),
+
+  testLdapConnection: (id) => request(`/ldap/connections/${id}/test`, {
+    method: 'POST',
+    body: '{}',
+  }),
 
   getUserAccess: (id) => request(`/user/users/${id}/access`),
 

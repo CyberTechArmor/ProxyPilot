@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
@@ -24,7 +24,8 @@ import Notifications from '@/pages/Notifications';
 import Layout from '@/components/Layout';
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, user, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -36,6 +37,13 @@ function ProtectedRoute({ children }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  // Accounts without an assigned role (LDAP sign-ins awaiting an admin)
+  // only get their profile page. The backend enforces the same rule on
+  // every non-profile API surface.
+  if (user?.role === 'pending' && location.pathname !== '/profile') {
+    return <Navigate to="/profile" replace />;
   }
 
   return children;

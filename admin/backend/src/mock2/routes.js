@@ -20,16 +20,27 @@ import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 // membership is still enforced on top by requireMock2Role.
 const requireAdmin = requireAdminOrPermission('developer');
 
+import { logAudit, getDb } from '../db.js';
+
 // The acting user's id for attribution and NOT NULL actor columns. The JWT
-// payload's `id` is absent on some sessions/tokens; the session row's `user_id`
-// (written at login, always present) is the authoritative fallback. Without this,
-// an undefined id becomes NaN → SQLite stores NULL → a NOT NULL actor column
-// (mock2_integration_verifications.operator_id, mock2_integration_resolutions
-// .decided_by) rejects the insert with an opaque error. Never returns undefined.
+// payload's `id` is absent on some sessions/tokens; an undefined id becomes NaN →
+// SQLite stores NULL → a NOT NULL actor column (mock2_integration_verifications
+// .operator_id, mock2_integration_resolutions.decided_by) rejects the insert with
+// an opaque error. Resolve robustly through three sources, ending with a direct
+// lookup of the session row by the token's `jti` (always present post-auth), so
+// the id is found regardless of how req.user / req.session were populated.
 function mock2ActorId(req) {
-  return req?.user?.id ?? req?.session?.user_id ?? null;
+  const direct = req?.user?.id ?? req?.session?.user_id;
+  if (direct != null) return direct;
+  const jti = req?.user?.jti;
+  if (jti) {
+    try {
+      const row = getDb().prepare('SELECT user_id FROM sessions WHERE id = ?').get(jti);
+      if (row?.user_id != null) return row.user_id;
+    } catch { /* fall through to null — the caller returns a clean error */ }
+  }
+  return null;
 }
-import { logAudit } from '../db.js';
 import { postNotification, resolveNotification } from '../lib/notifications.js';
 import {
   listParentDomains,

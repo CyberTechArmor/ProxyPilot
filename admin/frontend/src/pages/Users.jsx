@@ -46,6 +46,7 @@ export default function UsersPage() {
   const [selectedUser, setSelectedUser] = useState(null);
   const [userAccess, setUserAccess] = useState([]);
   const [userFolderAccess, setUserFolderAccess] = useState([]);
+  const [userPermissions, setUserPermissions] = useState([]);
   const [loadingAccess, setLoadingAccess] = useState(false);
   const [savingAccess, setSavingAccess] = useState(false);
   const [copiedPassword, setCopiedPassword] = useState(false);
@@ -180,7 +181,9 @@ export default function UsersPage() {
       if (result.isAdmin) {
         setUserAccess([]);
         setUserFolderAccess([]);
+        setUserPermissions([]);
       } else {
+        setUserPermissions(result.permissions || []);
         // Service access
         const accessMap = {};
         result.access.forEach(a => {
@@ -223,7 +226,7 @@ export default function UsersPage() {
 
     setSavingAccess(true);
     try {
-      // Save both service access and folder access
+      // Save service access, folder access, and feature permissions
       await Promise.all([
         api.updateUserAccess(selectedUser.id, userAccess.map(a => ({
           serviceId: a.serviceId,
@@ -235,12 +238,14 @@ export default function UsersPage() {
           canView: f.canView,
           canWrite: f.canWrite,
         }))),
+        api.updateUserPermissions(selectedUser.id, userPermissions),
       ]);
       toast({
         title: 'Success',
-        description: 'User access updated',
+        description: 'User access updated — changes are live immediately',
       });
       setAccessDialogOpen(false);
+      fetchUsers();
     } catch (error) {
       toast({
         variant: 'destructive',
@@ -250,6 +255,12 @@ export default function UsersPage() {
     } finally {
       setSavingAccess(false);
     }
+  };
+
+  const togglePermission = (permission, granted) => {
+    setUserPermissions((prev) => granted
+      ? [...new Set([...prev, permission])]
+      : prev.filter((p) => p !== permission));
   };
 
   const copyPassword = (password) => {
@@ -362,6 +373,11 @@ export default function UsersPage() {
                           LDAP
                         </span>
                       )}
+                      {(user.permissions || []).map((perm) => (
+                        <span key={perm} className="text-xs px-2 py-0.5 rounded-full bg-cyan-100 text-cyan-700 dark:bg-cyan-900 dark:text-cyan-300">
+                          {perm}
+                        </span>
+                      ))}
                     </div>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-muted-foreground">
                       <span className={user.totpEnabled ? 'text-green-500' : 'text-yellow-500'}>
@@ -617,6 +633,40 @@ export default function UsersPage() {
             </div>
           ) : (
             <>
+              {/* Feature permissions — page-level grants on top of the
+                  per-service access below. Live immediately on save. */}
+              <div className="space-y-2 mb-4">
+                <p className="text-sm font-medium">Feature Permissions</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="flex items-center justify-between gap-3 p-3 border rounded-lg">
+                    <div className="min-w-0">
+                      <p className="font-medium text-sm">Proxy</p>
+                      <p className="text-xs text-muted-foreground">
+                        Containers &amp; routing (Incus) plus their granted services
+                      </p>
+                    </div>
+                    <Switch
+                      id="perm-proxy"
+                      checked={userPermissions.includes('proxy')}
+                      onCheckedChange={(checked) => togglePermission('proxy', checked)}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 p-3 border rounded-lg">
+                    <div className="min-w-0">
+                      <p className="font-medium text-sm">Developer</p>
+                      <p className="text-xs text-muted-foreground">
+                        Projects page (dev/build module)
+                      </p>
+                    </div>
+                    <Switch
+                      id="perm-developer"
+                      checked={userPermissions.includes('developer')}
+                      onCheckedChange={(checked) => togglePermission('developer', checked)}
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* Tab Navigation */}
               <div className="flex gap-1 p-1 bg-muted rounded-lg mb-4">
                 <button

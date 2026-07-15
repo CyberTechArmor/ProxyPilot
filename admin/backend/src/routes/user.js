@@ -4,7 +4,7 @@ import * as OTPAuth from 'otpauth';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireAdmin, requireSudo, getUserPermissions } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { checkSuperadminProtection } from '../lib/superadmin.js';
 import {
@@ -206,6 +206,7 @@ userRouter.get('/profile', (req, res) => {
         role: user.role || 'admin',
         authSource: user.auth_source || 'local',
         isSuperadmin: user.is_superadmin === 1,
+        permissions: getUserPermissions(user.id),
         totpEnabled: !!user.totp_enabled,
         hasPasskey: userHasPasskey(user.id),
         createdAt: user.created_at,
@@ -684,6 +685,13 @@ userRouter.get('/users', requireAdmin, (req, res) => {
       ORDER BY created_at DESC
     `).all();
 
+    // One pass over user_permissions instead of a per-user query.
+    const permsByUser = new Map();
+    for (const row of db.prepare('SELECT user_id, permission FROM user_permissions ORDER BY permission').all()) {
+      if (!permsByUser.has(row.user_id)) permsByUser.set(row.user_id, []);
+      permsByUser.get(row.user_id).push(row.permission);
+    }
+
     res.json({
       users: users.map(u => ({
         id: u.id,
@@ -694,6 +702,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
         isSuperadmin: u.is_superadmin === 1,
         totpEnabled: !!u.totp_enabled,
         passwordChangeRequired: !!u.password_change_required,
+        permissions: permsByUser.get(u.id) || [],
         createdAt: u.created_at,
         updatedAt: u.updated_at,
       })),
@@ -935,6 +944,7 @@ userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
         isAdmin: true,
         access: [],
         folderAccess: [],
+        permissions: [],
         message: 'Admin users have full access to all services and folders',
       });
     }
@@ -956,6 +966,7 @@ userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
 
     res.json({
       isAdmin: false,
+      permissions: getUserPermissions(id),
       access: access.map(a => ({
         serviceId: a.service_id,
         serviceName: a.service_name,
@@ -1029,6 +1040,54 @@ userRouter.put('/users/:id/access', requireAdmin, (req, res) => {
     }
     console.error('Error updating user access:', error);
     res.status(500).json({ error: 'Failed to update user access' });
+  }
+});
+
+// Update a user's feature permissions ('proxy' = containers/routing,
+// 'developer' = Projects module). Enforcement reads the DB on every
+// request, so a change here is live immediately for the target user.
+const updatePermissionsSchema = z.object({
+  permissions: z.array(z.enum(['proxy', 'developer'])).max(10),
+});
+
+userRouter.put('/users/:id/permissions', requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { permissions } = updatePermissionsSchema.parse(req.body);
+    const db = getDb();
+
+    const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.role === 'admin') {
+      return res.status(400).json({ error: 'Admins hold every permission implicitly' });
+    }
+    if (user.role === 'pending') {
+      return res.status(400).json({ error: 'Assign the user a role before granting permissions' });
+    }
+
+    const unique = [...new Set(permissions)];
+    const updatePermissions = db.transaction(() => {
+      db.prepare('DELETE FROM user_permissions WHERE user_id = ?').run(id);
+      const insert = db.prepare(
+        'INSERT INTO user_permissions (user_id, permission, granted_by) VALUES (?, ?, ?)'
+      );
+      for (const permission of unique) {
+        insert.run(id, permission, req.user.id);
+      }
+    });
+    updatePermissions();
+
+    logAudit(req.user.id, 'USER_PERMISSIONS_UPDATED', 'user', id, { permissions: unique }, req.ip);
+
+    res.json({ success: true, permissions: unique });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error updating user permissions:', error);
+    res.status(500).json({ error: 'Failed to update user permissions' });
   }
 });
 

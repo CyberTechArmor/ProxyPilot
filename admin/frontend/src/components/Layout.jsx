@@ -152,6 +152,11 @@ export default function Layout() {
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
+  // Feature permissions for the 'user' role (refreshed by the
+  // AuthContext 30s re-verify, so grants show up without re-login).
+  const permissions = user?.permissions ?? storedUser?.permissions ?? [];
+  const canDevelop = isAdmin || permissions.includes('developer');
+
   // Mock2 nav visibility. The entry appears only when the backend reports
   // the module enabled (GET /api/mock2/status → 200). On a disabled or
   // production-pinned host the route 404s (ADR-001) and the entry stays
@@ -202,20 +207,21 @@ export default function Layout() {
     return () => { cancelled = true; clearInterval(id); };
   }, [isAdmin]);
 
-  // Probe Mock2 presence once on mount (admins only — the route is
-  // admin-gated). A 404 (disabled/pinned host) leaves the entry hidden.
+  // Probe Mock2 presence (admins + developer-permission users — the
+  // route accepts both). A 404 (disabled/pinned host) leaves the entry
+  // hidden.
   useEffect(() => {
-    if (!isAdmin) { setMock2Enabled(false); return undefined; }
+    if (!canDevelop) { setMock2Enabled(false); return undefined; }
     let cancelled = false;
     api.mock2Status()
       .then(() => { if (!cancelled) setMock2Enabled(true); })
       .catch(() => { if (!cancelled) setMock2Enabled(false); });
     return () => { cancelled = true; };
-  }, [isAdmin]);
+  }, [canDevelop]);
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
-    { name: 'Incus', href: '/incus', icon: Server, adminOnly: true },
+    { name: 'Incus', href: '/incus', icon: Server, adminOnly: true, permission: 'proxy' },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
     { name: 'Firewall', href: '/firewall', icon: Shield, adminOnly: true },
@@ -226,15 +232,19 @@ export default function Layout() {
     { name: 'Notifications', href: '/notifications', icon: Bell, adminOnly: true },
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
-    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true }] : []),
+    ...(mock2Enabled ? [{ name: 'Projects', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
 
   // Accounts still waiting for a role (LDAP sign-ins) only see Profile.
+  // Admin-only entries also open up to users holding the entry's
+  // feature permission (Incus → 'proxy', Projects → 'developer').
   const isPending = (user?.role ?? storedUser?.role) === 'pending';
   const filteredNavigation = navigation.filter(item =>
-    isPending ? item.href === '/profile' : (!item.adminOnly || isAdmin)
+    isPending
+      ? item.href === '/profile'
+      : (!item.adminOnly || isAdmin || (item.permission && permissions.includes(item.permission)))
   );
 
   return (

@@ -231,6 +231,43 @@ export function blockPendingRole(req, res, next) {
   next();
 }
 
+// Feature permissions for the 'user' role ('proxy', 'developer').
+// Admins hold every permission implicitly.
+export function getUserPermissions(userId) {
+  try {
+    return getDb()
+      .prepare('SELECT permission FROM user_permissions WHERE user_id = ? ORDER BY permission')
+      .all(userId)
+      .map((r) => r.permission);
+  } catch {
+    return [];
+  }
+}
+
+// Admin OR a specific feature permission. Role and permission are both
+// read from the DB (not the JWT claim) so a grant/revoke from the
+// access dialog takes effect on the user's next request — no re-login.
+export function requireAdminOrPermission(permission) {
+  return function adminOrPermissionGuard(req, res, next) {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    let role = req.user.role;
+    try {
+      const row = getDb().prepare('SELECT role FROM users WHERE id = ?').get(req.user.id);
+      if (row) role = row.role || role;
+    } catch { /* fall back to the JWT claim */ }
+    if (role === 'admin') return next();
+    if (role === 'user' && getUserPermissions(req.user.id).includes(permission)) {
+      return next();
+    }
+    return res.status(403).json({
+      error: `This area requires admin access or the '${permission}' permission`,
+      permission_required: permission,
+    });
+  };
+}
+
 // Middleware to require admin role
 export function requireAdmin(req, res, next) {
   if (!req.user) {

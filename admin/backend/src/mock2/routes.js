@@ -11,7 +11,14 @@
 import dns from 'dns/promises';
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
+
+// Module-wide gate: full admins OR regular users holding the
+// 'developer' feature permission (assigned from the Users page access
+// dialog, effective in realtime). Shadowing the old requireAdmin name
+// keeps every route registration below unchanged; per-project
+// membership is still enforced on top by requireMock2Role.
+const requireAdmin = requireAdminOrPermission('developer');
 import { logAudit } from '../db.js';
 import { postNotification, resolveNotification } from '../lib/notifications.js';
 import {

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { getDb, logAudit } from '../db.js';
-import { generateToken, authenticateToken } from '../middleware/auth.js';
+import { generateToken, authenticateToken, getUserPermissions } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { ldapAuthenticate, hasEnabledLdapConnections } from '../lib/ldap.js';
 import {
@@ -460,6 +460,7 @@ authRouter.post('/login', async (req, res) => {
             displayName: user.display_name,
             role: user.role || 'admin',
             authSource: user.auth_source || 'local',
+            permissions: getUserPermissions(user.id),
             totpEnabled: true,
             passwordChangeRequired: !!user.password_change_required,
           },
@@ -598,6 +599,7 @@ authRouter.post('/login', async (req, res) => {
         displayName: user.display_name,
         role: user.role || 'admin',
         authSource: user.auth_source || 'local',
+        permissions: getUserPermissions(user.id),
         totpEnabled: true, // Always true after successful login
         passwordChangeRequired: !!user.password_change_required,
       },
@@ -702,6 +704,7 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
       displayName: user.display_name,
       role: user.role || 'admin',
       authSource: user.auth_source || 'local',
+      permissions: getUserPermissions(user.id),
       totpEnabled: !!user.totp_enabled,
       passwordChangeRequired: !!user.password_change_required,
     },
@@ -1143,6 +1146,7 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
         displayName: user.display_name,
         role: user.role || 'admin',
         authSource: user.auth_source || 'local',
+        permissions: getUserPermissions(user.id),
         totpEnabled: !!user.totp_enabled,
         passwordChangeRequired: !!user.password_change_required,
       },

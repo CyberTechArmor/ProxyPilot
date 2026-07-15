@@ -350,14 +350,29 @@ export default function BuildStatus({
                   />
                 </div>
 
-                {/* Blocked on the integration gate: offer the one-click manifest
-                    repair (migrates wrong-schema entries, archives the original,
-                    resumes). Safe when the manifest is fine — it just says so. */}
-                {canEdit && online && integrationBlocked ? (
-                  <Button variant="outline" size="sm" className="h-9" disabled={repairing || resuming} onClick={repairManifest}>
-                    {repairing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wrench className="h-4 w-4 mr-1" />}
-                    Repair integration manifest
-                  </Button>
+                {/* Direct actions on the blocker — no option pick required:
+                    the one-click manifest repair (integration blocks; migrates
+                    wrong-schema entries, archives the original, resumes — safe
+                    when the manifest is fine, it just says so), and Abandon
+                    (closes the cycle as abandoned; any typed context above is
+                    recorded with it; still resumable later via Continue). */}
+                {canEdit ? (
+                  <div className="flex flex-wrap gap-2">
+                    {online && integrationBlocked ? (
+                      <Button variant="outline" size="sm" className="h-9" disabled={repairing || resuming} onClick={repairManifest}>
+                        {repairing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wrench className="h-4 w-4 mr-1" />}
+                        Repair integration manifest
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost" size="sm" className="h-9 text-red-500"
+                      disabled={resuming || repairing}
+                      title="Close this build as abandoned — no option pick needed. You can continue it later."
+                      onClick={() => doResume({ abandon: true, ...(resumeMsg.trim() ? { message: resumeMsg.trim() } : {}) })}
+                    >
+                      <Ban className="h-4 w-4 mr-1" /> Abandon build
+                    </Button>
+                  </div>
                 ) : null}
 
                 {/* The gate's FULL finding list — what the count actually is.

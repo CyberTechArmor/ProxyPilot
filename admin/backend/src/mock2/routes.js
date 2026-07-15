@@ -422,6 +422,11 @@ const queueStatusSchema = z.object({
 const resumeSchema = z.object({
   message: z.string().trim().max(8000).optional(),
   option: z.string().trim().max(200).optional(),
+  // Direct abandon: close the blocked cycle as abandoned WITHOUT picking one of
+  // the model's proposed options first (the blocked card's Abandon button).
+  // Same terminal as choosing an abandon halt option; still resumable later
+  // via Continue build.
+  abandon: z.boolean().optional(),
   // Enforced rule waivers (ADMIN only — checked in the handler): applied at the
   // real enforcement layer (acceptanceVerdict) of the resumed cycle and stamped
   // into its acceptance record; never a narrated claim.
@@ -1895,15 +1900,18 @@ export function createMock2Router() {
       return res.status(403).json({ error: 'Waiving a finish-gate rule requires an administrator.' });
     }
 
-    // Abandon closes the cycle as abandoned — no resume (task Part 3).
-    if (chosen && chosen.kind === 'abandon') {
+    // Abandon closes the cycle as abandoned — no resume (task Part 3). Reached
+    // by choosing an abandon halt option OR directly via { abandon: true } (the
+    // blocked card's Abandon button — no option pick required).
+    const wantAbandon = parsedResume.data.abandon === true;
+    if (wantAbandon || (chosen && chosen.kind === 'abandon')) {
       finishCycle(cycle.id, { status: 'abandoned', error: `abandoned by operator${message ? `: ${message}` : ''}` });
       // Cost-truth: abandoning closes the whole umbrella request.
       try { if (cycle.request_id) closeRequest(cycle.request_id, 'abandoned'); } catch { /* best effort */ }
       for (const key of [`mock2-blocked:${cycle.id}`, `mock2-retries:${cycle.id}`, `mock2-requeue:${cycle.id}`]) {
         try { resolveQueueItem(key, { resolution: 'abandoned by operator', resolvedBy: req.user.id }); } catch { /* best effort */ }
       }
-      logAudit(req.user.id, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { ...auditBase, context: message || null }, req.ip);
+      logAudit(req.user.id, 'MOCK2_CYCLE_ABANDON', 'mock2_cycle', cycle.id, { ...auditBase, context: message || null, direct: wantAbandon }, req.ip);
       return res.json({ cycle: publicCycleShape(getCycle(cycle.id)), abandoned: true });
     }
 

@@ -22,7 +22,7 @@ import { Label } from '@/components/ui/label';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
-import { ArrowLeft, Loader2, BookText, GitCommitHorizontal, Undo2, AlertTriangle, Eye } from 'lucide-react';
+import { ArrowLeft, Loader2, BookText, GitCommitHorizontal, Undo2, AlertTriangle, Eye, Download, Upload } from 'lucide-react';
 
 const FIELDS = [
   { key: 'constitution_md', label: 'Constitution (markdown)', rows: 8 },
@@ -101,6 +101,43 @@ export default function FrameworkVersions() {
     catch (err) { toast({ variant: 'destructive', title: 'Load failed', description: err.message }); }
   };
 
+  // ---- export / import (download the harness) ----
+  const exportVersion = async (v) => {
+    setBusyId(v.id);
+    try {
+      const doc = await api.mock2ExportFramework(v.id);
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `proxypilot-framework-v${v.version}.json`;
+      a.click(); URL.revokeObjectURL(url);
+    } catch (err) { toast({ variant: 'destructive', title: 'Export failed', description: err.message }); }
+    finally { setBusyId(null); }
+  };
+
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importName, setImportName] = useState('');
+  const [importChangelog, setImportChangelog] = useState('');
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try { setImportText(await file.text()); setImportName(file.name); }
+    catch { toast({ variant: 'destructive', title: 'Could not read the file' }); }
+  };
+  const runImport = async () => {
+    setSaving(true);
+    try {
+      let doc;
+      try { doc = JSON.parse(importText); } catch { throw new Error('Not valid JSON — choose a downloaded proxypilot-framework-*.json file'); }
+      const res = await api.mock2ImportFramework(doc, importChangelog || undefined);
+      setImportOpen(false); setImportText(''); setImportName(''); setImportChangelog('');
+      await load();
+      toast({ title: `Imported → v${res.version.version}`, description: 'Published as a new framework version.' });
+    } catch (err) { toast({ variant: 'destructive', title: 'Import failed', description: err.message }); }
+    finally { setSaving(false); }
+  };
+
   if (gate === 'checking') return <div className="flex items-center justify-center p-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
   if (gate === 'disabled' || !isAdmin) return <Navigate to="/" replace />;
 
@@ -123,7 +160,8 @@ export default function FrameworkVersions() {
         </Card>
       )}
 
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="outline" onClick={() => setImportOpen(true)} className="min-h-[44px]"><Upload className="mr-1 h-4 w-4" /> Import framework</Button>
         <Button onClick={openEditor} className="min-h-[44px]"><GitCommitHorizontal className="mr-1 h-4 w-4" /> {current ? 'Edit → publish new version' : 'Publish version 1'}</Button>
       </div>
 
@@ -140,6 +178,9 @@ export default function FrameworkVersions() {
             {v.reverted_from_version && <p className="text-xs text-muted-foreground">reverted from v{v.reverted_from_version}</p>}
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => viewVersion(v.id)}><Eye className="mr-1 h-4 w-4" /> View</Button>
+              <Button variant="outline" size="sm" className="min-h-[44px]" disabled={busyId === v.id} onClick={() => exportVersion(v)}>
+                {busyId === v.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Download className="mr-1 h-4 w-4" /> Export</>}
+              </Button>
               {!(current && v.id === current.id) && (
                 <Button variant="outline" size="sm" className="min-h-[44px]" disabled={busyId === v.id} onClick={() => revert(v.id)}>
                   {busyId === v.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Undo2 className="mr-1 h-4 w-4" /> Revert to this</>}
@@ -218,6 +259,53 @@ export default function FrameworkVersions() {
             ))}
           </div>
           <DialogFooter><Button variant="ghost" onClick={() => setViewing(null)}>Close</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- import dialog (download the harness → bring it into this install) ---- */}
+      <Dialog open={importOpen} onOpenChange={(o) => { if (!saving) setImportOpen(o); }}>
+        <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Import framework</DialogTitle>
+            <DialogDescription>
+              Import a downloaded <code>proxypilot-framework-*.json</code> document as a new version.
+              The bundle is held to the same content bar as a publish (gates and skills must parse); it
+              is published as the next monotonic version and does not overwrite anything.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="fw-import-file">Framework document</Label>
+              <input
+                id="fw-import-file" type="file" accept="application/json,.json" onChange={onImportFile}
+                className="block w-full text-sm text-muted-foreground file:mr-3 file:h-9 file:rounded-md file:border file:bg-transparent file:px-3 file:text-sm file:font-medium file:text-foreground"
+              />
+              <p className="mt-1 text-xs text-muted-foreground break-all">
+                {importName ? `Selected: ${importName}` : 'Or paste the document JSON below.'}
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="fw-import-text">Document JSON</Label>
+              <textarea
+                id="fw-import-text" rows={6} value={importText} onChange={(e) => setImportText(e.target.value)}
+                className="w-full rounded-md border bg-background p-2 font-mono text-xs"
+                placeholder='{ "format": "proxypilot-framework@1", ... }'
+              />
+            </div>
+            <div>
+              <Label htmlFor="fw-import-cl">Changelog <span className="text-muted-foreground">(optional)</span></Label>
+              <input
+                id="fw-import-cl" value={importChangelog} onChange={(e) => setImportChangelog(e.target.value)}
+                className="w-full rounded-md border bg-background p-2 text-sm" placeholder="why you're importing this (defaults to the document's changelog)"
+              />
+            </div>
+          </div>
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            <Button variant="ghost" onClick={() => setImportOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={runImport} disabled={saving || !importText.trim()}>
+              {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Upload className="mr-1 h-4 w-4" />} Import as new version
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

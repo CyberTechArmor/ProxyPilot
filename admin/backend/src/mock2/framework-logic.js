@@ -17,6 +17,11 @@ export const FRAMEWORK_CONTENT_FIELDS = Object.freeze([
   'project_template_ref',
 ]);
 
+// The portable export/import document format tag (mirrors the component library's
+// COMPONENT_EXPORT_FORMAT idiom). Bump ONLY on a breaking shape change so an old
+// document is rejected loudly rather than silently mis-imported.
+export const FRAMEWORK_EXPORT_FORMAT = 'proxypilot-framework@1';
+
 // The next monotonic version number given the existing rows. 1 when empty.
 export function nextVersionNumber(rows = []) {
   let max = 0;
@@ -78,4 +83,45 @@ export function publicFrameworkShape(row, { includeContent = false } = {}) {
     for (const f of FRAMEWORK_CONTENT_FIELDS) out[f] = row[f];
   }
   return out;
+}
+
+// ---- portable export / import (the "download the harness" document) ----
+
+// buildFrameworkExport(row) — the portable document for a framework version: the
+// five immutable content fields plus the provenance (which version it was
+// exported from and its changelog). No install-specific ids leak — the document
+// is self-contained so it can be imported into any ProxyPilot install as a NEW
+// version. Deterministic (no clock) so the caller stamps exported_at if it wants
+// one (keeps this pure/testable, like buildComponentExport).
+export function buildFrameworkExport(row) {
+  if (!row) throw new Error('buildFrameworkExport: no version row');
+  const doc = {
+    format: FRAMEWORK_EXPORT_FORMAT,
+    exported_from_version: Number(row.version),
+    changelog: row.changelog || null,
+  };
+  for (const f of FRAMEWORK_CONTENT_FIELDS) doc[f] = row[f];
+  return doc;
+}
+
+// parseFrameworkImport(doc) — validate an import document (the output of
+// buildFrameworkExport, possibly hand-edited) into content ready for insert as a
+// NEW version. Reuses validateFrameworkContent so an imported bundle is held to
+// the SAME bar as an in-app publish (gates parse, skills parse, required fields).
+// Returns { ok, error } or { ok:true, data:{...content, changelog} }.
+export function parseFrameworkImport(doc) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { ok: false, error: 'import must be a JSON object' };
+  }
+  if (doc.format !== FRAMEWORK_EXPORT_FORMAT) {
+    return { ok: false, error: `unsupported format "${String(doc.format || '(none)').slice(0, 60)}" — expected ${FRAMEWORK_EXPORT_FORMAT}` };
+  }
+  const content = {};
+  for (const f of FRAMEWORK_CONTENT_FIELDS) content[f] = typeof doc[f] === 'string' ? doc[f] : '';
+  const v = validateFrameworkContent(content);
+  if (!v.ok) return { ok: false, error: v.error };
+  const fromVersion = Number.isFinite(Number(doc.exported_from_version)) ? Number(doc.exported_from_version) : null;
+  const changelog = String(doc.changelog || '').trim().slice(0, 2000)
+    || (fromVersion ? `Imported framework (exported from v${fromVersion})` : 'Imported framework');
+  return { ok: true, data: { ...content, changelog, exported_from_version: fromVersion } };
 }

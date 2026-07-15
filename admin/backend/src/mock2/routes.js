@@ -98,6 +98,7 @@ import {
 } from './framework.js';
 import {
   validateFrameworkContent, buildRevertContent, publicFrameworkShape,
+  buildFrameworkExport, parseFrameworkImport,
 } from './framework-logic.js';
 // ---- Component library (migration 516) ----
 import {
@@ -463,6 +464,12 @@ const frameworkContentSchema = z.object({
   gates_json: z.string().min(1),
   design_system_md: z.string().min(1),
   project_template_ref: z.string().trim().min(1).max(500),
+  changelog: z.string().trim().max(2000).optional(),
+});
+// Import a framework document (the buildFrameworkExport shape) as a NEW version;
+// the content bar is re-enforced by parseFrameworkImport in the handler.
+const frameworkImportSchema = z.object({
+  doc: z.record(z.any()),
   changelog: z.string().trim().max(2000).optional(),
 });
 
@@ -1351,6 +1358,44 @@ export function createMock2Router() {
     });
     logAudit(req.user.id, 'MOCK2_FRAMEWORK_REVERT', 'mock2_framework_version', row.id,
       { version: row.version, reverted_from_version: source.version }, req.ip);
+    res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
+  });
+
+  // Export a framework version as a portable JSON document ("download the
+  // harness") — the five immutable content fields + provenance, self-contained so
+  // it imports into any install as a NEW version. Admin-gated; streams a download.
+  router.get('/framework/versions/:id/export', requireAdmin, (req, res) => {
+    const row = getFrameworkVersion(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Framework version not found' });
+    const doc = buildFrameworkExport(row);
+    logAudit(req.user.id, 'MOCK2_FRAMEWORK_EXPORT', 'mock2_framework_version', row.id, { version: row.version }, req.ip);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="proxypilot-framework-v${row.version}.json"`);
+    res.json(doc);
+  });
+
+  // Import a framework document as a NEW version (append-only, monotonic —
+  // exactly like a publish; the imported bundle is held to the same content bar).
+  // source='import' records honest provenance. Admin-gated.
+  router.post('/framework/import', requireAdmin, (req, res) => {
+    const parsed = frameworkImportSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'doc (the exported framework JSON) is required' });
+    const check = parseFrameworkImport(parsed.data.doc);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    const d = check.data;
+    const changelog = (parsed.data.changelog || '').trim() || d.changelog;
+    const row = insertFrameworkVersion({
+      constitution_md: d.constitution_md,
+      skills_json: d.skills_json,
+      gates_json: d.gates_json,
+      design_system_md: d.design_system_md,
+      project_template_ref: d.project_template_ref,
+      changelog,
+      source: 'import',
+      createdBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_FRAMEWORK_IMPORT', 'mock2_framework_version', row.id,
+      { version: row.version, exported_from_version: d.exported_from_version }, req.ip);
     res.status(201).json({ version: publicFrameworkShape(row, { includeContent: true }) });
   });
 

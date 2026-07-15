@@ -11,10 +11,13 @@ import assert from 'node:assert/strict';
 
 import {
   FRAMEWORK_CONTENT_FIELDS,
+  FRAMEWORK_EXPORT_FORMAT,
   nextVersionNumber,
   validateFrameworkContent,
   buildRevertContent,
   publicFrameworkShape,
+  buildFrameworkExport,
+  parseFrameworkImport,
 } from '../mock2/framework-logic.js';
 import {
   GIT_PROVIDERS,
@@ -69,6 +72,63 @@ test('publicFrameworkShape: content hidden by default, included on request', () 
   const full = publicFrameworkShape(row, { includeContent: true });
   assert.equal(full.constitution_md, 'C');
   assert.equal(full.project_template_ref, 'T');
+});
+
+// ---- portable export / import (download the harness) ----
+
+const GOOD_GATES = JSON.stringify([{ name: 'typecheck', script: '#!/bin/sh\nexit 0\n', order: 1 }]);
+const FRAMEWORK_ROW = {
+  id: 9, version: 4, changelog: 'v4 changes', reverted_from_version: null, source: 'in_app',
+  created_by: 1, created_at: '2026-07-15T00:00:00Z',
+  constitution_md: '# Constitution', skills_json: '{"a":1}', gates_json: GOOD_GATES,
+  design_system_md: '# Design', project_template_ref: 'scaffold@run-1',
+};
+
+test('buildFrameworkExport: self-contained document, no install-specific ids', () => {
+  const doc = buildFrameworkExport(FRAMEWORK_ROW);
+  assert.equal(doc.format, FRAMEWORK_EXPORT_FORMAT);
+  assert.equal(doc.exported_from_version, 4);
+  assert.equal(doc.changelog, 'v4 changes');
+  for (const f of FRAMEWORK_CONTENT_FIELDS) assert.equal(doc[f], FRAMEWORK_ROW[f]);
+  // No id / created_by / source leak into the portable document.
+  assert.equal(doc.id, undefined);
+  assert.equal(doc.created_by, undefined);
+});
+
+test('buildFrameworkExport → parseFrameworkImport round-trips into insertable content', () => {
+  const doc = buildFrameworkExport(FRAMEWORK_ROW);
+  const r = parseFrameworkImport(doc);
+  assert.equal(r.ok, true);
+  for (const f of FRAMEWORK_CONTENT_FIELDS) assert.equal(r.data[f], FRAMEWORK_ROW[f]);
+  assert.equal(r.data.exported_from_version, 4);
+  assert.match(r.data.changelog, /v4 changes/);
+});
+
+test('parseFrameworkImport: rejects a wrong/missing format tag', () => {
+  assert.equal(parseFrameworkImport(null).ok, false);
+  assert.equal(parseFrameworkImport([]).ok, false);
+  assert.equal(parseFrameworkImport({ ...buildFrameworkExport(FRAMEWORK_ROW), format: 'proxypilot-component@1' }).ok, false);
+  const { format, ...noFormat } = buildFrameworkExport(FRAMEWORK_ROW);
+  assert.equal(parseFrameworkImport(noFormat).ok, false);
+});
+
+test('parseFrameworkImport: holds an imported bundle to the SAME content bar as a publish', () => {
+  // Malformed gates JSON in the document is rejected (validateFrameworkContent).
+  const bad = { ...buildFrameworkExport(FRAMEWORK_ROW), gates_json: 'not json' };
+  const r = parseFrameworkImport(bad);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /gates_json/);
+  // Missing required content is rejected.
+  const missing = { ...buildFrameworkExport(FRAMEWORK_ROW), constitution_md: '' };
+  assert.equal(parseFrameworkImport(missing).ok, false);
+});
+
+test('parseFrameworkImport: defaults a changelog when the document omits one', () => {
+  const doc = buildFrameworkExport(FRAMEWORK_ROW);
+  delete doc.changelog;
+  const r = parseFrameworkImport(doc);
+  assert.equal(r.ok, true);
+  assert.match(r.data.changelog, /Imported framework .*v4/);
 });
 
 // ---- git connectors (ADR-006) ----

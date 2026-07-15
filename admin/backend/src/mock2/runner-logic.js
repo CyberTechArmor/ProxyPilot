@@ -109,9 +109,38 @@ export const RUNNER_TOOLS = Object.freeze([
     },
   },
   {
+    name: 'pending_verification',
+    description:
+      'Conclude the cycle as PENDING-OPERATOR-VERIFICATION — a calm, expected completion, NOT a block. Use this INSTEAD of finish when all in-fence gates are green and the code is real and complete, but one or more declared integrations require a LIVE external check that cannot run inside the sealed fence (it needs a human with production credentials/network to the real endpoint) — e.g. an ADP Test Connection or an LDAPS bind against the production directory. This is the correct end state for exactly that situation: it deploys the built app (so the operator can verify it) and records the cycle as pending-operator-verification with the outstanding live checks listed, WITHOUT falsely claiming succeeded and WITHOUT raising a blocker. The integration gate still runs first: if it finds a stub, canned success, or fabricated data, this becomes a block — pending-verification is ONLY for real, implemented integrations. Provide the same summary + acceptance + assumptions as finish. Do NOT ask to inject production credentials or open fence egress to verify in-cycle — that is a separate, rare admin action, never part of a normal completion.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        summary: { type: 'string', description: 'Human-readable "what changed", one line.' },
+        acceptance: {
+          type: 'array',
+          minItems: 1,
+          items: { type: 'string' },
+          description: 'Human-runnable acceptance check(s), one per user-visible change, in "as <role>, do X, expect Y" form (as for finish).',
+        },
+        assumptions: {
+          type: 'object',
+          description: 'Cross-layer assumptions, split honestly into verified (read the source this cycle — name the file) vs assumed (as for finish).',
+          properties: {
+            verified: { type: 'array', items: { type: 'string' } },
+            assumed: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['verified', 'assumed'],
+          additionalProperties: false,
+        },
+      },
+      required: ['summary', 'acceptance', 'assumptions'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'halt',
     description:
-      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Give the specific reason (what blocks you), and ALWAYS propose 2–4 concrete `options` — the viable paths forward, each with its tradeoff and exactly what will be fed back to you on resume. Never a bare refusal: the operator picks one option (or an admin grants an authorization option) and it resumes the build. Never keep responding without calling a tool when you are stuck — call halt instead.',
+      'End the cycle WITHOUT success because you cannot honestly complete the change — you are blocked, a dependency is missing, or the fix needed is out of scope. This is the ONLY honest way to stop short of finishing: it records the cycle as blocked (needs human attention), does NOT deploy, and is resumable once the blocker is cleared. Note: a build that is complete and real but awaits a LIVE external verification the fence cannot run is NOT a block — use pending_verification for that, not halt. Give the specific reason (what blocks you), and ALWAYS propose 2–4 concrete `options` — the viable paths forward, each with its tradeoff and exactly what will be fed back to you on resume. Never a bare refusal: the operator picks one option (or an admin grants an authorization option) and it resumes the build. Never keep responding without calling a tool when you are stuck — call halt instead.',
     input_schema: {
       type: 'object',
       properties: {
@@ -371,7 +400,7 @@ export function formatAcceptanceBlock(acceptance = [], assumptions = null) {
 // { done, halted, haltReason, finishSummary, toolCalls, stalled }.
 export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
-  const base = { done: false, halted: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false, refusal: false, trigger: null };
+  const base = { done: false, halted: false, pendingVerification: false, haltReason: null, haltOptions: [], authRequest: null, finishSummary: null, toolCalls: calls, stalled: false, refusal: false, trigger: null };
   // Fable 5 (audit lane / consult) can return stop_reason "refusal" from its safety
   // classifiers — a shape Opus 4.8 never produces. Map it to the existing halt state
   // (needs-attention, resumable) with the refusal as the reason — NEVER a crash or a
@@ -390,22 +419,38 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
   if (haltCall) {
     return { ...base, halted: true, haltReason: String(haltCall.input?.reason || 'blocked — no reason given'), haltOptions: parseHaltOptions(haltCall.input?.options) };
   }
-  const finishCall = calls.find((c) => c && c.name === 'finish');
-  if (finishCall) {
-    const acceptance = Array.isArray(finishCall.input?.acceptance)
-      ? finishCall.input.acceptance.map((s) => String(s || '').trim()).filter(Boolean)
-      : [];
-    const a = finishCall.input?.assumptions;
-    const strList = (v) => (Array.isArray(v) ? v.map((s) => String(s || '').trim()).filter(Boolean) : null);
+  const strList = (v) => (Array.isArray(v) ? v.map((s) => String(s || '').trim()).filter(Boolean) : null);
+  const parseFinishShape = (input) => {
+    const acceptance = Array.isArray(input?.acceptance) ? input.acceptance.map((s) => String(s || '').trim()).filter(Boolean) : [];
+    const a = input?.assumptions;
     const assumptions = a && typeof a === 'object' && strList(a.verified) && strList(a.assumed)
       ? { verified: strList(a.verified), assumed: strList(a.assumed) }
       : null;
+    return { summary: String(input?.summary || 'change complete'), acceptance, assumptions };
+  };
+  // A calm PENDING-OPERATOR-VERIFICATION conclusion: the same finish-shaped
+  // payload, but the builder is declaring "real + complete in-fence, awaiting a
+  // live external check" rather than "succeeded". Checked before finish so a turn
+  // that pairs both is treated as the (more conservative) pending conclusion; the
+  // runner still re-runs the integration gate and downgrades to a block if the
+  // code is a stub (the invariant — pending is never reachable from a fake).
+  const pendingCall = calls.find((c) => c && c.name === 'pending_verification');
+  if (pendingCall) {
+    const f = parseFinishShape(pendingCall.input);
+    return {
+      ...base, pendingVerification: true,
+      finishSummary: f.summary, finishAcceptance: f.acceptance, finishAssumptions: f.assumptions,
+    };
+  }
+  const finishCall = calls.find((c) => c && c.name === 'finish');
+  if (finishCall) {
+    const f = parseFinishShape(finishCall.input);
     return {
       ...base,
       done: true,
-      finishSummary: String(finishCall.input?.summary || 'change complete'),
-      finishAcceptance: acceptance,
-      finishAssumptions: assumptions,
+      finishSummary: f.summary,
+      finishAcceptance: f.acceptance,
+      finishAssumptions: f.assumptions,
     };
   }
   if (calls.length === 0) {

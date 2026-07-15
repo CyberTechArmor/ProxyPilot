@@ -1307,6 +1307,10 @@ export const api = {
   mock2GetIntegrationStatus: (id) => request(`/mock2/projects/${id}/integration-status`),
   mock2VerifyIntegrationItem: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  // PATCH2 B.2 — confirm/waive a capability's live check independently of any
+  // build cycle (verification is a property of the capability's lifecycle).
+  mock2VerifyCapabilityCheck: (id, body) =>
+    request(`/mock2/projects/${id}/capability-checks/verify`, { method: 'POST', body: JSON.stringify(body) }),
   // PATCH — blocked-deviation resolution: the class-matched options for a blocked
   // cycle, the manifest-backfill (declare an undeclared capability, editor), and
   // the analysis-limitation waiver (admin, provenance-not-established only).

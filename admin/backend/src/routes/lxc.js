@@ -8,7 +8,12 @@ import { join } from 'path';
 import http from 'http';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
-import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
+
+// Containers/routing surface: full admins always pass; regular users
+// pass when they hold the 'proxy' feature permission (assignable from
+// the Users page access dialog, effective in realtime).
+const requireProxyAccess = requireAdminOrPermission('proxy');
 import { getDb, logAudit } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCaddyStructure, regenerateDomainCaddyConfig } from './services.js';
@@ -225,8 +230,8 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Apply requireAdmin to all routes in this router
-lxcRouter.use(requireAdmin);
+// Apply the containers/routing gate to all routes in this router
+lxcRouter.use(requireProxyAccess);
 
 // GET /status - Check if Incus is available on the host
 lxcRouter.get('/status', async (req, res) => {
@@ -324,7 +329,7 @@ lxcRouter.get('/all-containers', async (req, res) => {
 //
 // `name` is accepted both with and without the `pp-` prefix so the
 // UI can pass whatever it has on hand.
-lxcRouter.get('/containers/:name/cert-mounts', requireAdmin, async (req, res) => {
+lxcRouter.get('/containers/:name/cert-mounts', requireProxyAccess, async (req, res) => {
   try {
     const db = getDb();
     const incusName = req.params.name.startsWith(INSTANCE_PREFIX)

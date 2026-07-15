@@ -93,6 +93,9 @@ export function getDb() {
 //               role) + auth_source column ('local' | 'ldap').
 //   601 LDAPS — ldap_connections table (directory connection settings;
 //               bind password encrypted at rest via lib/secrets.js).
+//   602 Permissions — user_permissions table ('proxy' = containers/
+//               routing pages, 'developer' = Projects module) granted
+//               per user-role account from the access dialog.
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1514,6 +1517,29 @@ export function initDatabase() {
     d.exec(`
       CREATE INDEX IF NOT EXISTS idx_ldap_connections_enabled
         ON ldap_connections(enabled)
+    `);
+  });
+
+  // Version 602: feature permissions for the 'user' role. Admins have
+  // everything implicitly; 'pending' accounts are blocked wholesale —
+  // this table only widens what a regular user can reach:
+  //   proxy      containers + routing (the Incus/LXC surface)
+  //   developer  the Projects (Mock2) module
+  // Checked from the DB on every request (requireAdminOrPermission) so
+  // a grant/revoke takes effect in realtime, no re-login needed.
+  runMigration(db, 602, 'user_feature_permissions', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS user_permissions (
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        permission TEXT NOT NULL CHECK(permission IN ('proxy', 'developer')),
+        granted_by TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, permission)
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_user_permissions_user
+        ON user_permissions(user_id)
     `);
   });
 

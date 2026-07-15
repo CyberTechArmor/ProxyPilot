@@ -52,6 +52,9 @@ export default function Projects() {
   const { user } = useAuth();
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
+  // Regular users with the 'developer' feature permission also get in.
+  const canDevelop = isAdmin ||
+    (user?.permissions ?? storedUser?.permissions ?? []).includes('developer');
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -119,7 +122,7 @@ export default function Projects() {
     }
   };
 
-  if (!isAdmin) return <Navigate to="/" replace />;
+  if (!canDevelop) return <Navigate to="/" replace />;
   if (gate === 'disabled') return <Navigate to="/" replace />;
   if (gate === 'checking') {
     return (

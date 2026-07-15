@@ -28,6 +28,28 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Realtime role/permission propagation: while logged in, re-verify
+  // every 30s so an admin assigning a role or feature permission shows
+  // up in this session (nav, route guards) without a re-login. The
+  // backend enforces from the DB per-request either way — this only
+  // keeps the UI in step. Transient poll failures are ignored; a real
+  // 401 is handled by the api layer's redirect-to-login.
+  const authed = !!user;
+  useEffect(() => {
+    if (!authed) return undefined;
+    const id = setInterval(() => {
+      api.verify()
+        .then(({ user: fresh }) => {
+          localStorage.setItem('user', JSON.stringify(fresh));
+          setUser((prev) =>
+            JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh
+          );
+        })
+        .catch(() => { /* tolerated — next poll retries */ });
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [authed]);
+
   const login = async (credentials) => {
     // Backend sets pp_token (httpOnly) and pp_csrf cookies on success.
     // Token in the response body is ignored — kept for non-browser

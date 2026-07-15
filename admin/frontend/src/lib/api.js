@@ -588,6 +588,14 @@ export const api = {
     body: JSON.stringify({ access }),
   }),
 
+  // Feature permissions for the 'user' role: 'proxy' (containers &
+  // routing) and 'developer' (Projects module). Enforced from the DB
+  // per-request, so changes are live for the target user immediately.
+  updateUserPermissions: (id, permissions) => request(`/user/users/${id}/permissions`, {
+    method: 'PUT',
+    body: JSON.stringify({ permissions }),
+  }),
+
   getUserFolderAccess: (id) => request(`/user/users/${id}/folder-access`),
 
   updateUserFolderAccess: (id, folderAccess) => request(`/user/users/${id}/folder-access`, {

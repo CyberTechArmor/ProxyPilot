@@ -29,6 +29,7 @@ import {
 } from '../mock2/integration-logic.js';
 import { screenDisclosureText, screeningVerdict } from '../mock2/screening-logic.js';
 import { evaluateIntegrationTruthfulness } from '../mock2/integration-enforcement.js';
+import { analyzeIntegrations } from '../mock2/integration-logic.js';
 import { buildResumeContextBlock } from '../mock2/unblock-logic.js';
 
 // ---- A. the verified empty-diff rule ----
@@ -120,8 +121,9 @@ test('resume block carries the blocked run\'s exact gate findings as guidance', 
   });
   assert.match(block, /BLOCKED by the integration gate/);
   assert.match(block, /src\/adp\/service\.ts#syncWorkers/);
-  assert.match(block, /Resolve EACH one/);
+  assert.match(block, /VERIFY each against the current code/);
   assert.match(block, /never convert an error into success/);
+  assert.match(block, /do NOT restructure correct code/);
   // Findings alone are enough to produce a resume block (a bare resume of a
   // gate-blocked cycle still gets the list).
   assert.notEqual(block, '');
@@ -417,4 +419,153 @@ test('screening: a bare ambiguous term with no guard context still blocks as bef
     { source: 'finish.summary', text: 'Employee list is populated from sample data for now.' },
   ]);
   assert.equal(screeningVerdict(findings).blocking, true);
+});
+
+// ---- analyzer scope: local app code in a DECLARED subsystem is not the
+// integration surface (the real 20-false-positive case) ----
+
+const AUTH_MANIFEST = {
+  schema_version: 1,
+  entries: [{
+    id: 'ldaps-directory', subsystem: 'auth',
+    actions: [{ name: 'bind', operation: 'ldaps-bind' }],
+    destination: { source: 'env', key: 'LDAPS_URL' },
+    transport: 'ldaps-tls',
+    provenance: { response_to_output: 'required' },
+    live_verification: { required: true },
+    egress: { classification: 'private' },
+  }],
+};
+
+// The exact shapes that mass-flagged a real build: local crypto, local DB
+// persistence of runtime values, accessor-named state writes — in a subsystem
+// that ALSO holds a genuine class-based LDAPS client.
+const AUTH_LOCAL_CODE = [
+  {
+    path: 'src/auth/crypto.ts',
+    content: `
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
+
+export function verifyPassword(hash, supplied) {
+  const candidate = createHash('sha256').update(supplied).digest();
+  return timingSafeEqual(Buffer.from(hash, 'hex'), candidate);
+}
+
+export function verifyAccessToken(token, secret) {
+  const [head, sig] = String(token).split('.');
+  const expect = createHash('sha256').update(head + secret).digest('hex');
+  return sig === expect;
+}
+
+export function newRefreshToken(db, tokens, userId) {
+  const value = randomBytes(32).toString('hex');
+  return db.insert(tokens).values({ userId, value }).onConflictDoUpdate({ target: tokens.userId, set: { value } });
+}
+`,
+  },
+  {
+    path: 'src/auth/repo.ts',
+    content: `
+import { db } from '../db';
+import { refreshTokens, auditLog, ldapStatus } from './schema';
+
+export async function insertRefreshToken(row) {
+  await db.insert(refreshTokens).values(row);
+  return { ok: true };
+}
+
+export async function writeAudit(event, detail) {
+  await db.insert(auditLog).values({ event, detail, at: new Date().toISOString() });
+  return { ok: true };
+}
+
+export async function setConnectionStatus(status, detail) {
+  await db.insert(ldapStatus).values({ status, detail }).onConflictDoUpdate({ target: ldapStatus.id, set: { status, detail } });
+  return { ok: true, status };
+}
+`,
+  },
+  {
+    path: 'src/auth/ldapts-client.ts',
+    content: `
+import tls from 'node:tls';
+
+export class LdapsClient {
+  constructor(cfg) { this.cfg = cfg; }
+
+  async probeReachability() {
+    const socket = await this.dial();
+    if (!socket.authorized) throw new Error('TLS not authorized: ' + socket.authorizationError);
+    return { ok: true, protocol: socket.getProtocol() };
+  }
+
+  dial() {
+    return new Promise((resolve, reject) => {
+      const socket = tls.connect(process.env.LDAPS_URL, () => resolve(socket));
+      socket.on('error', reject);
+    });
+  }
+}
+
+export function testLdapConnection(cfg) {
+  const client = new LdapsClient(cfg);
+  return client.probeReachability();
+}
+`,
+  },
+];
+
+test('analyzer scope: local crypto/persistence in a declared subsystem is NOT flagged; class-method transport is reachable', () => {
+  const r = analyzeIntegrations({ files: AUTH_LOCAL_CODE, manifest: AUTH_MANIFEST });
+  assert.equal(r.verdict, 'pass', JSON.stringify(r.findings, null, 2));
+  // verifyPassword / verifyAccessToken / newRefreshToken / insertRefreshToken /
+  // writeAudit / setConnectionStatus produce nothing; probeReachability and
+  // testLdapConnection reach the transport through the class method.
+  assert.equal(r.findings.length, 0);
+});
+
+test('analyzer scope: a connectivity check that does NOT reach transport is still caught', () => {
+  const presenceOnly = [{
+    path: 'src/auth/probe.ts',
+    content: `
+export async function probeDirectoryConnection(cfg) {
+  if (cfg && cfg.directoryUrl && cfg.bindDnEnc) {
+    return { ok: true, detail: 'bind passed' };
+  }
+  return { ok: false };
+}
+`,
+  }];
+  const r = analyzeIntegrations({ files: presenceOnly, manifest: AUTH_MANIFEST });
+  assert.equal(r.verdict, 'fail');
+  const f = r.findings.find((x) => x.kind === 'execution_without_transport');
+  assert.ok(f, JSON.stringify(r.findings));
+  assert.match(f.function, /probeDirectoryConnection/);
+});
+
+test('analyzer scope: canned records laundered through a helper are still caught without transport', () => {
+  const canned = [{
+    path: 'src/auth/sync.ts',
+    content: `
+import { db } from '../db';
+import { people } from './schema';
+
+function starterRows() {
+  return [
+    { externalId: 'E1', name: 'Ada Example' },
+    { externalId: 'E2', name: 'Ben Example' },
+  ];
+}
+
+export async function syncPeople() {
+  for (const r of starterRows()) {
+    await db.insert(people).values(r);
+  }
+  return { ok: true };
+}
+`,
+  }];
+  const r = analyzeIntegrations({ files: canned, manifest: AUTH_MANIFEST });
+  assert.equal(r.verdict, 'fail');
+  assert.ok(r.findings.some((f) => f.kind === 'fabricated_output'), JSON.stringify(r.findings));
 });

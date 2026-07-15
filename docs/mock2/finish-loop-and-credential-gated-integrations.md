@@ -112,9 +112,46 @@ transport code, and the gate never accepts (or demands) a fabricated live test.
 ## Malformed manifest self-healing
 
 A `state/integrations.json` that doesn't parse used to be a dead-end block.
-`POST /projects/:id/integrations/repair-manifest` now archives the broken text
-to `state/integrations.invalid.json` (nothing is silently lost), salvages every
-entry that still validates individually, writes a valid
-`{schema_version, entries[]}` scaffold, commits it, and resumes a blocked
-cycle so the gate re-reads the declared capabilities. An *absent* manifest was
+`POST /projects/:id/integrations/repair-manifest` (or the **Repair integration
+manifest** button on the blocked build card) now archives the broken text to
+`state/integrations.invalid.json` (nothing is silently lost), **migrates
+near-miss entries into the required shape** — `key`/`name` → `id`,
+`destinations[]` → `destination{source,key}`, subsystem derived from the
+entry's own `code`/`paths` file lists, string actions normalized, with strict
+defaults for the safety-relevant fields (`live_verification.required: true`,
+`egress.classification: "private"`) and every inference reported — writes a
+valid `{schema_version, entries[]}` scaffold, commits it, and resumes a
+blocked cycle so the gate re-reads the declared capabilities. Only entries that
+can't even be migrated are dropped (and reported). An *absent* manifest was
 already tolerated (it reads as empty).
+
+Prevention: the runner's system prompt now carries the exact manifest schema
+with a worked example, and every validation error appends the required entry
+shape — so a build that declares in the wrong field names gets actionable
+feedback instead of a five-cycle loop.
+
+## Disclosure screening: guards are not disclosures
+
+The finish-time lexical screen treats ambiguous terms ("fixture", "simulated",
+"mock", "hardcoded"…) inside a **guard/defense sentence** — "a no-simulation
+guard that *fails if* anyone hardcodes a fake roster", "*contract tests* drive
+the transport against a real *local TLS fixture*", "*test-only*" — as recorded,
+not blocking. Describing the protection the constitution demands is not
+disclosing a simulation. High-confidence disclosure phrases ("returns canned
+success", "connection test is simulated because … unreachable") and bare
+ambiguous terms with no guard context still block exactly as before; the B.4
+source analyzer remains the positive detector for real stubs.
+
+## Unsticking a build looping on the integration gate
+
+1. Open the blocked build card and press **Repair integration manifest** — it
+   migrates wrong-schema entries, archives the original, and resumes. The gate
+   then re-checks the declared subsystems for real provenance.
+2. Do **not** pick "Approve as a recorded simulation" for code that is real —
+   the build will keep refusing to record a false simulation (correctly).
+3. With the manifest valid and the code real, the cycle lands in
+   **pending-operator-verification** and deploys. Run the live checks (ADP Test
+   Connection, LDAPS bind) with your real credentials, then report each from
+   the **Live verification** card: "It works — confirm" (with what you
+   observed) advances the build to succeeded; "It failed" opens a real bug-fix
+   build carrying your observation.

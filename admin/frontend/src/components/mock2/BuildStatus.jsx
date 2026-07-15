@@ -16,7 +16,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown,
+  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
@@ -73,6 +73,7 @@ export default function BuildStatus({
   const [resumeMsg, setResumeMsg] = useState(''); // operator guidance carried on resume / with a chosen option
   const [otherText, setOtherText] = useState(''); // free-text "Other" resolution (the escape hatch)
   const [resuming, setResuming] = useState(false);
+  const [repairing, setRepairing] = useState(false); // one-click integration-manifest repair
   const [auths, setAuths] = useState([]); // open one-time authorization requests
   const [authBusy, setAuthBusy] = useState(false);
   const [devEdit, setDevEdit] = useState({}); // deviation id -> edited text (approve-as-edited)
@@ -160,6 +161,30 @@ export default function BuildStatus({
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not update the deviation', description: err.message });
     } finally { setDevBusy(false); }
+  };
+
+  // One-click manifest repair (the manifest-invalid / wrong-schema loop): the
+  // server archives the broken state/integrations.json, migrates near-miss
+  // entries into the required shape, writes a valid scaffold, and resumes the
+  // blocked cycle so the gate re-reads it. A valid manifest is a graceful no-op.
+  const repairManifest = async () => {
+    setRepairing(true);
+    try {
+      const r = await api.mock2RepairIntegrationManifest(projectId);
+      if (r.repaired === false) {
+        toast({ title: 'Nothing to repair', description: r.reason });
+      } else {
+        const migrated = (r.migrated || []).length;
+        const dropped = (r.dropped || []).length;
+        toast({
+          title: 'Manifest repaired',
+          description: `${(r.salvaged || []).length} entr${(r.salvaged || []).length === 1 ? 'y' : 'ies'} kept${migrated ? ` (${migrated} migrated into the required shape)` : ''}${dropped ? `, ${dropped} dropped (see the audit log)` : ''}. Original archived to ${r.archived_to}. ${r.resume === 'started' ? 'The build is resuming.' : ''}`,
+        });
+      }
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not repair the manifest', description: err.message });
+    } finally { setRepairing(false); }
   };
 
   // Resume the blocked/paused cycle, optionally carrying operator guidance
@@ -310,6 +335,16 @@ export default function BuildStatus({
                     className="shrink-0"
                   />
                 </div>
+
+                {/* Blocked on the integration gate: offer the one-click manifest
+                    repair (migrates wrong-schema entries, archives the original,
+                    resumes). Safe when the manifest is fine — it just says so. */}
+                {canEdit && online && ['integration_gate', 'simulation_disclosure', 'resolution_ineffective'].includes(cycle.halt_reason) ? (
+                  <Button variant="outline" size="sm" className="h-9" disabled={repairing || resuming} onClick={repairManifest}>
+                    {repairing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wrench className="h-4 w-4 mr-1" />}
+                    Repair integration manifest
+                  </Button>
+                ) : null}
 
                 {/* One choice card (task Part 2): the model's 2–4 proposed resolutions
                     as radio-style choices + a free-text "Other". Picking one resumes the

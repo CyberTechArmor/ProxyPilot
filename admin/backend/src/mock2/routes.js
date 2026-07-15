@@ -2838,7 +2838,7 @@ export function createMock2Router() {
     if (!result.ok) return res.status(409).json({ error: result.error });
     if (!result.repaired) return res.json({ repaired: false, reason: result.reason });
     logAudit(req.user.id, 'MOCK2_INTEGRATION_MANIFEST_REPAIR', 'mock2_project', project.id,
-      { salvaged: result.salvaged.map((e) => e.id), dropped: result.dropped, archive: result.archive }, req.ip);
+      { salvaged: result.salvaged.map((e) => e.id), migrated: result.migrated, dropped: result.dropped, archive: result.archive }, req.ip);
     // Resume a cycle blocked on the invalid manifest so the gate re-reads it.
     let resumed = null;
     try {
@@ -2850,6 +2850,7 @@ export function createMock2Router() {
     res.status(201).json({
       repaired: true,
       salvaged: result.salvaged.map((e) => e.id),
+      migrated: result.migrated,
       dropped: result.dropped,
       archived_to: result.archive,
       resume: resumed?.status || 'not_resumed',

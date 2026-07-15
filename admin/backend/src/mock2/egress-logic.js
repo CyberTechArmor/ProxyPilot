@@ -50,6 +50,17 @@ export function grantKey(g) {
   return `${String(g.host || '').trim().toLowerCase()}|${Number(g.port)}|${normalizeProtocol(g.protocol) || 'tcp'}`;
 }
 
+// validateOperatorEgressInput({ host, port, protocol }) — an operator-initiated
+// grant is admin-typed, so validate it with the SAME discipline a mock2.yaml
+// declaration gets before it ever reaches the fence renderer. Pure.
+export function validateOperatorEgressInput({ host, port, protocol = 'tcp' } = {}) {
+  const proto = normalizeProtocol(protocol);
+  if (!isEgressHost(host)) return { ok: false, error: 'host must be an IPv4 literal or a valid hostname (no scheme, path, or port).' };
+  if (!isEgressPort(port)) return { ok: false, error: 'port must be an integer in 1–65535.' };
+  if (!proto) return { ok: false, error: 'protocol must be tcp or udp.' };
+  return { ok: true, host: String(host).trim().toLowerCase(), port: Number(port), protocol: proto };
+}
+
 function stripQuotes(v) {
   const s = String(v ?? '').trim();
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1);

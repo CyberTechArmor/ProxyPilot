@@ -81,7 +81,8 @@ import {
 } from './integration-enforcement.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
-import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
+import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, recordIntegrationResolution, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
+import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation } from './accept-pending-logic.js';
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
@@ -415,6 +416,93 @@ export async function retryDeploy({ project, cycle }) {
   })();
 
   return { status: 'started', cycle: getCycle(cycle.id) };
+}
+
+// acceptPendingVerification — operator completion valve (accept-pending-logic.js is
+// the pure decision). For a BLOCKED cycle the operator attests is real code awaiting
+// a live external check the fence cannot run, convert it to
+// pending-operator-verification and deploy the already-checkpointed working tree —
+// WITHOUT another model round and NEVER as "succeeded". The outstanding live check
+// is recorded on the cycle and the operator's attestation is audit-logged, so the
+// honesty guarantee moves from "the fence proves it" to "a named human verifies it
+// live and records the observed result" — it is never dropped.
+export async function acceptPendingVerification({ project, cycle, initiatedBy, attestation = '' }) {
+  if (!cycle) return { status: 'error', error: 'No cycle to accept.' };
+  const elig = acceptPendingEligibility(cycle);
+  if (!elig.ok) return { status: 'error', error: elig.reason };
+  const att = normalizeAttestation(attestation);
+  if (!att.ok) return { status: 'error', error: att.error };
+  const projectId = Number(project.id);
+  if (project.lifecycle !== 'active') {
+    return { status: 'error', error: 'Bring the project online first — accept-pending deploys the app so you can verify it live.' };
+  }
+  const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
+  if (!lock.ok) return { status: 'error', error: `Could not acquire the checkout lock: ${lock.reason}` };
+  const holder = { type: 'cycle', id: cycle.id };
+  const containerName = project.container_name || containerNameForProject(projectId);
+
+  let gateDecision = null;
+  try { gateDecision = cycle.integration_gate_json ? JSON.parse(cycle.integration_gate_json) : null; } catch { gateDecision = null; }
+  const subsystems = gateDecision?.touched_subsystems || [];
+  const checklist = buildAcceptPendingChecklist({ gateDecision, subsystems });
+  const priorHaltReason = cycle.halt_reason || null;
+  const logEvent = (kind, payload = {}) => insertCycleEvent({ projectId, cycleId: cycle.id, kind, ...payload });
+
+  // Reopen as running so the task list shows deploy progress; the halt banner clears.
+  updateCycle(cycle.id, { status: 'running', error: null });
+  setJob(cycle.id, { phase: 'deploying', message: 'Accepting as pending live verification — deploying…', startedAt: Date.now() });
+
+  // Fire-and-forget; always lands terminal + releases the lock (mirrors retryDeploy).
+  (async () => {
+    try {
+      const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+      if (!deployed.ok) {
+        finishCycle(cycle.id, { status: 'failed', error: `accept-pending deploy failed: ${deployed.error}` });
+        setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error });
+        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
+        return;
+      }
+      // Land the honest pending terminal (status awaiting_user + verification_state
+      // pending → reported outcome pending-operator-verification), the SAME terminal
+      // the runner's own B.5 branch produces — never "succeeded".
+      openVerificationChecklist({ projectId, cycleId: cycle.id, checklist });
+      updateCycle(cycle.id, { verification_state: 'pending', halt_reason: null });
+      finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+      try {
+        recordIntegrationResolution({
+          project_id: projectId, cycle_id: cycle.id, kind: 'operator_accept_pending',
+          reason: att.text, routed_to: 'pending-operator-verification',
+          decided_by: initiatedBy, role: 'admin',
+        });
+      } catch (e) { console.warn('[mock2] accept-pending resolution record failed:', e?.message); }
+      try {
+        logAudit(initiatedBy, 'MOCK2_ACCEPT_PENDING_VERIFICATION', 'mock2_cycle', cycle.id, {
+          project_id: projectId, attestation: att.text,
+          checklist: checklist.map((c) => c.item_id), prior_halt_reason: priorHaltReason,
+        }, null);
+      } catch (e) { console.warn('[mock2] accept-pending audit failed:', e?.message); }
+      logEvent('pending_verification', {
+        role: 'system',
+        content: `Operator accepted the blocked build as pending live verification (${checklist.length} live check(s) outstanding). Attestation: ${att.text}`,
+        meta: { checklist, operator_accepted: true, prior_halt_reason: priorHaltReason },
+      });
+      updateProject(projectId, { last_activity_at: nowIso() });
+      setJob(cycle.id, {
+        phase: 'pending_verification',
+        message: `Accepted — deployed for live verification. ${checklist.length} live check${checklist.length === 1 ? '' : 's'} to confirm against the real system.`,
+        commit: null,
+      });
+      void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
+    } catch (err) {
+      finishCycle(cycle.id, { status: 'failed', error: `accept-pending crashed: ${err?.message || err}` });
+      setJob(cycle.id, { phase: 'failed', message: `accept-pending crashed: ${err?.message || err}` });
+    } finally {
+      releaseLock(projectId, holder);
+      scheduleJobCleanup(cycle.id);
+    }
+  })();
+
+  return { status: 'started', cycle: getCycle(cycle.id), warn: elig.warn || null };
 }
 
 // ---- the agentic loop ----

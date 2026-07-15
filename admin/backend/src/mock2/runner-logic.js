@@ -376,6 +376,24 @@ runs the live check after deploy (pending_verification is then your finish).
    test against the local fixture server); never fabricate a live test and
    never stub the transport to force a plain finish.
 
+# External endpoints are NOT reachable from this fence (read this before you halt)
+This container is network-fenced: it has NO route to external services or LAN
+hosts (a directory server, an ADP/OAuth token endpoint, an internal database).
+Their live credentials and network belong to the operator, not this fence. So for
+an app whose job IS an external integration:
+- Implement the REAL transport (the actual bind/handshake/request) that ATTEMPTS
+  the call and SURFACES failures — do not swallow errors into success, do not
+  return success from config-field presence.
+- DECLARE it in state/integrations.json with live_verification.required: true.
+- Then call pending_verification — that IS your completion. The operator runs the
+  live check against the real system after deploy.
+Do NOT halt just because a live bind/connection failed or is unreachable FROM THE
+FENCE — that is expected here and is NOT a blocker; it is precisely what
+pending_verification is for. Do NOT fake a green connection to force finish, and
+do NOT loop re-probing an endpoint the fence cannot reach. Reserve halt for a real
+blocker (a missing dependency, an out-of-scope fix, a rule question) — never for
+"the fence can't reach the live endpoint."
+
 # If you cannot honestly finish
 If you cannot complete the change — you are blocked, a dependency is missing, the
 gate can't pass for a reason outside this change, or the real fix is out of scope —
@@ -725,6 +743,17 @@ names — entries written with keys like \`key\`, \`name\`, \`destinations\`, or
 subsystem is the src/<subsystem>/ folder; destination.key is the env/config key
 the real endpoint comes from; live_verification.required true means a human
 runs the live check after deploy.
+
+## External endpoints are NOT reachable from this fence
+This checkout builds for a network-fenced container with NO route to external
+services or LAN hosts (a directory server, an ADP/OAuth endpoint, an internal DB).
+For an app whose job IS an external integration: implement the REAL transport that
+attempts the call and surfaces failures (never swallow errors into success, never
+return success from config-field presence), DECLARE it in state/integrations.json
+with live_verification.required: true, and treat the live check as the operator's
+job after deploy. A live bind failing or being unreachable FROM THE FENCE is
+expected and is NOT a blocker — do not fake a green connection and do not loop
+re-probing an endpoint the fence cannot reach.
 
 ## How to work
 1. Write \`state/acceptance.json\` FIRST — what "done" means for THIS task: {task,

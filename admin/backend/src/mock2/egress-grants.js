@@ -19,7 +19,7 @@
 
 import { getMock2Db } from './db.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
-import { grantKey, normalizeProtocol, isEgressHost, isEgressPort } from './egress-logic.js';
+import { grantKey, normalizeProtocol, isEgressHost, isEgressPort, validateOperatorEgressInput } from './egress-logic.js';
 import { probeHostReachable } from './network.js';
 
 // The queue dedupe_key for a grant — stable per (project, host, port, protocol) so
@@ -114,6 +114,9 @@ export function syncDeclaredEgress(projectId, declared = []) {
 
   const revoked = [];
   for (const row of existing) {
+    // Operator-initiated grants are NOT reconciled against mock2.yaml — an admin
+    // opened them directly, so a declaration sweep must never revoke them.
+    if (row.origin === 'operator') continue;
     if (declKeys.has(grantKey(row))) continue;      // still declared
     if (row.status === 'revoked' || row.status === 'denied') continue;
     db.prepare(`UPDATE mock2_egress_grants SET status = 'revoked', decided_at = datetime('now') WHERE id = ?`).run(row.id);
@@ -141,6 +144,36 @@ export function setEgressGrantStatus(id, status, { decidedBy = null } = {}) {
       WHERE id = ?`,
   ).run(status, decidedBy == null ? null : Number(decidedBy), Number(id));
   return getEgressGrant(id);
+}
+
+// insertOperatorEgressGrant — an ADMIN opens the build fence to a LAN/external
+// host:port directly, independent of any mock2.yaml declaration. The grant is
+// created ALREADY APPROVED with origin 'operator' (the admin IS the approval), so
+// the next reconcileMock2Firewall punches the scoped allow-hole. Idempotent on
+// (project, host, port, protocol): an existing row is re-approved and re-stamped
+// with origin 'operator' rather than duplicated. Returns { ok, grant } or
+// { ok:false, error }.
+export function insertOperatorEgressGrant({ projectId, host, port, protocol = 'tcp', reason = '', decidedBy = null }) {
+  const v = validateOperatorEgressInput({ host, port, protocol });
+  if (!v.ok) return v;
+  const db = getMock2Db();
+  const pid = Number(projectId);
+  const existing = db.prepare(
+    `SELECT * FROM mock2_egress_grants WHERE project_id = ? AND host = ? AND port = ? AND protocol = ?`,
+  ).get(pid, v.host, v.port, v.protocol);
+  if (existing) {
+    db.prepare(
+      `UPDATE mock2_egress_grants
+          SET status = 'approved', origin = 'operator', reason = ?, decided_by = ?, decided_at = datetime('now')
+        WHERE id = ?`,
+    ).run(String(reason || '').trim() || existing.reason || null, decidedBy == null ? null : Number(decidedBy), existing.id);
+    return { ok: true, grant: getEgressGrant(existing.id), reused: true };
+  }
+  const r = db.prepare(
+    `INSERT INTO mock2_egress_grants (project_id, host, port, protocol, reason, status, origin, requested_at, decided_by, decided_at)
+     VALUES (?, ?, ?, ?, ?, 'approved', 'operator', datetime('now'), ?, datetime('now'))`,
+  ).run(pid, v.host, v.port, v.protocol, String(reason || '').trim() || null, decidedBy == null ? null : Number(decidedBy));
+  return { ok: true, grant: getEgressGrant(Number(r.lastInsertRowid)) };
 }
 
 // probeEgressGrants(ids) — measure host reachability for a set of grants and

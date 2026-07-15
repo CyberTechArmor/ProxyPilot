@@ -78,6 +78,14 @@ export default function BuildStatus({
   const [auths, setAuths] = useState([]); // open one-time authorization requests
   const [authBusy, setAuthBusy] = useState(false);
   const [devEdit, setDevEdit] = useState({}); // deviation id -> edited text (approve-as-edited)
+  // Admin completion/networking valves for a build blocked on an external
+  // integration the sealed fence can't verify live.
+  const [acceptOpen, setAcceptOpen] = useState(false); // accept-as-pending attestation form
+  const [attestation, setAttestation] = useState('');
+  const [accepting, setAccepting] = useState(false);
+  const [egressOpen, setEgressOpen] = useState(false); // operator egress-grant form
+  const [egress, setEgress] = useState({ host: '', port: '', protocol: 'tcp', reason: '' });
+  const [egressBusy, setEgressBusy] = useState(false);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
   // The running build clock: tick once a second while the cycle is live so the
@@ -206,6 +214,40 @@ export default function BuildStatus({
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setResuming(false); }
+  };
+
+  // Admin: accept a blocked build as pending LIVE verification — convert the
+  // unverifiable-in-fence integration block to pending-operator-verification and
+  // deploy, with a required attestation. Never records "succeeded".
+  const doAcceptPending = async () => {
+    if (!cycle || !attestation.trim()) return;
+    setAccepting(true);
+    try {
+      const res = await api.mock2AcceptPending(projectId, cycle.id, attestation.trim());
+      setAcceptOpen(false); setAttestation('');
+      toast({ title: 'Accepted as pending verification', description: res?.warn || 'Deploying — verify the live check against the real system when ready.' });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not accept', description: err.message });
+    } finally { setAccepting(false); }
+  };
+
+  // Admin: open the build fence to a LAN / external host:port directly, so a build
+  // that must reach an internal endpoint (a directory server, an ADP endpoint) can
+  // — on an install whose host can route there — verify the real handshake in-fence.
+  const doAddEgress = async () => {
+    const host = egress.host.trim();
+    const port = Number(egress.port);
+    if (!host || !port) return;
+    setEgressBusy(true);
+    try {
+      await api.mock2AddEgress(projectId, { host, port, protocol: egress.protocol, reason: egress.reason.trim() });
+      setEgressOpen(false); setEgress({ host: '', port: '', protocol: 'tcp', reason: '' });
+      toast({ title: 'Fence egress granted', description: `The build fence can now reach ${host}:${port}. Resume the build to verify the live connection.` });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not grant egress', description: err.message });
+    } finally { setEgressBusy(false); }
   };
 
   // While blocked on the integration gate, load the cycle's FULL finding list —
@@ -364,6 +406,31 @@ export default function BuildStatus({
                         Repair integration manifest
                       </Button>
                     ) : null}
+                    {/* Admin valves for a build blocked because the sealed fence
+                        cannot verify a live external integration: grant the fence
+                        egress to the real endpoint (verify live in-fence), or
+                        accept the real code as pending operator verification
+                        (deploy now, verify live yourself). Both admin-only. */}
+                    {isAdmin && online ? (
+                      <Button
+                        variant="outline" size="sm" className="h-9"
+                        disabled={resuming || repairing || accepting}
+                        title="Open the build fence to a LAN / external host:port so the build can reach the real endpoint."
+                        onClick={() => { setEgressOpen((v) => !v); setAcceptOpen(false); }}
+                      >
+                        <Wrench className="h-4 w-4 mr-1" /> Grant fence egress…
+                      </Button>
+                    ) : null}
+                    {isAdmin && online ? (
+                      <Button
+                        variant="outline" size="sm" className="h-9"
+                        disabled={resuming || repairing || accepting}
+                        title="The code is real but the fence can't run the live check — deploy it and verify live yourself (records as pending verification, never 'succeeded')."
+                        onClick={() => { setAcceptOpen((v) => !v); setEgressOpen(false); }}
+                      >
+                        <ShieldAlert className="h-4 w-4 mr-1" /> Accept as pending verification…
+                      </Button>
+                    ) : null}
                     <Button
                       variant="ghost" size="sm" className="h-9 text-red-500"
                       disabled={resuming || repairing}
@@ -372,6 +439,71 @@ export default function BuildStatus({
                     >
                       <Ban className="h-4 w-4 mr-1" /> Abandon build
                     </Button>
+                  </div>
+                ) : null}
+
+                {/* Operator egress-grant form (admin) — opens the fence to a real
+                    endpoint. Full-width, stacks on mobile. */}
+                {isAdmin && egressOpen ? (
+                  <div className="space-y-2 rounded-md border border-orange-500/30 bg-background/50 p-2.5">
+                    <p className="text-[11px] font-medium text-orange-600">
+                      Grant the build fence egress to a real endpoint. Use this when the build must reach a LAN/external host (e.g. a directory server at 10.0.1.4:636) and this ProxyPilot host can route to it — the build then verifies the live connection in-fence.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        placeholder="host (IP or hostname, e.g. 10.0.1.4)"
+                        value={egress.host} disabled={egressBusy}
+                        onChange={(e) => setEgress((s) => ({ ...s, host: e.target.value }))}
+                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          placeholder="port (e.g. 636)" inputMode="numeric"
+                          value={egress.port} disabled={egressBusy}
+                          onChange={(e) => setEgress((s) => ({ ...s, port: e.target.value.replace(/[^0-9]/g, '') }))}
+                        />
+                        <select
+                          className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          value={egress.protocol} disabled={egressBusy}
+                          onChange={(e) => setEgress((s) => ({ ...s, protocol: e.target.value }))}
+                        >
+                          <option value="tcp">tcp</option>
+                          <option value="udp">udp</option>
+                        </select>
+                      </div>
+                    </div>
+                    <input
+                      className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      placeholder="reason (why the build needs this endpoint)"
+                      value={egress.reason} disabled={egressBusy}
+                      onChange={(e) => setEgress((s) => ({ ...s, reason: e.target.value }))}
+                    />
+                    <div className="flex justify-end">
+                      <Button size="sm" className="h-9" disabled={egressBusy || !egress.host.trim() || !egress.port} onClick={doAddEgress}>
+                        {egressBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Grant egress + reconcile fence'}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Accept-as-pending attestation form (admin). */}
+                {isAdmin && acceptOpen ? (
+                  <div className="space-y-2 rounded-md border border-orange-500/30 bg-background/50 p-2.5">
+                    <p className="text-[11px] font-medium text-orange-600">
+                      Accept this build as pending LIVE verification. Use this when the integration code is real but the sealed fence can’t run the live check (it needs production network/credentials). The app deploys and the cycle is recorded as pending-operator-verification — never “succeeded” — with the live check left for you to confirm against the real system.
+                    </p>
+                    <textarea
+                      className="flex min-h-[44px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                      placeholder="Attestation (required): state that the integration code is real and that you will verify it live — e.g. “the LDAPS transport is real; I’ll bind against the prod directory after deploy.”"
+                      value={attestation} disabled={accepting}
+                      onChange={(e) => setAttestation(e.target.value)}
+                    />
+                    <div className="flex justify-end">
+                      <Button size="sm" className="h-9" disabled={accepting || !attestation.trim()} onClick={doAcceptPending}>
+                        {accepting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Accept + deploy for live verification'}
+                      </Button>
+                    </div>
                   </div>
                 ) : null}
 

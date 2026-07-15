@@ -21,7 +21,8 @@ import { cvesRouter } from './routes/cves.js';
 import { housekeepingRouter } from './routes/housekeeping.js';
 import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
-import { authenticateToken, assertJwtSecret, sweepStaleSessions } from './middleware/auth.js';
+import { ldapRouter } from './routes/ldap.js';
+import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
@@ -428,19 +429,24 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), frontendPath: FRONTEND_PATH });
 });
 
-// API Routes
+// API Routes. blockPendingRole sits on every router EXCEPT /api/auth
+// and /api/user: 'pending' accounts (LDAP-provisioned, no role assigned
+// yet) may authenticate and manage their own profile (which /api/user
+// serves — its admin-only endpoints carry requireAdmin themselves), but
+// see nothing else until an admin assigns them a role.
 app.use('/api/auth', authRouter);
-app.use('/api/services', authenticateToken, servicesRouter);
+app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
-app.use('/api/lxc', authenticateToken, lxcRouter);
-app.use('/api/ssh-access', authenticateToken, sshAccessRouter);
-app.use('/api/firewall', authenticateToken, firewallRouter);
-app.use('/api/vpn', authenticateToken, vpnRouter);
-app.use('/api/security', authenticateToken, securityRouter);
-app.use('/api/cves', authenticateToken, cvesRouter);
-app.use('/api/housekeeping', authenticateToken, housekeepingRouter);
-app.use('/api/backups', authenticateToken, backupsRouter);
-app.use('/api/notifications', authenticateToken, notificationsRouter);
+app.use('/api/lxc', authenticateToken, blockPendingRole, lxcRouter);
+app.use('/api/ssh-access', authenticateToken, blockPendingRole, sshAccessRouter);
+app.use('/api/firewall', authenticateToken, blockPendingRole, firewallRouter);
+app.use('/api/vpn', authenticateToken, blockPendingRole, vpnRouter);
+app.use('/api/security', authenticateToken, blockPendingRole, securityRouter);
+app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
+app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
+app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
+app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
+app.use('/api/ldap', authenticateToken, ldapRouter);
 
 // Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
 // no native imports; only when it resolves enabled do we dynamically
@@ -472,7 +478,7 @@ if (mock2Gate.enabled) {
     // the fix can actually reach projects (they adopt it via drift → update cycle;
     // nothing auto-remediates). Idempotent — a no-op when the seed is unchanged.
     try { upgradeFrameworkFromSeed(null); } catch (err) { console.error('[mock2] framework seed upgrade failed:', err?.message || err); }
-    app.use('/api/mock2', authenticateToken, createMock2Router());
+    app.use('/api/mock2', authenticateToken, blockPendingRole, createMock2Router());
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>

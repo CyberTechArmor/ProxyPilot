@@ -88,6 +88,11 @@ export function getDb() {
 //                     file (data/db/mock2.db) and also claim block 500 in
 //                     THAT database's schema_migrations — a different table,
 //                     no collision (see src/mock2/migrations.js).
+//   600 LDAPS — users table rebuild: role CHECK gains 'pending' (LDAP
+//               auto-provisioned accounts awaiting a manually-assigned
+//               role) + auth_source column ('local' | 'ldap').
+//   601 LDAPS — ldap_connections table (directory connection settings;
+//               bind password encrypted at rest via lib/secrets.js).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1416,6 +1421,101 @@ export function initDatabase() {
   // oldest admin. Guarded on "zero superadmins" so it never demotes or
   // overrides a deliberate assignment — once one exists, this stops acting.
   backfillSuperadmin(db);
+
+  // Version 600: LDAPS — loosen the users.role CHECK to allow 'pending'
+  // and add auth_source. LDAP-authenticated users are auto-provisioned
+  // with role='pending' and see nothing but their profile page until an
+  // admin assigns a real role. SQLite can't ALTER a CHECK constraint, so
+  // this is a table rebuild (copy → drop → rename), same dance as 207/208.
+  // disableFks: sessions, user_service_access, webauthn_credentials, etc.
+  // all FK into users(id) with ON DELETE CASCADE — the DROP would wipe
+  // them without the toggle.
+  runMigration(db, 600, 'ldaps_users_pending_role_and_auth_source', (d) => {
+    const cols = new Set(
+      d.prepare(`PRAGMA table_info(users)`).all().map((c) => c.name)
+    );
+    const has = (name, fallback) =>
+      cols.has(name) ? name : `${fallback} AS ${name}`;
+    d.exec(`
+      CREATE TABLE users__new (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        display_name TEXT,
+        password_hash TEXT NOT NULL,
+        totp_secret TEXT NOT NULL,
+        totp_enabled INTEGER DEFAULT 1,
+        role TEXT DEFAULT 'user' CHECK(role IN ('admin', 'user', 'pending')),
+        password_change_required INTEGER DEFAULT 0,
+        failed_attempts INTEGER NOT NULL DEFAULT 0,
+        last_failed_at TEXT,
+        locked_until TEXT,
+        webauthn_user_handle BLOB,
+        is_superadmin INTEGER NOT NULL DEFAULT 0,
+        auth_source TEXT NOT NULL DEFAULT 'local' CHECK(auth_source IN ('local', 'ldap')),
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      INSERT INTO users__new (
+        id, username, display_name, password_hash, totp_secret, totp_enabled,
+        role, password_change_required, failed_attempts, last_failed_at,
+        locked_until, webauthn_user_handle, is_superadmin, auth_source,
+        created_at, updated_at
+      )
+      SELECT
+        id, username,
+        ${has('display_name', 'NULL')},
+        password_hash, totp_secret,
+        ${has('totp_enabled', '1')},
+        COALESCE(role, 'admin'),
+        ${has('password_change_required', '0')},
+        ${has('failed_attempts', '0')},
+        ${has('last_failed_at', 'NULL')},
+        ${has('locked_until', 'NULL')},
+        ${has('webauthn_user_handle', 'NULL')},
+        ${has('is_superadmin', '0')},
+        'local',
+        created_at, updated_at
+      FROM users
+    `);
+    d.exec(`DROP TABLE users`);
+    d.exec(`ALTER TABLE users__new RENAME TO users`);
+  }, { disableFks: true });
+
+  // Version 601: LDAPS — directory connection settings. One row per
+  // configured directory; the login flow tries every enabled row in
+  // creation order until one authenticates the user. bind_password_enc
+  // is AES-GCM ciphertext via lib/secrets.encryptSecret() — same at-rest
+  // envelope as totp_secret. ca_cert holds an optional PEM chain for
+  // directories with a private CA; tls_verify=0 skips certificate
+  // verification entirely (lab use only, the UI warns about it).
+  runMigration(db, 601, 'ldaps_ldap_connections', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS ldap_connections (
+        id                TEXT PRIMARY KEY,
+        name              TEXT UNIQUE NOT NULL,
+        host              TEXT NOT NULL,
+        port              INTEGER NOT NULL DEFAULT 636,
+        bind_dn           TEXT,
+        bind_password_enc TEXT,
+        base_dn           TEXT NOT NULL,
+        user_filter       TEXT NOT NULL DEFAULT '(|(uid={username})(sAMAccountName={username}))',
+        tls_verify        INTEGER NOT NULL DEFAULT 1,
+        ca_cert           TEXT,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        last_test_status  TEXT,
+        last_test_error   TEXT,
+        last_test_at      TEXT,
+        created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ldap_connections_enabled
+        ON ldap_connections(enabled)
+    `);
+  });
 
   // Create file versions table for version control
   db.exec(`

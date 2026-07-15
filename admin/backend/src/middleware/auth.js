@@ -208,6 +208,29 @@ export function requireSudo(req, res, next) {
   next();
 }
 
+// Block accounts whose role is 'pending' (LDAP-provisioned, awaiting a
+// manually-assigned role) from everything except auth + their own
+// profile endpoints. Reads the CURRENT role from the DB rather than
+// the JWT claim so an admin assigning a role takes effect on the
+// user's next request instead of their next login.
+export function blockPendingRole(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  let role = req.user.role;
+  try {
+    const row = getDb().prepare('SELECT role FROM users WHERE id = ?').get(req.user.id);
+    if (row) role = row.role || role;
+  } catch { /* fall back to the JWT claim */ }
+  if (role === 'pending') {
+    return res.status(403).json({
+      error: 'No role has been assigned to your account yet. Ask an administrator to assign one.',
+      role_pending: true,
+    });
+  }
+  next();
+}
+
 // Middleware to require admin role
 export function requireAdmin(req, res, next) {
   if (!req.user) {

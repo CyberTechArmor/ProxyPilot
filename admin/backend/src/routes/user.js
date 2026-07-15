@@ -18,6 +18,7 @@ import {
   userHasPasskey,
 } from '../lib/webauthn.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
+import { ldapAuthenticate } from '../lib/ldap.js';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
@@ -189,7 +190,7 @@ userRouter.get('/profile', (req, res) => {
   try {
     const db = getDb();
     const user = db.prepare(`
-      SELECT id, username, display_name, role, is_superadmin, totp_enabled, created_at, updated_at
+      SELECT id, username, display_name, role, auth_source, is_superadmin, totp_enabled, created_at, updated_at
       FROM users WHERE id = ?
     `).get(req.user.id);
 
@@ -203,6 +204,7 @@ userRouter.get('/profile', (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        authSource: user.auth_source || 'local',
         isSuperadmin: user.is_superadmin === 1,
         totpEnabled: !!user.totp_enabled,
         hasPasskey: userHasPasskey(user.id),
@@ -334,6 +336,11 @@ userRouter.post('/change-password', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Directory-backed accounts change their password in LDAP, not here.
+    if (user.auth_source === 'ldap') {
+      return res.status(400).json({ error: 'Your password is managed by the directory (LDAP) — change it there' });
+    }
+
     // Verify current password
     const passwordValid = await bcrypt.compare(currentPassword, user.password_hash);
     if (!passwordValid) {
@@ -392,8 +399,11 @@ userRouter.post('/totp/generate', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Verify password
-    const passwordValid = await bcrypt.compare(currentPassword, user.password_hash);
+    // Verify password — against the directory for LDAP-backed accounts
+    // (they have no local hash), locally otherwise.
+    const passwordValid = user.auth_source === 'ldap'
+      ? (await ldapAuthenticate(user.username, currentPassword, { db })).ok
+      : await bcrypt.compare(currentPassword, user.password_hash);
     if (!passwordValid) {
       return res.status(401).json({ error: 'Password is incorrect' });
     }
@@ -669,7 +679,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
   try {
     const db = getDb();
     const users = db.prepare(`
-      SELECT id, username, display_name, role, is_superadmin, totp_enabled, password_change_required, created_at, updated_at
+      SELECT id, username, display_name, role, auth_source, is_superadmin, totp_enabled, password_change_required, created_at, updated_at
       FROM users
       ORDER BY created_at DESC
     `).all();
@@ -680,6 +690,7 @@ userRouter.get('/users', requireAdmin, (req, res) => {
         username: u.username,
         displayName: u.display_name,
         role: u.role || 'admin',
+        authSource: u.auth_source || 'local',
         isSuperadmin: u.is_superadmin === 1,
         totpEnabled: !!u.totp_enabled,
         passwordChangeRequired: !!u.password_change_required,
@@ -745,10 +756,12 @@ userRouter.post('/users', requireAdmin, requireSudo, async (req, res) => {
   }
 });
 
-// Update user validation schema
+// Update user validation schema. 'pending' is the parked state for
+// LDAP-provisioned accounts awaiting a manually-assigned role; an
+// admin can also send a user back to it to revoke all access.
 const updateUserSchema = z.object({
   displayName: z.string().max(100).optional(),
-  role: z.enum(['admin', 'user']).optional(),
+  role: z.enum(['admin', 'user', 'pending']).optional(),
   resetPassword: z.boolean().optional(),
 });
 
@@ -764,10 +777,12 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    const isDemotion = (role === 'user' || role === 'pending') && user.role === 'admin';
+
     // Superadmin protection (ADR-007): a non-superadmin cannot demote a
-    // superadmin (role admin -> user). Actor's flag is read from the DB —
-    // the JWT does not carry is_superadmin.
-    if (role === 'user' && user.role === 'admin') {
+    // superadmin (role admin -> user/pending). Actor's flag is read from
+    // the DB — the JWT does not carry is_superadmin.
+    if (isDemotion) {
       const actor = db.prepare('SELECT is_superadmin FROM users WHERE id = ?').get(req.user.id);
       const guard = checkSuperadminProtection({
         actorIsSuperadmin: actor?.is_superadmin === 1,
@@ -780,11 +795,16 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
     }
 
     // Prevent demoting the last admin
-    if (role === 'user' && user.role === 'admin') {
+    if (isDemotion) {
       const adminCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?').get('admin').count;
       if (adminCount <= 1) {
         return res.status(400).json({ error: 'Cannot demote the last admin user' });
       }
+    }
+
+    // Directory-backed accounts have no local password to reset.
+    if (resetPassword && user.auth_source === 'ldap') {
+      return res.status(400).json({ error: 'This account authenticates via LDAP — its password is managed in the directory' });
     }
 
     let newPassword = null;
@@ -831,16 +851,17 @@ userRouter.put('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   }
 });
 
-// Delete user
+// Delete user. Gated on requireSudo (fresh password+TOTP or passkey
+// within the sliding window), same as create/update. The old extra
+// per-request TOTP check on top of requireSudo was removed: when the
+// sudo modal interjected, the retried DELETE carried a by-then-expired
+// TOTP code from the delete dialog, failed with a bare 401, and the
+// frontend treated that as session expiry — the operator cycled
+// through two verification passes and the user never got deleted.
 userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { id } = req.params;
-    const { totpCode, passkeyAssertion } = req.body || {};
     const db = getDb();
-
-    const adminUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    const verified = await verifyConfirmationFactor({ req, user: adminUser, totpCode, passkeyAssertion });
-    if (!verified.ok) return res.status(401).json({ error: verified.error });
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!user) {
@@ -874,8 +895,19 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
       }
     }
 
-    // Delete user (service access will cascade delete)
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    // Delete user. Access/session/device/passkey rows cascade via their
+    // FKs; audit_log, file_versions and service_config_versions reference
+    // users(id) with NO delete action, so any user with a login history
+    // would trip "FOREIGN KEY constraint failed" (the root cause of the
+    // delete button silently failing). Detach those rows first — the
+    // history itself is preserved, only the author link is cleared.
+    const deleteUserTx = db.transaction(() => {
+      db.prepare('UPDATE audit_log SET user_id = NULL WHERE user_id = ?').run(id);
+      db.prepare('UPDATE file_versions SET created_by = NULL WHERE created_by = ?').run(id);
+      db.prepare('UPDATE service_config_versions SET created_by = NULL WHERE created_by = ?').run(id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    });
+    deleteUserTx();
 
     logAudit(req.user.id, 'USER_DELETED', 'user', id, { username: user.username }, req.ip);
 

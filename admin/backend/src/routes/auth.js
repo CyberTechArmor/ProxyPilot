@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { getDb, logAudit } from '../db.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
+import { ldapAuthenticate, hasEnabledLdapConnections } from '../lib/ldap.js';
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -350,7 +351,31 @@ authRouter.post('/login', async (req, res) => {
     const db = getDb();
 
     // Find user
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    let user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+
+    // Unknown username: if any LDAPS connection is configured, try the
+    // directory. A successful directory auth auto-provisions a local
+    // account with role='pending' — the user can sign in (and is walked
+    // through TOTP setup below) but sees nothing beyond their profile
+    // page until an admin assigns a real role.
+    let ldapVerified = false;
+    if (!user && hasEnabledLdapConnections(db)) {
+      const ldapResult = await ldapAuthenticate(username, password, { db });
+      if (ldapResult.ok) {
+        const userId = uuidv4();
+        db.prepare(`
+          INSERT INTO users (id, username, display_name, password_hash, totp_secret,
+                             totp_enabled, role, password_change_required, auth_source)
+          VALUES (?, ?, ?, '', '', 0, 'pending', 0, 'ldap')
+        `).run(userId, username, ldapResult.displayName || null);
+        logAudit(userId, 'USER_PROVISIONED_LDAP', 'user', userId,
+          { username, connection: ldapResult.connectionName, dn: ldapResult.dn }, req.ip);
+        user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+        ldapVerified = true;
+      } else if (ldapResult.reason === 'directory_error') {
+        console.error('LDAP login attempt failed (directory error):', ldapResult.error);
+      }
+    }
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -370,20 +395,35 @@ authRouter.post('/login', async (req, res) => {
         });
     }
 
-    // Check if user needs initial setup (empty password)
-    if (!user.password_hash) {
-      return res.status(401).json({
-        error: 'Initial setup required. Please set your password.',
-        setupRequired: true,
-      });
-    }
+    if (user.auth_source === 'ldap') {
+      // Directory-backed account: the password lives in LDAP, never
+      // locally. Skip the initial-setup branch (password_hash is
+      // intentionally empty) and verify against the directory instead.
+      if (!ldapVerified) {
+        const ldapResult = await ldapAuthenticate(username, password, { db });
+        if (!ldapResult.ok) {
+          recordLoginFailure(db, user, req);
+          logAudit(null, 'LOGIN_FAILED', 'user', user.id,
+            { reason: `Invalid LDAP credentials (${ldapResult.reason})` }, req.ip);
+          return res.status(401).json({ error: 'Invalid credentials' });
+        }
+      }
+    } else {
+      // Check if user needs initial setup (empty password)
+      if (!user.password_hash) {
+        return res.status(401).json({
+          error: 'Initial setup required. Please set your password.',
+          setupRequired: true,
+        });
+      }
 
-    // Verify password
-    const passwordValid = await bcrypt.compare(password, user.password_hash);
-    if (!passwordValid) {
-      recordLoginFailure(db, user, req);
-      logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid password' }, req.ip);
-      return res.status(401).json({ error: 'Invalid credentials' });
+      // Verify password
+      const passwordValid = await bcrypt.compare(password, user.password_hash);
+      if (!passwordValid) {
+        recordLoginFailure(db, user, req);
+        logAudit(null, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid password' }, req.ip);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
     }
 
     // Generate fingerprint from request
@@ -419,6 +459,7 @@ authRouter.post('/login', async (req, res) => {
             username: user.username,
             displayName: user.display_name,
             role: user.role || 'admin',
+            authSource: user.auth_source || 'local',
             totpEnabled: true,
             passwordChangeRequired: !!user.password_change_required,
           },
@@ -556,6 +597,7 @@ authRouter.post('/login', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        authSource: user.auth_source || 'local',
         totpEnabled: true, // Always true after successful login
         passwordChangeRequired: !!user.password_change_required,
       },
@@ -604,7 +646,11 @@ authRouter.post('/sudo', authenticateToken, async (req, res) => {
         });
     }
 
-    const passwordValid = await bcrypt.compare(password, user.password_hash);
+    // LDAP-backed accounts have no local password hash — re-prove the
+    // password against the directory instead.
+    const passwordValid = user.auth_source === 'ldap'
+      ? (await ldapAuthenticate(user.username, password, { db })).ok
+      : await bcrypt.compare(password, user.password_hash);
     if (!passwordValid) {
       recordLoginFailure(db, user, req);
       logAudit(req.user.id, 'SUDO_DENIED', 'user', req.user.id, { reason: 'Invalid password' }, req.ip);
@@ -643,7 +689,7 @@ authRouter.post('/sudo', authenticateToken, async (req, res) => {
 // Verify token endpoint
 authRouter.get('/verify', authenticateToken, (req, res) => {
   const db = getDb();
-  const user = db.prepare('SELECT id, username, display_name, role, totp_enabled, password_change_required FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare('SELECT id, username, display_name, role, auth_source, totp_enabled, password_change_required FROM users WHERE id = ?').get(req.user.id);
 
   if (!user) {
     return res.status(401).json({ error: 'User not found' });
@@ -655,6 +701,7 @@ authRouter.get('/verify', authenticateToken, (req, res) => {
       username: user.username,
       displayName: user.display_name,
       role: user.role || 'admin',
+      authSource: user.auth_source || 'local',
       totpEnabled: !!user.totp_enabled,
       passwordChangeRequired: !!user.password_change_required,
     },
@@ -1095,6 +1142,7 @@ authRouter.post('/passkey/authenticate/verify', async (req, res) => {
         username: user.username,
         displayName: user.display_name,
         role: user.role || 'admin',
+        authSource: user.auth_source || 'local',
         totpEnabled: !!user.totp_enabled,
         passwordChangeRequired: !!user.password_change_required,
       },

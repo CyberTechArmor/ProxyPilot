@@ -231,8 +231,10 @@ export default function Layout() {
     { name: 'Profile', href: '/profile', icon: User },
   ];
 
+  // Accounts still waiting for a role (LDAP sign-ins) only see Profile.
+  const isPending = (user?.role ?? storedUser?.role) === 'pending';
   const filteredNavigation = navigation.filter(item =>
-    !item.adminOnly || isAdmin
+    isPending ? item.href === '/profile' : (!item.adminOnly || isAdmin)
   );
 
   return (

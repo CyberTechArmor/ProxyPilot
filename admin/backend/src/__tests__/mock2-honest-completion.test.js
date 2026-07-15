@@ -121,8 +121,9 @@ test('resume block carries the blocked run\'s exact gate findings as guidance', 
   });
   assert.match(block, /BLOCKED by the integration gate/);
   assert.match(block, /src\/adp\/service\.ts#syncWorkers/);
-  assert.match(block, /Resolve EACH one/);
+  assert.match(block, /VERIFY each against the current code/);
   assert.match(block, /never convert an error into success/);
+  assert.match(block, /do NOT restructure correct code/);
   // Findings alone are enough to produce a resume block (a bare resume of a
   // gate-blocked cycle still gets the list).
   assert.notEqual(block, '');

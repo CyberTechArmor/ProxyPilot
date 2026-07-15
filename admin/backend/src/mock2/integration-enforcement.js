@@ -243,7 +243,7 @@ export async function repairManifestInContainer({ containerName, execInContainer
   try {
     await execInContainer(containerName, `git add ${INTEGRATION_MANIFEST_PATH} ${plan.archive} && git -c user.name=ProxyPilot -c user.email=mock2@proxypilot.local commit -q -m 'mock2: repair invalid integration manifest' || true`);
   } catch { /* best effort — the write is the load-bearing part */ }
-  return { ok: true, repaired: true, salvaged: plan.salvaged, dropped: plan.dropped, archive: plan.archive };
+  return { ok: true, repaired: true, salvaged: plan.salvaged, migrated: plan.migrated || [], dropped: plan.dropped, archive: plan.archive };
 }
 
 export async function backfillManifestEntryInContainer({ containerName, entry, execInContainer, readFileInContainer, writeFileInContainer }) {

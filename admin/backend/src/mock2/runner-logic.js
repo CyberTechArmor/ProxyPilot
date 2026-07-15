@@ -326,6 +326,21 @@ approved exception; implementing it is the required work for this build.
 # Available skills
 ${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
 
+# Integration manifest (state/integrations.json — the EXACT shape is enforced)
+Any external capability (a third-party API, a directory bind, an external DB)
+must be declared in state/integrations.json. The gate validates the exact field
+names — entries written with keys like \`key\`, \`name\`, \`destinations\`, or
+\`code\` do NOT validate and will block finish. One valid example:
+{"schema_version":1,"entries":[{"id":"adp-workforce","subsystem":"adp",
+"actions":[{"name":"test-connection","operation":"oauth-token"}],
+"destination":{"source":"env","key":"ADP_TOKEN_URL"},"transport":"https-mtls",
+"provenance":{"response_to_output":"required"},
+"live_verification":{"required":true},"egress":{"classification":"public"},
+"contract_test":"tests/contract/adp.contract.test.ts"}]}
+subsystem is the src/<subsystem>/ folder; destination.key is the env/config key
+the real endpoint comes from; live_verification.required true means a human
+runs the live check after deploy (pending_verification is then your finish).
+
 # How to work
 1. Write state/acceptance.json FIRST — what "done" means for THIS task: {task,
    kind: bugfix|feature|chore, defect_tag + regression tests for a bug fix,
@@ -695,6 +710,21 @@ approved exception; implementing it is the required work for this build.
 
 ## Available skills
 ${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: '.claude/components' }).replace(/^# /m, '## ')}
+
+## Integration manifest (state/integrations.json — the EXACT shape is enforced)
+Any external capability (a third-party API, a directory bind, an external DB)
+must be declared in state/integrations.json. The gate validates the exact field
+names — entries written with keys like \`key\`, \`name\`, \`destinations\`, or
+\`code\` do NOT validate. One valid example:
+{"schema_version":1,"entries":[{"id":"adp-workforce","subsystem":"adp",
+"actions":[{"name":"test-connection","operation":"oauth-token"}],
+"destination":{"source":"env","key":"ADP_TOKEN_URL"},"transport":"https-mtls",
+"provenance":{"response_to_output":"required"},
+"live_verification":{"required":true},"egress":{"classification":"public"},
+"contract_test":"tests/contract/adp.contract.test.ts"}]}
+subsystem is the src/<subsystem>/ folder; destination.key is the env/config key
+the real endpoint comes from; live_verification.required true means a human
+runs the live check after deploy.
 
 ## How to work
 1. Write \`state/acceptance.json\` FIRST — what "done" means for THIS task: {task,

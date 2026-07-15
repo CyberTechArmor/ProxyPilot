@@ -45,6 +45,18 @@ const AMBIGUOUS_TERMS = [
 // that says it was REMOVED or ISOLATED, it is recorded (not auto-blocking).
 const NEGATION_MARKERS = /\b(removed|deleted|dropped|eliminated|replaced|no\s+longer|isolat(?:ed|ion)|verified|confirmed\s+no|without\s+any)\b/i;
 
+// Guard / defense-description markers (ambiguous tier ONLY — never applied to a
+// high-confidence phrase): a sentence that DESCRIBES A DEFENSE against
+// simulation legitimately uses the ambiguous vocabulary — "a no-simulation
+// guard that fails if anyone hardcodes a fake roster", "contract tests drive
+// the transport against a real local TLS fixture", "fixture is test-only".
+// Blocking those sentences punished exactly the disclosures the constitution
+// demands (a real build looped for five cycles on them). The B.4 source
+// analyzer remains the positive detector for fixture-in-production, canned
+// success, and dead transport — this lexical net only stops flagging the
+// sentences that describe the protections.
+const GUARD_MARKERS = /\b(fails?\s+(?:if|when|on)|guards?\s+against|prevent(?:s|ing)?|detect(?:s|ing|ed)?|reject(?:s|ing|ed)?|refuse(?:s|d)?|forbid(?:s|den)?|blocks?|no[-\s]?simulation|anti[-\s]?simulation|test[-\s]?only|contract\s+tests?|local\s+(?:tls\s+)?fixture|fixture[-\s]server|in[-\s]?fence|never\s+(?:returns?|selects?|reachable|shipped))\b/i;
+
 // A window of characters around a match, for the excerpt.
 function excerptAround(text, start, end, pad = 60) {
   const s = Math.max(0, start - pad);
@@ -52,14 +64,22 @@ function excerptAround(text, start, end, pad = 60) {
   return (s > 0 ? '…' : '') + text.slice(s, e).trim() + (e < text.length ? '…' : '');
 }
 
-// Is the sentence containing this match a negation/remediation statement?
-function inNegatedContext(text, idx) {
-  // Sentence boundaries: previous and next '.', '\n', or start/end.
+// The sentence containing a match (boundaries: '.', '\n', or start/end).
+function sentenceAround(text, idx) {
   const prev = Math.max(text.lastIndexOf('.', idx), text.lastIndexOf('\n', idx));
   let next = text.indexOf('.', idx);
   if (next < 0) next = text.length;
-  const sentence = text.slice(prev + 1, next);
-  return NEGATION_MARKERS.test(sentence);
+  return text.slice(prev + 1, next);
+}
+
+// Is the sentence containing this match a negation/remediation statement?
+function inNegatedContext(text, idx) {
+  return NEGATION_MARKERS.test(sentenceAround(text, idx));
+}
+
+// Is the sentence a guard/defense description (ambiguous tier only)?
+function inGuardContext(text, idx) {
+  return GUARD_MARKERS.test(sentenceAround(text, idx));
 }
 
 function mkFinding(patch) {
@@ -96,6 +116,8 @@ export function screenDisclosureText(fields = []) {
     }
 
     // Ambiguous single terms (skip if already inside a high-confidence span).
+    // A term inside a negation OR a guard/defense sentence is recorded, not
+    // blocking — describing the protection is not disclosing a simulation.
     for (const term of AMBIGUOUS_TERMS) {
       const re = new RegExp(term.re.source, 'gi');
       let m;
@@ -103,13 +125,16 @@ export function screenDisclosureText(fields = []) {
         const idx = m.index;
         if (highSpans.some(([a, b]) => idx >= a && idx < b)) continue;
         const negated = inNegatedContext(t, idx);
+        const guard = !negated && inGuardContext(t, idx);
         const span = [idx, idx + m[0].length];
         findings.push(mkFinding({
-          source, tier: negated ? 'negated' : 'ambiguous',
+          source, tier: (negated || guard) ? 'negated' : 'ambiguous',
           term: term.term, matched: m[0], span, excerpt: excerptAround(t, span[0], span[1]),
           proposed_classification: negated
             ? 'remediation/negation — recorded, not auto-blocking'
-            : `ambiguous simulation term "${term.term}" — admin resolves as approved-simulation (register + label) or false positive`,
+            : guard
+              ? 'guard/defense description (the sentence describes a protection against simulation) — recorded, not auto-blocking'
+              : `ambiguous simulation term "${term.term}" — admin resolves as approved-simulation (register + label) or false positive`,
         }));
       }
     }

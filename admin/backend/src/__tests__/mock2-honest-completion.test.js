@@ -25,8 +25,9 @@ import {
 } from '../mock2/verification-logic.js';
 import {
   repairManifestPlan, scaffoldManifestText, parseIntegrationManifest, appendManifestEntry,
-  INTEGRATION_MANIFEST_INVALID_PATH,
+  INTEGRATION_MANIFEST_INVALID_PATH, normalizeManifestEntry, MANIFEST_ENTRY_SHAPE_HINT,
 } from '../mock2/integration-logic.js';
+import { screenDisclosureText, screeningVerdict } from '../mock2/screening-logic.js';
 import { evaluateIntegrationTruthfulness } from '../mock2/integration-enforcement.js';
 import { buildResumeContextBlock } from '../mock2/unblock-logic.js';
 
@@ -309,4 +310,95 @@ test('repairManifestPlan: salvages individually-valid entries, reports the dropp
 
 test('scaffoldManifestText: the self-heal target parses', () => {
   assert.equal(parseIntegrationManifest(scaffoldManifestText()).ok, true);
+});
+
+// ---- near-miss manifest migration (the observed five-cycle loop) ----
+
+// The exact wrong shape a real build kept writing: entries keyed on
+// key/name/destinations/code instead of id/subsystem/destination.
+const WRONG_SHAPE_MANIFEST = JSON.stringify({
+  schema_version: 1,
+  entries: [
+    {
+      key: 'adp-workforce-now',
+      name: 'ADP Workforce Now',
+      destinations: ['env:ADP_TOKEN_URL', 'env:ADP_API_URL'],
+      code: ['src/adp/transport.ts', 'src/adp/service.ts'],
+      transport: 'https-mtls',
+      contract_test: 'tests/contract/adp.contract.test.ts',
+    },
+    {
+      key: 'ldaps-directory',
+      destinations: [{ source: 'env', key: 'LDAPS_URL' }],
+      code: ['src/ldaps/client.ts'],
+      protocol: 'ldaps',
+    },
+  ],
+});
+
+test('normalizeManifestEntry: migrates the observed wrong shape into a valid entry', () => {
+  const raw = JSON.parse(WRONG_SHAPE_MANIFEST).entries[0];
+  const n = normalizeManifestEntry(raw);
+  assert.equal(n.ok, true, n.error);
+  assert.equal(n.entry.id, 'adp-workforce-now');            // from `key`
+  assert.equal(n.entry.subsystem, 'adp');                   // from the `code` paths
+  assert.deepEqual(n.entry.destination, { source: 'env', key: 'ADP_TOKEN_URL' }); // first of `destinations`
+  assert.equal(n.entry.transport, 'https-mtls');
+  assert.equal(n.entry.live_verification.required, true);   // strict default
+  assert.equal(n.entry.contract_test, 'tests/contract/adp.contract.test.ts');
+  assert.ok(n.inferred.length >= 3);                        // every inference reported
+  // An already-valid entry passes through untouched.
+  const valid = JSON.parse(LDAPS_MANIFEST).entries[0];
+  assert.deepEqual(normalizeManifestEntry(valid).inferred, []);
+});
+
+test('repairManifestPlan: MIGRATES near-miss entries instead of dropping them', () => {
+  const plan = repairManifestPlan(WRONG_SHAPE_MANIFEST);
+  assert.equal(plan.needed, true);
+  assert.match(plan.error, /needs a string id/);
+  assert.match(plan.error, /required entry shape/); // the actionable hint rides the error
+  assert.deepEqual(plan.salvaged.map((e) => e.id), ['adp-workforce-now', 'ldaps-directory']);
+  assert.equal(plan.dropped.length, 0);
+  assert.equal(plan.migrated.length, 2);
+  const repaired = parseIntegrationManifest(plan.text);
+  assert.equal(repaired.ok, true);
+  // The migrated LDAPS entry kept its declared destination and protocol.
+  const ldaps = repaired.manifest.entries.find((e) => e.id === 'ldaps-directory');
+  assert.deepEqual(ldaps.destination, { source: 'env', key: 'LDAPS_URL' });
+  assert.equal(ldaps.transport, 'ldaps');
+});
+
+test('parseIntegrationManifest: validation errors carry the exact required shape', () => {
+  const p = parseIntegrationManifest(WRONG_SHAPE_MANIFEST);
+  assert.equal(p.ok, false);
+  assert.match(p.error, /`key`, `name`, `destinations`, or `code` do NOT validate/);
+  assert.equal(MANIFEST_ENTRY_SHAPE_HINT.includes('"id"'), true);
+});
+
+// ---- disclosure screening: guard descriptions are not disclosures ----
+
+test('screening: describing an anti-simulation GUARD does not block', () => {
+  // The real finish language that inflated the finding count for five cycles.
+  const { findings } = screenDisclosureText([
+    { source: 'finish.summary', text: 'Added a no-simulation guard that fails if anyone hardcodes a fake roster; contract tests drive the transport against a real local TLS fixture.' },
+    { source: 'finish.acceptance', text: 'as admin, run Test Connection — the check rejects stubbed transports and performs the real mTLS handshake' },
+  ]);
+  const verdict = screeningVerdict(findings);
+  assert.equal(verdict.blocking, false, JSON.stringify(verdict.candidates));
+  assert.ok(verdict.recorded.length > 0); // still recorded, never silently dropped
+});
+
+test('screening: a REAL simulation disclosure still blocks', () => {
+  const { findings } = screenDisclosureText([
+    { source: 'finish.summary', text: 'The connection test is simulated because the ADP endpoint is unreachable from the fence; the roster returns canned data.' },
+  ]);
+  const verdict = screeningVerdict(findings);
+  assert.equal(verdict.blocking, true);
+});
+
+test('screening: a bare ambiguous term with no guard context still blocks as before', () => {
+  const { findings } = screenDisclosureText([
+    { source: 'finish.summary', text: 'Employee list is populated from sample data for now.' },
+  ]);
+  assert.equal(screeningVerdict(findings).blocking, true);
 });

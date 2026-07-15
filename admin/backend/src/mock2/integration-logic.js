@@ -87,6 +87,12 @@ function canonicalEntry(e) {
   };
 }
 
+// The exact entry shape, appended to every validation error so a builder (or an
+// operator) can self-correct in one step instead of guessing field names —
+// entries keyed `key`/`name`/`destinations`/`code` were a real five-cycle loop.
+export const MANIFEST_ENTRY_SHAPE_HINT =
+  'required entry shape (exact keys): {"id":"<slug>","subsystem":"<src/<subsystem>/ folder>","actions":[{"name":"…","operation":"…"}],"destination":{"source":"env|config","key":"<ENV_OR_CONFIG_KEY>"},"transport":"https|https-mtls|ldaps|…","provenance":{"response_to_output":"required"},"live_verification":{"required":true|false},"egress":{"classification":"public|private"},"contract_test":"tests/contract/….test.ts"?} — keys like `key`, `name`, `destinations`, or `code` do NOT validate';
+
 export function parseIntegrationManifest(text) {
   let doc;
   try { doc = JSON.parse(String(text || '')); } catch (e) {
@@ -99,7 +105,7 @@ export function parseIntegrationManifest(text) {
   const entriesIn = Array.isArray(doc.entries) ? doc.entries : [];
   for (let i = 0; i < entriesIn.length; i++) {
     const err = validateEntry(entriesIn[i], i);
-    if (err) return { ok: false, error: err };
+    if (err) return { ok: false, error: `${err} — ${MANIFEST_ENTRY_SHAPE_HINT}` };
   }
   return { ok: true, manifest: { schema_version: MANIFEST_SCHEMA_VERSION, entries: entriesIn.map(canonicalEntry) } };
 }
@@ -119,6 +125,121 @@ export function validateManifestEntry(entry) {
   return { ok: true, entry: canonicalEntry(entry) };
 }
 
+// ---- near-miss entry normalization (schema migration for wrong-shape entries) ----
+
+// A build (or a human) that declared its integrations in the WRONG field names
+// — `key`/`name` instead of `id`, `destinations` instead of `destination`,
+// `code`/`paths` file lists instead of `subsystem`, string actions — wrote real
+// information in an invalid shape. Dropping those entries on repair would turn
+// a manifest-invalid block into an undeclared block: the same loop, one class
+// over. This migrates a near-miss entry into the canonical shape, CONSERVATIVELY:
+// it only ever renames/derives from what the entry actually says, defaults the
+// safety-relevant fields to their strict values (live_verification.required
+// true; egress private), and reports every inference so the operator sees what
+// was assumed. The result still passes validateManifestEntry — and declaring is
+// not trusting: the gate re-checks the declared subsystem's code for real
+// provenance either way.
+function slugId(v) {
+  return String(v || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+}
+
+// Parse one destination-ish value into { source, key }: an object with
+// source/key; "env:LDAPS_URL" / "config:adpTokenUrl"; a bare env-var-looking
+// name; or any other string (kept as a config key).
+function coerceDestination(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const source = String(v.source || v.type || '').trim();
+    const key = String(v.key || v.name || v.env || v.url || '').trim();
+    if (key) return { source: source || (/^[A-Z0-9_]+$/.test(key) ? 'env' : 'config'), key };
+    return null;
+  }
+  const s = String(v || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(env|config|secret|settings?)\s*[:=]\s*(.+)$/i);
+  if (m) return { source: m[1].toLowerCase(), key: m[2].trim() };
+  return { source: /^[A-Z0-9_]+$/.test(s) ? 'env' : 'config', key: s };
+}
+
+// normalizeManifestEntry(raw) — best-effort migration of a near-miss entry into
+// the canonical shape. Returns { ok, entry, inferred: [what was derived] } or
+// { ok:false, error } when even migration can't produce a valid entry. An entry
+// that ALREADY validates returns as-is with inferred: [].
+export function normalizeManifestEntry(raw) {
+  const direct = validateManifestEntry(raw);
+  if (direct.ok) return { ok: true, entry: direct.entry, inferred: [] };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'entry is not an object' };
+  const inferred = [];
+
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : slugId(raw.key ?? raw.name);
+  if (!id) return { ok: false, error: 'no id/key/name to derive an id from' };
+  if (raw.id !== id) inferred.push(`id "${id}" from ${raw.key != null ? '`key`' : '`name`'}`);
+
+  // Subsystem: declared, or derived from the entry's own file lists (code/paths/
+  // files/sources), or the id's leading word as a last resort.
+  let subsystem = typeof raw.subsystem === 'string' && raw.subsystem.trim() ? raw.subsystem.trim() : null;
+  if (!subsystem) {
+    const fileLists = ['code', 'paths', 'files', 'sources'];
+    for (const k of fileLists) {
+      const arr = Array.isArray(raw[k]) ? raw[k] : [];
+      for (const p of arr) {
+        const sub = subsystemForPath(p);
+        if (sub) { subsystem = sub; inferred.push(`subsystem "${sub}" from \`${k}\` path ${p}`); break; }
+      }
+      if (subsystem) break;
+    }
+  }
+  if (!subsystem) { subsystem = id.split('-')[0]; inferred.push(`subsystem "${subsystem}" from the id`); }
+
+  const transport = String(raw.transport || raw.protocol || '').trim() || 'https';
+  if (!raw.transport) inferred.push(`transport "${transport}"${raw.protocol ? ' from `protocol`' : ' (default)'}`);
+
+  // Actions: objects kept; strings become {name, operation}; none → one generic
+  // action on the transport.
+  const rawActions = Array.isArray(raw.actions) ? raw.actions : (Array.isArray(raw.operations) ? raw.operations : []);
+  let actions = rawActions.map((a) => {
+    if (a && typeof a === 'object' && a.name && a.operation) return { name: String(a.name), operation: String(a.operation) };
+    if (a && typeof a === 'object' && (a.name || a.operation)) return { name: String(a.name || a.operation), operation: String(a.operation || a.name) };
+    const s = String(a || '').trim();
+    return s ? { name: s, operation: s } : null;
+  }).filter(Boolean);
+  if (!actions.length) { actions = [{ name: 'connect', operation: transport }]; inferred.push('a generic "connect" action (none declared)'); }
+  else if (!Array.isArray(raw.actions) || rawActions.some((a) => !(a && a.name && a.operation))) inferred.push('actions normalized to {name, operation}');
+
+  // Destination: the canonical object, the first of a `destinations` list, or an
+  // endpoint/url-ish field.
+  let destination = coerceDestination(raw.destination)
+    || (Array.isArray(raw.destinations) ? raw.destinations.map(coerceDestination).find(Boolean) : null)
+    || coerceDestination(raw.endpoint ?? raw.url ?? raw.host ?? null);
+  if (!destination) return { ok: false, error: `entry "${id}" has no destination/destinations/endpoint to derive destination{source,key} from` };
+  if (!(raw.destination && raw.destination.source && raw.destination.key)) inferred.push(`destination {source:"${destination.source}", key:"${destination.key}"}`);
+
+  const provenance = raw.provenance?.response_to_output
+    ? { response_to_output: String(raw.provenance.response_to_output) }
+    : { response_to_output: 'required' };
+  if (!raw.provenance?.response_to_output) inferred.push('provenance.response_to_output "required" (strict default)');
+
+  const live = typeof raw.live_verification?.required === 'boolean'
+    ? { required: raw.live_verification.required }
+    : { required: true };
+  if (typeof raw.live_verification?.required !== 'boolean') inferred.push('live_verification.required true (strict default — the operator confirms the live check)');
+
+  const egress = raw.egress?.classification
+    ? { classification: String(raw.egress.classification) }
+    : { classification: typeof raw.egress === 'string' && raw.egress.trim() ? raw.egress.trim() : 'private' };
+  if (!raw.egress?.classification) inferred.push(`egress.classification "${egress.classification}"${typeof raw.egress === 'string' ? ' from `egress`' : ' (strict default)'}`);
+
+  const contractTest = [raw.contract_test, raw.contractTest, raw.contract].find((v) => typeof v === 'string' && v.trim());
+
+  const candidate = {
+    id, subsystem, actions, destination, transport, provenance,
+    live_verification: live, egress,
+    ...(contractTest ? { contract_test: contractTest.trim() } : {}),
+  };
+  const v = validateManifestEntry(candidate);
+  if (!v.ok) return { ok: false, error: `could not migrate entry "${id}": ${v.error}` };
+  return { ok: true, entry: v.entry, inferred };
+}
+
 // scaffoldManifestText(entries) — a fresh, valid state/integrations.json body
 // (schema_version + entries[]). The self-healing target for an absent or
 // malformed manifest.
@@ -133,11 +254,16 @@ export const INTEGRATION_MANIFEST_INVALID_PATH = 'state/integrations.invalid.jso
 // repairManifestPlan(currentText) — the self-healing decision for a manifest
 // that does not parse/validate (the manifest-invalid dead end). Pure. Returns:
 //   { needed:false }                          — the manifest is already valid;
-//   { needed:true, text, salvaged, dropped,   — rewrite with a valid scaffold,
-//     archive }                                 salvaging every entry that
-//                                               individually validates, dropping
-//                                               (and reporting) the rest; the
-//                                               original text goes to `archive`
+//   { needed:true, text, salvaged, migrated,  — rewrite with a valid scaffold:
+//     dropped, archive }                        entries that validate are kept;
+//                                               NEAR-MISS entries (wrong field
+//                                               names — key/name/destinations/
+//                                               code) are MIGRATED into the
+//                                               canonical shape (each with its
+//                                               inference report); only entries
+//                                               that can't be migrated are
+//                                               dropped (reported). The original
+//                                               text goes to `archive`
 //                                               (state/integrations.invalid.json)
 //                                               so nothing is silently lost.
 // An absent/blank manifest needs no repair (the gate already tolerates it).
@@ -146,24 +272,28 @@ export function repairManifestPlan(currentText) {
   if (!raw.trim()) return { needed: false, reason: 'no manifest present — nothing to repair (an absent manifest is valid)' };
   const parsed = parseIntegrationManifest(raw);
   if (parsed.ok) return { needed: false, reason: 'the manifest already parses and validates' };
-  // Salvage: if the text is JSON with an entries array, keep every entry that
-  // validates on its own; anything else (or unparseable JSON) salvages nothing.
-  let salvaged = [];
+  const salvaged = [];
+  const migrated = [];
   const dropped = [];
   try {
     const doc = JSON.parse(raw);
-    const entriesIn = Array.isArray(doc?.entries) ? doc.entries : [];
+    // Wrong container keys happen too: entries may live under `integrations`.
+    const entriesIn = Array.isArray(doc?.entries) ? doc.entries
+      : Array.isArray(doc?.integrations) ? doc.integrations : [];
     for (const e of entriesIn) {
-      const v = validateManifestEntry(e);
-      if (v.ok && !salvaged.some((s) => s.id === v.entry.id)) salvaged.push(v.entry);
-      else dropped.push({ id: e?.id || '(no id)', error: v.ok ? 'duplicate id' : v.error });
+      const n = normalizeManifestEntry(e);
+      if (!n.ok) { dropped.push({ id: e?.id || e?.key || e?.name || '(no id)', error: n.error }); continue; }
+      if (salvaged.some((s) => s.id === n.entry.id)) { dropped.push({ id: n.entry.id, error: 'duplicate id' }); continue; }
+      salvaged.push(n.entry);
+      if (n.inferred.length) migrated.push({ id: n.entry.id, inferred: n.inferred });
     }
-  } catch { salvaged = []; }
+  } catch { /* unparseable JSON — nothing to salvage */ }
   return {
     needed: true,
     error: parsed.error,
     text: scaffoldManifestText(salvaged),
     salvaged,
+    migrated,
     dropped,
     archive: INTEGRATION_MANIFEST_INVALID_PATH,
   };
@@ -557,7 +687,7 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
     if (declaredSubsystems.has(sub)) continue;
     findings.push(finding('undeclared_integration', {
       file: paths[0],
-      message: `Outbound integration in "${sub}" (${paths.join(', ')}) has no entry in ${INTEGRATION_MANIFEST_PATH}. Every external capability must be declared; add a manifest entry (id, subsystem, actions, destination, transport, provenance, live_verification, egress).`,
+      message: `Outbound integration in "${sub}" (${paths.join(', ')}) has no entry in ${INTEGRATION_MANIFEST_PATH}. Every external capability must be declared; add a manifest entry — ${MANIFEST_ENTRY_SHAPE_HINT}.`,
     }));
   }
 

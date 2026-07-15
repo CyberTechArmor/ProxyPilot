@@ -19,6 +19,16 @@ import { requireSudo, requireAdminOrPermission } from '../middleware/auth.js';
 // keeps every route registration below unchanged; per-project
 // membership is still enforced on top by requireMock2Role.
 const requireAdmin = requireAdminOrPermission('developer');
+
+// The acting user's id for attribution and NOT NULL actor columns. The JWT
+// payload's `id` is absent on some sessions/tokens; the session row's `user_id`
+// (written at login, always present) is the authoritative fallback. Without this,
+// an undefined id becomes NaN → SQLite stores NULL → a NOT NULL actor column
+// (mock2_integration_verifications.operator_id, mock2_integration_resolutions
+// .decided_by) rejects the insert with an opaque error. Never returns undefined.
+function mock2ActorId(req) {
+  return req?.user?.id ?? req?.session?.user_id ?? null;
+}
 import { logAudit } from '../db.js';
 import { postNotification, resolveNotification } from '../lib/notifications.js';
 import {
@@ -2066,7 +2076,7 @@ export function createMock2Router() {
     const attestation = String(req.body?.attestation || '').trim();
     let result;
     try {
-      result = await acceptPendingVerification({ project, cycle, initiatedBy: req.user.id, attestation });
+      result = await acceptPendingVerification({ project, cycle, initiatedBy: mock2ActorId(req), attestation });
     } catch (err) {
       return res.status(500).json({ error: `Could not accept the build as pending verification: ${err?.message || 'unknown error'}` });
     }
@@ -2724,7 +2734,7 @@ export function createMock2Router() {
     const record = {
       project_id: project.id, cycle_id: cycle.id, item_id: item.item_id,
       manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
-      operator_id: req.user.id, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      operator_id: mock2ActorId(req), role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
       environment: parsed.data.environment, endpoint_classification: item.endpoint_classification,
       observed_result: parsed.data.observed_result || null,
       waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
@@ -2778,7 +2788,7 @@ export function createMock2Router() {
     const record = {
       project_id: project.id, cycle_id: null, item_id: item.item_id,
       manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
-      operator_id: req.user.id, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      operator_id: mock2ActorId(req), role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
       environment: parsed.data.environment, endpoint_classification: item.endpoint_classification || 'unknown',
       observed_result: parsed.data.observed_result || null,
       waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
@@ -2882,7 +2892,7 @@ export function createMock2Router() {
       subsystem: result.entry.subsystem, manifest_id: result.entry.id, manifest_hash: result.hash,
       manifest_entry_json: result.entry, routed_to: 'building',
       reason: parsed.data.reason || `declared integration "${result.entry.id}"`,
-      decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+      decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
     });
     logAudit(req.user.id, 'MOCK2_INTEGRATION_BACKFILL', 'mock2_cycle', cycle.id,
       { manifest_id: result.entry.id, subsystem: result.entry.subsystem }, req.ip);
@@ -2958,7 +2968,7 @@ export function createMock2Router() {
       finding_class: 'live-check-failed', finding_kind: 'live_check_failed',
       subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
       reason: `${parsed.data.environment}: ${observed}`, routed_to: 'building',
-      decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+      decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
     });
 
     // The pending cycle(s) carrying this item stop being "pending" — the live
@@ -3021,7 +3031,7 @@ export function createMock2Router() {
         finding_class: 'live-check-deferred', finding_kind: 'live_check_deferred',
         subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
         reason, routed_to: 'pending-operator-verification',
-        decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+        decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
       });
       logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECK_DEFERRED', 'mock2_project', project.id,
         { item_id: item.item_id, reason }, req.ip);

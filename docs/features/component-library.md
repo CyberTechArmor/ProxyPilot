@@ -80,7 +80,8 @@ admin + sudo. All mutations are audit-logged.
 `docs/features/examples/ldaps-auth.component.json` is a complete, importable
 example — the canonical LDAPS auth module (search-then-bind, bounded connection
 pool, RFC 4515 escaping, group extraction) in `proxypilot-component@1` format.
-Import it via **Projects → Components → Import** (paste the JSON), or:
+Import it via **Projects → Components → Import** (upload the .component.json
+file or paste the JSON), or:
 
 ```bash
 curl -sS -X POST https://<host>/api/mock2/components/import \
@@ -98,4 +99,8 @@ same component (matched by `key`).
 `/projects/components` (`admin/frontend/src/pages/ComponentLibrary.jsx`),
 linked from the Projects landing page: browse/view (files + annotated version
 history), create, publish new versions, revert, deprecate/publish, delete
-(sudo), export/import JSON, propose from a project, and the admin review inbox.
+(sudo), export/import JSON (file upload or paste), propose from a project, and
+the admin review inbox.
+
+The authoring spec for the document format (schema, limits, packaging rules)
+is `docs/features/component-authoring.md`.

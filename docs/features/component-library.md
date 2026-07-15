@@ -32,9 +32,16 @@ unit-tested stub-first in `__tests__/mock2-components.test.js`) +
 
 - **Hand-rolled runner** (`runner.js`): the published catalog (key, name,
   description, tags, version) is appended to the system prompt
-  ("Component library — reuse before you rebuild"), and a `get_component`
-  tool returns a component's full files + integration notes on demand
-  (published components only; result truncated to a prompt budget).
+  ("Component library — reuse before you rebuild"). Two tools serve it
+  (published components only): `get_component` returns integration notes +
+  sources (inline while they fit the prompt budget; beyond that a complete
+  path/bytes/sha256 manifest instead — never a mid-file cutoff), and
+  `materialize_component` ADOPTS a component by writing every file verbatim
+  into the app source server-side (byte-exact, sha256-verified in-container,
+  size-unlimited up to the import ceiling; existing files are kept unless
+  `overwrite`). Each materialization is audit-logged
+  (`MOCK2_COMPONENT_MATERIALIZE`: component, version, project, counts —
+  never contents).
 - **SDK runner** (`runner-sdk.js`, `BUILD_RUNNER=sdk`): the same catalog rides
   in the generated `.claude/CLAUDE.md`, and full sources are materialized as
   reference copies under `.claude/components/<key>/` (+ `USAGE.md`) in the

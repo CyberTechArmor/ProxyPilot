@@ -57,7 +57,12 @@ import {
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
 import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
-import { formatComponentForModel } from './component-logic.js';
+import {
+  formatComponentForModel, parseFilesJson, safeComponentPath, buildComponentManifest,
+  buildPathsExistScript, parsePathsExistOutput, buildManifestVerifyScript, parseShaVerifyOutput,
+  formatMaterializeResult,
+} from './component-logic.js';
+import { logAudit } from '../db.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
@@ -1060,6 +1065,64 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
       const found = getPublishedComponentWithVersion(key);
       if (!found) return { content: `error: no published component with key "${key.slice(0, 80)}" — the available keys are listed in your system prompt` };
       return { content: formatComponentForModel(found.component, found.version) };
+    }
+    case 'materialize_component': {
+      // Server-side adopt: the platform writes the component's files INTO the
+      // app source over the same channel write_file uses — the contents never
+      // transit the model context, so the prompt/tool-result budgets put no
+      // ceiling on component size (the 600k import ceiling is the only limit).
+      // Byte-exactness is verified in-container (sha256sum vs the stored
+      // content's hash); the result carries paths/sizes/hashes, never contents.
+      const key = String(call.input?.key || '').trim();
+      const overwrite = call.input?.overwrite === true;
+      const found = getPublishedComponentWithVersion(key);
+      if (!found) return { content: `error: no published component with key "${key.slice(0, 80)}" — the available keys are listed in your system prompt` };
+      const files = parseFilesJson(found.version.files_json)
+        .map((f) => ({ path: safeComponentPath(f.path), content: f.content }))
+        .filter((f) => f.path);
+      if (!files.length) return { content: `error: component "${key}" has no files to materialize` };
+      const manifest = buildComponentManifest(files);
+
+      // 1) Existing target paths are KEPT (reported, not clobbered) unless
+      //    overwrite — a second adopt must never wipe already-adapted files.
+      let existing = new Set();
+      if (!overwrite) {
+        const ex = await containerSh(containerName, buildPathsExistScript(files.map((f) => f.path), { appDir: APP_DIR }), { timeoutMs: 60000 });
+        existing = parsePathsExistOutput(ex.stdout);
+      }
+
+      // 2) Write server-side, one proven base64 round-trip per file.
+      const statuses = {};
+      for (const f of files) {
+        if (existing.has(f.path)) { statuses[f.path] = 'kept'; continue; }
+        const w = await writeFileInContainer(containerName, f.path, f.content);
+        statuses[f.path] = w.ok ? 'written' : 'write failed';
+      }
+      touchLock(cycle.project_id, holder);
+
+      // 3) Verify every written file landed byte-exact.
+      const written = files.filter((f) => statuses[f.path] === 'written').map((f) => f.path);
+      if (written.length) {
+        const v = await containerSh(containerName, buildManifestVerifyScript(written, { appDir: APP_DIR }), { timeoutMs: 120000 });
+        const shas = parseShaVerifyOutput(v.stdout);
+        for (const m of manifest) {
+          if (statuses[m.path] === 'written' && shas.get(m.path) !== m.sha256) statuses[m.path] = 'verify failed';
+        }
+      }
+
+      // Audit trail: which component+version landed in which project — counts
+      // and hashes only, never file contents.
+      try {
+        const tally = (s) => Object.values(statuses).filter((x) => x === s).length;
+        logAudit(cycle.initiated_by, 'MOCK2_COMPONENT_MATERIALIZE', 'mock2_component', found.component.id, {
+          project_id: cycle.project_id, cycle_id: cycle.id,
+          key: found.component.key, version: found.version.version,
+          files: manifest.length, written: tally('written'), kept: tally('kept'),
+          failed: manifest.length - tally('written') - tally('kept'), overwrite,
+        }, null);
+      } catch (e) { console.warn('[mock2] materialize audit log failed:', e?.message); }
+
+      return { content: formatMaterializeResult({ component: found.component, version: found.version, manifest, statuses }) };
     }
     case 'run_gates': {
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);

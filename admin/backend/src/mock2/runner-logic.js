@@ -63,11 +63,25 @@ export const RUNNER_TOOLS = Object.freeze([
   {
     name: 'get_component',
     description:
-      'Fetch a component from the installation\'s component library: its full source files and integration notes. The available components are listed in your system prompt under "Component library" — when the task overlaps one, fetch it and REUSE its code (copy the files into the app source, adapt only the glue) instead of writing your own implementation.',
+      'Inspect a component from the installation\'s component library: its integration notes plus its sources (inline when small; larger components return a path/size/sha256 file MANIFEST instead — their contents are delivered whole by materialize_component, never through this tool). The available components are listed in your system prompt under "Component library" — when the task overlaps one, REUSE it instead of writing your own implementation.',
     input_schema: {
       type: 'object',
       properties: {
         key: { type: 'string', description: 'The component key from the catalog, e.g. "ldaps-auth".' },
+      },
+      required: ['key'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'materialize_component',
+    description:
+      'Adopt a component: the platform writes every file of the published component verbatim into the app source tree server-side (byte-exact at any size — contents never pass through your context) and returns a manifest of what landed (path, bytes, sha256, per-file status). Files that already exist are kept untouched and reported unless overwrite is true. Afterwards read/adapt the real files with read_file/write_file and wire the glue per the integration notes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'The component key from the catalog, e.g. "ldaps-auth".' },
+        overwrite: { type: 'boolean', description: 'Replace files that already exist at the component\'s paths. Default false: existing files are kept and reported.' },
       },
       required: ['key'],
       additionalProperties: false,
@@ -470,6 +484,7 @@ export function describeRunnerStep(turn, toolCalls = []) {
     if (c?.name === 'read_file') return `reading ${c.input?.path || 'a file'}`;
     if (c?.name === 'exec_in_container') return `running \`${String(c.input?.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)}\``;
     if (c?.name === 'get_component') return `fetching component ${c.input?.key || ''}`.trim();
+    if (c?.name === 'materialize_component') return `materializing component ${c.input?.key || ''}`.trim();
     if (c?.name === 'run_gates') return 'running the gate battery';
     if (c?.name === 'finish') return 'wrapping up';
     return c?.name || 'working';

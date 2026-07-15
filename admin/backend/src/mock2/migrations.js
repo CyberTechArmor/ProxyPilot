@@ -63,6 +63,10 @@
 //            kind, defect tag, red-test-observed, required live checks,
 //            demonstrated) so "gates green" and "acceptance demonstrated" are
 //            distinguishable states in the record — additive, one nullable column
+//   519 Tpl — design-template import: mock2_projects.design_import_json — the
+//            imported design's provenance + original design brief + Builder
+//            notes, carried into the initial build instruction — additive,
+//            one nullable column
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -848,6 +852,22 @@ export const MOCK2_MIGRATIONS = [
     up: (d) => {
       d.exec(`
         ALTER TABLE mock2_cycles ADD COLUMN acceptance_json TEXT;
+      `);
+    },
+  },
+  {
+    // Design-template import (design-template-logic.js). When a project's
+    // Concept stage is seeded from an exported design template (or another
+    // project's design), this records the provenance, the ORIGINAL design
+    // brief, and the Builder's changes/context notes — the initial build after
+    // approval quotes them so the built app references the original design
+    // intent even when the imported mockup is approved untouched. NULLable —
+    // every home-grown project reads as before; a disabled host never writes it.
+    version: 519,
+    name: 'mock2_design_import',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN design_import_json TEXT;
       `);
     },
   },

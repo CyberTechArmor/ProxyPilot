@@ -19,8 +19,15 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
 import {
-  Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from '@/components/ui/dialog';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import {
+  Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -149,6 +156,89 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const online = project?.lifecycle === 'active';
   const previewUrl = data?.preview_url || project?.preview_url || null;
   const hasMockup = !!(data?.current_mockup_id || project?.current_mockup_id);
+  // A design exists to export pre-approval (live mockup) AND post-approval
+  // (the archived mockup is kept — the template reads it from the repo).
+  const hasDesign = hasMockup || !!project?.design_approved_at || !!project?.mockup_archive_url;
+
+  // ---- design template: download + import (design/mockup only, never code) ----
+  const [downloading, setDownloading] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importSource, setImportSource] = useState('file'); // 'file' | 'project'
+  const [importFileText, setImportFileText] = useState('');
+  const [importFileName, setImportFileName] = useState('');
+  const [importProjects, setImportProjects] = useState(null); // null = not loaded yet
+  const [importProjectId, setImportProjectId] = useState('');
+  const [importNotes, setImportNotes] = useState('');
+
+  const downloadTemplate = async () => {
+    setDownloading(true);
+    try {
+      const doc = await api.mock2ExportDesignTemplate(projectId);
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${project?.slug || `project-${projectId}`}.design-template.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not download the design', description: err.message });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const openImport = async () => {
+    setImportOpen(true);
+    if (importProjects === null) {
+      try {
+        const r = await api.mock2ListProjects();
+        // Only projects that actually have a design, and not this one.
+        setImportProjects((r.projects || []).filter(
+          (p) => p.id !== Number(projectId) && (p.current_mockup_id || p.design_approved_at),
+        ));
+      } catch {
+        setImportProjects([]);
+      }
+    }
+  };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setImportFileText(await file.text());
+      setImportFileName(file.name);
+    } catch {
+      toast({ variant: 'destructive', title: 'Could not read the file' });
+    }
+  };
+
+  const runImport = async () => {
+    setImportBusy(true);
+    try {
+      const body = {};
+      if (importNotes.trim()) body.notes = importNotes.trim();
+      if (importSource === 'file') {
+        let doc;
+        try { doc = JSON.parse(importFileText); } catch { throw new Error('Not valid JSON — choose a downloaded .design-template.json file'); }
+        body.doc = doc;
+      } else {
+        if (!importProjectId) throw new Error('Choose a project to copy the design from');
+        body.source_project_id = Number(importProjectId);
+      }
+      await api.mock2ImportDesignTemplate(projectId, body);
+      setImportOpen(false);
+      setImportFileText(''); setImportFileName(''); setImportProjectId(''); setImportNotes('');
+      toast({ title: 'Design imported', description: 'The mockup is live at the preview — iterate it in chat, or approve the design when it feels right.' });
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Import failed', description: err.message });
+    } finally {
+      setImportBusy(false);
+    }
+  };
 
   // The mockup preview is owned by the parent (ProjectDetail), but WE are the
   // one polling the chat, so we're the first to learn a new mockup was rendered
@@ -232,6 +322,27 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           </div>
         ) : null}
 
+        {/* Design template actions: download this design (mockup + brief, no
+            code), or seed this project from a downloaded template / another
+            project's design. Download works pre- and post-approval (the
+            archived mockup is kept); import only while still in Concept. */}
+        {(hasDesign || (editable && !approved && online)) ? (
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {hasDesign ? (
+              <Button variant="outline" size="sm" className="h-9" onClick={downloadTemplate} disabled={downloading}>
+                {downloading ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Download className="h-3.5 w-3.5 mr-1" />}
+                Download design
+              </Button>
+            ) : null}
+            {editable && !approved && online ? (
+              <Button variant="outline" size="sm" className="h-9" onClick={openImport} disabled={jobActive || busy}>
+                <FileUp className="h-3.5 w-3.5 mr-1" />
+                Import design
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
         {/* Plan vs Design — above the chat. Plan talks through the idea without
             touching the mockup; Design generates/iterates it. */}
         {editable && !approved ? (
@@ -310,6 +421,106 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
           </p>
         ) : null}
       </CardContent>
+
+      {/* Import-design dialog — a downloaded template file OR another project's
+          design (design/mockup only, never code), plus optional changes/context
+          for the build. Full-screen on <sm (MOBILE_FIRST). */}
+      <Dialog open={importOpen} onOpenChange={(o) => { if (!importBusy) setImportOpen(o); }}>
+        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Import a design</DialogTitle>
+            <DialogDescription>
+              Start this project from an existing mockup — a downloaded design template or another
+              project's design. Only the design is imported, never any code.
+              {hasMockup ? ' The current mockup will be replaced.' : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Design source">
+              <button
+                type="button" role="tab" aria-selected={importSource === 'file'}
+                onClick={() => setImportSource('file')}
+                className={`inline-flex items-center gap-1 rounded px-2.5 py-2 text-xs font-medium min-h-[44px] sm:min-h-0 ${importSource === 'file' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              >
+                <FileUp className="h-3.5 w-3.5" /> From a file
+              </button>
+              <button
+                type="button" role="tab" aria-selected={importSource === 'project'}
+                onClick={() => setImportSource('project')}
+                className={`inline-flex items-center gap-1 rounded px-2.5 py-2 text-xs font-medium min-h-[44px] sm:min-h-0 ${importSource === 'project' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              >
+                <FolderGit2 className="h-3.5 w-3.5" /> From a project
+              </button>
+            </div>
+
+            {importSource === 'file' ? (
+              <div className="space-y-1.5">
+                <Label htmlFor="design-template-file">Design template file</Label>
+                <input
+                  id="design-template-file"
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={onImportFile}
+                  className="block w-full text-sm text-muted-foreground file:mr-3 file:h-9 file:rounded-md file:border file:border-input file:bg-transparent file:px-3 file:text-sm file:font-medium file:text-foreground"
+                />
+                <p className="text-xs text-muted-foreground break-all">
+                  {importFileName
+                    ? `Selected: ${importFileName}`
+                    : 'A .design-template.json downloaded from a project’s "Download design".'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="design-template-source">Copy the design from</Label>
+                {importProjects === null ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading projects…
+                  </div>
+                ) : importProjects.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-2">No other project has a design to copy yet.</p>
+                ) : (
+                  <Select value={importProjectId} onValueChange={setImportProjectId}>
+                    <SelectTrigger id="design-template-source" className="h-11 sm:h-10">
+                      <SelectValue placeholder="Choose a project" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {importProjects.map((p) => (
+                        <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="design-import-notes">Changes or context <span className="text-muted-foreground">(optional)</span></Label>
+              <textarea
+                id="design-import-notes"
+                className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="Anything to change or add for this project…"
+                value={importNotes}
+                onChange={(e) => setImportNotes(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Left empty, the template's original design brief is used as the reference when building.
+              </p>
+            </div>
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button type="button" variant="outline" className="h-11 sm:h-10" onClick={() => setImportOpen(false)} disabled={importBusy}>
+              Cancel
+            </Button>
+            <Button
+              type="button" className="h-11 sm:h-10" onClick={runImport}
+              disabled={importBusy || (importSource === 'file' ? !importFileText : !importProjectId)}
+            >
+              {importBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <FileUp className="h-4 w-4 mr-1" />}
+              Import design
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

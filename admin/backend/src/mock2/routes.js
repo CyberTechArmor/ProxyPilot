@@ -42,6 +42,7 @@ import {
   upsertMember,
   removeMember,
   lookupUser,
+  isUserSuperadmin,
   listProjectSlugs,
   purgeProjectSlugHistory,
   addTypingSeconds,
@@ -143,8 +144,10 @@ import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleF
 import { listMessages } from './chats.js';
 import {
   startConceptTurn, startDesignApproval, getConceptJobStatus, conceptReady,
+  exportDesignTemplate, importDesignTemplate,
 } from './concept.js';
 import { publicChatMessageShape } from './concept-logic.js';
+import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-logic.js';
 // ---- M8: audit, rule questions, admin queue (ADR-002/003) ----
 import {
   startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
@@ -333,6 +336,15 @@ const chatMessageSchema = z.object({
   // the mockup; 'design' (default) may generate/iterate the mockup.
   mode: z.enum(['plan', 'design']).optional(),
 });
+// Design-template import: either an uploaded exported document OR another
+// project to copy the design from (the server exports that project's template
+// internally — same document either way), plus optional changes/context notes
+// carried into the seeded chat and the initial build instruction.
+const designTemplateImportSchema = z.object({
+  doc: z.record(z.any()).optional(),
+  source_project_id: z.union([z.number().int(), z.string()]).optional(),
+  notes: z.string().trim().max(MAX_IMPORT_NOTES_CHARS).optional(),
+}).refine((o) => o.doc || o.source_project_id != null, 'doc or source_project_id is required');
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
   // Length bound applied in the handler against getChatMaxChars() (same ceiling
@@ -2141,6 +2153,75 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_DESIGN_APPROVE', 'mock2_project', project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(202).json({ job: getConceptJobStatus(project.id) });
+  });
+
+  // Export the project's DESIGN TEMPLATE — the mockup HTML + original design
+  // brief + conversation + design tokens, and never any application code — as
+  // a downloadable JSON document. Any member may export (same bar as
+  // export.zip); works for active, stopped, and archived projects (the bare
+  // repo is the fallback source, ADR-006).
+  router.get('/projects/:id/design-template', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    const out = await exportDesignTemplate(project);
+    if (!out.ok) return res.status(409).json({ error: out.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_TEMPLATE_EXPORT', 'mock2_project', project.id, { name: project.name }, req.ip);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${project.slug || `project-${project.id}`}.design-template.json"`);
+    res.json(out.doc);
+  });
+
+  // Import a design template into THIS project's Concept stage: either an
+  // uploaded exported document or another project picked from the list (the
+  // server exports that project's template — the design/mockup only, no code).
+  // Editor-gated; refuses once the design is approved. Optional `notes` carry
+  // the Builder's changes/context; otherwise the template's original prompt is
+  // the reference the initial build quotes.
+  router.post('/projects/:id/design-template/import', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = designTemplateImportSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'doc (an exported design template) or source_project_id is required' });
+    }
+    let doc = parsed.data.doc || null;
+    let source = 'file';
+    let sourceName = null;
+    if (!doc) {
+      const src = getProject(Number(parsed.data.source_project_id));
+      // Mask a non-member's probe as not-found (mirror requireMock2Role): the
+      // source design is only copyable by someone who can already view it.
+      const adminBypass = isReqAdmin(req) || isUserSuperadmin(req.user.id);
+      if (!src || (!adminBypass && !getMembership(src.id, req.user.id))) {
+        return res.status(404).json({ error: 'Source project not found' });
+      }
+      if (src.id === project.id) {
+        return res.status(400).json({ error: 'Choose a different project to copy the design from' });
+      }
+      const out = await exportDesignTemplate(src);
+      if (!out.ok) return res.status(409).json({ error: `Could not read the source project's design: ${out.error}` });
+      doc = out.doc;
+      source = 'project';
+      sourceName = src.name;
+    }
+    const check = parseDesignTemplate(doc);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    if (source === 'file') sourceName = check.template.name || null;
+    let result;
+    try {
+      result = await importDesignTemplate({
+        project, template: check.template, notes: parsed.data.notes || '',
+        source, sourceName, user: req.user,
+        actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Import failed: ${err?.message || 'unknown error'}` });
+    }
+    if (!result.ok) return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_TEMPLATE_IMPORT', 'mock2_project', project.id,
+      { source, source_name: sourceName, mockup_id: result.mockupId, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.status(201).json({
+      project: shapeProject(getProject(project.id), { isAdmin: isReqAdmin(req) }),
+      mockup_id: result.mockupId,
+    });
   });
 
   // ============================================================

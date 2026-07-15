@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/analysis-limitation-waiver",
+  "title": "Mock2 analysis-limitation waiver (mock2_integration_resolutions, kind=analysis_limitation_waiver)",
+  "description": "PATCH B.2. An append-only, content-hashed, admin-only record that a provenance-not-established finding was manually inspected and confirmed to be genuinely real code the conservative analyzer could not prove. Routes the capability to pending-operator-verification (NEVER succeeded); the live checklist is the backstop. Refused for any finding the analyzer positively classified as fabricated. A manifest-hash change re-opens the waiver.",
+  "type": "object",
+  "required": ["kind", "project_id", "finding_class", "inspected", "reason", "routed_to", "decided_by", "role", "content_hash", "created_at"],
+  "additionalProperties": true,
+  "properties": {
+    "kind": { "const": "analysis_limitation_waiver" },
+    "project_id": { "type": "integer" },
+    "cycle_id": { "type": ["integer", "null"] },
+    "finding_class": { "const": "provenance-not-established", "description": "waiver-eligible ONLY for this class; never for positively-fabricated findings" },
+    "finding_kind": { "type": "string", "description": "the waived finding's kind (e.g. provenance_not_established)" },
+    "subsystem": { "type": ["string", "null"] },
+    "file": { "type": ["string", "null"], "description": "the file the finding anchored to" },
+    "inspected": { "type": "string", "description": "REQUIRED — what was manually inspected (file/function) to confirm the code is real" },
+    "analyzer_limitation": { "type": ["string", "null"], "description": "the analyzer's stated limitation (from its documented known-limits) that prevented automated proof" },
+    "manifest_id": { "type": ["string", "null"] },
+    "manifest_hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$", "description": "the manifest entry hash at waiver time — a change re-opens the waiver (reverification trigger)" },
+    "reason": { "type": "string", "description": "REQUIRED — why the code is confirmed real" },
+    "routed_to": { "const": "pending-operator-verification", "description": "NEVER succeeded — the live checklist backstops the waived code" },
+    "decided_by": { "type": "integer" },
+    "role": { "const": "admin", "description": "admin-only" },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "created_at": { "type": "string" }
+  }
+}

@@ -153,10 +153,16 @@ import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-l
 // ---- Integration truthfulness (AUDIT.md; B.4/B.5/B.6) ----
 import {
   reportedCycleOutcome, deployPendingIsHealthy, validateConfirmation, OUTCOME_CODES,
+  deriveVerificationChecklist, verificationTransition,
 } from './verification-logic.js';
 import {
   listActiveVerifications, recordVerification, listOpenIntegrationFindings,
+  recordIntegrationResolution, listIntegrationResolutions, priorBlockedSignatures,
 } from './integration-state.js';
+import { blockingSummary, backfillManifestEntryInContainer } from './integration-enforcement.js';
+import { validateManifestEntry } from './integration-logic.js';
+import { waiverEligible } from './resolution-logic.js';
+import { execInContainer, writeFileInContainer } from './runner.js';
 // ---- M8: audit, rule questions, admin queue (ADR-002/003) ----
 import {
   startBuild, answerAuditQuestion, resolveFrameworkDeviation, getAuditJobStatus, auditReady,
@@ -364,6 +370,31 @@ const verifyConfirmSchema = z.object({
   waiver_reason: z.string().trim().max(2000).optional(),
   evidence_ref: z.string().trim().max(500).optional(),
   expires_at: z.string().trim().max(40).optional(),
+});
+// PATCH B.1 — declare an undeclared capability: an operator-confirmed manifest
+// entry (re-validated in the handler by validateManifestEntry).
+const manifestBackfillSchema = z.object({
+  entry: z.object({
+    id: z.string().trim().min(1).max(120),
+    subsystem: z.string().trim().min(1).max(80),
+    actions: z.array(z.object({ name: z.string().trim().min(1), operation: z.string().trim().min(1) })).min(1),
+    destination: z.object({ source: z.string().trim().min(1), key: z.string().trim().min(1) }),
+    transport: z.string().trim().min(1).max(60),
+    provenance: z.object({ response_to_output: z.string().trim().min(1) }),
+    live_verification: z.object({ required: z.boolean() }),
+    egress: z.object({ classification: z.string().trim().min(1) }),
+    contract_test: z.string().trim().max(400).optional(),
+  }).passthrough(),
+  reason: z.string().trim().max(2000).optional(),
+});
+// PATCH B.2 — analysis-limitation waiver (admin): the finding being waived, what
+// was manually inspected, and why it is confirmed real. Handler enforces
+// waiver-eligibility (never for positively-fabricated findings).
+const provenanceWaiverSchema = z.object({
+  finding_kind: z.string().trim().min(1).max(80),
+  file: z.string().trim().max(400).optional(),
+  inspected: z.string().trim().min(1).max(2000),
+  reason: z.string().trim().min(1).max(2000),
 });
 // ---- M8 Zod schemas ----
 const answerQuestionSchema = z.object({
@@ -2543,6 +2574,136 @@ export function createMock2Router() {
       remaining: checklist.filter((c) => !active.has(c.item_id)).map((c) => c.item_id),
       reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
       advanced_to_succeeded: advanced,
+    });
+  });
+
+  // The class-matched resolution options for a blocked cycle (PATCH B.1). Reads the
+  // stored gate result, computes the offered options (each resolves ≥1 present
+  // class), and reports the loop-breaker state. Any member can see it; only the
+  // relevant role may act (backfill: editor; waiver/approve: admin).
+  router.get('/projects/:id/cycles/:cycleId/resolutions', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    let decision = null;
+    try { decision = cycle.integration_gate_json ? JSON.parse(cycle.integration_gate_json) : null; } catch { decision = null; }
+    if (!decision || !decision.blocking) return res.json({ blocked: false, options: [] });
+    let priorSignatures = [];
+    try { priorSignatures = priorBlockedSignatures(cycle.request_id, cycle.id); } catch { priorSignatures = []; }
+    const bs = blockingSummary(decision, { priorSignatures });
+    res.json({
+      blocked: true,
+      state: bs.state || 'blocked-deviation',
+      reason: bs.reason,
+      classes: bs.classes || [],
+      findings: bs.findings || decision.reasons || [],
+      options: bs.options || [],
+      requires_resolution: bs.requires_resolution || null,
+      uncovered: bs.uncovered || [],
+      resolutions: listIntegrationResolutions(project.id, { cycleId: cycle.id }).map((r) => ({
+        id: r.id, kind: r.kind, finding_class: r.finding_class, routed_to: r.routed_to,
+        reason: r.reason, created_at: r.created_at, content_hash: r.content_hash,
+      })),
+    });
+  });
+
+  // PATCH B.1 — backfill: DECLARE an undeclared capability by appending an
+  // operator-confirmed entry to state/integrations.json, then resume the cycle so
+  // the gate re-runs against it (an undeclared finding becomes a real-provenance
+  // check — the deadlock is broken). Editor-gated; the project must be online.
+  router.post('/projects/:id/cycles/:cycleId/backfill-manifest', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online to declare an integration.' });
+    const parsed = manifestBackfillSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid manifest entry' });
+    const check = validateManifestEntry(parsed.data.entry);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    const containerName = project.container_name || containerNameForProject(project.id);
+    let result;
+    try {
+      result = await backfillManifestEntryInContainer({
+        containerName, entry: parsed.data.entry,
+        execInContainer, readFileInContainer, writeFileInContainer,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Backfill failed: ${err?.message || 'unknown error'}` });
+    }
+    if (!result.ok) return res.status(409).json({ error: result.error });
+    recordIntegrationResolution({
+      project_id: project.id, cycle_id: cycle.id, kind: 'manifest_backfill',
+      finding_class: 'undeclared', finding_kind: 'undeclared_integration',
+      subsystem: result.entry.subsystem, manifest_id: result.entry.id, manifest_hash: result.hash,
+      manifest_entry_json: result.entry, routed_to: 'building',
+      reason: parsed.data.reason || `declared integration "${result.entry.id}"`,
+      decided_by: req.user.id, role: isReqAdmin(req) ? 'admin' : 'editor',
+    });
+    logAudit(req.user.id, 'MOCK2_INTEGRATION_BACKFILL', 'mock2_cycle', cycle.id,
+      { manifest_id: result.entry.id, subsystem: result.entry.subsystem }, req.ip);
+    // Resume the cycle: a fresh cycle continues from the checkpoint and re-runs the
+    // gate against the now-declared manifest.
+    let resumed = null;
+    try {
+      resumed = await retryCycle({ project: getProject(project.id), cycle: getCycle(cycle.id), initiatedBy: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, message: `Declared integration "${result.entry.id}" in the manifest — re-run the gate against it.` });
+    } catch (err) { console.warn('[mock2] backfill resume failed:', err?.message); }
+    res.status(201).json({ declared: { id: result.entry.id, subsystem: result.entry.subsystem, hash: result.hash }, resume: resumed?.status || 'not_resumed' });
+  });
+
+  // PATCH B.2 — waiver: an admin confirms a provenance-not-established finding is
+  // genuinely real code the analyzer could not prove ("confirmed real — analysis
+  // limitation"). Records a hash-linked waiver and routes the capability to
+  // pending-operator-verification (NEVER succeeded). Refused for any finding the
+  // analyzer positively classified as fabricated. Admin-only.
+  router.post('/projects/:id/cycles/:cycleId/waive-provenance', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (!(isReqAdmin(req) || req.mock2Access?.actingAsAdmin)) {
+      return res.status(403).json({ error: 'Only an administrator can waive a provenance finding.' });
+    }
+    const cycle = getCycle(req.params.cycleId);
+    if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
+    let decision = null;
+    try { decision = cycle.integration_gate_json ? JSON.parse(cycle.integration_gate_json) : null; } catch { decision = null; }
+    if (!decision || !decision.blocking) return res.status(409).json({ error: 'This cycle is not blocked on an integration finding.' });
+    const parsed = provenanceWaiverSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid waiver' });
+    // Find the target finding and ENFORCE waiver-eligibility (never fabricated).
+    const target = (decision.gate?.findings || []).find((f) => f.kind === parsed.data.finding_kind
+      && (parsed.data.file ? f.file === parsed.data.file : true));
+    if (!target) return res.status(404).json({ error: 'No matching finding on this cycle' });
+    if (!waiverEligible(target)) {
+      return res.status(409).json({ error: 'This finding is positively-fabricated, not merely unprovable — a waiver is refused. Implement the real integration or approve it as a recorded simulation.' });
+    }
+    const t = verificationTransition({ state: 'blocked-deviation', event: 'provenance_waived', waiverEligible: true });
+    if (!t.ok) return res.status(409).json({ error: t.reason });
+    // Record the append-only, hash-linked waiver (with the analyzer's limitation +
+    // a manifest hash so a manifest change re-opens it).
+    const manEntry = (decision.manifest?.entry_hashes || [])[0] || null;
+    const saved = recordIntegrationResolution({
+      project_id: project.id, cycle_id: cycle.id, kind: 'analysis_limitation_waiver',
+      finding_class: 'provenance-not-established', finding_kind: target.kind,
+      subsystem: target.subsystem || null, file: target.file || null,
+      inspected: parsed.data.inspected, analyzer_limitation: (decision.gate?.limits?.known_limits || []).join(' | ').slice(0, 2000),
+      manifest_id: manEntry?.id || null, manifest_hash: manEntry?.hash || null,
+      reason: parsed.data.reason, routed_to: 'pending-operator-verification',
+      decided_by: req.user.id, role: 'admin',
+    });
+    // Route the cycle to pending-operator-verification with a checklist derived
+    // from the manifest for the waived subsystem — the live backstop.
+    const checklist = deriveVerificationChecklist({
+      manifest: { entries: (decision.manifest?.entry_hashes || []).map((h) => ({ id: h.id })) },
+      subsystems: [],
+    });
+    updateCycle(cycle.id, {
+      verification_state: 'pending',
+      integration_gate_json: JSON.stringify({ ...decision, outcome: 'pending-operator-verification', blocking: false, checklist: checklist.length ? checklist : (decision.checklist || []), waived: true }),
+    });
+    finishCycle(cycle.id, { status: 'awaiting_user', error: null });
+    logAudit(req.user.id, 'MOCK2_INTEGRATION_WAIVE', 'mock2_cycle', cycle.id,
+      { finding_kind: target.kind, file: target.file, routed_to: 'pending-operator-verification' }, req.ip);
+    res.status(201).json({
+      waiver: { id: saved.id, content_hash: saved.content_hash, routed_to: 'pending-operator-verification' },
+      reported_outcome: reportedCycleOutcome(getCycle(cycle.id)),
     });
   });
 

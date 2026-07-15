@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mock2/blocked-deviation-resolution",
+  "title": "Mock2 blocked-deviation resolution payload (blockingSummary output)",
+  "description": "PATCH B.1/B.4. The admin-visible resolution payload for a blocked-deviation cycle: the CLASS-MATCHED options (every finding class present is offered at least one option that resolves it) and, when the loop breaker fires, the resolution-ineffective state with the full finding list inline. Derived from the stored integration-gate result; not persisted separately.",
+  "type": "object",
+  "required": ["reason", "options"],
+  "additionalProperties": true,
+  "properties": {
+    "state": {
+      "enum": ["blocked-deviation", "resolution-ineffective"],
+      "description": "resolution-ineffective when the same finding set has survived N=2 consecutive resolutions (B.4)"
+    },
+    "reason": { "type": "string", "description": "admin-visible summary" },
+    "signature": { "type": "string", "description": "order-independent signature of the finding set (loop-breaker comparison key)" },
+    "classes": {
+      "type": "array",
+      "items": { "enum": ["undeclared", "simulated", "provenance-not-established", "contract-missing", "fixture-tooling-missing", "egress-missing", "manifest-invalid"] },
+      "description": "the distinct finding classes present"
+    },
+    "findings": { "type": "array", "items": { "type": "string" }, "description": "the finding list; surfaced INLINE (not a count) when resolution-ineffective" },
+    "options": {
+      "type": "array",
+      "description": "class-matched resolution options; suppressed to a single record-resolution affordance when resolution-ineffective",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "resolves"],
+        "properties": {
+          "id": { "enum": ["backfill_manifest", "implement_real", "approve_simulation", "waive_provenance", "declare_egress", "provision_fixture_tooling", "fix_manifest", "record_resolution"] },
+          "kind": { "type": "string" },
+          "label": { "type": "string" },
+          "detail": { "type": "string" },
+          "adminOnly": { "type": "boolean" },
+          "resolves": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "the finding classes this option can transition to resolved (empty for the record_resolution escape hatch)"
+          }
+        }
+      }
+    },
+    "requires_resolution": { "type": ["string", "null"], "description": "present when resolution-ineffective: a free-text or admin resolution is required before another automatic resume" },
+    "uncovered": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "finding classes present with NO resolving option — a harness defect (must be empty; the B.1 invariant test fails otherwise)"
+    },
+    "loop": {
+      "type": "object",
+      "properties": {
+        "ineffective": { "type": "boolean" },
+        "consecutive": { "type": "integer" },
+        "threshold": { "type": "integer" }
+      }
+    }
+  }
+}

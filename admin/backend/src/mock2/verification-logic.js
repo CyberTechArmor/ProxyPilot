@@ -19,6 +19,9 @@ export const REPORTED_OUTCOMES = Object.freeze({
   'blocked-deviation': 'a blocking simulation/intent deviation is unresolved',
   'gate-rejected': 'a deterministic gate (incl. the integration gate) is red',
   'migration-analysis-incomplete': 'legacy analysis could not conclude; findings recorded, non-blocking until touched/reconciled',
+  // PATCH B.4: the same finding set survived N consecutive resolutions — a
+  // deadlock, surfaced AS a deadlock (full findings inline, free-text/admin required).
+  'resolution-ineffective': 'the same blocked-deviation finding set survived repeated resolutions; automatic retry is disabled pending a free-text or admin resolution',
 });
 
 // Stable status codes for scripting/telemetry (deploy-pending is healthy — see
@@ -30,6 +33,7 @@ export const OUTCOME_CODES = Object.freeze({
   'blocked-deviation': 71,
   'gate-rejected': 72,
   'migration-analysis-incomplete': 73,
+  'resolution-ineffective': 74,
 });
 
 // Deployment while pending is ALLOWED (the operator needs the running app to
@@ -48,6 +52,7 @@ export function reportedCycleOutcome(cycle = {}) {
   if (status === 'awaiting_admin' && cycle.halt_reason === 'simulation_disclosure') return 'blocked-deviation';
   if (status === 'awaiting_admin' && cycle.halt_reason === 'integration_gate') return 'gate-rejected';
   if (cycle.halt_reason === 'migration_analysis_incomplete') return 'migration-analysis-incomplete';
+  if (cycle.halt_reason === 'resolution_ineffective') return 'resolution-ineffective';
   if (status === 'failed') return 'gate-rejected';
   if (['awaiting_user', 'awaiting_admin', 'interrupted', 'abandoned', 'refused_quota'].includes(status)) {
     // Blocked/paused terminals that are not one of the specific new outcomes.
@@ -114,13 +119,25 @@ const TRANSITIONS = {
     simulation_disclosure: 'blocked-deviation',
     gate_red: 'rejected',
   },
+  'blocked-deviation': {
+    // PATCH B.2: an admin analysis-limitation waiver on a provenance-not-established
+    // finding routes the capability to pending-operator-verification — NEVER to
+    // succeeded. The live checklist is the backstop that the waived code is real.
+    provenance_waived: 'pending-operator-verification',
+    // PATCH B.1: backfilling the manifest declares the capability; the resume
+    // re-runs the gate (which then checks it for real provenance), so the build
+    // returns to building rather than staying blocked on `undeclared`.
+    manifest_backfilled: 'building',
+    // PATCH B.4: repeated identical block → surfaced as a deadlock.
+    loop_breaker_tripped: 'resolution-ineffective',
+  },
   'pending-operator-verification': {
     all_items_confirmed: 'succeeded',
     live_check_failed: 'building',
   },
 };
 
-export function verificationTransition({ state, event, integrationGateVerdict = null } = {}) {
+export function verificationTransition({ state, event, integrationGateVerdict = null, waiverEligible = null } = {}) {
   const table = TRANSITIONS[state];
   if (!table || !(event in table)) {
     return { ok: false, reason: `no transition from "${state}" on "${event}"` };
@@ -129,6 +146,11 @@ export function verificationTransition({ state, event, integrationGateVerdict = 
   // real integration that passed the B.4 gate. It must never legitimize a stub.
   if (event === 'gates_green_with_integrations' && integrationGateVerdict === 'fail') {
     return { ok: false, reason: 'the integration gate is red — this is a blocking deviation, not pending verification; pending-operator-verification never legitimizes a failed integration gate' };
+  }
+  // INVARIANT (B.2): a waiver may ONLY route findings the analyzer could not prove
+  // (provenance-not-established) — never a positively-fabricated finding.
+  if (event === 'provenance_waived' && waiverEligible === false) {
+    return { ok: false, reason: 'the finding is positively-fabricated, not merely unprovable — a waiver is refused; only implement-real or approve-as-simulation apply' };
   }
   return { ok: true, next: table[event] };
 }

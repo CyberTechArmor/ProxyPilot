@@ -1307,6 +1307,14 @@ export const api = {
   mock2GetIntegrationStatus: (id) => request(`/mock2/projects/${id}/integration-status`),
   mock2VerifyIntegrationItem: (id, cycleId, body) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  // PATCH — blocked-deviation resolution: the class-matched options for a blocked
+  // cycle, the manifest-backfill (declare an undeclared capability, editor), and
+  // the analysis-limitation waiver (admin, provenance-not-established only).
+  mock2GetCycleResolutions: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}/resolutions`),
+  mock2BackfillManifest: (id, cycleId, entry, reason) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/backfill-manifest`, { method: 'POST', body: JSON.stringify(reason ? { entry, reason } : { entry }) }),
+  mock2WaiveProvenance: (id, cycleId, body) =>
+    request(`/mock2/projects/${id}/cycles/${cycleId}/waive-provenance`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- Mock2 M8: audit, rule questions, admin queue ----
   mock2ListQuestions: (id) => request(`/mock2/projects/${id}/questions`),

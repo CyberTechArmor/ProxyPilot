@@ -235,6 +235,22 @@ endpoint is reachable," "best-effort probe," "would replace this when credential
 are present") creates a **blocking** deviation candidate and the request must not
 report `succeeded` while it is unresolved.
 
+**When the external endpoint is unreachable from the build fence — the normal
+case — the correct implementation is real transport code plus an in-fence
+contract test that drives that code against the local contract-fixture server
+(`tests/contract/fixture-server.ts`: a real local TLS socket, injected only via
+test-only configuration), landing the capability in `pending-operator-verification`
+until an operator confirms it against the live system. Stubbing is never an
+acceptable fallback for an unreachable endpoint.** If the fixture tooling cannot
+be provisioned for a project, the gate says so explicitly (`fixture-tooling-missing`)
+and the resolution is to provision it — not to stub. Every blocked-deviation
+finding carries a class, and the harness always offers at least one resolution
+that can actually clear each class: an undeclared capability is *declared*
+(manifest backfill), unprovable-but-real code is *waived* by an administrator
+(analysis limitation) into `pending-operator-verification`, and a positively
+fabricated capability is *implemented for real* or *approved as a recorded
+simulation*.
+
 ## 8. What is deliberately removed
 
 Relative to standard spec-driven development, the framework removes per-project

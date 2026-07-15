@@ -73,7 +73,10 @@ import {
 } from './integration-enforcement.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
-import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH } from './integration-state.js';
+import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, STUB_REGISTRY_PATH, priorBlockedSignatures } from './integration-state.js';
+// B.3: the in-fence contract-fixture server module a project must provide so the
+// honest path (real transport verified against a local TLS socket) is walkable.
+import { CONTRACT_FIXTURE_PATH_RE } from './scaffold.js';
 import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-scan.js';
 import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
@@ -786,10 +789,13 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         const snapshot = await readSourceSnapshot({ containerName, appDir: APP_DIR, execInContainer, readFileInContainer });
         const declaredEgress = await readDeclaredEgress(containerName, APP_DIR).catch(() => []);
         const approvedGrants = listApprovedEgressGrants(projectId);
+        // B.3: is the in-fence contract-fixture server present? If not, the gate
+        // must say so (fixture_tooling_missing) rather than let a stub slip.
+        const fixtureToolingPresent = snapshot.files.some((f) => CONTRACT_FIXTURE_PATH_RE.test(f.path));
         integrationDecision = evaluateIntegrationTruthfulness({
           files: snapshot.files, manifestText: snapshot.manifestText, declaredEgress, approvedGrants,
           finish: { summary: decision.finishSummary, acceptance: decision.finishAcceptance, assumptions: decision.finishAssumptions },
-          changedFiles: changedThisCycle,
+          changedFiles: changedThisCycle, fixtureToolingPresent,
         });
         // A suspected legacy stub recorded at migration time CROSSES into blocking
         // when this cycle touches its subsystem (or the framework has reconciled).
@@ -823,11 +829,22 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
             ],
           });
         } catch (e) { console.warn('[mock2] integration findings persist failed:', e?.message); }
-        const bs = blockingSummary(integrationDecision);
-        transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Cannot finish — ${bs.reason}\n${bs.findings.map((r) => `- ${r}`).join('\n')}` });
+        // B.4 loop breaker: compare THIS block's finding set against the earlier
+        // blocked cycles of the same request. If the same set has now survived
+        // N=2 consecutive resolutions, blockingSummary marks it resolution-
+        // ineffective — the deadlock is surfaced AS a deadlock (full findings
+        // inline, options suppressed, free-text/admin required).
+        let priorSignatures = [];
+        try { priorSignatures = priorBlockedSignatures(cycle.request_id, cycle.id); } catch { priorSignatures = []; }
+        const bs = blockingSummary(integrationDecision, { priorSignatures });
+        const trigger = bs.state === 'resolution-ineffective'
+          ? 'resolution_ineffective'
+          : (haltReasonForDecision(integrationDecision) || 'integration_gate');
+        const findingLines = (bs.findings || integrationDecision.reasons || []);
+        transcript.push({ role: 'tool', toolCallId: finishCallId(result.toolCalls), name: 'finish', content: `Cannot finish — ${bs.reason}\n${findingLines.map((r) => `- ${r}`).join('\n')}${bs.requires_resolution ? `\n\n${bs.requires_resolution}` : ''}` });
         await haltCycle({
           cycle: getCycle(cycle.id), project, containerName, holder, gateReports: battery, gateScripts, framework,
-          trigger: haltReasonForDecision(integrationDecision) || 'integration_gate', reason: bs.reason, options: bs.options, logEvent,
+          trigger, reason: bs.reason, options: bs.options, logEvent,
         });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'blocked' });
         return scheduleJobCleanup(cycle.id);
@@ -1051,7 +1068,7 @@ export async function readFileInContainer(containerName, path) {
   return { ok: true, content: r.stdout || '' };
 }
 
-async function writeFileInContainer(containerName, path, content) {
+export async function writeFileInContainer(containerName, path, content) {
   const rel = safeRel(path);
   if (!rel) return { ok: false, error: 'path must be relative and inside the app dir' };
   const script = `p=$(printf '%s' '${b64(rel)}' | base64 -d); d="${APP_DIR}/$p"; mkdir -p "$(dirname "$d")"; printf '%s' '${b64(content)}' | base64 -d > "$d" && echo ok`;

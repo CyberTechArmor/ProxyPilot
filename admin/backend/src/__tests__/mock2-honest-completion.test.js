@@ -543,6 +543,117 @@ export async function probeDirectoryConnection(cfg) {
   assert.match(f.function, /probeDirectoryConnection/);
 });
 
+// ---- library-aware transport: client-library I/O IS the real handshake ----
+
+// The exact remaining 4-finding shape: connection checks whose transport goes
+// through the `ldapts` client library (bind/search/unbind are the real LDAPS
+// operations, defined in node_modules where the call graph can't see) and an
+// mTLS HTTP client (axios). None of these use a lexical fingerprint like
+// tls.connect in their own bodies.
+const LIB_TRANSPORT_CODE = [
+  {
+    path: 'src/auth/ldapts-client.ts',
+    content: `
+import { Client } from 'ldapts';
+
+export class DirectoryClient {
+  constructor(cfg) { this.cfg = cfg; this.client = new Client({ url: cfg.directoryUrl }); }
+
+  async probeReachability() {
+    await this.client.bind(this.cfg.bindDn, this.cfg.bindPassword);
+    return { ok: true };
+  }
+
+  async safeUnbind() {
+    try { await this.client.unbind(); } catch (err) { /* already closed */ }
+    return { ok: true };
+  }
+}
+`,
+  },
+  {
+    path: 'src/auth/ldap.ts',
+    content: `
+import { DirectoryClient } from './ldapts-client';
+
+export async function testLdapConnection(cfg) {
+  const client = new DirectoryClient(cfg);
+  try {
+    const probe = await client.probeReachability();
+    return probe;
+  } finally {
+    await client.safeUnbind();
+  }
+}
+`,
+  },
+];
+
+const ADP_LIB_CODE = [{
+  path: 'src/adp/service.ts',
+  content: `
+import axios from 'axios';
+
+export async function testAdpConnection(cfg) {
+  const http = axios.create({ baseURL: cfg.tokenUrl, httpsAgent: cfg.mtlsAgent });
+  const res = await http.post('/auth/oauth/v2/token', 'grant_type=client_credentials');
+  if (res.status !== 200) throw new Error('token endpoint returned ' + res.status);
+  return { ok: true, tokenType: res.data.token_type };
+}
+`,
+}];
+
+const ADP_AUTH_MANIFEST = {
+  schema_version: 1,
+  entries: [
+    ...AUTH_MANIFEST.entries,
+    {
+      id: 'adp-workforce', subsystem: 'adp',
+      actions: [{ name: 'test-connection', operation: 'oauth-token' }],
+      destination: { source: 'env', key: 'ADP_TOKEN_URL' },
+      transport: 'https-mtls',
+      provenance: { response_to_output: 'required' },
+      live_verification: { required: true },
+      egress: { classification: 'public' },
+    },
+  ],
+};
+
+test('library-aware transport: ldapts bind/unbind and axios post count as the real handshake', () => {
+  const r = analyzeIntegrations({ files: [...LIB_TRANSPORT_CODE, ...ADP_LIB_CODE], manifest: ADP_AUTH_MANIFEST });
+  assert.equal(r.verdict, 'pass', JSON.stringify(r.findings, null, 2));
+});
+
+test('library-aware transport: a presence-only check in a transport-importing file is STILL caught', () => {
+  const presenceOnly = [{
+    path: 'src/auth/ldap.ts',
+    content: `
+import { Client } from 'ldapts';
+
+export async function testLdapConnection(cfg) {
+  if (cfg && cfg.directoryUrl && cfg.bindDnEnc) {
+    return { ok: true, detail: 'directory configured' };
+  }
+  return { ok: false };
+}
+`,
+  }];
+  const r = analyzeIntegrations({ files: presenceOnly, manifest: AUTH_MANIFEST });
+  assert.equal(r.verdict, 'fail');
+  assert.ok(r.findings.some((f) => f.kind === 'execution_without_transport'), JSON.stringify(r.findings));
+});
+
+test('library-aware discovery: an UNDECLARED subsystem dialing out through a client library is found', () => {
+  const r = analyzeIntegrations({
+    files: ADP_LIB_CODE,
+    manifest: { schema_version: 1, entries: [] },
+  });
+  assert.equal(r.verdict, 'fail');
+  const und = r.findings.find((f) => f.kind === 'undeclared_integration');
+  assert.ok(und, JSON.stringify(r.findings));
+  assert.equal(und.file, 'src/adp/service.ts');
+});
+
 test('analyzer scope: canned records laundered through a helper are still caught without transport', () => {
   const canned = [{
     path: 'src/auth/sync.ts',

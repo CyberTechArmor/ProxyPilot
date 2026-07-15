@@ -159,6 +159,14 @@ integration action. The analyzer scopes its two blocking checks:
   code and produces no finding.
 - Class and object-literal **methods are extracted** into the call graph, so
   transport implemented on a client class is reachable from its callers.
+- Transport through a **known client library** counts: when a file imports a
+  transport module (`node:tls`/`https`/`net`, `ldapts`, `ldapjs`, `axios`,
+  `got`, `undici`, `pg`, …), instance I/O-verb calls (`.bind(`, `.unbind(`,
+  `.search(`, `.request(`, `.post(`, `.query(`, …) are the real handshake —
+  `ldapts`' `client.bind()` IS the LDAPS operation. A presence-only check has
+  neither the import nor the call, so it stays caught; the same awareness
+  feeds undeclared-integration discovery, so dialing out through a library is
+  not a way around the manifest.
 
 All the evasion patterns the gate was built for (canned rosters — including
 laundered through helpers, bundled JSON, presence-only checks, ignored

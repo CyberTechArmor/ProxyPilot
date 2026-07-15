@@ -142,6 +142,29 @@ success", "connection test is simulated because … unreachable") and bare
 ambiguous terms with no guard context still block exactly as before; the B.4
 source analyzer remains the positive detector for real stubs.
 
+## Analyzer scope: local app code is not the integration surface
+
+Declaring a subsystem in the manifest does not make every function in it an
+integration action. The analyzer scopes its two blocking checks:
+
+- `execution_without_transport` applies to **connectivity-named** functions
+  (connection/probe/bind/handshake/ping/health/reachability), excluding
+  accessor-style names (`setConnectionStatus` is state access, not a check) —
+  not to any name containing `verify`/`test` (`verifyPassword`, `verifyTotp`,
+  `touchTested` are local code).
+- `fabricated_output` on a no-transport path requires **positive canned-data
+  evidence**: a hardcoded record set reachable through the call graph, or
+  bundled fixture data. Ordinary local persistence (session tokens, audit
+  rows, admin-entered settings, cache bookkeeping over runtime values) is app
+  code and produces no finding.
+- Class and object-literal **methods are extracted** into the call graph, so
+  transport implemented on a client class is reachable from its callers.
+
+All the evasion patterns the gate was built for (canned rosters — including
+laundered through helpers, bundled JSON, presence-only checks, ignored
+responses, error→success conversion, production-reachable fixture modes,
+undeclared egress) remain caught; the fixtures prove it.
+
 ## Unsticking a build looping on the integration gate
 
 1. Open the blocked build card and press **Repair integration manifest** — it

@@ -41,6 +41,8 @@ const KNOWN_LIMITS = Object.freeze([
   'Reflection / eval / runtime-assembled call targets are not followed.',
   'Only TypeScript/JavaScript sources are analyzed; other languages fail closed as provenance_not_established.',
   'Provenance is established structurally (response identifier flows into the returned/persisted value); an obfuscated laundering of a literal through many assignments may exceed the conservative depth and fail closed rather than pass.',
+  'Fabrication findings require POSITIVE canned-data evidence (a reachable hardcoded record set or bundled fixture data): a declared subsystem\'s ordinary local persistence (session tokens, audit rows, settings, cache bookkeeping) is app code, not integration output. Programmatically generated fake data with no literal/bundled source is out of this analyzer\'s reach (the no-simulation test guard and disclosure screen cover that).',
+  'Class and object-literal methods are extracted alongside top-level functions; property-assigned arrow methods (`foo: () => {}`) are not followed.',
 ]);
 
 function analyzerLimits() {
@@ -328,6 +330,28 @@ function stripComments(src) {
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
+// Balance the parameter list starting at the '(' at index i; returns the index
+// just past the closing ')'.
+function skipBalancedParens(code, i) {
+  let pd = 0;
+  for (; i < code.length; i++) {
+    if (code[i] === '(') pd++;
+    else if (code[i] === ')') { pd--; if (pd === 0) return i + 1; }
+  }
+  return i;
+}
+
+// Balance a `{ … }` body starting at the '{' at index b; returns the index just
+// past the closing '}'.
+function skipBalancedBraces(code, b) {
+  let depth = 0;
+  for (let j = b; j < code.length; j++) {
+    if (code[j] === '{') depth++;
+    else if (code[j] === '}') { depth--; if (depth === 0) return j + 1; }
+  }
+  return code.length;
+}
+
 // Extract top-level exported function/const-arrow bodies as { name, body }.
 // Deliberately simple brace-matching — enough to reason about which function a
 // transport call and a return statement live in.
@@ -341,22 +365,49 @@ function extractFunctions(src) {
     // The match ends just after the param-list's opening '('. Balance parens to
     // skip the parameter list (which may itself contain `{ … }` destructuring —
     // the reason a naive "first { after the name" is wrong), THEN take the body.
-    let i = re.lastIndex - 1; // points at '('
-    let pd = 0;
-    for (; i < code.length; i++) {
-      if (code[i] === '(') pd++;
-      else if (code[i] === ')') { pd--; if (pd === 0) { i++; break; } }
-    }
+    const i = skipBalancedParens(code, re.lastIndex - 1);
     const b = code.indexOf('{', i);
     if (b < 0) continue;
-    let depth = 0;
-    let j = b;
-    for (; j < code.length; j++) {
-      if (code[j] === '{') depth++;
-      else if (code[j] === '}') { depth--; if (depth === 0) { j++; break; } }
-    }
+    const j = skipBalancedBraces(code, b);
     out.push({ name, body: code.slice(b, j) });
     re.lastIndex = j; // continue scanning after this function
+  }
+  return [...out, ...extractMethods(code)];
+}
+
+// Also extract CLASS and OBJECT-LITERAL METHODS (`async fetchWorkers(args) {`).
+// Real transport code frequently lives on a client class; without this, every
+// caller of a class method looked like "unreachable transport" and a whole
+// subsystem of honest code mass-flagged. A method definition is a line-leading
+// `name(params)` whose balanced param list is followed (after an optional TS
+// return-type annotation) by `{` — a CALL statement is followed by `;`/`.`/
+// operator instead, so calls never match.
+const METHOD_NAME_KEYWORDS = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'await',
+  'constructor', 'super', 'new', 'else', 'do', 'typeof', 'delete', 'void', 'yield',
+]);
+function extractMethods(code) {
+  const out = [];
+  const re = /(?:^|\n)[ \t]*(?:(?:public|private|protected|static|readonly|override)\s+)*(?:async\s+)?(?:\*\s*)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const name = m[1];
+    if (METHOD_NAME_KEYWORDS.has(name)) continue;
+    let i = skipBalancedParens(code, re.lastIndex - 1);
+    while (i < code.length && /\s/.test(code[i])) i++;
+    // Optional TS return type between `)` and `{` — accept only a simple
+    // annotation on the same statement (no ';' or '=>' before the brace).
+    if (code[i] === ':') {
+      const brace = code.indexOf('{', i);
+      const semi = code.indexOf(';', i);
+      const arrow = code.indexOf('=>', i);
+      if (brace < 0 || (semi >= 0 && semi < brace) || (arrow >= 0 && arrow < brace)) continue;
+      i = brace;
+    }
+    if (code[i] !== '{') continue; // a call / non-method construct
+    const j = skipBalancedBraces(code, i);
+    out.push({ name, body: code.slice(i, j) });
+    re.lastIndex = j;
   }
   return out;
 }
@@ -404,6 +455,45 @@ function buildTransportReachability(fns) {
 // Does a function persist data (the "and persist" half of fetch-and-persist)?
 function persistsData(body) {
   return /\.(insert|upsert|onConflict|save|create)\s*\(|\.values\s*\(/.test(String(body || ''));
+}
+
+// buildCannedReachability(fns) → (name) => boolean: does a function's body
+// contain a hardcoded record set, or (transitively, within the subsystem's
+// function set) call one that does? The canned-literal twin of transport
+// reachability — it's what keeps "the literal moved into a helper" caught while
+// ordinary local persistence (inserting runtime arguments) stays clean.
+function buildCannedReachability(fns) {
+  const byName = new Map(fns.map((f) => [f.name, f]));
+  const memo = new Map();
+  const resolve = (name, seen) => {
+    if (memo.has(name)) return memo.get(name);
+    const fn = byName.get(name);
+    if (!fn || seen.has(name)) return false;
+    seen.add(name);
+    let canned = hasHardcodedRecordSet(fn.body);
+    if (!canned) {
+      for (const callee of calledIdentifiers(fn.body)) {
+        if (callee !== name && resolve(callee, seen)) { canned = true; break; }
+      }
+    }
+    memo.set(name, canned);
+    return canned;
+  };
+  return (name) => resolve(name, new Set());
+}
+
+// A CONNECTIVITY check: the function's name says it exercises the link itself
+// (connection test, probe, bind, handshake, health/heartbeat, reachability).
+// Deliberately NOT any name containing verify/test/check — a declared auth
+// subsystem legitimately holds verifyPassword/verifyTotp/verifyAccessToken
+// (local crypto) and touchTested (bookkeeping); demanding those invoke the
+// directory transport mass-flagged honest code. Accessor-style prefixes
+// (setConnectionStatus, getConnectionInfo) are state access, not checks.
+const CONNECTIVITY_NAME_RE = /(connect|handshake|probe|ping|reachab|bind|heartbeat|health|upstream|link)/i;
+const ACCESSOR_PREFIX_RE = /^(get|set|read|load|store|save|update|write|clear|mark|touch|is|has|format|render|on)(?=[A-Z_])/;
+function isConnectivityCheckName(name) {
+  const n = String(name || '');
+  return CONNECTIVITY_NAME_RE.test(n) && !ACCESSOR_PREFIX_RE.test(n);
 }
 
 // A hardcoded record set literal returned/persisted as data: an array of object
@@ -609,19 +699,21 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
     // transport helper in transport.ts is reachable from an action in service.ts.
     const allFns = analyzable.flatMap((f) => extractFunctions(f.content).map((fn) => ({ ...fn, path: f.path })));
     const reachesTransport = buildTransportReachability(allFns);
+    const reachesCanned = buildCannedReachability(allFns);
 
     for (const f of analyzable) {
       const imports = extractImports(f.content);
       const fns = extractFunctions(f.content);
 
       for (const fn of fns) {
-        // A "connection/test/probe/verify" action: it must actually perform the
-        // operation it reports success for.
-        const isCheckAction = /check|test|probe|connect|verify|handshake/i.test(fn.name);
+        // A CONNECTIVITY check action: it must actually perform the handshake it
+        // reports success for. Scoped to connectivity-named functions — local
+        // verification (verifyPassword/verifyTotp) and accessors are app code.
+        const isCheckAction = isConnectivityCheckName(fn.name);
         // A "fetch-and-persist" action: it persists, or its name says it pulls
         // external data. A pure DB read (listPeople → db.select) is the legitimate
         // "read stored copy" half and is NOT an integration call.
-        const isFetchAction = persistsData(fn.body) || /sync|fetch|pull|refresh|import/i.test(fn.name);
+        const isFetchAction = persistsData(fn.body) || /sync|fetch|pull|import/i.test(fn.name);
         if (!isCheckAction && !isFetchAction) continue;
 
         // (4) Honest failure: transport error caught and converted to success.
@@ -659,9 +751,16 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
           const reaches = reachesTransport(fn.name);
           const bundled = usesBundledData(fn.body, imports);
           if (!reaches) {
+            // Fabrication needs POSITIVE canned-data evidence: a hardcoded
+            // record set reachable from this function, or bundled fixture data.
+            // A declared subsystem's ordinary local persistence (session tokens,
+            // audit rows, admin-entered settings, cache bookkeeping over runtime
+            // values) is app code, not integration output — flagging it forced
+            // honest builds into an unfixable block (a real 20-finding case).
+            if (!bundled && !reachesCanned(fn.name)) continue;
             findings.push(finding('fabricated_output', {
               file: f.path, fn: fn.name,
-              message: `"${fn.name}" persists/returns ${bundled ? 'bundled fixture data' : 'data that does not come from a transport'} without any reachable ${entry.transport} invocation. Persisted or returned data must derive from the ${entry.transport} response; it must fail loudly when the endpoint is unreachable, never fabricate rows.`,
+              message: `"${fn.name}" persists/returns ${bundled ? 'bundled fixture data' : 'hardcoded/canned records'} without any reachable ${entry.transport} invocation. Persisted or returned data must derive from the ${entry.transport} response; it must fail loudly when the endpoint is unreachable, never fabricate rows.`,
             }));
             continue;
           }

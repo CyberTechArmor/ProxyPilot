@@ -942,14 +942,26 @@ function RepoRemoteCard({ projectId, isAdmin, slug }) {
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base">Repository</CardTitle>
-        <CardDescription>Export the project&apos;s git history, or push it to an external remote (optional — the local bare repo is primary).</CardDescription>
+        <CardDescription>Download the project&apos;s files or its full git history, or push it to an external remote (optional — the local bare repo is primary).</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Button asChild variant="outline" size="sm" className="h-11 sm:h-10">
-          <a href={api.mock2ProjectExportZipUrl(projectId)} download={`${slug || `project-${projectId}`}.zip`}>
-            <Download className="h-4 w-4 mr-1" /> Export as zip
-          </a>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline" size="sm" className="h-11 sm:h-10">
+            <a href={api.mock2ProjectRepoBundleUrl(projectId)} download={`${slug || `project-${projectId}`}.bundle`}>
+              <GitBranch className="h-4 w-4 mr-1" /> Download git repo
+            </a>
+          </Button>
+          <Button asChild variant="outline" size="sm" className="h-11 sm:h-10">
+            <a href={api.mock2ProjectExportZipUrl(projectId)} download={`${slug || `project-${projectId}`}.zip`}>
+              <Download className="h-4 w-4 mr-1" /> Download project (.zip)
+            </a>
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium">Git repo</span> is a bundle with full history (the checkpoints and change records) —
+          reconstruct it with <code>git clone &lt;file&gt;.bundle</code>. <span className="font-medium">Project</span> is a zip
+          of the current files only.
+        </p>
 
         {isAdmin ? (
           <div className="space-y-2 border-t pt-4">

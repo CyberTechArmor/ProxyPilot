@@ -14,7 +14,7 @@
 // MOBILE_FIRST: single-column cards, full-width 44px touch targets, dialogs
 // scroll inside max-h-[90vh] and complete on a 360px screen, no fixed widths.
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Navigate, Link } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -192,13 +192,30 @@ export default function ComponentLibrary() {
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [importReason, setImportReason] = useState('');
+  // File-upload path: reads the picked .component.json into the same importText
+  // the paste path uses, so one runImport serves both. Zip archives are NOT
+  // accepted — the portable format is a single JSON document.
+  const [importFileName, setImportFileName] = useState('');
+  const importFileRef = useRef(null);
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file after an edit
+    if (!file) return;
+    try {
+      const text = await file.text();
+      JSON.parse(text); // fail fast on non-JSON; the server validates the shape
+      setImportText(text); setImportFileName(file.name);
+    } catch {
+      toast({ variant: 'destructive', title: 'Not a JSON file', description: `"${file.name}" could not be parsed — upload an exported .component.json document.` });
+    }
+  };
   const runImport = async () => {
     setSaving(true);
     try {
       let doc;
-      try { doc = JSON.parse(importText); } catch { throw new Error('Not valid JSON — paste an exported .component.json document'); }
+      try { doc = JSON.parse(importText); } catch { throw new Error('Not valid JSON — upload or paste an exported .component.json document'); }
       const r = await api.mock2ImportComponent(doc, importReason || undefined);
-      setImportOpen(false); setImportText(''); setImportReason(''); await load();
+      setImportOpen(false); setImportText(''); setImportReason(''); setImportFileName(''); await load();
       toast({ title: r.created ? `Imported new component "${r.component.key}"` : `Imported as ${r.component.key} v${r.component.current_version}` });
     } catch (err) { toast({ variant: 'destructive', title: 'Import failed', description: err.message }); }
     finally { setSaving(false); }
@@ -484,10 +501,23 @@ export default function ComponentLibrary() {
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Import a component</DialogTitle>
-            <DialogDescription>Paste an exported .component.json document. A new key creates the component; an existing key gets a new version.</DialogDescription>
+            <DialogDescription>Upload or paste an exported .component.json document. A new key creates the component; an existing key gets a new version.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <textarea rows={10} value={importText} onChange={(e) => setImportText(e.target.value)}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input ref={importFileRef} type="file" accept=".json,application/json" className="hidden" onChange={onImportFile} aria-hidden="true" tabIndex={-1} />
+              <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => importFileRef.current?.click()}>
+                <Upload className="mr-1 h-4 w-4" /> Upload file
+              </Button>
+              {importFileName ? (
+                <span className="flex min-w-0 items-center gap-1 text-sm text-muted-foreground">
+                  <FileCode2 className="h-4 w-4 shrink-0" /><span className="truncate">{importFileName}</span>
+                </span>
+              ) : (
+                <span className="text-sm text-muted-foreground">…or paste the document below</span>
+              )}
+            </div>
+            <textarea rows={10} value={importText} onChange={(e) => { setImportText(e.target.value); setImportFileName(''); }}
               className="w-full rounded-md border bg-background p-2 font-mono text-xs" placeholder='{"format":"proxypilot-component@1", …}' />
             <div><Label htmlFor="i-reason">Reason (recorded in the history)</Label>
               <Input id="i-reason" value={importReason} onChange={(e) => setImportReason(e.target.value)} placeholder="Imported from the staging install" /></div>

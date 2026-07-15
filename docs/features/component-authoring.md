@@ -1,0 +1,141 @@
+# Authoring a component (`proxypilot-component@1`)
+
+The complete schema and requirements for producing a component upload file —
+one JSON document that Projects → Components → Import accepts (file upload or
+paste), and that `POST /api/mock2/components/import` accepts as `{ doc,
+change_reason? }`. Every rule below is enforced by
+`admin/backend/src/mock2/component-logic.js` (`parseComponentImport`), so a
+document that follows this spec imports cleanly; one that doesn't is rejected
+with the specific error quoted.
+
+A component is a set of SOURCE files plus integration notes. It is not an
+installable package: the build runner copies the files into a project's source
+and writes only the glue. Package it accordingly (see "Packaging rules").
+
+## Document shape
+
+One JSON object, conventionally saved as `<key>.component.json`:
+
+```json
+{
+  "format": "proxypilot-component@1",
+  "key": "ldaps-auth",
+  "name": "LDAPS Auth",
+  "description": "Search-then-bind LDAPS authentication with a bounded connection pool.",
+  "category": "auth",
+  "tags": ["ldap", "ldaps", "auth"],
+  "version": 1,
+  "usage_md": "# Integration notes\n\nnpm install ldapts\n\nEnv vars: LDAP_URL, ...",
+  "files": [
+    { "path": "src/lib/ldaps/config.ts", "content": "import { z } from 'zod';\n..." },
+    { "path": "src/lib/ldaps/client.ts", "content": "..." }
+  ]
+}
+```
+
+## Field requirements
+
+| Field | Required | Rules |
+| --- | --- | --- |
+| `format` | yes | Exactly the string `proxypilot-component@1`. Anything else is rejected. |
+| `name` | yes | Non-empty display name, max 120 chars. |
+| `key` | no | Stable handle: lowercase slug, 2–64 chars, `[a-z0-9-]`, no leading/trailing or doubled meaning beyond `^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`. Omitted → derived from `name` ("LDAPS Connection" → `ldaps-connection`). **Import matches on key**: a new key creates a component, an existing key appends a new version to it. |
+| `files` | yes | Non-empty array of `{ path, content }` — see limits below. |
+| `description` | no | Plain text; truncated to 2000 chars. |
+| `category` | no | Short label (e.g. `auth`, `networking`); truncated to 80 chars. |
+| `tags` | no | Array or comma-separated string; lowercased, deduped, each tag capped at 40 chars, max 12 tags kept. |
+| `usage_md` | no (strongly recommended) | Markdown integration notes; truncated to 20 000 chars. This is what the build runner reads to wire the component in — see "What usage_md must cover". |
+| `version` | ignored | Informational in exports. The receiving install assigns its own version number (1 for a new key, current+1 for an existing one). |
+
+Unknown extra fields are ignored. Install-specific data (ids, authors,
+timestamps) must not be included — the document is portable by design.
+
+## File entries and limits
+
+Each element of `files` is `{ "path": string, "content": string }`.
+
+- **Path**: relative only, `/`-separated, max 400 chars. Rejected: absolute
+  paths, backslashes, `..` segments, empty segments, duplicates (after
+  normalization — a leading `./` is stripped). Use the path the file should
+  have in a consuming project (e.g. `src/lib/auth/rbac.ts`).
+- **Content**: must be a string — i.e. **text files only**. Binary assets
+  can't ride in the document; if one is unavoidable, embed it base64 in a text
+  file and note the decode step in `usage_md`.
+- **Limits** (constants in `component-logic.js`):
+  - max **40 files** per component,
+  - max **200 000 chars** per file,
+  - max **600 000 chars** total.
+
+Note the runner-side budget too: a `get_component` tool result is truncated at
+60 000 chars, so a component near the size limits is served to builds
+truncated. Prefer small, focused components; split a sprawling module.
+
+## Packaging rules (what goes in `files`)
+
+Include:
+- source files (`src/…`) at the paths a consuming project should use,
+- runtime assets that are text (templates, `public/*.html`, shared JS),
+- tests if the target projects can run them (say so in `usage_md`).
+
+Exclude:
+- **build output** (`dist/`, `*.d.ts` generated from sources, minified
+  bundles) — it's regenerable, wastes the file budget, and drifts from source,
+- `node_modules/`, lockfiles, `.git/`, editor/CI config,
+- `package.json` as a manifest (dependencies belong in `usage_md` as an
+  explicit `npm install …` line; there is no automatic dependency install),
+- secrets of any kind — documents are stored and offered to builds verbatim.
+
+## What `usage_md` must cover
+
+The runner gets `usage_md` alongside the files and is instructed to copy the
+code and adapt only the glue. Write it for that reader:
+
+1. **Dependencies** — exact `npm install …` (or equivalent) lines, split
+   runtime vs dev.
+2. **Mount/wiring example** — the minimal host-side code to integrate
+   (imports, init call, router mounts, schema registration).
+3. **Configuration** — every env var / config key with defaults, and which are
+   secrets that production must inject.
+4. **Layout notes** — what each top-level directory is, which files are tests,
+   anything that must be kept in sync.
+5. **Security caveats** — default-off switches, trust assumptions, anything an
+   integrator can get dangerously wrong.
+
+## Import semantics (what happens on upload)
+
+- `POST /api/mock2/components/import`, body `{ "doc": <document>,
+  "change_reason": "why" }` — admin-only, CSRF-protected. The UI's Import
+  dialog (upload the file or paste it) posts the same shape.
+- `change_reason` is optional here; it defaults to `Imported component
+  document (<key>)`. Everywhere else a version is created it is REQUIRED —
+  give a real one.
+- New key → new component, **status `published`** (immediately offered to
+  every build cycle), version 1. Existing key → new version of that component,
+  annotated as an import.
+- Versions are immutable and append-only: to change anything, re-import the
+  edited document (same key) or publish a new version in the UI. Revert = a
+  new version carrying the old content.
+
+## Pre-upload checklist
+
+- [ ] `format` is exactly `proxypilot-component@1`
+- [ ] `key` is a valid slug (or omitted) and — deliberately — either new
+      (create) or existing (new version)
+- [ ] ≤ 40 files, ≤ 200k chars each, ≤ 600k total; ideally well under
+- [ ] no `dist/`, `node_modules/`, lockfiles, binaries, or secrets
+- [ ] all paths relative, forward slashes, no `..`
+- [ ] `usage_md` covers dependencies, mount example, config/env vars, caveats
+- [ ] valid JSON (`python3 -m json.tool doc.component.json` or equivalent)
+
+## Converting an existing module (zip/directory) into a document
+
+Zip archives are not accepted anywhere — convert to the JSON document first.
+The mechanical recipe:
+
+1. Choose the file set per the packaging rules (typically `src/` + text
+   assets, drop `dist/` etc.).
+2. For each file, add `{ "path": "<relative path>", "content": "<full text>" }`
+   to `files` (JSON-escape the content; any JSON library does this for you).
+3. Write `usage_md` (start from the module's README if it has one).
+4. Fill in `format`/`key`/`name`/`description`/`category`/`tags`.
+5. Validate against the checklist, then import.

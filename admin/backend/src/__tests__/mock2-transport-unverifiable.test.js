@@ -70,6 +70,51 @@ export async function probeDirectory() {
 `,
 };
 
+// A HAND-ROLLED LDAP client: no `ldapts` import at all — the real transport is a
+// raw `tls.connect` socket in a client class, and the connectivity check calls
+// `client.bind()` on an injected client (a method dispatch the single-file call
+// graph can't trace). Plus BER codec functions (encode/parse) that must NOT be
+// treated as connection tests just because their names contain "bind".
+const HANDROLLED_LDAP = {
+  'src/auth/ldaps-service.ts': `
+import * as tls from 'node:tls';
+export class LdapsClient {
+  connect(cfg) {
+    this.socket = tls.connect({ host: cfg.host, port: 636, cert: cfg.cert, key: cfg.key });
+    return new Promise((res, rej) => { this.socket.on('secureConnect', res); this.socket.on('error', rej); });
+  }
+  bind(dn, pw) { this.socket.write(encodeBindRequest(dn, pw)); }
+}
+export async function runConnectionTest(cfg) {
+  const client = new LdapsClient();
+  await client.connect(cfg);
+  const res = await runConnectionTestWithClient(client, cfg);
+  return { ok: res.bound };
+}
+`,
+  'src/auth/ldap-interface-check.ts': `
+export async function runConnectionTestWithClient(client, cfg) {
+  await client.bind(cfg.bindDn, cfg.bindPw);
+  return { bound: true };
+}
+`,
+  'src/auth/ldap-ber.ts': `
+export function encodeBindRequest(dn, pw) { return Buffer.concat([Buffer.from([0x30]), Buffer.from(dn), Buffer.from(pw)]); }
+export function parseBindResponse(buf) { return { resultCode: buf[0] }; }
+`,
+};
+
+const MANIFEST_AUTH = JSON.stringify({
+  schema_version: 1,
+  entries: [{
+    id: 'directory', subsystem: 'auth',
+    actions: [{ name: 'probe', operation: 'ldaps-bind' }],
+    destination: { source: 'config', key: 'directory.url' },
+    transport: 'ldaps', provenance: { response_to_output: 'required' },
+    live_verification: { required: true }, egress: { classification: 'private' },
+  }],
+});
+
 const run = (fileMap) => analyzeIntegrations({ files: toFiles(CONFIG_MODULE, fileMap), manifest: JSON.parse(MANIFEST_LIVE) });
 const evaluate = (fileMap) => evaluateIntegrationTruthfulness({
   files: toFiles(CONFIG_MODULE, fileMap),
@@ -94,6 +139,28 @@ test('soft finding routes the cycle to pending-operator-verification, not a bloc
   assert.equal(d.gate.verdict, 'pass', 'no blocking gate findings');
   assert.equal(d.pending_findings.length, 1);
   assert.ok(d.checklist.length >= 1, 'hands the operator a live check');
+});
+
+test('hand-rolled raw-tls LDAP: real check downgraded, BER codecs not flagged at all', () => {
+  const r = analyzeIntegrations({ files: toFiles(CONFIG_MODULE, HANDROLLED_LDAP), manifest: JSON.parse(MANIFEST_AUTH) });
+  // encodeBindRequest / parseBindResponse are codec functions — no finding at all.
+  assert.ok(!r.findings.some((f) => f.function === 'encodeBindRequest'), 'encodeBindRequest not flagged');
+  assert.ok(!r.findings.some((f) => f.function === 'parseBindResponse'), 'parseBindResponse not flagged');
+  // The real connectivity checks reach transport only via method dispatch → soft, not hard-block.
+  assert.ok(!r.findings.some((f) => f.kind === 'execution_without_transport'), 'no hard block');
+  const soft = r.findings.filter((f) => f.kind === 'transport_unverifiable_in_fence');
+  assert.ok(soft.length >= 1, 'real checks downgraded to soft');
+  assert.ok(soft.every((f) => f.subsystem === 'auth'));
+});
+
+test('hand-rolled raw-tls LDAP routes to pending, not blocked', () => {
+  const d = evaluateIntegrationTruthfulness({
+    files: toFiles(CONFIG_MODULE, HANDROLLED_LDAP), manifestText: MANIFEST_AUTH,
+    changedFiles: Object.keys(HANDROLLED_LDAP),
+    finish: { summary: 'real ldaps bind', acceptance: ['as admin, Test connection binds to the directory'], assumptions: { verified: [], assumed: [] } },
+  });
+  assert.equal(d.blocking, false);
+  assert.equal(d.outcome, 'pending-operator-verification');
 });
 
 test('genuine presence-only fake still hard-blocks (honesty preserved)', () => {

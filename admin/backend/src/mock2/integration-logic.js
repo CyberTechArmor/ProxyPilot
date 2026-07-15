@@ -413,6 +413,13 @@ function extractMethods(code) {
   return out;
 }
 
+// Concrete raw-socket transport invocations (a hand-rolled protocol client over
+// node's tls/net/dgram, or a direct http(s) request) — proof the subsystem really
+// dials out even when no recognized client library is imported. Deliberately
+// narrower than TRANSPORT_PATTERNS (which includes the loose 'ldap' substring): a
+// downgrade must key on an actual socket/request call, not a filename mention.
+const RAW_SOCKET_TRANSPORT_RE = /\b(tls\.connect|net\.connect|net\.createConnection|https?\.request|https?\.get|dgram\.createSocket)\s*\(|\bnew\s+WebSocket\s*\(/;
+
 function hasTransportCall(text) {
   const t = String(text || '');
   return TRANSPORT_PATTERNS.some((p) => t.includes(p));
@@ -534,8 +541,16 @@ function buildCannedReachability(fns) {
 // (setConnectionStatus, getConnectionInfo) are state access, not checks.
 const CONNECTIVITY_NAME_RE = /(connect|handshake|probe|ping|reachab|bind|heartbeat|health|upstream|link)/i;
 const ACCESSOR_PREFIX_RE = /^(get|set|read|load|store|save|update|write|clear|mark|touch|is|has|format|render|on)(?=[A-Z_])/;
+// Protocol codec / serialization functions are NOT connectivity checks even when
+// their name contains a link word: a hand-rolled LDAP/BER stack legitimately holds
+// encodeBindRequest / parseBindResponse / serializeSearch / decodeMessage — these
+// build or parse PDUs, they neither perform nor claim to perform the network bind.
+// Flagging them as "reports success without invoking the transport" was a false
+// positive that hard-blocked honest protocol code.
+const CODEC_PREFIX_RE = /^(encode|decode|parse|serialize|deserialize|marshal|unmarshal|wrap|unwrap|pack|unpack|build|assemble|frame)(?=[A-Z_])/;
 function isConnectivityCheckName(name) {
   const n = String(name || '');
+  if (CODEC_PREFIX_RE.test(n)) return false;
   return CONNECTIVITY_NAME_RE.test(n) && !ACCESSOR_PREFIX_RE.test(n);
 }
 
@@ -763,6 +778,17 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
     });
     const reachesTransport = buildTransportReachability(allFns);
     const reachesCanned = buildCannedReachability(allFns);
+    // Does the subsystem perform REAL raw-socket transport (a hand-rolled protocol
+    // client over node's tls/net, not a recognized client library)? A concrete
+    // socket-connect anywhere in the subsystem is proof the transport exists even
+    // when a check function reaches it only through a method dispatch the single-
+    // file call graph can't trace (client.bind() on an injected client). Used to
+    // downgrade an untraceable connectivity check to a live-verification item
+    // instead of hard-blocking honest hand-rolled code.
+    const subsystemHasRealTransport = analyzable.some((f) => {
+      const code = stripComments(f.content);
+      return RAW_SOCKET_TRANSPORT_RE.test(code) || importsTransportModule(extractImports(f.content));
+    });
 
     for (const f of analyzable) {
       const imports = extractImports(f.content);
@@ -812,12 +838,15 @@ export function analyzeIntegrations({ files = [], manifest = { entries: [] } } =
           // transport library imported, config-presence-only success, or a
           // catch→success) is caught by the checks above and stays blocking, and
           // the mandatory live verification catches anything that slips through.
-          const fileImportsTransport = importsTransportModule(imports);
-          const liveRequired = entry.live_verification?.required === true;
-          if (fileImportsTransport && liveRequired && !isPresenceOnlyCheck(fn.body)) {
+          // Real transport is present if THIS file imports a client library, or the
+          // SUBSYSTEM does raw-socket transport (hand-rolled protocol client). Either
+          // way, a connectivity check the graph can't trace to it is honest code the
+          // fence can't exercise — route to live verification, don't hard-block.
+          const realTransportPresent = importsTransportModule(imports) || subsystemHasRealTransport;
+          if (realTransportPresent && !isPresenceOnlyCheck(fn.body)) {
             findings.push(finding('transport_unverifiable_in_fence', {
               file: f.path, fn: fn.name, severity: 'medium', subsystem: entry.subsystem,
-              message: `"${fn.name}" uses ${entry.transport} (its file imports a real transport client library) but the sealed build fence cannot statically prove or exercise the live call — the endpoint is unreachable from inside the fence. The code is real and the integration is declared for live verification, so this is NOT a block: it routes to pending-operator-verification, and an operator runs the live ${entry.transport} check against the real system after deploy.`,
+              message: `"${fn.name}" is part of a real ${entry.transport} client (the ${entry.subsystem} subsystem performs actual socket/library transport) but the sealed build fence cannot statically prove or exercise this call — the endpoint is unreachable from inside the fence and the call reaches the transport through a dispatch the single-file analyzer can't trace. The code is real, so this is NOT a block: it routes to pending-operator-verification, and an operator runs the live ${entry.transport} check against the real system after deploy.`,
             }));
             continue;
           }

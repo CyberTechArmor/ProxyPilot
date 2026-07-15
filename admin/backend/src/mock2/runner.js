@@ -335,8 +335,25 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
   const grantedWaivers = (Array.isArray(waivers) ? waivers : [])
     .map((w) => (typeof w === 'string' ? { rule: w } : w))
     .filter((w) => w && w.rule === 'reproduce_first');
-  const resumeContext = (msg || selectedOption || authorizations.length || grantedWaivers.length)
-    ? { message: msg, selectedOption, authorizations, waivers: grantedWaivers }
+  // Carry the blocked cycle's INTEGRATION-GATE FINDINGS into the resume: the
+  // gate is deterministic, so without the exact finding list the resumed build
+  // rediscovers them blind and re-halts on the same block (a real 5-cycle loop).
+  // Bounded so a pathological finding set can't blow the transcript.
+  let gateFindings = [];
+  try {
+    const d = cycle.integration_gate_json ? JSON.parse(cycle.integration_gate_json) : null;
+    if (d?.blocking && Array.isArray(d.reasons)) {
+      let budget = 7000;
+      for (const r of d.reasons.slice(0, 40)) {
+        const line = String(r || '').slice(0, 500);
+        if (line.length > budget) break;
+        budget -= line.length;
+        gateFindings.push(line);
+      }
+    }
+  } catch { gateFindings = []; }
+  const resumeContext = (msg || selectedOption || authorizations.length || grantedWaivers.length || gateFindings.length)
+    ? { message: msg, selectedOption, authorizations, waivers: grantedWaivers, findings: gateFindings }
     : null;
 
   // Cost-truth: the resume is a SEGMENT of the SAME request as the cycle being resumed.
@@ -485,7 +502,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     const block = buildResumeContextBlock(resumeCtx);
     if (block) {
       transcript.push({ role: 'user', text: block });
-      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope), waivers: (resumeCtx.waivers || []).map((w) => w.rule) } });
+      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope), waivers: (resumeCtx.waivers || []).map((w) => w.rule), findings: (resumeCtx.findings || []).length } });
     }
   }
 

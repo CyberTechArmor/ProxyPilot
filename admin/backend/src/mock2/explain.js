@@ -13,7 +13,10 @@
 import { getSlot, getConnector, decryptConnectorKey } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
 import { callModelTurn } from './model-client.js';
-import { EXPLAIN_SYSTEM_PROMPT, buildExplainTranscript, parseExplanation } from './explain-logic.js';
+import {
+  EXPLAIN_SYSTEM_PROMPT, buildExplainTranscript, parseExplanation,
+  EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, buildFollowupTranscript, parseFollowupAnswer,
+} from './explain-logic.js';
 
 // Is the summary lane usable? Mirrors concept.js's slotReady for the one slot we need,
 // with an operator-readable reason when it isn't (surfaced as a graceful fallback).
@@ -53,4 +56,27 @@ export async function explainCard({ text, title = '', status = '', kind = '' }) 
   }
   if (!res.ok) return { ok: false, error: res.error || 'the explainer model call failed' };
   return parseExplanation(res.text);
+}
+
+// explainFollowup — answer an operator's follow-up question about an already-explained
+// card, via the same summary lane. Returns { ok:true, answer } (plain text) or
+// { ok:false, error }. Same read-only guarantees as explainCard: one model call, no
+// state change, never throws for a model/slot problem.
+export async function explainFollowup({ text, title = '', status = '', kind = '', prior = '', question }) {
+  const ready = summaryReady();
+  if (!ready.ok) return { ok: false, error: ready.reason };
+
+  let res;
+  try {
+    res = await callModelTurn({
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+      system: EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, tools: [],
+      transcript: buildFollowupTranscript({ text, title, status, kind, prior, question }),
+      maxTokens: 1024,
+    });
+  } catch (err) {
+    return { ok: false, error: `the explainer call failed: ${err?.message || String(err)}` };
+  }
+  if (!res.ok) return { ok: false, error: res.error || 'the explainer model call failed' };
+  return parseFollowupAnswer(res.text);
 }

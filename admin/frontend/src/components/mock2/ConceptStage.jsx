@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Hammer,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -263,6 +263,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   }, [data, onMockupChanged]);
 
+  // Auto-refresh on turn completion: the moment a design turn's background job
+  // finishes, reload the preview — the mockup URL is stable (same src, new
+  // content), so without this a re-render under an unchanged URL would sit stale
+  // until a manual reload. The id-transition effect above covers new mockups;
+  // this covers the completed turn itself. Fires only on the active→done edge.
+  const prevJobActive = useRef(false);
+  useEffect(() => {
+    if (!data) return;
+    const activeNow = !!(data.job && !['done', 'approved', 'failed'].includes(data.job.phase));
+    const finished = prevJobActive.current && !activeNow && data.job?.phase === 'done';
+    prevJobActive.current = activeNow;
+    if (finished && data.current_mockup_id && onMockupChanged) {
+      onMockupChanged(data.current_mockup_id);
+    }
+  }, [data, onMockupChanged]);
+
   const send = async () => {
     const text = message.trim();
     if (!text) return;
@@ -286,14 +302,20 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     setBusy(true);
     try {
       await api.mock2ApproveDesign(projectId);
-      toast({ title: 'Approving design…', description: 'Extracting the design inventory and unlocking Build.' });
+      toast({ title: 'Building…', description: 'Locking in your design and unlocking the build — watch the chat for progress.' });
       await load();
     } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not approve', description: err.message });
+      toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
     } finally {
       setBusy(false);
     }
   };
+
+  // The "are you ready to build?" confirm — the Build button at the bottom of
+  // the chat opens it; confirming approves the design (sign-off #1), which locks
+  // the mockup in and unlocks the build runner.
+  const [confirmBuild, setConfirmBuild] = useState(false);
+  const doBuild = () => { setConfirmBuild(false); approve(); };
 
   const composerDisabled = busy || jobActive || !online || approved;
 
@@ -456,8 +478,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               }}
             />
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to send</span>
-              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || !message.trim()} onClick={send}>
+              {/* Build — lives at the bottom of the design chat: when the mockup
+                  looks right, this (after a confirm) locks the design in and
+                  starts building the working app. */}
+              {hasMockup && online ? (
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  disabled={composerDisabled}
+                  title="Build — lock in the design and start building the working app"
+                  onClick={() => setConfirmBuild(true)}
+                >
+                  <Hammer className="h-4 w-4 mr-1" /> Build
+                </Button>
+              ) : null}
+              <span className="text-[11px] text-muted-foreground hidden sm:block ml-auto">⌘/Ctrl+Enter to send</span>
+              <Button className="h-11 sm:h-10 ml-auto sm:ml-0" disabled={composerDisabled || !message.trim()} onClick={send}>
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
                 Send
               </Button>
@@ -565,6 +601,27 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             >
               {importBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <FileUp className="h-4 w-4 mr-1" />}
               Import design
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Build confirm — locking in the design is sign-off #1 and can't be
+          un-approved, so it always asks first. Full-screen on <sm (MOBILE_FIRST). */}
+      <Dialog open={confirmBuild} onOpenChange={(o) => !o && setConfirmBuild(false)}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Are you ready to build?</DialogTitle>
+            <DialogDescription>
+              This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null} and
+              starts building the working app from it. You can keep chatting to refine the design instead — building
+              is a step you take when the mockup looks right.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>
+            <Button onClick={doBuild} className="h-11 sm:h-10">
+              <Hammer className="h-4 w-4 mr-1" /> Yes, build
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -58,6 +58,53 @@ export function buildExplainTranscript({ text = '', title = '', status = '', kin
   }];
 }
 
+// ---- follow-up questions ----
+
+// Bound the operator's follow-up question and the prior-explanation context we hand
+// back to the model (both are client-supplied; the route validates the same limits).
+export const FOLLOWUP_MAX_QUESTION_CHARS = 1000;
+export const FOLLOWUP_MAX_PRIOR_CHARS = 6000;
+
+// The fixed follow-up prompt: same plain-language rules as the explainer, but the
+// output is a short direct answer (plain text, no JSON) to the operator's question.
+export const EXPLAIN_FOLLOWUP_SYSTEM_PROMPT = `You are answering a follow-up question from a NON-TECHNICAL operator about a software build assistant's status message that was already explained to them in plain language. The operator has no programming or database knowledge.
+
+Write in plain, everyday words. Do NOT use jargon or technical terms. Do NOT mention section numbers, rule references, file paths, code, SQL, database tables, timestamps, hashes, or IDs — translate the MEANING into ordinary language instead. Keep sentences short and calm.
+
+Answer ONLY the operator's question, directly, in one to three short paragraphs of plain text. Do not repeat the whole explanation. If the original message does not contain enough information to answer, say so honestly instead of guessing. Output plain text only — no JSON, no markdown headings, no code.`;
+
+// Assemble the follow-up turn: context header + the original technical message + the
+// plain-language explanation already shown + the operator's question. Pure/testable.
+export function buildFollowupTranscript({
+  text = '', title = '', status = '', kind = '', prior = '', question = '',
+} = {}) {
+  const clippedText = String(text || '').slice(0, EXPLAIN_MAX_INPUT_CHARS);
+  const clippedPrior = String(prior || '').slice(0, FOLLOWUP_MAX_PRIOR_CHARS);
+  const clippedQuestion = String(question || '').slice(0, FOLLOWUP_MAX_QUESTION_CHARS);
+  const ctx = [];
+  if (title) ctx.push(`What the operator asked the build to do: ${String(title).trim()}`);
+  if (status) ctx.push(`Current build status: ${String(status).trim()}`);
+  if (kind) ctx.push(`The message is a: ${kindLabel(kind)}`);
+  const header = ctx.length ? `${ctx.join('\n')}\n\n` : '';
+  const priorBlock = clippedPrior
+    ? `The plain-language explanation the operator has already read:\n"""\n${clippedPrior}\n"""\n\n`
+    : '';
+  return [{
+    role: 'user',
+    text: `${header}The original technical message:\n"""\n${clippedText}\n"""\n\n${priorBlock}The operator's follow-up question:\n"""\n${clippedQuestion}\n"""`,
+  }];
+}
+
+// Parse the follow-up model reply: it's plain text, so just trim it (dropping any stray
+// code fences). Empty ⇒ failure so the UI can say the answer isn't available.
+export function parseFollowupAnswer(modelText) {
+  const answer = String(modelText || '')
+    .replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '')
+    .trim();
+  if (!answer) return { ok: false, error: 'the explainer returned nothing' };
+  return { ok: true, answer };
+}
+
 // A human word for the card kind (fed to the model as context only).
 function kindLabel(kind) {
   switch (String(kind || '')) {

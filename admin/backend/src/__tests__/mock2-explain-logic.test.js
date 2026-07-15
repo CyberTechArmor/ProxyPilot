@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import {
   EXPLAIN_SYSTEM_PROMPT, EXPLAIN_MAX_INPUT_CHARS, RISK_LEVELS,
   buildExplainTranscript, parseExplanation, normalizeRiskLevel,
+  EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, FOLLOWUP_MAX_QUESTION_CHARS, FOLLOWUP_MAX_PRIOR_CHARS,
+  buildFollowupTranscript, parseFollowupAnswer,
 } from '../mock2/explain-logic.js';
 
 test('EXPLAIN_SYSTEM_PROMPT: forbids jargon and names the five sections + risk', () => {
@@ -80,4 +82,50 @@ test('parseExplanation: failure modes fall back (empty / non-JSON / no content)'
   assert.equal(parseExplanation('the model refused, no json here').ok, false);
   assert.equal(parseExplanation(JSON.stringify({ risk_level: 'low' })).ok, false); // no what_happened/what_asking
   assert.equal(parseExplanation(JSON.stringify(['not', 'an', 'object'])).ok, false);
+});
+
+test('EXPLAIN_FOLLOWUP_SYSTEM_PROMPT: plain-language rules, plain-text answer, honest when unsure', () => {
+  const p = EXPLAIN_FOLLOWUP_SYSTEM_PROMPT;
+  assert.match(p, /follow-up question/i);
+  assert.match(p, /Do NOT use jargon/i);
+  assert.match(p, /SQL/); // explicitly forbidden
+  assert.match(p, /plain text only/i);
+  assert.match(p, /say so honestly/i);
+});
+
+test('buildFollowupTranscript: one user turn with context, original text, prior explanation, question', () => {
+  const t = buildFollowupTranscript({
+    text: 'DELETE FROM users WHERE email = \'seed@test\' -- §4.2',
+    title: 'Add first-run setup', status: 'blocked', kind: 'authorization',
+    prior: 'It wants to remove one leftover test account.',
+    question: 'Will this touch my real customers?',
+  });
+  assert.equal(t.length, 1);
+  assert.equal(t[0].role, 'user');
+  assert.match(t[0].text, /Add first-run setup/);
+  assert.match(t[0].text, /Current build status: blocked/);
+  assert.match(t[0].text, /request for one-time permission/); // kind → human label
+  assert.match(t[0].text, /DELETE FROM users/); // the raw card text
+  assert.match(t[0].text, /leftover test account/); // the prior explanation
+  assert.match(t[0].text, /Will this touch my real customers\?/); // the question, last
+});
+
+test('buildFollowupTranscript: clips question and prior to their ceilings, omits empty prior block', () => {
+  const t = buildFollowupTranscript({
+    text: 'x',
+    prior: 'p'.repeat(FOLLOWUP_MAX_PRIOR_CHARS + 5000),
+    question: 'q'.repeat(FOLLOWUP_MAX_QUESTION_CHARS + 5000),
+  });
+  assert.ok(t[0].text.length < FOLLOWUP_MAX_PRIOR_CHARS + FOLLOWUP_MAX_QUESTION_CHARS + 1000);
+  const bare = buildFollowupTranscript({ text: 'x', question: 'why?' });
+  assert.ok(!/already read/.test(bare[0].text)); // no prior → no prior block
+  assert.match(bare[0].text, /why\?/);
+});
+
+test('parseFollowupAnswer: trims plain text, strips fences, fails on empty', () => {
+  assert.deepEqual(parseFollowupAnswer('  No — only the one test account is affected.  '),
+    { ok: true, answer: 'No — only the one test account is affected.' });
+  assert.equal(parseFollowupAnswer('```\nJust the test account.\n```').answer, 'Just the test account.');
+  assert.equal(parseFollowupAnswer('').ok, false);
+  assert.equal(parseFollowupAnswer('   ').ok, false);
 });

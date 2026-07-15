@@ -28,6 +28,24 @@ const STATUS_TONE = {
   interrupted: 'text-amber-500', abandoned: 'text-muted-foreground', queued: 'text-blue-500', estimating: 'text-blue-500',
 };
 
+// The cycle's wall-clock build time: started_at (falling back to created_at)
+// until finished_at, or until "now" while the cycle is still live. Null when the
+// timestamps are missing/inconsistent so the caller can just omit it.
+function buildElapsed(cycle, nowMs) {
+  if (!cycle) return null;
+  const start = Date.parse(cycle.started_at || cycle.created_at || '');
+  if (!Number.isFinite(start)) return null;
+  const end = cycle.finished_at ? Date.parse(cycle.finished_at) : nowMs;
+  if (!Number.isFinite(end) || end < start) return null;
+  const total = Math.floor((end - start) / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
 // How each typed halt-resolution kind reads on the choice card. adminOnly kinds
 // (grant an authorization, override a rule) can only be picked by an admin — that's
 // where Grant/Deny folds into choosing/rejecting the option.
@@ -59,6 +77,16 @@ export default function BuildStatus({
   const [devEdit, setDevEdit] = useState({}); // deviation id -> edited text (approve-as-edited)
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
+  // The running build clock: tick once a second while the cycle is live so the
+  // elapsed time next to the spend counts up; a finished cycle shows its final
+  // duration (finished_at) and needs no ticking.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return undefined;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  const elapsed = buildElapsed(cycle, nowTick);
   // A soft-paused cycle ('interrupted' + pause_reason) is a resumable checkpoint,
   // not a failure — it gets its own label + one-click Resume, distinct from a
   // plain user interrupt.
@@ -241,6 +269,11 @@ export default function BuildStatus({
               </div>
               <div className="text-xs text-muted-foreground whitespace-nowrap">
                 {cycle.used_cost_cents ? `$${(cycle.used_cost_cents / 100).toFixed(2)}` : '$0.00'} · {cycle.used_tokens || 0} tok
+                {elapsed ? (
+                  <span title={active ? 'Running build time' : 'Total build time'}>
+                    {' · '}<Clock className="inline h-3 w-3 mb-0.5" /> {elapsed}
+                  </span>
+                ) : null}
               </div>
             </div>
 

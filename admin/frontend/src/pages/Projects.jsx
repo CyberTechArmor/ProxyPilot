@@ -29,7 +29,10 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import { FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox, Blocks } from 'lucide-react';
+import {
+  FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox, Blocks,
+  Sparkles, Hammer,
+} from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
 // Preview the subdomain the backend will derive from a project name (mirrors
@@ -319,6 +322,27 @@ export default function Projects() {
   );
 }
 
+// The tile's Mockup/Build stage chip — where the project is in the flow.
+// Pre-approval it's in the Mockup (design) stage, with or without a mockup yet;
+// once the design is approved it's in the Build stage (and "app live" once the
+// latest build is serving). Reads the same derived fields as the detail page.
+function stageChip(p) {
+  const approved = !!p.stage?.design_approved;
+  if (approved) {
+    const live = p.deploy_state === 'serving';
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary whitespace-nowrap">
+        <Hammer className="h-3 w-3" /> Build{live ? ' · app live' : ''}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-500 whitespace-nowrap">
+      <Sparkles className="h-3 w-3" /> Mockup{p.current_mockup_id ? '' : ' · not started'}
+    </span>
+  );
+}
+
 // One project tile — used by both the active grid and the archived section. An
 // archived tile is dimmed and shows a rehydrate hint instead of a live URL (its
 // slug is retained but currently 404s).
@@ -328,7 +352,10 @@ function ProjectTile({ p, archived = false }) {
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-2 min-w-0">
           <CardTitle className="truncate text-base">{p.name}</CardTitle>
-          {statusChip(p.status, p.flagged)}
+          <span className="flex flex-wrap items-center justify-end gap-1 shrink-0">
+            {!archived ? stageChip(p) : null}
+            {statusChip(p.status, p.flagged)}
+          </span>
         </div>
         {p.description ? (
           <CardDescription className="line-clamp-2">{p.description}</CardDescription>

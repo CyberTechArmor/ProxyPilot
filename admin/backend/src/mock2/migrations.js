@@ -67,6 +67,12 @@
 //            imported design's provenance + original design brief + Builder
 //            notes, carried into the initial build instruction — additive,
 //            one nullable column
+//   520 Int — integration truthfulness: mock2_cycles.verification_state +
+//            integration_gate_json, and the mock2_integration_verifications +
+//            mock2_integration_findings append-only tables (AUDIT.md; B.4/B.5)
+//   521 Fw  — framework export/import: widen mock2_framework_versions.source
+//            CHECK to include 'import' (table rebuild — an imported framework
+//            version records honest provenance)
 //
 // Terminology (risk R7): the AI build component is the RUNNER. Nothing
 // here uses the bare word "agent" — `proxypilot-agent` is an unrelated Go
@@ -947,6 +953,48 @@ export const MOCK2_MIGRATIONS = [
         );
         CREATE INDEX idx_mock2_int_findings_project ON mock2_integration_findings (project_id, status);
         CREATE INDEX idx_mock2_int_findings_subsystem ON mock2_integration_findings (project_id, subsystem);
+      `);
+    },
+  },
+  {
+    // Portable framework export/import ("download the harness"). An imported
+    // framework version records source='import' so its provenance is honest —
+    // but mock2_framework_versions' source CHECK (migration 501) only allowed
+    // ('in_app','git_sync'). SQLite can't ALTER a CHECK, so rebuild the table
+    // widening it to add 'import' (same idiom as migration 517's queue rebuild).
+    // Every column, row, index-worthy UNIQUE, and value is preserved verbatim;
+    // this is purely a constraint widening. Additive in effect (no existing row
+    // changes); a disabled host never runs it.
+    version: 521,
+    name: 'mock2_framework_import_source',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_framework_versions_new (
+          id INTEGER PRIMARY KEY,
+          version INTEGER NOT NULL UNIQUE,
+          constitution_md TEXT NOT NULL,
+          skills_json TEXT NOT NULL,
+          gates_json TEXT NOT NULL,
+          design_system_md TEXT NOT NULL,
+          project_template_ref TEXT NOT NULL,
+          changelog TEXT,
+          reverted_from_version INTEGER,
+          source TEXT NOT NULL DEFAULT 'in_app'
+            CHECK (source IN ('in_app','git_sync','import')),
+          source_git_commit TEXT,
+          created_by INTEGER NOT NULL,
+          created_at TEXT
+        );
+        INSERT INTO mock2_framework_versions_new
+          (id, version, constitution_md, skills_json, gates_json, design_system_md,
+           project_template_ref, changelog, reverted_from_version, source, source_git_commit,
+           created_by, created_at)
+          SELECT id, version, constitution_md, skills_json, gates_json, design_system_md,
+                 project_template_ref, changelog, reverted_from_version, source, source_git_commit,
+                 created_by, created_at
+          FROM mock2_framework_versions;
+        DROP TABLE mock2_framework_versions;
+        ALTER TABLE mock2_framework_versions_new RENAME TO mock2_framework_versions;
       `);
     },
   },

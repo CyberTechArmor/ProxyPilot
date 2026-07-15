@@ -1204,6 +1204,12 @@ export const api = {
     request('/mock2/framework/versions', { method: 'POST', body: JSON.stringify(body) }),
   mock2RevertFramework: (id, changelog) =>
     request(`/mock2/framework/versions/${id}/revert`, { method: 'POST', body: JSON.stringify({ changelog }) }),
+  // Portable framework export/import ("download the harness"): export returns the
+  // JSON document (the caller blob-downloads it); import creates a NEW version
+  // from a document, held to the same content bar as a publish.
+  mock2ExportFramework: (id) => request(`/mock2/framework/versions/${id}/export`),
+  mock2ImportFramework: (doc, changelog) =>
+    request('/mock2/framework/import', { method: 'POST', body: JSON.stringify(changelog ? { doc, changelog } : { doc }) }),
 
   // ---- Component library (migration 516): reusable, versioned building blocks ----
   mock2ListComponents: (status) =>

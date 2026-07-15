@@ -123,8 +123,10 @@ import {
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
 } from './authorizations.js';
 import { resolveSelectedOption, haltOptionRequiresAdmin, haltOptionCarriesAuthorization } from './unblock-logic.js';
-import { explainCard } from './explain.js';
-import { EXPLAIN_MAX_INPUT_CHARS } from './explain-logic.js';
+import { explainCard, explainFollowup } from './explain.js';
+import {
+  EXPLAIN_MAX_INPUT_CHARS, FOLLOWUP_MAX_QUESTION_CHARS, FOLLOWUP_MAX_PRIOR_CHARS,
+} from './explain-logic.js';
 // ---- Cost-truth: requests (umbrella), consults (second opinion), grouped log ----
 import { getRequest, listRequestsForProject, closeRequest, publicRequestShape } from './requests.js';
 import { listCyclesForRequest } from './cycles.js';
@@ -434,6 +436,11 @@ const explainSchema = z.object({
   title: z.string().trim().max(400).optional(),
   status: z.string().trim().max(60).optional(),
   card_id: z.string().trim().max(160).optional(),
+  // Follow-up: an operator question about an already-explained card, plus the
+  // plain-language explanation they already read (context for the answer). When
+  // `question` is present the route answers it instead of re-explaining the card.
+  question: z.string().trim().min(1).max(FOLLOWUP_MAX_QUESTION_CHARS).optional(),
+  prior: z.string().trim().max(FOLLOWUP_MAX_PRIOR_CHARS).optional(),
 });
 // ---- Component library Zod schemas ----
 const componentFileSchema = z.object({
@@ -2002,20 +2009,21 @@ export function createMock2Router() {
   router.post('/projects/:id/explain', requireMock2Role('viewer'), async (req, res) => {
     const parsed = explainSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'text is required to explain a card' });
-    const { text, kind = 'blocker', title = '', status = '', card_id = null } = parsed.data;
+    const { text, kind = 'blocker', title = '', status = '', card_id = null, question = null, prior = '' } = parsed.data;
     let result;
     try {
-      result = await explainCard({ text, title, status, kind });
+      result = question
+        ? await explainFollowup({ text, title, status, kind, prior, question })
+        : await explainCard({ text, title, status, kind });
     } catch (err) {
       result = { ok: false, error: err?.message || 'the explainer failed' };
     }
     // Audit log ONLY that an explanation was viewed — no state change to the cycle,
     // authorization, or deviation this explained.
     logAudit(req.user.id, 'MOCK2_EXPLAIN_VIEW', 'mock2_project', req.mock2Project.id,
-      { kind, card_id, ok: !!result.ok }, req.ip);
-    return res.json(result.ok
-      ? { ok: true, explanation: result.explanation }
-      : { ok: false, error: result.error || 'could not explain this right now' });
+      { kind, card_id, ok: !!result.ok, followup: !!question }, req.ip);
+    if (!result.ok) return res.json({ ok: false, error: result.error || 'could not explain this right now' });
+    return res.json(question ? { ok: true, answer: result.answer } : { ok: true, explanation: result.explanation });
   });
 
   // Admin stop-all — interrupt every running cycle (escape hatch). Sets

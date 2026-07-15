@@ -1257,6 +1257,8 @@ export const api = {
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) }),
   // "Explain this" — plain-language rewrite of a blocker/authorization/deviation/rule
   // card via the summary lane. Read-only; returns { ok, explanation } or { ok:false }.
+  // With a `question` (+ optional `prior` explanation context) in the body it answers
+  // an operator follow-up instead, returning { ok, answer }.
   mock2ExplainCard: (id, body) =>
     request(`/mock2/projects/${id}/explain`, { method: 'POST', body: JSON.stringify(body) }),
   // Scoped one-time authorizations (Part 4).

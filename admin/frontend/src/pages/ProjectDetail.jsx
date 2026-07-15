@@ -32,8 +32,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
-  Zap, Square, CheckCircle2, XCircle, Circle, Hammer, Unlock, ShieldCheck, Clock,
-  Monitor, Smartphone, Sparkles, TerminalSquare, MessageSquare,
+  Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
@@ -67,7 +66,6 @@ export default function ProjectDetail() {
   const [egressLog, setEgressLog] = useState(null);   // null = not loaded; [] = empty
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
-  const [confirmBuild, setConfirmBuild] = useState(false);
   const [pendingJob, setPendingJob] = useState(null); // 'archive' | 'rehydrate' | 'wake' | null
   const [provStatus, setProvStatus] = useState(null); // live provisioning progress + step log
   const [tab, setTab] = useState('chat'); // 'chat' | 'terminal' | 'details'
@@ -260,27 +258,6 @@ export default function ProjectDetail() {
   const doRehydrate = () => startJob('rehydrate', () => api.mock2RehydrateProject(id), 'Rehydrating project');
   const doWake = () => startJob('wake', () => api.mock2WakeProject(id), 'Starting container');
 
-  // Build: the "are you ready to build?" confirm. Sign-off #1 is design
-  // approval — it locks the current design in and unlocks the build runner — so
-  // that's what Build kicks off. The approval runs as a background job; the page
-  // polls it, and once approved the build controls appear in the chat. If a
-  // project is somehow already approved, we just send them to the build view.
-  const doBuild = async () => {
-    setConfirmBuild(false);
-    setTab('chat');
-    try {
-      if (!project.stage?.design_approved) {
-        await api.mock2ApproveDesign(id);
-        toast({ title: 'Building…', description: 'Locking in your design and unlocking the build — watch the chat for progress.' });
-      } else {
-        toast({ title: 'Design already locked in', description: 'Use the build controls in the chat to run the build.' });
-      }
-      await load();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
-    }
-  };
-
   const doDelete = async () => {
     setConfirmDelete(false);
     setBusy(true);
@@ -362,46 +339,9 @@ export default function ProjectDetail() {
         </div>
       ) : null}
 
-      {/* Stage flow — always visible above the tabs. "Chat to App" opens the
-          preview + chat; Build is the next step (styled clickable but not yet
-          active); Run follows. */}
-      <div className="flex items-center gap-2 shrink-0 overflow-x-auto pb-0.5">
-        <button
-          type="button"
-          onClick={() => setTab('chat')}
-          className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors ${
-            tab === 'chat'
-              ? 'bg-primary/15 text-primary'
-              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-          }`}
-        >
-          <MessageSquare className="h-4 w-4" /> Chat to App
-        </button>
-        <span className="text-muted-foreground/40" aria-hidden>→</span>
-        {designApproved ? (
-          <span
-            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-500 whitespace-nowrap"
-            title="Design locked in — use “Run a cycle” in the chat to build changes"
-          >
-            <CheckCircle2 className="h-4 w-4" /> Build
-          </span>
-        ) : (
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 border-dashed"
-            title="Build — lock in the design and start building the working app"
-            onClick={() => setConfirmBuild(true)}
-          >
-            <Hammer className="h-4 w-4 mr-1" /> Build
-          </Button>
-        )}
-        <span className="text-muted-foreground/40" aria-hidden>→</span>
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-muted-foreground whitespace-nowrap">
-          <Play className="h-4 w-4" /> Run
-        </span>
-      </div>
-
+      {/* The stage flow (Chat to App → Build → Run) header was retired: the Build
+          action lives at the bottom of the design chat (ConceptStage), and the
+          Mockup/Build stage is shown on the project tiles. */}
       <Tabs value={tab} onValueChange={setTab} className="w-full flex-1 min-h-0 flex flex-col">
         <TabsList className="grid w-full grid-cols-3 h-auto shrink-0">
           <TabsTrigger value="chat" className="py-2"><MessageSquare className="h-4 w-4 mr-1.5" />Chat</TabsTrigger>
@@ -839,25 +779,6 @@ export default function ProjectDetail() {
       ) : null}
         </TabsContent>
       </Tabs>
-
-      <Dialog open={confirmBuild} onOpenChange={(o) => !o && setConfirmBuild(false)}>
-        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
-          <DialogHeader>
-            <DialogTitle>Are you ready to build?</DialogTitle>
-            <DialogDescription>
-              This locks in your current design for <span className="font-medium">{project.name}</span> and starts
-              building the working app from it. You can keep chatting to refine the design instead — building is a
-              step you take when the mockup looks right.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>
-            <Button onClick={doBuild} className="h-11 sm:h-10">
-              <Hammer className="h-4 w-4 mr-1" /> Yes, build
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={confirmArchive} onOpenChange={(o) => !o && setConfirmArchive(false)}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">

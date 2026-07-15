@@ -1361,6 +1361,12 @@ export const api = {
   // carrying it (the pending-verification lifecycle's failure branch).
   mock2ReportCapabilityFailure: (id, body) =>
     request(`/mock2/projects/${id}/capability-checks/report-failure`, { method: 'POST', body: JSON.stringify(body) }),
+  // Operator DEFERS a live check — can't verify it in this environment right now
+  // (no route to the endpoint, app not deployed/reachable, no credentials). Records
+  // an honest note and leaves the build calmly pending; no false confirm, no
+  // bug-fix build. body: { item_id, reason }.
+  mock2DeferCapabilityCheck: (id, body) =>
+    request(`/mock2/projects/${id}/capability-checks/defer`, { method: 'POST', body: JSON.stringify(body) }),
   // Self-heal a malformed state/integrations.json: archive the broken text,
   // salvage valid entries, write a valid scaffold, resume any blocked cycle.
   mock2RepairIntegrationManifest: (id) =>

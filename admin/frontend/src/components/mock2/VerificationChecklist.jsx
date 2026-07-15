@@ -19,7 +19,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, ShieldCheck, ShieldAlert, KeyRound, CheckCircle2, Ban } from 'lucide-react';
+import { Loader2, ShieldCheck, ShieldAlert, KeyRound, CheckCircle2, Ban, Clock } from 'lucide-react';
 
 export default function VerificationChecklist({ projectId, canEdit, online, cycle, onRefresh }) {
   const { toast } = useToast();
@@ -82,6 +82,24 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
     } finally { setBusyItem(null); }
   };
 
+  // Defer: the operator can't run this live check in this environment right now
+  // (no route to the endpoint, the app isn't deployed/reachable, no credentials).
+  // Records an honest note (reusing the observation field as the reason) and leaves
+  // the build calmly pending — no false confirm, no bug-fix build.
+  const deferCheck = async (item) => {
+    const f = form(item.item_id);
+    const reason = f.observed.trim() || 'Operator cannot verify in this environment right now (no access to the live endpoint / app not deployed).';
+    setBusyItem(item.item_id);
+    try {
+      const res = await api.mock2DeferCapabilityCheck(projectId, { item_id: item.item_id, reason });
+      toast({ title: 'Deferred — left pending', description: res?.note || 'The build stays pending your live verification; nothing else is required.' });
+      await load();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not defer the check', description: err.message });
+    } finally { setBusyItem(null); }
+  };
+
   return (
     <Card className="border-sky-500/30">
       <CardHeader className="pb-3">
@@ -89,9 +107,11 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
           <ShieldCheck className="h-4 w-4 text-sky-500" /> Live verification — over to you
         </CardTitle>
         <CardDescription>
-          The build wired {outstanding.length === 1 ? 'an integration' : `${outstanding.length} integrations`} with real
-          transport code and verified everything checkable inside the fence. The remaining live check{outstanding.length === 1 ? ' needs' : 's need'} real
-          credentials only you have — run {outstanding.length === 1 ? 'it' : 'each'} against the real system and report what you observe.
+          The build is <span className="font-medium">complete and deployed</span> — it wired {outstanding.length === 1 ? 'an integration' : `${outstanding.length} integrations`} with real
+          transport code and verified everything checkable inside the fence. This is a calm, non-blocking state: the remaining live
+          check{outstanding.length === 1 ? ' needs' : 's need'} real credentials/network only you have. Run {outstanding.length === 1 ? 'it' : 'each'} against the real
+          system when you can and report what you observe — or, if you can't test it yet (the app isn't reachable from here, no
+          credentials), choose <span className="font-medium">Can't verify now</span> and it stays pending. Nothing here is required to proceed.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -144,6 +164,12 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
                     <Button variant="outline" size="sm" className="h-11 sm:h-9 text-red-500" disabled={busy || !f.observed.trim()} onClick={() => reportFailure(item)}>
                       <Ban className="h-4 w-4 mr-1" />
                       It failed — open a bug-fix build
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-11 sm:h-9" disabled={busy}
+                      title="Can't verify this right now (no access to the endpoint, the app isn't deployed/reachable, no credentials). Records a note and leaves the build calmly pending — nothing false, no bug-fix build."
+                      onClick={() => deferCheck(item)}>
+                      <Clock className="h-4 w-4 mr-1" />
+                      Can't verify now
                     </Button>
                   </div>
                 </div>

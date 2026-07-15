@@ -74,6 +74,7 @@ export default function BuildStatus({
   const [otherText, setOtherText] = useState(''); // free-text "Other" resolution (the escape hatch)
   const [resuming, setResuming] = useState(false);
   const [repairing, setRepairing] = useState(false); // one-click integration-manifest repair
+  const [gateInfo, setGateInfo] = useState(null); // the blocked cycle's full finding list (resolutions endpoint)
   const [auths, setAuths] = useState([]); // open one-time authorization requests
   const [authBusy, setAuthBusy] = useState(false);
   const [devEdit, setDevEdit] = useState({}); // deviation id -> edited text (approve-as-edited)
@@ -207,6 +208,19 @@ export default function BuildStatus({
     } finally { setResuming(false); }
   };
 
+  // While blocked on the integration gate, load the cycle's FULL finding list —
+  // "20 findings across 1 class" is not actionable without the 20 items. The
+  // same list is carried into the resume as authoritative guidance server-side.
+  const integrationBlocked = !!cycle && ['integration_gate', 'simulation_disclosure', 'resolution_ineffective'].includes(cycle.halt_reason);
+  useEffect(() => {
+    if (!integrationBlocked || !cycle?.id) { setGateInfo(null); return; }
+    let cancelled = false;
+    api.mock2GetCycleResolutions(projectId, cycle.id)
+      .then((r) => { if (!cancelled) setGateInfo(r?.blocked ? r : null); })
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load gate findings failed:', err); });
+    return () => { cancelled = true; };
+  }, [integrationBlocked, cycle?.id, projectId]);
+
   // Load the project's OPEN one-time authorization requests while a build is blocked,
   // so the card can show them (and let an admin grant/deny in place).
   const loadAuths = useCallback(async () => {
@@ -339,11 +353,26 @@ export default function BuildStatus({
                 {/* Blocked on the integration gate: offer the one-click manifest
                     repair (migrates wrong-schema entries, archives the original,
                     resumes). Safe when the manifest is fine — it just says so. */}
-                {canEdit && online && ['integration_gate', 'simulation_disclosure', 'resolution_ineffective'].includes(cycle.halt_reason) ? (
+                {canEdit && online && integrationBlocked ? (
                   <Button variant="outline" size="sm" className="h-9" disabled={repairing || resuming} onClick={repairManifest}>
                     {repairing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wrench className="h-4 w-4 mr-1" />}
                     Repair integration manifest
                   </Button>
+                ) : null}
+
+                {/* The gate's FULL finding list — what the count actually is.
+                    Resuming carries this same list to the build as guidance. */}
+                {gateInfo?.findings?.length ? (
+                  <details className="rounded-md border border-orange-500/30 bg-background/50 text-xs" open={gateInfo.findings.length <= 8}>
+                    <summary className="cursor-pointer select-none px-2.5 py-2 font-medium text-orange-600">
+                      All {gateInfo.findings.length} finding{gateInfo.findings.length === 1 ? '' : 's'} — resuming feeds this exact list to the build
+                    </summary>
+                    <ul className="max-h-64 overflow-auto border-t px-2.5 py-2 space-y-1.5">
+                      {gateInfo.findings.map((f, i) => (
+                        <li key={i} className="break-words font-mono text-[11px] leading-relaxed text-foreground/90">{f}</li>
+                      ))}
+                    </ul>
+                  </details>
                 ) : null}
 
                 {/* One choice card (task Part 2): the model's 2–4 proposed resolutions

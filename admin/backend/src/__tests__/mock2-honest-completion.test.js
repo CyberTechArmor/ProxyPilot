@@ -111,6 +111,22 @@ test('reproduce-first waiver: applied at the verdict layer and recorded as waive
   assert.equal(rec.demonstrated, true);
 });
 
+test('resume block carries the blocked run\'s exact gate findings as guidance', () => {
+  const block = buildResumeContextBlock({
+    findings: [
+      '[integration:error_converted_to_success] src/adp/service.ts#syncWorkers: catches a transport error and returns success',
+      '[integration:fabricated_output] src/adp/service.ts#listWorkers: persists data with no reachable transport',
+    ],
+  });
+  assert.match(block, /BLOCKED by the integration gate/);
+  assert.match(block, /src\/adp\/service\.ts#syncWorkers/);
+  assert.match(block, /Resolve EACH one/);
+  assert.match(block, /never convert an error into success/);
+  // Findings alone are enough to produce a resume block (a bare resume of a
+  // gate-blocked cycle still gets the list).
+  assert.notEqual(block, '');
+});
+
 test('resume block names an enforced waiver as in effect (never a bare narration)', () => {
   const block = buildResumeContextBlock({ waivers: [{ rule: 'reproduce_first' }] });
   assert.match(block, /Enforced waivers/);

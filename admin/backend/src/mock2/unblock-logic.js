@@ -140,12 +140,13 @@ export function resolveSelectedOption(options = [], selected) {
 // operator's free-text message, the resolution option they chose, and any scoped
 // one-time authorizations granted for THIS resume. Returns '' when there's nothing to
 // add (a bare resume stays a bare resume).
-export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [] } = {}) {
+export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [], findings = [] } = {}) {
   const msg = String(message || '').trim();
   const opt = selectedOption && selectedOption.label ? selectedOption : null;
   const auths = (Array.isArray(authorizations) ? authorizations : []).filter((a) => a && a.scope);
   const waived = (Array.isArray(waivers) ? waivers : []).filter(Boolean);
-  if (!msg && !opt && !auths.length && !waived.length) return '';
+  const found = (Array.isArray(findings) ? findings : []).map((f) => String(f || '').trim()).filter(Boolean);
+  if (!msg && !opt && !auths.length && !waived.length && !found.length) return '';
 
   const lines = [
     'Operator guidance on resume (AUTHORITATIVE — a human is directing this build after it',
@@ -169,6 +170,14 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
     // enforcement layer (acceptanceVerdict) for this resumed cycle — it is never
     // merely narrated. Only structured admin-granted waivers reach this list.
     lines.push('', `Enforced waivers for this resumed cycle (applied at the finish gate itself — these are in effect, not just described): ${waived.map((w) => String(w.rule || w)).join(', ')}.`);
+  }
+  if (found.length) {
+    // The EXACT findings the previous run was blocked on. Without this, a
+    // resumed build has to rediscover them blind — the real engine of the
+    // "resolve → re-halt on the same block" loop: the gate is deterministic,
+    // so the resume converges only if it targets these specific items.
+    lines.push('', `The previous run was BLOCKED by the integration gate on the following specific findings. Resolve EACH one (fix the named file/function, or — for behavior an operator explicitly confirmed, like serving cached last-synced data — implement it honestly: surface the transport failure and label cached data as cached; never convert an error into success). The gate re-runs at finish and must find none of these:`);
+    for (const f of found) lines.push(`- ${f}`);
   }
   if (auths.length) {
     lines.push('', buildAuthorizationBlock(auths));

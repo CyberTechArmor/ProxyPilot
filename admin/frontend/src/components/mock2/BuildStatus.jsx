@@ -21,6 +21,7 @@ import {
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
 import ExplainThis from './ExplainThis';
+import VerificationChecklist from './VerificationChecklist';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
@@ -256,6 +257,11 @@ export default function BuildStatus({
         {!online ? (
           <p className="text-sm text-muted-foreground">Bring the project online to run a build.</p>
         ) : null}
+
+        {/* Live-verification hand-off (pending-operator-verification): the
+            credential-gated checks only the operator can run against the real
+            system. Renders nothing when no live check is outstanding. */}
+        <VerificationChecklist projectId={projectId} canEdit={canEdit} online={online} cycle={cycle} onRefresh={onRefresh} />
 
         {/* Live / last cycle */}
         {cycle ? (

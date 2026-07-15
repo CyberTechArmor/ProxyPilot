@@ -119,6 +119,56 @@ export function validateManifestEntry(entry) {
   return { ok: true, entry: canonicalEntry(entry) };
 }
 
+// scaffoldManifestText(entries) — a fresh, valid state/integrations.json body
+// (schema_version + entries[]). The self-healing target for an absent or
+// malformed manifest.
+export function scaffoldManifestText(entries = []) {
+  return `${JSON.stringify({ schema_version: MANIFEST_SCHEMA_VERSION, entries }, null, 2)}\n`;
+}
+
+// Where a malformed manifest's original text is preserved when the repair path
+// rewrites it — the broken content is archived, never silently destroyed.
+export const INTEGRATION_MANIFEST_INVALID_PATH = 'state/integrations.invalid.json';
+
+// repairManifestPlan(currentText) — the self-healing decision for a manifest
+// that does not parse/validate (the manifest-invalid dead end). Pure. Returns:
+//   { needed:false }                          — the manifest is already valid;
+//   { needed:true, text, salvaged, dropped,   — rewrite with a valid scaffold,
+//     archive }                                 salvaging every entry that
+//                                               individually validates, dropping
+//                                               (and reporting) the rest; the
+//                                               original text goes to `archive`
+//                                               (state/integrations.invalid.json)
+//                                               so nothing is silently lost.
+// An absent/blank manifest needs no repair (the gate already tolerates it).
+export function repairManifestPlan(currentText) {
+  const raw = String(currentText || '');
+  if (!raw.trim()) return { needed: false, reason: 'no manifest present — nothing to repair (an absent manifest is valid)' };
+  const parsed = parseIntegrationManifest(raw);
+  if (parsed.ok) return { needed: false, reason: 'the manifest already parses and validates' };
+  // Salvage: if the text is JSON with an entries array, keep every entry that
+  // validates on its own; anything else (or unparseable JSON) salvages nothing.
+  let salvaged = [];
+  const dropped = [];
+  try {
+    const doc = JSON.parse(raw);
+    const entriesIn = Array.isArray(doc?.entries) ? doc.entries : [];
+    for (const e of entriesIn) {
+      const v = validateManifestEntry(e);
+      if (v.ok && !salvaged.some((s) => s.id === v.entry.id)) salvaged.push(v.entry);
+      else dropped.push({ id: e?.id || '(no id)', error: v.ok ? 'duplicate id' : v.error });
+    }
+  } catch { salvaged = []; }
+  return {
+    needed: true,
+    error: parsed.error,
+    text: scaffoldManifestText(salvaged),
+    salvaged,
+    dropped,
+    archive: INTEGRATION_MANIFEST_INVALID_PATH,
+  };
+}
+
 // appendManifestEntry(manifestText, entry) — return the new integrations.json text
 // with `entry` appended (PATCH B.1). Pure: takes the current file text (may be
 // empty/absent), validates the entry, and rejects a duplicate id. { ok, text } or

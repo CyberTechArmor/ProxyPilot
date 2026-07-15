@@ -334,6 +334,11 @@ ${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
    For a BUG FIX, reproduce first: write the defect-tagged regression test so
    it FAILS against the current behavior, run run_gates to record the red, then
    fix and drive it green — finish is rejected without that observed red.
+   Reproduce-first applies only when product code changes: if the work turns
+   out to already be done (an idempotent re-adoption, a state/-only alignment,
+   nothing to change), do NOT fabricate a red test and do NOT reclassify —
+   declare the honest kind (usually chore), leave the code untouched, and call
+   finish; the orchestrator verifies the empty diff itself and accepts it.
 2. Read the relevant files to understand the current state.
 3. Make the smallest change that satisfies the requested task. Do not refactor,
    add features, or touch anything the task did not ask for. When a gate fires
@@ -347,6 +352,14 @@ ${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
    finish before the gates are green, and do not leave a permission or
    role-name value in "assumed" — verify it. The summary must describe THIS
    cycle's diff only — naming files this cycle did not change is rejected.
+6. When the code is real and complete and the gates are green, but a DECLARED
+   integration still needs a live external check the fence cannot run (the
+   credentials/endpoint belong to the operator — e.g. an LDAPS bind against the
+   production directory), call pending_verification instead of finish: it is
+   the first-class honest completion for exactly that case. Verify everything
+   verifiable in-fence first (typecheck, config-schema presence, the contract
+   test against the local fixture server); never fabricate a live test and
+   never stub the transport to force a plain finish.
 
 # If you cannot honestly finish
 If you cannot complete the change — you are blocked, a dependency is missing, the
@@ -689,7 +702,10 @@ ${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: 
    integration contract test for external-integration changes, ui check ids}.
    For a BUG FIX, reproduce first: write the defect-tagged regression test so it
    fails against the current behavior; the harness must observe it red before a
-   green battery counts.
+   green battery counts. Reproduce-first applies only when product code changes:
+   if the work is already done (idempotent re-adoption, state/-only alignment),
+   do NOT fabricate a red test — declare the honest kind (usually chore), leave
+   the code untouched, and stop; the harness verifies the empty diff itself.
 2. Read the relevant files to understand the current state.
 3. Make the smallest change that satisfies the requested task. Do not refactor,
    add features, or touch anything the task did not ask for. Never reword or

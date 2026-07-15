@@ -31,10 +31,12 @@ import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion } from './framework.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
+  listCyclesForProject,
 } from './cycles.js';
 import {
   parseGateScripts, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
+  noopStartRefusal,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
@@ -72,7 +74,7 @@ import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
-  acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord,
+  acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -189,6 +191,24 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
 
+  // No-work-remaining backstop: when the last NOOP_CYCLE_LIMIT cycles for this
+  // exact instruction each completed as a VERIFIED no-op (success-family
+  // terminal, orchestrator-confirmed empty code diff), the work is done —
+  // starting another empty cycle is the loop, not progress. Refuse calmly with
+  // a terminal message (no cycle row is inserted: a refusal must not itself
+  // mint another no-op). New/different instructions reset the count naturally.
+  try {
+    const refusal = noopStartRefusal({ priorCycles: listCyclesForProject(projectId, { limit: 10 }), instruction });
+    if (refusal.refuse) {
+      safeRaise({
+        kind: 'flag', project_id: projectId, dedupe_key: `mock2-noop-done:${projectId}`,
+        ref_table: 'mock2_projects', ref_id: projectId,
+        detail: `${project.name}: ${refusal.reason}`,
+      });
+      return { status: 'refused', cycle: null, error: refusal.reason };
+    }
+  } catch (e) { console.warn('[mock2] no-op start check failed:', e?.message); }
+
   // The container must be up (an active project). The lock guards it, so we also
   // refuse if someone/something already holds the checkout.
   if (project.lifecycle !== 'active') {
@@ -284,12 +304,15 @@ const RESUMABLE_CYCLE_STATUSES = Object.freeze([
 ]);
 
 // message (optional): free-text operator guidance injected on resume. option
-// (optional): the id/label of a halt resolution option the operator chose. Any
-// GRANTED, unused one-time authorizations for the project are gathered, injected,
-// and consumed (single-use) on this resume. A bare resume (no message/option/grant)
-// carries no new context, so a build blocked on a real blocker re-halts rather than
-// loops.
-export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0, message = '', option = null }) {
+// (optional): the id/label of a halt resolution option the operator chose.
+// waivers (optional, ADMIN-granted upstream): structured rule waivers — e.g.
+// [{ rule: 'reproduce_first' }] — that the resumed cycle applies AT THE
+// ENFORCEMENT LAYER (acceptanceVerdict), not as narration; each is stamped into
+// the cycle's acceptance record. Any GRANTED, unused one-time authorizations
+// for the project are gathered, injected, and consumed (single-use) on this
+// resume. A bare resume (no message/option/grant/waiver) carries no new
+// context, so a build blocked on a real blocker re-halts rather than loops.
+export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 0, message = '', option = null, waivers = [] }) {
   if (!cycle) return { status: 'error', error: 'No cycle to retry.' };
   if (!RESUMABLE_CYCLE_STATUSES.includes(cycle.status)) {
     return { status: 'error', error: `This cycle is "${cycle.status}" — there is nothing to retry.` };
@@ -309,8 +332,11 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
   const authorizations = granted.map((a) => ({ scope: a.scope, conditions: a.conditions }));
   for (const a of granted) { try { markAuthorizationUsed(a.id); } catch { /* best effort */ } }
   const msg = String(message || '').trim();
-  const resumeContext = (msg || selectedOption || authorizations.length)
-    ? { message: msg, selectedOption, authorizations }
+  const grantedWaivers = (Array.isArray(waivers) ? waivers : [])
+    .map((w) => (typeof w === 'string' ? { rule: w } : w))
+    .filter((w) => w && w.rule === 'reproduce_first');
+  const resumeContext = (msg || selectedOption || authorizations.length || grantedWaivers.length)
+    ? { message: msg, selectedOption, authorizations, waivers: grantedWaivers }
     : null;
 
   // Cost-truth: the resume is a SEGMENT of the SAME request as the cycle being resumed.
@@ -459,7 +485,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     const block = buildResumeContextBlock(resumeCtx);
     if (block) {
       transcript.push({ role: 'user', text: block });
-      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope) } });
+      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope), waivers: (resumeCtx.waivers || []).map((w) => w.rule) } });
     }
   }
 
@@ -495,6 +521,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // carry before finish is accepted.
   const taskKind = classifyTaskKind(cycle.instruction);
   let redTestObserved = false;
+  // An enforced reproduce-first waiver carried on the resume context (admin-
+  // granted upstream). Applied at the acceptance verdict — the real enforcement
+  // layer — and stamped into the acceptance record, never merely narrated.
+  const reproduceFirstWaiver = (resumeCtx?.waivers || []).find((w) => w && w.rule === 'reproduce_first') || null;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // 1) Honor interrupts at the step boundary.
@@ -741,13 +771,23 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         }
         continue;
       }
+      // The ORCHESTRATOR'S OWN diff reading for this cycle — read BEFORE the
+      // acceptance verdict, because the verdict's verified-empty-diff rule keys
+      // off it (§12: the harness verifies the diff itself; a model claim of
+      // "nothing changed" is never trusted). Also feeds the over-claim check.
+      const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
+      const changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const codeChanged = codeChangedFiles(changedThisCycle);
       // MACHINE acceptance (cycle-94 lesson — Goodhart guard). Gates green is a
       // PROXY; finish is only accepted when the acceptance spec exists and, for
-      // a bug-fix task, red→green was demonstrated INSIDE this cycle. Every
+      // a bug-fix task, red→green was demonstrated INSIDE this cycle — UNLESS
+      // the verified code diff is empty (nothing to reproduce: an idempotent
+      // re-adoption or spec-only alignment finishes as the chore it is), or an
+      // admin granted an enforced reproduce-first waiver on resume. Every
       // rejection reason is actionable feedback; the breaker backstops refusal.
       const accFile = await readFileInContainer(containerName, ACCEPTANCE_PATH);
       const accParsed = accFile.ok ? parseAcceptance(accFile.content) : { ok: false, error: 'state/acceptance.json not found' };
-      const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved });
+      const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved, changedFiles: changedThisCycle, reproduceFirstWaiver });
       if (!verdict.ok) {
         transcript.push({
           role: 'tool', toolCallId: termId, name: termName,
@@ -763,8 +803,6 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       }
       // The change-record summary must describe THIS cycle's diff — naming files
       // the cycle did not touch (bundling prior cycles' work) is rejected.
-      const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
-      const changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
       const oc = summaryOverclaims(decision.finishSummary, changedThisCycle);
       if (!oc.ok) {
         transcript.push({
@@ -780,8 +818,14 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         continue;
       }
       // Stamp the machine-readable acceptance state (migration 517) so "gates
-      // green" and "acceptance demonstrated" are distinguishable in the record.
-      const accState = acceptanceRecord({ spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved, uiRequired: accParsed.ok ? accParsed.spec.ui : [] });
+      // green" and "acceptance demonstrated" are distinguishable in the record —
+      // including the verified no-op flag (the loop-termination signal) and the
+      // reproduce-first basis (demonstrated / not-required-empty-diff / waived).
+      const accState = acceptanceRecord({
+        spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
+        uiRequired: accParsed.ok ? accParsed.spec.ui : [],
+        changedFiles: changedThisCycle, reproduceFirst: verdict.reproduce_first,
+      });
       try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
       logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}`, meta: { acceptance: accState } });
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
@@ -838,6 +882,23 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
           for (const f of legacyBlocking) {
             integrationDecision.reasons.push(`[legacy:${f.kind}] ${f.subsystem || ''}: ${typeof f.detail === 'string' ? f.detail : (f.detail?.message || 'suspected legacy stub now in scope')}`);
           }
+        }
+        // Net the live-check checklist against the project's ACTIVE confirmations
+        // (matching manifest hash): a capability the operator already verified
+        // must not re-pend on every later cycle — that would be the empty-cycle
+        // loop wearing a different hat. A manifest change invalidates the old
+        // confirmation (hash mismatch), so a real change still re-opens the check.
+        if (!integrationDecision.blocking && integrationDecision.checklist?.length) {
+          try {
+            const cap = capabilityCheckStatus({
+              checklistItems: integrationDecision.checklist,
+              activeVerifications: listActiveVerifications(projectId),
+            });
+            integrationDecision.checklist = cap.outstanding.map(({ stale_verification, ...it }) => it);
+            if (!integrationDecision.checklist.length && integrationDecision.outcome === 'pending-operator-verification') {
+              integrationDecision.outcome = 'succeeded';
+            }
+          } catch (e) { console.warn('[mock2] checklist netting failed:', e?.message); }
         }
         recordIntegrationGate(cycle.id, integrationDecision);
         logEvent('integration_gate', { role: 'system', content: integrationDecision.outcome, meta: { verdict: integrationDecision.gate.verdict, egress_ok: integrationDecision.egress.ok, screening_blocking: integrationDecision.screening.blocking, legacy_blocking: legacyBlocking.length, reasons: integrationDecision.reasons } });
@@ -898,7 +959,13 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // deploy failure is a distinct, retryable terminal state (not a silent
       // success). The live URL then serves the real app (the CycleCard reloads
       // the preview on success via onBuilt).
-      const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+      // A verified NO-OP cycle (no code change) advances straight to its
+      // terminal: nothing changed, so re-running install/build/restart adds risk
+      // and time for zero benefit — the existing deploy keeps serving.
+      const noOpCycle = codeChanged.length === 0;
+      const deployed = noOpCycle
+        ? { ok: true, skipped: true, noop: true }
+        : await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
         logEvent('deploy', { role: 'system', content: deployed.error || 'deploy failed', meta: { ok: false } });
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });
@@ -907,7 +974,15 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
         return scheduleJobCleanup(cycle.id);
       }
-      logEvent('deploy', { role: 'system', content: deployed.skipped ? 'No run contract — placeholder still serving (nothing to deploy).' : 'Deployed — app serving on its live URL.', meta: { ok: true, skipped: !!deployed.skipped } });
+      logEvent('deploy', {
+        role: 'system',
+        content: deployed.noop
+          ? 'No code changes this cycle — the existing deploy keeps serving (nothing to redeploy).'
+          : deployed.skipped
+            ? 'No run contract — placeholder still serving (nothing to deploy).'
+            : 'Deployed — app serving on its live URL.',
+        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop },
+      });
 
       // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap
       // HTTP/API layer always runs; the browser + read-only DB connectors are a
@@ -939,7 +1014,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // pending but nothing is actually outstanding, it is simply a success.
       const pendingChecklist = integrationDecision?.checklist || [];
       const wantsPending = decision.pendingVerification === true;
-      if (pendingChecklist.length || (wantsPending && pendingChecklist.length)) {
+      if (pendingChecklist.length) {
         openVerificationChecklist({ projectId, cycleId: cycle.id, checklist: pendingChecklist });
         updateCycle(cycle.id, { verification_state: 'pending' });
         // Stored status 'awaiting_user' + verification_state 'pending' → the
@@ -972,7 +1047,10 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // touched is a Goodhart signature — flag it for a human, loudly.
       try {
         const commitFiles = record?.commit_sha ? await changedFilesForCommit(containerName, APP_DIR, record.commit_sha) : [];
-        const anomaly = anomalySignals({ kind: taskKind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: commitFiles, redTestObserved });
+        // Use the RECORDED kind (accState) — a verified empty-diff cycle resolved
+        // to the spec's chore/feature kind, so a legitimate no-op is not nagged as
+        // an under-verified bug fix on every run.
+        const anomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: commitFiles, redTestObserved });
         if (anomaly.flag) {
           const detail = `${project.name}: cycle ${cycle.id} succeeded but looks under-verified — ${anomaly.reasons.join('; ')}. Review the change record and the live behavior.`;
           safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
@@ -983,9 +1061,11 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       updateProject(projectId, { last_activity_at: nowIso() });
       setJob(cycle.id, {
         phase: deployed.skipped ? 'succeeded' : 'serving',
-        message: deployed.skipped
-          ? 'Change complete — gates green, checkpoint recorded.'
-          : 'Deployed — gates green and the app is live on its URL.',
+        message: deployed.noop
+          ? 'Nothing left to do — the work is already complete and verified; the existing deploy keeps serving.'
+          : deployed.skipped
+            ? 'Change complete — gates green, checkpoint recorded.'
+            : 'Deployed — gates green and the app is live on its URL.',
         commit: record?.commit_sha || null,
       });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });

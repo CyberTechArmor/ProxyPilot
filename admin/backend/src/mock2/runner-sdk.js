@@ -58,7 +58,8 @@ import {
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
 } from './integration-enforcement.js';
-import { recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist } from './integration-state.js';
+import { recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, listActiveVerifications } from './integration-state.js';
+import { capabilityCheckStatus } from './verification-logic.js';
 import { readDeclaredEgress } from './deploy.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
@@ -159,6 +160,14 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   const taskKind = classifyTaskKind(cycle.instruction);
   let redTestObserved = false;
   let pendingFeedback = null; // acceptance feedback carried into the next round
+  // Enforced reproduce-first waiver from the resume context (admin-granted
+  // upstream) — applied at the acceptance verdict, same as the hand-rolled path.
+  let reproduceFirstWaiver = null;
+  try {
+    const rc = getCycle(cycle.id)?.resume_context_json;
+    const ctx = rc ? JSON.parse(rc) : null;
+    reproduceFirstWaiver = (ctx?.waivers || []).find((w) => w && w.rule === 'reproduce_first') || null;
+  } catch { reproduceFirstWaiver = null; }
 
   try {
     // 1) Materialize a local checkout of the container's working tree.
@@ -346,14 +355,27 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       if (gatesGreen) {
         // Gates green is a PROXY (cycle-94): the cycle only counts as green when
         // the acceptance spec exists and, for a bug-fix, red→green was
-        // demonstrated inside this cycle. Otherwise feed the reasons into the
-        // next round instead of certifying unverified work.
+        // demonstrated inside this cycle — unless the ORCHESTRATOR-VERIFIED code
+        // diff is empty (the verified empty-diff rule: nothing to reproduce) or
+        // an admin granted an enforced reproduce-first waiver on resume.
+        // Otherwise feed the reasons into the next round instead of certifying
+        // unverified work. The diff is read in the container (the synced tree),
+        // never taken from a model claim.
+        let changedThisCycle = [];
+        try {
+          const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
+          changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+        } catch { changedThisCycle = []; }
         let accText = null;
         try { accText = await readFile(join(checkoutDir, ACCEPTANCE_PATH), 'utf8'); } catch { accText = null; }
         const accParsed = accText != null ? parseAcceptance(accText) : { ok: false, error: 'state/acceptance.json not found' };
-        const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved });
+        const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved, changedFiles: changedThisCycle, reproduceFirstWaiver });
         if (verdict.ok) {
-          const accState = acceptanceRecord({ spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved, uiRequired: accParsed.ok ? accParsed.spec.ui : [] });
+          const accState = acceptanceRecord({
+            spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
+            uiRequired: accParsed.ok ? accParsed.spec.ui : [],
+            changedFiles: changedThisCycle, reproduceFirst: verdict.reproduce_first,
+          });
           try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch { /* best effort */ }
           green = true;
           break;
@@ -388,6 +410,21 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         files: snapshot.files, manifestText: snapshot.manifestText, declaredEgress, approvedGrants,
         finish: { summary: 'SDK runner change', acceptance: [], assumptions: null },
       });
+      // Net the live-check checklist against active confirmations (parity with
+      // the hand-rolled runner): an already-verified capability (matching
+      // manifest hash) must not re-pend on every later cycle.
+      if (!integrationDecision.blocking && integrationDecision.checklist?.length) {
+        try {
+          const cap = capabilityCheckStatus({
+            checklistItems: integrationDecision.checklist,
+            activeVerifications: listActiveVerifications(projectId),
+          });
+          integrationDecision.checklist = cap.outstanding.map(({ stale_verification, ...it }) => it);
+          if (!integrationDecision.checklist.length && integrationDecision.outcome === 'pending-operator-verification') {
+            integrationDecision.outcome = 'succeeded';
+          }
+        } catch (e) { console.warn('[mock2] SDK checklist netting failed:', e?.message); }
+      }
       recordIntegrationGate(cycle.id, integrationDecision);
       logEvent('integration_gate', { role: 'system', content: integrationDecision.outcome, meta: { verdict: integrationDecision.gate.verdict, reasons: integrationDecision.reasons } });
     } catch (e) {

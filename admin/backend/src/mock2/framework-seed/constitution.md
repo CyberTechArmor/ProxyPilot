@@ -350,6 +350,17 @@ proxy gets optimized. These rules bind the reward to the goal:
   looks correct" or "appears already implemented" is not acceptance — if the
   defect cannot be reproduced, the cycle halts with that finding instead of
   succeeding.
+- **Reproduce-first applies to product-code changes.** A cycle whose diff —
+  **verified by the orchestrator itself**, never taken from a model claim —
+  contains no product-code change (an idempotent re-adoption, a `state/`-only
+  spec alignment, a nothing-left-to-do re-run) has no behavior change to
+  reproduce, and fabricating a red test would itself require a product change.
+  Such a cycle finishes as its declared kind (usually a chore) without a red
+  test; the record carries `code_diff_empty` and the reproduce-first basis
+  explicitly. This is a structural rule, not a per-cycle waiver. When a human
+  DOES waive reproduce-first (admin-granted on resume), the waiver is applied
+  at the enforcement gate itself and stamped into the record — a waiver that is
+  merely narrated is a falsified precondition and remains a stopping condition.
 - **No integration validated by mocks alone.** Any external-integration path
   (mTLS, auth, transport) carries at least one contract test that runs the REAL
   logic — actual cert/key matching, a real agent against local fixtures or a

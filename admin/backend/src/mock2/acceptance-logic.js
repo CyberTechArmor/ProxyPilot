@@ -84,31 +84,83 @@ export function batteryHasRedTestGate(battery = []) {
   return (Array.isArray(battery) ? battery : []).some((g) => g && g.name === 'test' && g.status === 'failed');
 }
 
+// ---- the verified empty-diff rule ----
+
+// Paths under state/ are the harness's own spec/record files (acceptance.json,
+// rules.md, ui-checks.json, integrations.json, change mirrors) — aligning them is
+// bookkeeping, not a product change, and the test gate does not exercise them.
+export const STATE_PATH_RE = /^state\//;
+
+// The PRODUCT-CODE slice of a cycle's diff: everything the cycle changed except
+// the state/ bookkeeping. This is what reproduce-first is really about — a cycle
+// that changed no product code has no behavior change to reproduce a defect
+// against, and fabricating a red test would REQUIRE a product change (a
+// contradiction the old rule forced). The caller must pass the ORCHESTRATOR'S
+// OWN diff reading (git in the container), never a model claim (§12: verify,
+// don't trust).
+export function codeChangedFiles(changedFiles = []) {
+  return (Array.isArray(changedFiles) ? changedFiles : [])
+    .map((f) => String(f || '').replace(/^\.\//, '').trim())
+    .filter(Boolean)
+    .filter((f) => !STATE_PATH_RE.test(f));
+}
+
 // acceptanceVerdict — the finish-time decision (orchestrator side). Given the
-// parsed spec (or its parse failure), the task classification, and whether a
-// red test gate was observed this cycle, decide whether finish may proceed.
-// Returns { ok, reasons: [] } — every reason is actionable feedback fed back
-// to the finish tool call.
-export function acceptanceVerdict({ parsed, instructionKind = 'feature', redTestObserved = false } = {}) {
+// parsed spec (or its parse failure), the task classification, whether a red
+// test gate was observed this cycle, the ORCHESTRATOR-VERIFIED list of files
+// this cycle changed, and any enforced operator waiver, decide whether finish
+// may proceed. Returns { ok, reasons: [], reproduce_first } — every reason is
+// actionable feedback fed back to the finish tool call; reproduce_first records
+// the basis on which the requirement was satisfied or set aside, so the record
+// is honest about WHY (§12 — a waiver that isn't in effect is never implied).
+//
+// The verified empty-diff rule (first-class, not a per-cycle manual waiver):
+// reproduce-first exists to stop "the code looks correct" from passing as a
+// fix. A cycle whose verified diff contains NO product-code change (an
+// idempotent re-adoption, a spec/state alignment, a nothing-left-to-do re-run)
+// has no behavior change to demonstrate red→green against — and fabricating a
+// red test would itself require a product change. When changedFiles is the
+// orchestrator's own diff reading and its code slice is empty, reproduce-first
+// does not apply and the spec's own kind (e.g. chore) stands. changedFiles null
+// = unknown (caller didn't verify) → the strict rule applies unchanged.
+export function acceptanceVerdict({
+  parsed, instructionKind = 'feature', redTestObserved = false,
+  changedFiles = null, reproduceFirstWaiver = null,
+} = {}) {
   const reasons = [];
+  const codeChanged = changedFiles == null ? null : codeChangedFiles(changedFiles);
+  const diffEmpty = codeChanged != null && codeChanged.length === 0;
   if (!parsed || parsed.ok === false) {
     reasons.push(`state/acceptance.json is missing or invalid (${parsed?.error || 'not found'}) — write it FIRST: {task, kind, defect_tag?, tests[], integration?, ui[]}.`);
-    if (instructionKind === 'bugfix') {
+    if (instructionKind === 'bugfix' && !diffEmpty) {
       reasons.push('This task is a BUG FIX: declare kind "bugfix" with a defect_tag and a regression test, and demonstrate red→green inside this cycle.');
     }
-    return { ok: false, reasons };
+    return { ok: false, reasons, reproduce_first: 'not_evaluated' };
   }
   const spec = parsed.spec;
+  // A verified-empty code diff: nothing to reproduce, the spec's kind stands.
+  if (diffEmpty) {
+    return { ok: true, reasons: [], reproduce_first: 'not_required_empty_diff' };
+  }
   // The instruction says bug-fix but the spec claims otherwise — the spec must
   // not be used to opt out of reproduce-first.
   const kind = instructionKind === 'bugfix' ? 'bugfix' : spec.kind;
   if (kind === 'bugfix' && spec.kind !== 'bugfix') {
     reasons.push('The task instruction describes a defect, but acceptance.kind is not "bugfix" — reclassify it and add a defect_tag + regression test.');
   }
+  let reproduceFirst = kind === 'bugfix' ? (redTestObserved ? 'demonstrated' : 'not_demonstrated') : 'not_applicable';
   if (kind === 'bugfix' && !redTestObserved) {
-    reasons.push('Reproduce-first not demonstrated: no gate battery in THIS cycle showed the test gate RED. Write the regression test so it FAILS against the current (broken) behavior, run run_gates to record the red, then fix and go green. "The code looks correct / appears already implemented" is not acceptance.');
+    // An ENFORCED operator waiver (admin-granted on resume, applied HERE — the
+    // real enforcement layer — and stamped into the record). Never inferred
+    // from narration: the caller passes it only when the structured waiver was
+    // actually granted.
+    if (reproduceFirstWaiver && reproduceFirstWaiver.rule === 'reproduce_first') {
+      reproduceFirst = 'waived_by_operator';
+    } else {
+      reasons.push('Reproduce-first not demonstrated: no gate battery in THIS cycle showed the test gate RED. Write the regression test so it FAILS against the current (broken) behavior, run run_gates to record the red, then fix and go green. "The code looks correct / appears already implemented" is not acceptance.');
+    }
   }
-  return { ok: reasons.length === 0, reasons };
+  return { ok: reasons.length === 0, reasons, reproduce_first: reproduceFirst };
 }
 
 // ---- change-record accountability (over-claim rejection) ----
@@ -175,15 +227,37 @@ export function anomalySignals({
 
 // The machine-readable acceptance state stamped on the cycle (migration 517)
 // and echoed into the record — "gates green" and "acceptance demonstrated" are
-// DISTINGUISHABLE states.
-export function acceptanceRecord({ spec = null, instructionKind = 'feature', redTestObserved = false, uiRequired = [] } = {}) {
-  const kind = instructionKind === 'bugfix' ? 'bugfix' : (spec?.kind || instructionKind);
+// DISTINGUISHABLE states. changedFiles (orchestrator-verified) adds the
+// no-op/empty-diff facts; reproduceFirst is the verdict's recorded basis
+// ('demonstrated' | 'not_required_empty_diff' | 'waived_by_operator' |
+// 'not_applicable' | 'not_demonstrated') so the record never implies a red test
+// that wasn't observed, or hides a waiver that was.
+export function acceptanceRecord({
+  spec = null, instructionKind = 'feature', redTestObserved = false, uiRequired = [],
+  changedFiles = null, reproduceFirst = null,
+} = {}) {
+  const codeChanged = changedFiles == null ? null : codeChangedFiles(changedFiles);
+  const diffEmpty = codeChanged != null && codeChanged.length === 0;
+  // A verified-empty diff keeps the spec's own kind (the empty-diff rule); with
+  // code changes the eager instruction classification still wins.
+  const kind = diffEmpty
+    ? (spec?.kind || 'chore')
+    : (instructionKind === 'bugfix' ? 'bugfix' : (spec?.kind || instructionKind));
+  const basis = reproduceFirst
+    || (kind !== 'bugfix' ? 'not_applicable' : (redTestObserved ? 'demonstrated' : 'not_demonstrated'));
   return {
     kind,
     defect_tag: spec?.defect_tag || null,
     red_test_observed: !!redTestObserved,
     tests: spec?.tests || [],
     ui_required: uiRequired,
-    demonstrated: kind === 'bugfix' ? !!redTestObserved : true,
+    // A verified no-op (no product-code change) — the loop-termination signal
+    // the orchestrator counts (cycle-logic.consecutiveNoopCycles).
+    code_diff_empty: diffEmpty,
+    no_op: diffEmpty,
+    reproduce_first: basis,
+    demonstrated: kind === 'bugfix'
+      ? (!!redTestObserved || basis === 'not_required_empty_diff' || basis === 'waived_by_operator')
+      : true,
   };
 }

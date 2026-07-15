@@ -63,7 +63,11 @@ export function reportedCycleOutcome(cycle = {}) {
 
 // deriveVerificationChecklist({ manifest, subsystems }) — one checklist item per
 // live-verification-required action of each in-scope manifest entry. Each item
-// carries the manifest id + content hash so a later manifest change supersedes it.
+// carries the manifest id + content hash so a later manifest change supersedes
+// it, plus the OPERATOR HAND-OFF: what to supply (the declared config source +
+// key — the connection string / env var the fence deliberately does not have),
+// how to run the live check, and how to report the result. The hand-off is what
+// makes pending-operator-verification a walkable completion instead of a shrug.
 export function deriveVerificationChecklist({ manifest = { entries: [] }, subsystems = [] } = {}) {
   const items = [];
   for (const entry of manifest.entries || []) {
@@ -81,10 +85,31 @@ export function deriveVerificationChecklist({ manifest = { entries: [] }, subsys
         operation: action.operation,
         endpoint_classification: entry.egress?.classification || 'unknown',
         description: `Verify against the live system: "${action.name}" (${action.operation}) reaches ${entry.destination?.key || 'the configured destination'} over ${entry.transport} and returns real data — record the observed result (status, sample volume), not a checkbox.`,
+        // Operator hand-off (credential-gated integrations): the build wired the
+        // real transport but the fence has no production credentials, so the
+        // live check is yours to run.
+        required_config: {
+          source: entry.destination?.source || 'unknown',
+          key: entry.destination?.key || null,
+          note: 'Supply the real connection value(s) in the deployed environment — the build container never held them.',
+        },
+        how_to_verify: `With the real ${entry.destination?.key || 'connection'} configured, run "${action.name}" (${action.operation}) in the deployed app against the production endpoint over ${entry.transport} and note exactly what you observe.`,
+        report: 'Report the result from the project Build panel: confirm with the observed result if it worked, or report a failure — a failure opens a real bug-fix build carrying your observation.',
       });
     }
   }
   return items;
+}
+
+// failureBugfixInstruction({ item, observed }) — the build instruction a
+// live-check FAILURE report opens a cycle with. The operator's observation is a
+// real, reproducible defect report — exactly what reproduce-first exists for —
+// and the wording deliberately classifies as a bug fix (classifyTaskKind) so the
+// new cycle demands red→green against the in-fence contract fixture.
+export function failureBugfixInstruction({ item = {}, observed = '' } = {}) {
+  const what = `${item.action || 'the live check'} (${item.operation || 'operation'}) for integration "${item.manifest_id || item.item_id || 'unknown'}"`;
+  const obs = String(observed || '').trim();
+  return `Fix a defect reported from a failed live verification: ${what} failed when the operator ran it against the real system. Operator observed: "${obs}". Reproduce the failure with the in-fence contract fixture (tests/contract/fixture-server), demonstrate the regression test red, fix the transport/handling defect, and drive it green. Do not weaken the check or stub the transport.`;
 }
 
 // capabilityCheckStatus({ checklistItems, activeVerifications }) — PATCH2 B.2:

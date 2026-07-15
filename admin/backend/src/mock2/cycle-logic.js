@@ -166,6 +166,64 @@ export function retriesExhausted(retries) {
   return Number(retries || 0) > MAX_CYCLE_RETRIES;
 }
 
+// ---- no-op loop termination (the "no work remaining" backstop) ----
+
+// A cycle counts as a completed NO-OP when it reached a success-family terminal
+// ('succeeded', or 'awaiting_user' with a pending/verified live checklist — the
+// calm pending-operator-verification completion) AND its stamped acceptance
+// state says the verified code diff was empty. Both facts are orchestrator-
+// written (acceptance_json is stamped from the runner's own diff reading), so a
+// model claim can never mint a no-op.
+export function cycleWasNoop(cycle = {}) {
+  const successFamily = cycle.status === 'succeeded'
+    || (cycle.status === 'awaiting_user' && ['pending', 'verified'].includes(cycle.verification_state));
+  if (!successFamily) return false;
+  try {
+    const acc = JSON.parse(cycle.acceptance_json || 'null');
+    return !!acc && acc.no_op === true;
+  } catch { return false; }
+}
+
+// How many consecutive completed no-op cycles may run for the SAME instruction
+// before the orchestrator declares the work done and refuses to open another.
+// Two is enough to prove idempotence (the first no-op already finished cleanly;
+// the second confirms nothing regressed); a third adds no information.
+export const NOOP_CYCLE_LIMIT = 2;
+
+// consecutiveNoopCycles(cycles, instruction) — the trailing run of completed
+// no-op BUILD cycles for this exact instruction. `cycles` is most-recent-first
+// (the listCyclesForProject order). Same-instruction pipeline stages (the
+// 'define' audit cycle that precedes every build) are transparent — they are
+// bookkeeping for the same request, not work outcomes. Any different-
+// instruction cycle or non-no-op build outcome breaks the run — new work
+// always resets the counter.
+export function consecutiveNoopCycles(cycles = [], instruction = '') {
+  const want = String(instruction || '').trim();
+  let run = 0;
+  for (const c of Array.isArray(cycles) ? cycles : []) {
+    if (String(c?.instruction || '').trim() !== want) break;
+    if (c?.stage && c.stage !== 'build') continue; // define/audit stages are transparent
+    if (!cycleWasNoop(c)) break;
+    run += 1;
+  }
+  return run;
+}
+
+// noopStartRefusal({ priorCycles, instruction, limit }) — the start-time gate:
+// when the last `limit` cycles for this instruction all completed as verified
+// no-ops, there is no work remaining — opening another empty cycle is the loop,
+// not progress. Returns { refuse, reason } with a calm, terminal message (this
+// is a completion, not an error).
+export function noopStartRefusal({ priorCycles = [], instruction = '', limit = NOOP_CYCLE_LIMIT } = {}) {
+  const run = consecutiveNoopCycles(priorCycles, instruction);
+  if (run < limit) return { refuse: false, reason: null, consecutive: run };
+  return {
+    refuse: true,
+    consecutive: run,
+    reason: `No work remaining: the last ${run} build cycle${run === 1 ? '' : 's'} for this exact instruction completed with no code changes — the work is already done and verified. Not starting another empty cycle. If you want something different, describe the new change; if a live verification is outstanding, confirm it from the Build panel.`,
+  };
+}
+
 // ---- API response shape ----
 
 // Client-safe view of a cycle row for the poll endpoint + the "gates going

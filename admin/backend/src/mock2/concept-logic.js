@@ -21,6 +21,8 @@
 // component is the CONCEPT loop, driven by the concept_chat + mockup slots.
 // Nothing here is named "agent".
 
+import { parseAttachmentsJson, publicAttachmentShape } from './chat-image-logic.js';
+
 // ---- in-repo paths (03-data-model.md: the concept stage lives in the repo) ----
 
 export const MOCKUP_DIR = 'state/mockups';
@@ -477,14 +479,27 @@ export function classifyConceptTurn(toolCalls = []) {
 // conversation is replayed (kinds 'user' → user, 'assistant' → assistant);
 // system notes (mockup-updated, approval) are context for the human, not the
 // model, and are skipped so they don't pollute the model's turn structure.
-export function buildConceptTranscript(messages = [], newUserText = null) {
+// Multi-modal: user turns may carry `images` — the caller (concept.js) hydrates
+// bytes for the attachments chat-image-logic.planTranscriptImages selected and
+// sets `m.images` / passes `newUserImages`; attachments outside the hydration
+// window render as their stable text placeholder so the turn structure (and the
+// prompt-cache prefix) stays deterministic.
+export function buildConceptTranscript(messages = [], newUserText = null, { newUserImages = [] } = {}) {
   const out = [];
   for (const m of messages || []) {
     if (!m) continue;
-    if (m.kind === 'user') out.push({ role: 'user', text: String(m.body || '') });
-    else if (m.kind === 'assistant') out.push({ role: 'assistant', text: String(m.body || '') });
+    if (m.kind === 'user') {
+      const turn = { role: 'user', text: String(m.body || '') };
+      if (Array.isArray(m.images) && m.images.length) turn.images = m.images;
+      if (m.imagePlaceholders) turn.text = `${turn.text}${turn.text ? '\n' : ''}${m.imagePlaceholders}`;
+      out.push(turn);
+    } else if (m.kind === 'assistant') out.push({ role: 'assistant', text: String(m.body || '') });
   }
-  if (newUserText != null) out.push({ role: 'user', text: String(newUserText) });
+  if (newUserText != null) {
+    const turn = { role: 'user', text: String(newUserText) };
+    if (Array.isArray(newUserImages) && newUserImages.length) turn.images = newUserImages;
+    out.push(turn);
+  }
   return out;
 }
 
@@ -511,6 +526,9 @@ export function publicChatMessageShape(row) {
     acting_as_admin: Number(row.acting_as_admin) === 1,
     question_id: row.question_id ?? null,
     cycle_id: row.cycle_id ?? null,
+    // Image attachments (migration 526): [{id, media_type, name}] — the client
+    // renders thumbnails from GET /projects/:id/chat-images/:imageId.
+    attachments: parseAttachmentsJson(row.attachments_json).map(publicAttachmentShape).filter(Boolean),
     created_at: row.created_at || null,
   };
 }

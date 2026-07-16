@@ -38,6 +38,7 @@ import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
+import { saveChatImages, hydrateAttachments } from './chat-images.js';
 import {
   insertQuestion, getQuestion, answerQuestion, dismissQuestion, updateQuestionText,
   countOpenEditorQuestions, countOpenAdminQuestions, listQuestionsForCycle,
@@ -206,7 +207,11 @@ function detectDrift(project, framework) {
 // startBuild — the audit gate before a build cycle. Guards, quota check, drift
 // detection, then fire the background audit. Returns
 // { status:'started'|'refused'|'error', cycle, error }.
-export async function startBuild({ project, instruction, user, actingAsAdmin = 0 }) {
+// `images` (validated, chat-image-logic) attach to the REQUEST — the umbrella —
+// so they ride every segment: the audit call here, and the build's first task
+// turn (runner.js hydrates them from the request row), surviving the
+// rule-question gate and resumes.
+export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [] }) {
   const projectId = Number(project.id);
 
   if (project.lifecycle !== 'active') {
@@ -238,7 +243,9 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // Cost-truth: the operator's ask opens ONE request; the define audit + the build +
   // any resumes/consults are its segments (additive — request_id is nullable, this
   // never changes runner behavior).
-  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin });
+  let attachments = [];
+  try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] build image save failed:', e?.message); }
+  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin, attachments });
 
   // Quota (R5 — the audit step spends). refused_quota is a real terminal status.
   const estCostCents = estimateAuditCostCents(ready);
@@ -266,7 +273,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   getOrCreateChat(projectId);
   setJob(projectId, { phase: 'auditing', message: 'Auditing the design against the rules and framework…', cycleId: cycle.id, startedAt: Date.now() });
 
-  runAudit({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, instruction: String(instruction || '') })
+  runAudit({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, instruction: String(instruction || ''), attachments })
     .catch((err) => {
       console.error(`[mock2] audit crashed for project ${projectId}:`, err?.message || err);
       try { finishCycle(cycle.id, { status: 'failed', error: `audit crashed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -278,7 +285,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   return { status: 'started', cycle: getCycle(cycle.id) };
 }
 
-async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin, instruction }) {
+async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin, instruction, attachments = [] }) {
   const projectId = Number(project.id);
   const containerName = project.container_name || containerNameForProject(projectId);
 
@@ -327,11 +334,14 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   } catch (e) { console.warn('[mock2] component suggestion failed:', e?.message); }
 
   // 2) Run the audit on the audit slot (a reasoning task; no tools — JSON out).
+  //    The instruction's image attachments ride along — a screenshot of the bug
+  //    or a design reference is context the audit legitimately classifies on.
+  const auditImages = hydrateAttachments(projectId, attachments);
   const auditRes = await callModelTurn({
     connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
     system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
     tools: [],
-    transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }) }],
+    transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }), ...(auditImages.length ? { images: auditImages } : {}) }],
     maxTokens: 6000,
     effort: 'medium', // a bounded classification/reasoning task — high depth buys nothing here
   });

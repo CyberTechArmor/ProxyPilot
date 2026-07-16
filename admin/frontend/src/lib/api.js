@@ -1297,8 +1297,11 @@ export const api = {
     request(`/mock2/projects/${projectId}/components/install`, { method: 'POST' }),
   // Ask lane: a codebase question / bounded read-and-run task in the build chat
   // (no build cycle). 202 + poll; the answer lands as a chat message.
-  mock2Ask: (projectId, question) =>
-    request(`/mock2/projects/${projectId}/ask`, { method: 'POST', body: JSON.stringify({ question }) }),
+  mock2Ask: (projectId, question, images = null) =>
+    request(`/mock2/projects/${projectId}/ask`, {
+      method: 'POST',
+      body: JSON.stringify(images?.length ? { question, images } : { question }),
+    }),
   mock2AskStatus: (projectId) => request(`/mock2/projects/${projectId}/ask/status`),
 
   // Model routing knowledge base (admin): the task-kind → model/effort
@@ -1310,8 +1313,11 @@ export const api = {
     request(`/mock2/routing/outcomes${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
 
   // ---- Mock2 M6: cycle runner + checkout lock ----
-  mock2StartCycle: (id, instruction) =>
-    request(`/mock2/projects/${id}/cycles`, { method: 'POST', body: JSON.stringify({ instruction }) }),
+  mock2StartCycle: (id, instruction, images = null) =>
+    request(`/mock2/projects/${id}/cycles`, {
+      method: 'POST',
+      body: JSON.stringify(images?.length ? { instruction, images } : { instruction }),
+    }),
   mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
   mock2GetCycle: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}`),
   mock2ListCycles: (id) => request(`/mock2/projects/${id}/cycles`),
@@ -1364,8 +1370,11 @@ export const api = {
 
   // ---- Mock2 M7: Stage 1 (Concept) — chat, mockup, design approval ----
   mock2GetChat: (id) => request(`/mock2/projects/${id}/chat`),
-  mock2SendChatMessage: (id, message, mode) =>
-    request(`/mock2/projects/${id}/chat`, { method: 'POST', body: JSON.stringify(mode ? { message, mode } : { message }) }),
+  mock2SendChatMessage: (id, message, mode, images = null) =>
+    request(`/mock2/projects/${id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ message, ...(mode ? { mode } : {}), ...(images?.length ? { images } : {}) }),
+    }),
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
   // Design template — the design/mockup only (mockup HTML + original brief +

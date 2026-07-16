@@ -40,6 +40,7 @@ import { acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import { insertMessage, listMessages, getOrCreateChat } from './chats.js';
+import { saveChatImages, hydrateAttachments, hydrateChatMessagesForModel } from './chat-images.js';
 import {
   CONCEPT_CHAT_TOOLS, buildConceptChatSystemPrompt, buildMockupSystemPrompt, buildMockupTask,
   buildInventoryExtractionPrompt, buildInventoryExtractionTask,
@@ -360,7 +361,10 @@ export async function importDesignTemplate({ project, template, notes = '', sour
 // startConceptTurn — the Builder sent a chat message. Synchronous setup (lock,
 // insert the user message, quota check, create the concept cycle), then fire the
 // background turn. Returns { status:'started'|'refused'|'error', cycle, userMessage, error }.
-export async function startConceptTurn({ project, message, user, actingAsAdmin = 0, mode = 'design' }) {
+// `images` is the VALIDATED list from chat-image-logic.validateChatImages —
+// saved to disk here (content-addressed) and stamped on the user message as
+// small descriptors; the turn hydrates them into the model calls.
+export async function startConceptTurn({ project, message, user, actingAsAdmin = 0, mode = 'design', images = [] }) {
   const projectId = Number(project.id);
   const turnMode = mode === 'plan' ? 'plan' : 'design';
 
@@ -383,9 +387,12 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
     return { status: 'error', error: lock.reason || 'This project is checked out by another writer. Request a takeover to continue.' };
   }
 
-  // Record the Builder's message (acting_as_admin stamped, ADR-007).
+  // Record the Builder's message (acting_as_admin stamped, ADR-007) — with any
+  // image attachments saved to disk first (bytes never enter SQLite).
   getOrCreateChat(projectId);
-  const userMessage = insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: message });
+  let attachments = [];
+  try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] chat image save failed:', e?.message); }
+  const userMessage = insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: message, attachments });
 
   // Quota check (R5 — a concept turn spends on chat + mockup). refused_quota is a
   // real terminal cycle status.
@@ -408,7 +415,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   updateCycle(cycle.id, { started_at: nowIso() });
   setJob(projectId, { phase: 'thinking', message: 'Thinking…', kind: 'turn', cycleId: cycle.id, startedAt: Date.now() });
 
-  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message, mode: turnMode }).catch((err) => {
+  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message, mode: turnMode, userAttachments: attachments }).catch((err) => {
     console.error(`[mock2] concept turn crashed for project ${projectId}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `concept turn crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Something went wrong on that turn: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -419,7 +426,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   return { status: 'started', cycle: getCycle(cycle.id), userMessage };
 }
 
-async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message, mode = 'design' }) {
+async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message, mode = 'design', userAttachments = [] }) {
   const projectId = Number(project.id);
   const containerName = project.container_name || containerNameForProject(projectId);
   const holder = { type: 'user', id: user.id };
@@ -432,7 +439,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   //    produce a mockup and stays in conversation until the Builder switches to
   //    Design. The Builder's message is already stored, so buildConceptTranscript
   //    reads the whole history (including it) — don't append it again.
-  const transcript = buildConceptTranscript(listMessages(projectId));
+  // Multi-modal: hydrate image attachments into the transcript (the most
+  // recent few as real image blocks; older ones as stable placeholders).
+  const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, listMessages(projectId)));
   const hasMockup = !!project.current_mockup_id;
   const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup, mode });
 
@@ -467,10 +476,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // renders (the job heartbeat below is what the Builder reads in the chat —
     // and it makes clear the work continues server-side across tab switches),
     // and retry ONCE on a pure timeout before giving up.
+    // The mockup model doesn't see the chat transcript — but it SHOULD see the
+    // images the Builder just attached (design references / screenshots are
+    // exactly what a render needs). This turn's attachments ride the task.
+    const mockupImages = hydrateAttachments(projectId, userAttachments);
     const mockupCall = () => callModelTurn({
       connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
       system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
-      tools: [], transcript: [{ role: 'user', text: mockupTask }], maxTokens: 16000,
+      tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }], maxTokens: 16000,
       timeoutMs: 900000,
     });
     const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });

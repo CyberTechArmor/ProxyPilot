@@ -1178,4 +1178,19 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Multi-modal chat: image attachments on chat messages (concept chat + ask
+    // lane) and on requests (the build umbrella — images attached to a Build
+    // press ride every segment of that request: audit + build + resumes).
+    // The column holds small descriptors ([{id, bytes, name}]); bytes live on
+    // disk at MOCK2_DATA_DIR/chat-images/<projectId>/<sha256>.<ext>.
+    version: 526,
+    name: 'mock2_chat_image_attachments',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_chat_messages ADD COLUMN attachments_json TEXT;
+        ALTER TABLE mock2_requests ADD COLUMN attachments_json TEXT;
+      `);
+    },
+  },
 ];

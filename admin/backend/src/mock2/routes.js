@@ -175,6 +175,9 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { startAsk, getAskJobStatus } from './ask.js';
+// ---- Multi-modal chat images (migration 526) ----
+import { validateChatImages, MAX_CHAT_IMAGES, isChatImageId } from './chat-image-logic.js';
+import { readChatImage } from './chat-images.js';
 // ---- Model routing knowledge base (migration 525) ----
 import { listRoutingRules, getRoutingRule, updateRoutingRule, listRoutingOutcomes } from './routing.js';
 import {
@@ -399,8 +402,20 @@ const projectRemoteSchema = z.object({
 // The instruction ceiling is the same operator-configurable chat_max_chars the
 // design chat uses (getChatMaxChars) — the length bound is applied in the handler,
 // not baked in here, so raising the limit carries over to Build too.
+// Multi-modal chat (migration 526): image attachments on the concept chat, the
+// build composer, and the ask lane. The zod layer bounds shape/size; the deep
+// validation (media-type allowlist, base64 integrity, decoded-size cap) is
+// chat-image-logic.validateChatImages in each handler. ~3.4M base64 chars ≈
+// the 2.5MB decoded cap.
+const chatImagesSchema = z.array(z.object({
+  media_type: z.string().trim().max(40),
+  data: z.string().min(1).max(3_400_000),
+  name: z.string().max(200).optional(),
+})).max(MAX_CHAT_IMAGES).optional();
+
 const cycleStartSchema = z.object({
   instruction: z.string().trim().min(1),
+  images: chatImagesSchema,
 });
 const cycleFeedbackSchema = z.object({
   rating: z.enum(['up', 'down']),
@@ -419,6 +434,7 @@ const lockIdleSchema = z.object({
 // than baked into this static schema.
 const chatMessageSchema = z.object({
   message: z.string().trim().min(1),
+  images: chatImagesSchema,
   // Conversation mode (M7): 'plan' talks through requirements without touching
   // the mockup; 'design' (default) may generate/iterate the mockup.
   mode: z.enum(['plan', 'design']).optional(),
@@ -548,7 +564,7 @@ const componentVersionSchema = z.object({
   change_reason: z.string().trim().min(1).max(2000),
 });
 // The ask lane's input — a question/task for the read-and-run assistant.
-const askSchema = z.object({ question: z.string().trim().min(1).max(4000) });
+const askSchema = z.object({ question: z.string().trim().min(1).max(4000), images: chatImagesSchema });
 // A routing-rule edit — every field optional; null/'' clears back to the default.
 const routingRuleSchema = z.object({
   model: z.string().trim().max(120).nullish(),
@@ -1970,9 +1986,12 @@ export function createMock2Router() {
     // the M6 runner. 202 + poll: the audit runs in the background.
     let result;
     try {
+      const imgCheck = validateChatImages(parsed.data.images);
+      if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
       result = await startBuild({
         project, instruction: parsed.data.instruction,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        images: imgCheck.images,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });
@@ -2551,9 +2570,12 @@ export function createMock2Router() {
     if (!parsed.success) return res.status(400).json({ error: 'question is required (1–4000 chars)' });
     let result;
     try {
+      const imgCheck = validateChatImages(parsed.data.images);
+      if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
       result = await startAsk({
         project: req.mock2Project, question: parsed.data.question,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        images: imgCheck.images,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the ask: ${err?.message || 'unknown error'}` });
@@ -2566,6 +2588,19 @@ export function createMock2Router() {
 
   router.get('/projects/:id/ask/status', requireMock2Role('viewer'), (req, res) => {
     res.json({ job: getAskJobStatus(req.mock2Project.id) });
+  });
+
+  // Chat image bytes (migration 526). Content-addressed id ("<sha256>.<ext>"),
+  // so the response is immutable — the browser caches it forever and the chat
+  // never re-downloads a thumbnail. Viewer-gated like the chat itself.
+  router.get('/projects/:id/chat-images/:imageId', requireMock2Role('viewer'), (req, res) => {
+    const id = String(req.params.imageId || '');
+    if (!isChatImageId(id)) return res.status(400).json({ error: 'bad image id' });
+    const img = readChatImage(req.mock2Project.id, id);
+    if (!img) return res.status(404).json({ error: 'image not found' });
+    res.set('Content-Type', img.media_type);
+    res.set('Cache-Control', 'private, max-age=31536000, immutable');
+    res.send(img.buffer);
   });
 
   // ============================================================
@@ -2633,10 +2668,13 @@ export function createMock2Router() {
     }
     let result;
     try {
+      const imgCheck = validateChatImages(parsed.data.images);
+      if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
       result = await startConceptTurn({
         project, message: parsed.data.message, user: req.user,
         actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         mode: parsed.data.mode || 'design',
+        images: imgCheck.images,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not send message: ${err?.message || 'unknown error'}` });

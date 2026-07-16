@@ -53,16 +53,19 @@ export function getMessage(id) {
 // Append a message. author_user_id is NULL for system/model messages; a human
 // message carries the author and (for an admin acting outside their membership)
 // acting_as_admin=1 (ADR-007). Creates the chat row on first write.
-export function insertMessage({ projectId, chatId = null, authorUserId = null, actingAsAdmin = 0, kind, body, questionId = null, cycleId = null }) {
+// `attachments` (migration 526) is the image descriptor list from
+// chat-images.saveChatImages — small refs only, bytes live on disk.
+export function insertMessage({ projectId, chatId = null, authorUserId = null, actingAsAdmin = 0, kind, body, questionId = null, cycleId = null, attachments = null }) {
   const db = getMock2Db();
   const cid = chatId != null ? Number(chatId) : getOrCreateChat(projectId).id;
   const info = db
     .prepare(
       `INSERT INTO mock2_chat_messages
-         (chat_id, author_user_id, acting_as_admin, kind, body, question_id, cycle_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (chat_id, author_user_id, acting_as_admin, kind, body, question_id, cycle_id, created_at, attachments_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(cid, authorUserId, actingAsAdmin ? 1 : 0, kind, String(body ?? ''), questionId, cycleId, nowIso());
+    .run(cid, authorUserId, actingAsAdmin ? 1 : 0, kind, String(body ?? ''), questionId, cycleId, nowIso(),
+      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null);
   return db.prepare(`SELECT * FROM mock2_chat_messages WHERE id = ?`).get(info.lastInsertRowid);
 }
 

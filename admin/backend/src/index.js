@@ -207,6 +207,14 @@ const uploadPaths = [
 for (const p of uploadPaths) {
   app.use(p, uploadJson);
 }
+// Multi-modal chat: the mock2 composers accept image attachments (client-side
+// downscaled; ≤4 per message, ≤2.5MB decoded each — enforced again server-side
+// by chat-image-logic). 16mb covers the worst case with headroom without
+// widening the global 1mb default.
+const chatImagesJson = express.json({ limit: '16mb' });
+for (const p of ['/api/mock2/projects/:id/chat', '/api/mock2/projects/:id/ask', '/api/mock2/projects/:id/cycles']) {
+  app.use(p, chatImagesJson);
+}
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
 

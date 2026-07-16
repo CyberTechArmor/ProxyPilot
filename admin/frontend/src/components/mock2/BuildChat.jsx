@@ -17,6 +17,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Loader2, Zap, Hammer, HelpCircle } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
+import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
+import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, onStarted }) {
@@ -29,6 +31,9 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
+  // Multi-modal: images pasted/dropped/picked ride the build instruction or the
+  // ask — downscaled client-side before upload (lib/chat-images.js).
+  const attach = useChatImages({ onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }) });
 
   const load = useCallback(async () => {
     try { setData(await api.mock2GetChat(projectId)); }
@@ -93,15 +98,17 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, body);
+      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images));
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
       } else if (res.audit) {
         toast({ title: 'Auditing the build…', description: 'Checking the change against the rules and framework.' });
         setInstruction('');
+        attach.clear();
       } else {
         toast({ title: 'Build started' });
         setInstruction('');
+        attach.clear();
       }
       if (onStarted) onStarted();
       await load();
@@ -119,8 +126,9 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     if (!body) return;
     setBusy(true);
     try {
-      await api.mock2Ask(projectId, body);
+      await api.mock2Ask(projectId, body, toWireImages(attach.images));
       setInstruction('');
+      attach.clear();
       await load();
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not ask', description: err.message });
@@ -199,7 +207,18 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
               }}
+              onPaste={attach.handlePaste}
+              onDrop={attach.handleDrop}
+              onDragOver={(e) => e.preventDefault()}
             />
+            {/* Image attachments — paste or drop into the box above, or pick with
+                "+". Not offered on a resume (the resume message carries no images). */}
+            {!resumeMode ? (
+              <ImageAttachmentBar
+                images={attach.images} busy={attach.busy} disabled={composerDisabled}
+                onPickFiles={attach.addFiles} onRemove={attach.remove}
+              />
+            ) : null}
             <div className="flex items-center justify-between gap-2">
               {/* Build ↔ Ask mode toggle: Build runs a full audited cycle; Ask
                   answers questions / runs bounded tasks with no build. */}

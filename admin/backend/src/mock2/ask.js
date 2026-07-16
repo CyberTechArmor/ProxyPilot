@@ -27,6 +27,7 @@ import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertMessage, getOrCreateChat } from './chats.js';
+import { saveChatImages, hydrateAttachments } from './chat-images.js';
 import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
@@ -76,8 +77,10 @@ function recordSpend({ projectId, connector, model, usage }) {
 }
 
 // startAsk — validate, take the lock, fire the background loop. Returns
-// { status: 'started' | 'error', error }.
-export async function startAsk({ project, question, user, actingAsAdmin = 0 }) {
+// { status: 'started' | 'error', error }. `images` is the VALIDATED list from
+// chat-image-logic.validateChatImages — a screenshot of a bug or an API doc
+// rides the question straight into the model call.
+export async function startAsk({ project, question, user, actingAsAdmin = 0, images = [] }) {
   const projectId = Number(project.id);
   const q = buildAskTask(question);
   if (!q) return { status: 'error', error: 'A question (or task) is required.' };
@@ -110,10 +113,12 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0 }) {
   if (!lock.ok) return { status: 'error', error: lock.reason || 'A build is running — ask again when it finishes.' };
 
   getOrCreateChat(projectId);
-  insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q });
+  let attachments = [];
+  try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] ask image save failed:', e?.message); }
+  insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q, attachments });
   setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0 });
 
-  runAsk({ project, projectId, holder, ready, question: q })
+  runAsk({ project, projectId, holder, ready, question: q, attachments })
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -127,7 +132,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0 }) {
   return { status: 'started' };
 }
 
-async function runAsk({ project, projectId, holder, ready, question }) {
+async function runAsk({ project, projectId, holder, ready, question, attachments = [] }) {
   const containerName = project.container_name || containerNameForProject(projectId);
 
   // The installed-components section rides along so questions about auth /
@@ -145,7 +150,10 @@ async function runAsk({ project, projectId, holder, ready, question }) {
     projectName: project.name, webPort: project.web_port || 3000,
     webSearch: serverTools.length > 0, installedComponentsSection: installedSection,
   });
-  const transcript = [{ role: 'user', text: question }];
+  // The question's image attachments ride the first turn (an ask is a fresh
+  // transcript, so this is the only place they're paid for).
+  const askImages = hydrateAttachments(projectId, attachments);
+  const transcript = [{ role: 'user', text: question, ...(askImages.length ? { images: askImages } : {}) }];
 
   let finalText = '';
   let totalCents = 0;

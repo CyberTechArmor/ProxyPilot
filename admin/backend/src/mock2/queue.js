@@ -138,7 +138,9 @@ export function setQueueItemStatus(id, status, { resolvedBy = null, resolution =
       `UPDATE mock2_queue_items
          SET status = ?, resolved_by = ?, resolved_at = datetime('now'), resolution = ?
        WHERE id = ?`,
-    ).run(status, resolvedBy == null ? null : Number(resolvedBy), resolution, Number(id));
+    // resolvedBy is a users.id UUID — pass through as-is (Number(uuid) is NaN,
+    // which better-sqlite3 binds as NULL, silently dropping the attribution).
+    ).run(status, resolvedBy == null ? null : resolvedBy, resolution, Number(id));
   } else {
     db.prepare(
       `UPDATE mock2_queue_items

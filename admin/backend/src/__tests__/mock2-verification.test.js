@@ -158,18 +158,24 @@ test('supersession: manifest hash change, expiry, or requested reverification in
 });
 
 // ---- requireActorId: the NOT NULL actor-column guard ----
-// better-sqlite3 binds NaN as NULL and Number(null) === 0, so an unresolved
-// actor id used to surface as an opaque "NOT NULL constraint failed" 500 (or a
-// silent mis-attribution to user 0) on every button of the pending-verification
-// card. The guard fails HERE, with an actionable message.
+// users.id is a UUID (TEXT PRIMARY KEY): Number(uuid) is NaN and better-sqlite3
+// binds NaN as NULL, so a numeric coercion of the actor id surfaced as an
+// opaque "NOT NULL constraint failed" 500 on every button of the
+// pending-verification card. The guard passes real ids through AS-IS and fails
+// unresolvable ones with an actionable message.
 
-test('requireActorId passes real ids through as numbers', () => {
-  assert.equal(requireActorId(7, 'operator_id'), 7);
-  assert.equal(requireActorId('42', 'decided_by'), 42);
+test('requireActorId passes UUID ids through unchanged — never Number-coerced', () => {
+  const uuid = '6f1c2a4e-9b3d-4f7a-8c5e-2d1b0a9f8e7d';
+  assert.equal(requireActorId(uuid, 'operator_id'), uuid);
+  assert.equal(requireActorId('  admin-1  ', 'decided_by'), 'admin-1'); // trimmed, not coerced
 });
 
-test('requireActorId rejects null/undefined/NaN/zero with an actionable message', () => {
-  for (const bad of [null, undefined, NaN, 'nope', 0, -1]) {
+test('requireActorId tolerates legacy numeric ids', () => {
+  assert.equal(requireActorId(7, 'operator_id'), 7);
+});
+
+test('requireActorId rejects null/undefined/NaN/empty/zero with an actionable message', () => {
+  for (const bad of [null, undefined, NaN, '', '   ', 0, -1, false]) {
     assert.throws(() => requireActorId(bad, 'operator_id'), /sign out, sign back in/);
   }
 });

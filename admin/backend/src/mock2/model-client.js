@@ -52,8 +52,13 @@ function openAiBase(provider, baseUrl) {
 // otherwise run WITHOUT thinking on Opus 4.7/4.8, where omitting the parameter
 // means off). Unrecognized/older models and other providers get neither field,
 // so behavior there is byte-identical to before.
+// `onDelta(textChunk)` opts into STREAMING where the provider path supports it
+// (Anthropic today): visible text is delivered incrementally as it generates,
+// and the final return value is byte-identical in shape to the non-streaming
+// call (including the replayable `raw` content array). Providers without a
+// streaming path here simply ignore the callback — same result, one delivery.
 export async function callModelTurn({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null,
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null,
 }) {
   const provider = connector?.provider;
   // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
@@ -66,7 +71,7 @@ export async function callModelTurn({
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -89,12 +94,14 @@ export async function callModelTurn({
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
+  const streaming = typeof onDelta === 'function';
   const body = {
     model,
     max_tokens: maxTokens,
+    ...(streaming ? { stream: true } : {}),
     // Adaptive thinking + effort, gated per model id (see routing-logic).
     ...anthropicTuning({ model, effort }),
     // Prompt caching (rate-limit mitigation): the framework constitution / design
@@ -123,8 +130,16 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     body: JSON.stringify(body),
     signal,
   });
+  if (!res.ok) {
+    const text = await res.text();
+    return { ok: false, error: `anthropic HTTP ${res.status}: ${text.slice(0, 300)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+  // Streaming path: accumulate SSE events back into the exact non-streaming
+  // response shape (a proxy that strips SSE falls through to the JSON path).
+  if (streaming && String(res.headers.get('content-type') || '').includes('text/event-stream')) {
+    return anthropicAccumulateStream(res, onDelta);
+  }
   const text = await res.text();
-  if (!res.ok) return { ok: false, error: `anthropic HTTP ${res.status}: ${text.slice(0, 300)}`, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   let j; try { j = JSON.parse(text); } catch { return { ok: false, error: 'anthropic: non-JSON response', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; }
   let outText = '';
   const toolCalls = [];
@@ -147,6 +162,111 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
       // charged like input. Callers that only read input/output tokens still work.
       cacheReadInputTokens: j.usage?.cache_read_input_tokens || 0,
       cacheCreationInputTokens: j.usage?.cache_creation_input_tokens || 0,
+    },
+  };
+}
+
+// anthropicAccumulateStream — reassemble the SSE event stream into the exact
+// non-streaming response shape. The reconstruction follows the documented
+// rules: content_block_start seeds each block; text_delta / thinking_delta
+// append text; input_json_delta accumulates the tool input as a string,
+// parsed at content_block_stop; signature_delta stamps the thinking-block
+// signature. The resulting `raw` array is therefore replay-safe (thinking
+// blocks return unchanged, signatures intact). Only visible text-block deltas
+// reach onDelta — thinking and tool-input JSON never leak to the UI.
+async function anthropicAccumulateStream(res, onDelta) {
+  const blocks = [];
+  const jsonAcc = new Map(); // block index → accumulating partial_json string
+  let stopReason = null;
+  let streamError = null;
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+
+  const handleEvent = (data) => {
+    let ev; try { ev = JSON.parse(data); } catch { return; }
+    switch (ev.type) {
+      case 'message_start': {
+        const u = ev.message?.usage || {};
+        usage.input = u.input_tokens || 0;
+        usage.cacheRead = u.cache_read_input_tokens || 0;
+        usage.cacheCreation = u.cache_creation_input_tokens || 0;
+        break;
+      }
+      case 'content_block_start': {
+        blocks[ev.index] = { ...(ev.content_block || {}) };
+        const t = ev.content_block?.type;
+        if (t === 'tool_use' || t === 'server_tool_use' || t === 'mcp_tool_use') jsonAcc.set(ev.index, '');
+        break;
+      }
+      case 'content_block_delta': {
+        const b = blocks[ev.index];
+        const d = ev.delta || {};
+        if (!b) break;
+        if (d.type === 'text_delta') {
+          b.text = (b.text || '') + (d.text || '');
+          if (b.type === 'text' && d.text) { try { onDelta(d.text); } catch { /* UI callback must never kill the call */ } }
+        } else if (d.type === 'input_json_delta') {
+          jsonAcc.set(ev.index, (jsonAcc.get(ev.index) || '') + (d.partial_json || ''));
+        } else if (d.type === 'thinking_delta') {
+          b.thinking = (b.thinking || '') + (d.thinking || '');
+        } else if (d.type === 'signature_delta') {
+          b.signature = d.signature;
+        }
+        break;
+      }
+      case 'content_block_stop': {
+        const b = blocks[ev.index];
+        if (b && jsonAcc.has(ev.index)) {
+          const s = jsonAcc.get(ev.index);
+          jsonAcc.delete(ev.index);
+          if (s) { try { b.input = JSON.parse(s); } catch { b.input = {}; } }
+          else if (b.input == null) b.input = {};
+        }
+        break;
+      }
+      case 'message_delta': {
+        stopReason = ev.delta?.stop_reason || stopReason;
+        if (ev.usage?.output_tokens != null) usage.output = ev.usage.output_tokens;
+        break;
+      }
+      case 'error': {
+        streamError = ev.error?.message || 'stream error';
+        break;
+      }
+      default: break; // ping, message_stop
+    }
+  };
+
+  const decoder = new TextDecoder();
+  let buf = '';
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf('\n\n')) >= 0) {
+      const rawEvent = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('data:')) handleEvent(line.slice(5).trim());
+      }
+    }
+    if (streamError) break;
+  }
+  if (streamError) {
+    return { ok: false, error: `anthropic stream: ${streamError}`, toolCalls: [], usage: { inputTokens: usage.input, outputTokens: usage.output } };
+  }
+
+  const content = blocks.filter(Boolean);
+  let outText = '';
+  const toolCalls = [];
+  for (const block of content) {
+    if (block.type === 'text') outText += block.text || '';
+    else if (block.type === 'tool_use') toolCalls.push({ id: block.id, name: block.name, input: block.input || {} });
+  }
+  return {
+    ok: true, text: outText, toolCalls, raw: content.length ? content : null,
+    stopReason,
+    usage: {
+      inputTokens: usage.input, outputTokens: usage.output,
+      cacheReadInputTokens: usage.cacheRead, cacheCreationInputTokens: usage.cacheCreation,
     },
   };
 }

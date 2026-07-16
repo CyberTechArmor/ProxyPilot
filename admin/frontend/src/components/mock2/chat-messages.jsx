@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Loader2, CheckCircle2, HelpCircle } from 'lucide-react';
 import ExplainThis from './ExplainThis';
+import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
 
 // A rule_question body carries { question, choices } as JSON (M8, ADR-002).
@@ -149,12 +150,14 @@ export function ChatBubble({ m, projectId = null }) {
   return (
     <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap break-words ${
-          mine ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm'
+        className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm break-words ${
+          mine ? 'whitespace-pre-wrap bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm'
         }`}
       >
         <AttachmentThumbs m={m} projectId={projectId} mine={mine} />
-        {m.body}
+        {/* Assistant replies are markdown (headers, lists, code); the user's
+            own text stays verbatim pre-wrap. */}
+        {mine ? m.body : <Markdown>{m.body}</Markdown>}
         {m.acting_as_admin ? (
           <span className={`block mt-1 text-[10px] ${mine ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
             (admin)
@@ -169,9 +172,25 @@ export function ChatBubble({ m, projectId = null }) {
 // rule questions, an optional working indicator, and an empty-state line. The
 // caller owns fetching/polling and passes the scroll ref so it can keep the
 // newest message in view.
+// A live streaming reply — the model's answer arriving progressively (via the
+// job's `partial` text). Rendered as an assistant bubble with a pulsing caret;
+// the durable message replaces it when the turn completes.
+export function StreamingBubble({ text }) {
+  if (!text) return null;
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-muted px-3 py-2 text-sm break-words">
+        <Markdown>{text}</Markdown>
+        <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-text-bottom" aria-hidden />
+      </div>
+    </div>
+  );
+}
+
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
+  partialText = null,
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -179,7 +198,7 @@ export function ChatMessageList({
       ref={scrollRef}
       className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
     >
-      {messages.length === 0 ? (
+      {messages.length === 0 && !partialText ? (
         <p className="text-sm text-muted-foreground text-center py-6">{emptyLabel}</p>
       ) : (
         messages.map((m) => (
@@ -188,7 +207,8 @@ export function ChatMessageList({
             : <ChatBubble key={m.id} m={m} projectId={projectId} />
         ))
       )}
-      {working ? (
+      {working && partialText ? <StreamingBubble text={partialText} /> : null}
+      {working && !partialText ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           {workingLabel}

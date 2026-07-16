@@ -122,7 +122,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
-      setJob(projectId, { phase: 'failed', message: `ask crashed: ${err?.message || err}` });
+      setJob(projectId, { phase: 'failed', message: `ask crashed: ${err?.message || err}`, partial: null });
       scheduleJobCleanup(projectId);
     })
     .finally(() => {
@@ -155,17 +155,42 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   const askImages = hydrateAttachments(projectId, attachments);
   const transcript = [{ role: 'user', text: question, ...(askImages.length ? { images: askImages } : {}) }];
 
+  // Streaming (where the provider supports it — Anthropic): visible text
+  // accumulates on the job as `partial` across the tool turns, so the user
+  // watches the answer form instead of staring at a spinner. Throttled pushes;
+  // the durable chat message replaces the preview at the end.
+  let partial = '';
+  let lastPartialPush = 0;
+  let turnStreamed = false;
+  const pushPartial = () => {
+    const now = Date.now();
+    if (now - lastPartialPush < 250) return;
+    lastPartialPush = now;
+    setJob(projectId, { partial });
+  };
+  const onDelta = (t) => {
+    if (!turnStreamed) {
+      turnStreamed = true;
+      // A new turn's narration after tool work reads as a fresh paragraph.
+      if (partial && !partial.endsWith('\n')) partial += '\n\n';
+    }
+    partial += t;
+    pushPartial();
+  };
+
   let finalText = '';
   let totalCents = 0;
   for (let turn = 0; turn < ASK_MAX_TURNS; turn += 1) {
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
+    turnStreamed = false;
     const res = await callModelTurn({
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system, tools: ASK_TOOLS, serverTools, transcript, maxTokens: ASK_MAX_TOKENS,
+      onDelta,
     });
     if (!res.ok) {
       insertMessage({ projectId, kind: 'system', body: `The ask could not complete: ${res.error}` });
-      setJob(projectId, { phase: 'failed', message: res.error });
+      setJob(projectId, { phase: 'failed', message: res.error, partial: null });
       return scheduleJobCleanup(projectId);
     }
     totalCents += recordSpend({ projectId, connector: ready.connector, model: ready.model, usage: res.usage });
@@ -190,7 +215,8 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   try {
     logAudit(holder.id, 'MOCK2_ASK', 'mock2_project', projectId, { chars: question.length, cost_cents: totalCents, web_search: serverTools.length > 0 }, null);
   } catch { /* best effort */ }
-  setJob(projectId, { phase: 'done', message: 'Answered.' });
+  // partial cleared with the same poll that delivers the durable message.
+  setJob(projectId, { phase: 'done', message: 'Answered.', partial: null });
   return scheduleJobCleanup(projectId);
 }
 

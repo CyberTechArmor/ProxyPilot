@@ -30,7 +30,7 @@ import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
   ChevronDown, ChevronUp, Hammer,
 } from 'lucide-react';
-import { ChatBubble, RuleQuestion } from './chat-messages';
+import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
@@ -117,12 +117,15 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // In the read-only Details archive nothing is live and nothing is editable —
   // it's pure history of how the design was decided, no polling, no composer.
   const editable = canEdit && !archived;
+  // The streamed reply (Anthropic connectors): partial text on the turn job —
+  // rendered as a live assistant bubble; poll faster while it's arriving.
+  const jobPartial = jobActive ? (data?.job?.partial || null) : null;
   const shouldPoll = !archived && (jobActive || auditActive || openQuestionCount > 0 || projectOpenQuestions > 0);
   useEffect(() => {
     if (!shouldPoll) return undefined;
-    const t = setInterval(load, 2500);
+    const t = setInterval(load, jobActive ? 900 : 2500);
     return () => clearInterval(t);
-  }, [shouldPoll, load]);
+  }, [shouldPoll, jobActive, load]);
 
   const openIds = new Set(data?.open_question_ids || []);
   // In the read-only Details archive, show only the design conversation — the
@@ -149,10 +152,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
-  // Keep the newest message in view.
+  // Keep the newest message in view (including the streaming reply as it grows).
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [data?.messages?.length, data?.job?.phase]);
+  }, [data?.messages?.length, data?.job?.phase, data?.job?.partial?.length]);
 
   const stage = data?.stage || project?.stage;
   const approved = !!stage?.design_approved;
@@ -462,6 +465,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                 : <ChatBubble key={m.id} m={m} projectId={projectId} />
             ))
           )}
+          {/* The streamed reply, if any, with the working line kept underneath —
+              during a mockup render the heartbeat narration ("rendering the
+              design…") still matters even while the reply text is visible. */}
+          {!archived && jobPartial ? <StreamingBubble text={jobPartial} /> : null}
           {!archived && (jobActive || auditActive) ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

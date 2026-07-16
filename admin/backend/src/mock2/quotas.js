@@ -108,6 +108,16 @@ export function ledgerSince(projectId, sinceIso, scope = 'project') {
 }
 
 // Totals spent by a project (or globally) in the current period.
+// Cycle-less spend for a project — the ASK lane's ledger entries (questions in
+// the build chat spend real tokens but run no cycle, so the per-cycle usage
+// rollups never see them). The Details-page cost card adds these as their own
+// line item.
+export function cyclelessLedger(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_quota_ledger WHERE project_id = ? AND cycle_id IS NULL`)
+    .all(Number(projectId));
+}
+
 export function periodUsage({ scope = 'project', projectId = null, period = 'monthly' }) {
   const since = periodStartIso(period);
   const rows = ledgerSince(projectId, since, scope);

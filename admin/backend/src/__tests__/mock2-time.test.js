@@ -113,3 +113,24 @@ test('computeUsageSummary: missing/negative usage coerces to zero; empty is all 
   assert.equal(u.total_tokens, 0);
   assert.equal(u.total_cost_cents, 0);
 });
+
+test('computeUsageSummary: ask-lane (cycle-less ledger) spend lands in the questions bucket and the total', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const u = computeUsageSummary({
+    cycles: [{ stage: 'build', created_at: iso(1), used_tokens: 1000, used_cost_cents: 10 }],
+    askEntries: [
+      { input_tokens: 3000, output_tokens: 500, cost_cents: 4 },
+      { input_tokens: 1000, output_tokens: 200, cost_cents: 0.6 }, // fractional cents survive
+      null, // tolerated
+    ],
+  });
+  assert.equal(u.by_stage.questions.tokens, 4700);
+  assert.ok(Math.abs(u.by_stage.questions.cost_cents - 4.6) < 1e-9);
+  assert.equal(u.total_tokens, 5700);
+  assert.ok(Math.abs(u.total_cost_cents - 14.6) < 1e-9);
+});
+
+test('computeUsageSummary: no askEntries → questions bucket is zero (back-compat)', () => {
+  const u = computeUsageSummary({ cycles: [] });
+  assert.deepEqual(u.by_stage.questions, { tokens: 0, cost_cents: 0 });
+});

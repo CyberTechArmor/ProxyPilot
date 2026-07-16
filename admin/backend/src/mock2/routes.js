@@ -139,7 +139,7 @@ import {
   requiresBaaAck, isCloudProvider,
 } from './connector-logic.js';
 import {
-  listQuotas, getQuota, upsertQuota, deleteQuota, shapeQuota,
+  listQuotas, getQuota, upsertQuota, deleteQuota, shapeQuota, cyclelessLedger,
 } from './quotas.js';
 import {
   listGitConnectors, getGitConnector, getGitConnectorByName, insertGitConnector,
@@ -1138,7 +1138,8 @@ export function createMock2Router() {
     const deviations = listQueueItems({ projectId: project.id, kind: 'framework_deviation', limit: 500 });
     res.json({
       summary: computeTimeSummary({ project, cycles, deviations, nowMs: Date.now() }),
-      usage: computeUsageSummary({ cycles }),
+      // askEntries: the ask lane's cycle-less spend → the "Questions" line item.
+      usage: computeUsageSummary({ cycles, askEntries: cyclelessLedger(project.id) }),
     });
   });
 

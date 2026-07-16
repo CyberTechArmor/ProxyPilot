@@ -17,6 +17,7 @@
 import { getMock2Db } from './db.js';
 import { validateStubEntry } from './stub-logic.js';
 import { contentHash } from './integration-enforcement.js';
+import { requireActorId } from './verification-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -136,7 +137,7 @@ export function recordVerification(record) {
   const payload = {
     project_id: Number(record.project_id), cycle_id: record.cycle_id == null ? null : Number(record.cycle_id),
     item_id: record.item_id, manifest_id: record.manifest_id, manifest_hash: record.manifest_hash,
-    subsystem: record.subsystem || null, operator_id: Number(record.operator_id), role: record.role || 'operator',
+    subsystem: record.subsystem || null, operator_id: requireActorId(record.operator_id, 'operator_id'), role: record.role || 'operator',
     environment: record.environment, endpoint_classification: record.endpoint_classification,
     observed_result: record.observed_result || null, waived: record.waived ? 1 : 0,
     waiver_reason: record.waiver_reason || null, evidence_ref: record.evidence_ref || null,
@@ -209,7 +210,7 @@ export function recordIntegrationResolution(rec) {
     manifest_id: rec.manifest_id || null, manifest_hash: rec.manifest_hash || null,
     manifest_entry_json: rec.manifest_entry_json ? (typeof rec.manifest_entry_json === 'string' ? rec.manifest_entry_json : JSON.stringify(rec.manifest_entry_json)) : null,
     reason: rec.reason || null, routed_to: rec.routed_to || null,
-    decided_by: Number(rec.decided_by), role: rec.role || 'operator',
+    decided_by: requireActorId(rec.decided_by, 'decided_by'), role: rec.role || 'operator',
   };
   const hash = contentHash(payload);
   const info = db.prepare(`

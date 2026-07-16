@@ -186,3 +186,29 @@ undeclared egress) remain caught; the fixtures prove it.
    the **Live verification** card: "It works — confirm" (with what you
    observed) advances the build to succeeded; "It failed" opens a real bug-fix
    build carrying your observation.
+
+## Opting out of live verification entirely
+
+Some deployments do not want credential-gated live checks in their build loop
+at all — every build should complete without a "pending operator verification"
+hand-off. Two controls exist (both admin-gated, both audit-logged):
+
+- **Integration gate mode `off`** (Admin queue → Integration gate mode):
+  monitor semantics for would-block findings, PLUS the live-verification
+  hand-off is disabled — the runner never routes a cycle to
+  pending-operator-verification. Any checklist the gate derives is stored on
+  the gate record under `skipped_checklist` (recorded, never hidden) and the
+  cycle completes as `succeeded`.
+- **Release all** (`POST /api/mock2/projects/:id/capability-checks/release`,
+  or the "Release all — skip live verification" button on the Live
+  verification card): for a project already stuck pending, records an admin
+  waiver for every outstanding check and advances the pending build(s) to
+  succeeded. Use this to unstick an existing project; use mode `off` to stop
+  future builds from asking.
+
+Related hardening: every action on the Live verification card (confirm /
+report-failure / defer / release) resolves the acting user's id through
+JWT → session row → users-table lookup and fails with an actionable 401
+("sign out and back in") instead of the former opaque
+`NOT NULL constraint failed: …operator_id/decided_by` 500 that left the
+pending state with no working button.

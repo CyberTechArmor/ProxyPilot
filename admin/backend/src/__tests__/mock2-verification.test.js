@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
   REPORTED_OUTCOMES, OUTCOME_CODES, reportedCycleOutcome, deployPendingIsHealthy,
   deriveVerificationChecklist, validateConfirmation, verificationTransition,
-  supersessionNeeded, VERIFICATION_SCHEMA_VERSION,
+  supersessionNeeded, requireActorId, VERIFICATION_SCHEMA_VERSION,
 } from '../mock2/verification-logic.js';
 import { parseIntegrationManifest } from '../mock2/integration-logic.js';
 import { MANIFEST_OK } from './fixtures/integration-fixtures.js';
@@ -155,4 +155,21 @@ test('supersession: manifest hash change, expiry, or requested reverification in
   assert.match(expired.reason, /expir/i);
   const requested = supersessionNeeded({ record: verified, currentManifestHash: 'a'.repeat(64), now: '2026-07-15T00:00:00Z', requested: true });
   assert.equal(requested.needed, true);
+});
+
+// ---- requireActorId: the NOT NULL actor-column guard ----
+// better-sqlite3 binds NaN as NULL and Number(null) === 0, so an unresolved
+// actor id used to surface as an opaque "NOT NULL constraint failed" 500 (or a
+// silent mis-attribution to user 0) on every button of the pending-verification
+// card. The guard fails HERE, with an actionable message.
+
+test('requireActorId passes real ids through as numbers', () => {
+  assert.equal(requireActorId(7, 'operator_id'), 7);
+  assert.equal(requireActorId('42', 'decided_by'), 42);
+});
+
+test('requireActorId rejects null/undefined/NaN/zero with an actionable message', () => {
+  for (const bad of [null, undefined, NaN, 'nope', 0, -1]) {
+    assert.throws(() => requireActorId(bad, 'operator_id'), /sign out, sign back in/);
+  }
 });

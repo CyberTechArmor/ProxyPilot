@@ -26,20 +26,41 @@ import { logAudit, getDb } from '../db.js';
 // payload's `id` is absent on some sessions/tokens; an undefined id becomes NaN →
 // SQLite stores NULL → a NOT NULL actor column (mock2_integration_verifications
 // .operator_id, mock2_integration_resolutions.decided_by) rejects the insert with
-// an opaque error. Resolve robustly through three sources, ending with a direct
-// lookup of the session row by the token's `jti` (always present post-auth), so
-// the id is found regardless of how req.user / req.session were populated.
+// an opaque error. Resolve robustly through four sources, ending with lookups of
+// the session row by the token's `jti` and the users row by the token's
+// `username` (both present on every token this system has ever minted), so the
+// id is found regardless of how req.user / req.session were populated.
 function mock2ActorId(req) {
   const direct = req?.user?.id ?? req?.session?.user_id;
-  if (direct != null) return direct;
+  if (direct != null && Number.isFinite(Number(direct))) return Number(direct);
   const jti = req?.user?.jti;
   if (jti) {
     try {
       const row = getDb().prepare('SELECT user_id FROM sessions WHERE id = ?').get(jti);
       if (row?.user_id != null) return row.user_id;
+    } catch { /* fall through — the username lookup below still applies */ }
+  }
+  const username = req?.user?.username;
+  if (username) {
+    try {
+      const row = getDb().prepare('SELECT id FROM users WHERE username = ?').get(String(username));
+      if (row?.id != null) return row.id;
     } catch { /* fall through to null — the caller returns a clean error */ }
   }
   return null;
+}
+
+// Resolve the acting user's id or answer the request with an actionable 401 —
+// the operator-facing alternative to the opaque "NOT NULL constraint failed"
+// 500 that used to leave pending-verification builds with no working button.
+// Returns the id, or null after responding.
+function requireMock2Actor(req, res) {
+  const id = mock2ActorId(req);
+  if (id == null) {
+    res.status(401).json({ error: 'Your session no longer carries a resolvable user id — sign out, sign back in, and retry this action.' });
+    return null;
+  }
+  return id;
 }
 import { postNotification, resolveNotification } from '../lib/notifications.js';
 import {
@@ -2107,9 +2128,11 @@ export function createMock2Router() {
     const cycle = getCycle(req.params.cycleId);
     if (!cycle || cycle.project_id !== project.id) return res.status(404).json({ error: 'Cycle not found' });
     const attestation = String(req.body?.attestation || '').trim();
+    const acceptActorId = requireMock2Actor(req, res);
+    if (acceptActorId == null) return;
     let result;
     try {
-      result = await acceptPendingVerification({ project, cycle, initiatedBy: mock2ActorId(req), attestation });
+      result = await acceptPendingVerification({ project, cycle, initiatedBy: acceptActorId, attestation });
     } catch (err) {
       return res.status(500).json({ error: `Could not accept the build as pending verification: ${err?.message || 'unknown error'}` });
     }
@@ -2764,10 +2787,15 @@ export function createMock2Router() {
     const item = checklist.find((c) => c.item_id === parsed.data.item_id);
     if (!item) return res.status(404).json({ error: 'No such verification item on this cycle' });
     const isAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    const verifyActorId = requireMock2Actor(req, res);
+    if (verifyActorId == null) return;
     const record = {
       project_id: project.id, cycle_id: cycle.id, item_id: item.item_id,
-      manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
-      operator_id: mock2ActorId(req), role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      // Synthesized checklist items (accept-pending's live-<subsystem>-N) carry no
+      // manifest entry — fall back so a confirmation on them validates instead of
+      // dead-ending the pending state on a 400.
+      manifest_id: item.manifest_id || item.item_id, manifest_hash: item.manifest_hash || 'unversioned', subsystem: item.subsystem,
+      operator_id: verifyActorId, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
       environment: parsed.data.environment, endpoint_classification: item.endpoint_classification,
       observed_result: parsed.data.observed_result || null,
       waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
@@ -2818,10 +2846,13 @@ export function createMock2Router() {
     const item = items.find((c) => c.item_id === parsed.data.item_id);
     if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
     const isAdmin = isReqAdmin(req) || req.mock2Access?.actingAsAdmin;
+    const verifyActorId = requireMock2Actor(req, res);
+    if (verifyActorId == null) return;
     const record = {
       project_id: project.id, cycle_id: null, item_id: item.item_id,
-      manifest_id: item.manifest_id, manifest_hash: item.manifest_hash, subsystem: item.subsystem,
-      operator_id: mock2ActorId(req), role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
+      // Same synthesized-item fallback as the cycle-scoped verify above.
+      manifest_id: item.manifest_id || item.item_id, manifest_hash: item.manifest_hash || 'unversioned', subsystem: item.subsystem,
+      operator_id: verifyActorId, role: parsed.data.waived ? 'admin' : (isAdmin ? 'admin' : 'operator'),
       environment: parsed.data.environment, endpoint_classification: item.endpoint_classification || 'unknown',
       observed_result: parsed.data.observed_result || null,
       waived: !!parsed.data.waived, waiver_reason: parsed.data.waiver_reason || null,
@@ -2919,13 +2950,15 @@ export function createMock2Router() {
       return res.status(500).json({ error: `Backfill failed: ${err?.message || 'unknown error'}` });
     }
     if (!result.ok) return res.status(409).json({ error: result.error });
+    const backfillActorId = requireMock2Actor(req, res);
+    if (backfillActorId == null) return;
     recordIntegrationResolution({
       project_id: project.id, cycle_id: cycle.id, kind: 'manifest_backfill',
       finding_class: 'undeclared', finding_kind: 'undeclared_integration',
       subsystem: result.entry.subsystem, manifest_id: result.entry.id, manifest_hash: result.hash,
       manifest_entry_json: result.entry, routed_to: 'building',
       reason: parsed.data.reason || `declared integration "${result.entry.id}"`,
-      decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
+      decided_by: backfillActorId, role: isReqAdmin(req) ? 'admin' : 'editor',
     });
     logAudit(req.user.id, 'MOCK2_INTEGRATION_BACKFILL', 'mock2_cycle', cycle.id,
       { manifest_id: result.entry.id, subsystem: result.entry.subsystem }, req.ip);
@@ -2994,6 +3027,9 @@ export function createMock2Router() {
     const item = items.find((c) => c.item_id === parsed.data.item_id);
     if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
 
+    const failureActorId = requireMock2Actor(req, res);
+    if (failureActorId == null) return;
+
     // Append-only failure evidence (migration-522 table — same hash-linked record
     // class as backfills/waivers; routed_to 'building' per the lifecycle).
     const saved = recordIntegrationResolution({
@@ -3001,7 +3037,7 @@ export function createMock2Router() {
       finding_class: 'live-check-failed', finding_kind: 'live_check_failed',
       subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
       reason: `${parsed.data.environment}: ${observed}`, routed_to: 'building',
-      decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
+      decided_by: failureActorId, role: isReqAdmin(req) ? 'admin' : 'editor',
     });
 
     // The pending cycle(s) carrying this item stop being "pending" — the live
@@ -3058,13 +3094,15 @@ export function createMock2Router() {
     const items = projectChecklistItems(project.id);
     const item = items.find((c) => c.item_id === itemId);
     if (!item) return res.status(404).json({ error: 'No such capability live check in this project' });
+    const deferActorId = requireMock2Actor(req, res);
+    if (deferActorId == null) return;
     try {
       const saved = recordIntegrationResolution({
         project_id: project.id, cycle_id: null, kind: 'live_check_deferred',
         finding_class: 'live-check-deferred', finding_kind: 'live_check_deferred',
         subsystem: item.subsystem, manifest_id: item.manifest_id, manifest_hash: item.manifest_hash,
         reason, routed_to: 'pending-operator-verification',
-        decided_by: mock2ActorId(req), role: isReqAdmin(req) ? 'admin' : 'editor',
+        decided_by: deferActorId, role: isReqAdmin(req) ? 'admin' : 'editor',
       });
       logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECK_DEFERRED', 'mock2_project', project.id,
         { item_id: item.item_id, reason }, req.ip);
@@ -3075,6 +3113,83 @@ export function createMock2Router() {
     } catch (err) {
       console.error('[mock2] capability-check defer failed:', err?.stack || err?.message || err);
       return res.status(500).json({ error: `Could not record the deferral: ${err?.message || 'unknown error'}` });
+    }
+  });
+
+  // Admin escape hatch — RELEASE every outstanding live capability check at once.
+  // The guaranteed way out of pending-operator-verification: records an admin
+  // waiver (append-only, reasoned, hash-linked — same evidence class as a
+  // per-item waive) for each outstanding item, then advances every pending
+  // awaiting_user cycle whose checklist is now satisfied to succeeded. Use it
+  // when the live checks will never be run (no credentials/route from anywhere,
+  // the checks are unwanted, or the project must be unstuck NOW). Pairs with
+  // integration_gate_mode 'off', which stops NEW checks from being derived.
+  router.post('/projects/:id/capability-checks/release', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (!(isReqAdmin(req) || req.mock2Access?.actingAsAdmin)) {
+      return res.status(403).json({ error: 'Only an administrator can release outstanding live checks.' });
+    }
+    const actorId = requireMock2Actor(req, res);
+    if (actorId == null) return;
+    const reason = String(req.body?.reason || '').trim() || 'released by administrator — live verification not required for this project';
+    try {
+      const cap = capabilityCheckStatus({
+        checklistItems: projectChecklistItems(project.id),
+        activeVerifications: listActiveVerifications(project.id),
+      });
+      const released = [];
+      for (const item of cap.outstanding) {
+        const record = {
+          project_id: project.id, cycle_id: null, item_id: item.item_id,
+          // Synthesized items (no manifest entry) must still be releasable — the
+          // netting in capabilityCheckStatus treats a hash-less item as matched
+          // by any active verification with the same item_id.
+          manifest_id: item.manifest_id || item.item_id, manifest_hash: item.manifest_hash || 'unversioned', subsystem: item.subsystem || null,
+          operator_id: actorId, role: 'admin',
+          environment: 'n/a', endpoint_classification: item.endpoint_classification || 'unknown',
+          observed_result: null, waived: true, waiver_reason: reason,
+          evidence_ref: null, expires_at: null,
+        };
+        const v = validateConfirmation(record);
+        if (!v.ok) return res.status(400).json({ error: v.error });
+        recordVerification(record);
+        released.push(item.item_id);
+      }
+      // Advance every pending cycle whose whole checklist is now satisfied —
+      // the same sweep the per-item verify performs.
+      const active = new Set(listActiveVerifications(project.id).map((r) => r.item_id));
+      const advanced = [];
+      for (const cyc of listCyclesForProject(project.id, { limit: 200 })) {
+        if (cyc.verification_state !== 'pending') continue;
+        let gate = null;
+        try { gate = cyc.integration_gate_json ? JSON.parse(cyc.integration_gate_json) : null; } catch { gate = null; }
+        const cl = gate?.checklist || [];
+        if (!cl.length || cl.every((c) => active.has(c.item_id))) {
+          updateCycle(cyc.id, { verification_state: 'verified' });
+          finishCycle(cyc.id, { status: 'succeeded', error: null });
+          try { if (cyc.request_id) closeRequest(cyc.request_id, 'succeeded'); } catch { /* best effort */ }
+          try { resolveQueueItem(`mock2-verify:${cyc.id}`, { resolution: 'released by administrator', resolvedBy: actorId }); } catch { /* best effort */ }
+          advanced.push(cyc.id);
+        }
+      }
+      logAudit(req.user.id, 'MOCK2_CAPABILITY_CHECKS_RELEASE', 'mock2_project', project.id,
+        { released, advanced_cycles: advanced, reason }, req.ip);
+      // Recompute rather than assert: the honest answer even if a write raced.
+      const capAfter = capabilityCheckStatus({
+        checklistItems: projectChecklistItems(project.id),
+        activeVerifications: listActiveVerifications(project.id),
+      });
+      return res.status(released.length || advanced.length ? 201 : 200).json({
+        released,
+        advanced_cycles: advanced,
+        production_ready: capAfter.production_ready,
+        note: released.length
+          ? `Released ${released.length} outstanding live check${released.length === 1 ? '' : 's'} (recorded as admin waivers) — the project is no longer pending verification.`
+          : 'No live checks were outstanding — nothing to release.',
+      });
+    } catch (err) {
+      console.error('[mock2] capability-check release failed:', err?.stack || err?.message || err);
+      return res.status(500).json({ error: `Could not release the live checks: ${err?.message || 'unknown error'}` });
     }
   });
 

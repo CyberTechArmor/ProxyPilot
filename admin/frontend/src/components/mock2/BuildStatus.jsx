@@ -342,7 +342,7 @@ export default function BuildStatus({
         {/* Live-verification hand-off (pending-operator-verification): the
             credential-gated checks only the operator can run against the real
             system. Renders nothing when no live check is outstanding. */}
-        <VerificationChecklist projectId={projectId} canEdit={canEdit} online={online} cycle={cycle} onRefresh={onRefresh} />
+        <VerificationChecklist projectId={projectId} canEdit={canEdit} isAdmin={isAdmin} online={online} cycle={cycle} onRefresh={onRefresh} />
 
         {/* Live / last cycle */}
         {cycle ? (

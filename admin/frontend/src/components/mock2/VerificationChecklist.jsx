@@ -19,13 +19,14 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, ShieldCheck, ShieldAlert, KeyRound, CheckCircle2, Ban, Clock } from 'lucide-react';
+import { Loader2, ShieldCheck, ShieldAlert, KeyRound, CheckCircle2, Ban, Clock, ShieldOff } from 'lucide-react';
 
-export default function VerificationChecklist({ projectId, canEdit, online, cycle, onRefresh }) {
+export default function VerificationChecklist({ projectId, canEdit, isAdmin, online, cycle, onRefresh }) {
   const { toast } = useToast();
   const [status, setStatus] = useState(null); // integration-status payload
   const [forms, setForms] = useState({});     // item_id -> { environment, observed }
   const [busyItem, setBusyItem] = useState(null);
+  const [releasing, setReleasing] = useState(false);
 
   const load = useCallback(async () => {
     try { setStatus(await api.mock2GetIntegrationStatus(projectId)); }
@@ -98,6 +99,23 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not defer the check', description: err.message });
     } finally { setBusyItem(null); }
+  };
+
+  // Admin escape hatch: release EVERY outstanding live check at once (recorded
+  // as admin waivers) and advance the pending build(s) to succeeded. The
+  // guaranteed way out when the live checks will never be run.
+  const releaseAll = async () => {
+    setReleasing(true);
+    try {
+      const res = await api.mock2ReleaseCapabilityChecks(projectId, {
+        reason: 'released by administrator from the project Build panel — live verification not required',
+      });
+      toast({ title: 'Live checks released', description: res?.note || 'All outstanding live checks were released; the build is no longer pending verification.' });
+      await load();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not release the live checks', description: err.message });
+    } finally { setReleasing(false); }
   };
 
   return (
@@ -181,6 +199,19 @@ export default function VerificationChecklist({ projectId, canEdit, online, cycl
             </div>
           );
         })}
+        {isAdmin && online ? (
+          <div className="rounded-md border border-dashed p-3 space-y-2">
+            <p className="text-[11px] text-muted-foreground break-words">
+              <span className="font-medium text-foreground">Don't want these checks?</span> Release them all: each is recorded
+              as an admin waiver (append-only, reasoned) and the pending build advances to succeeded. To stop future builds
+              from asking at all, set the integration gate mode to <span className="font-medium">Off</span> in the admin queue.
+            </p>
+            <Button variant="outline" size="sm" className="h-11 sm:h-9" disabled={releasing} onClick={releaseAll}>
+              {releasing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ShieldOff className="h-4 w-4 mr-1" />}
+              Release all — skip live verification (admin)
+            </Button>
+          </div>
+        ) : null}
         <p className="text-[11px] text-muted-foreground">
           Confirming records your observed result (append-only evidence, never a checkbox) and marks the build fully
           verified once every check clears. Reporting a failure opens a real bug-fix build carrying your observation.

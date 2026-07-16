@@ -6,8 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeGateMode, applyIntegrationGateMode,
-  GATE_MODE_ENFORCE, GATE_MODE_PENDING, GATE_MODE_MONITOR, INTEGRATION_GATE_MODES,
+  normalizeGateMode, applyIntegrationGateMode, applyLiveCheckMode,
+  GATE_MODE_ENFORCE, GATE_MODE_PENDING, GATE_MODE_MONITOR, GATE_MODE_OFF, INTEGRATION_GATE_MODES,
 } from '../mock2/accept-pending-logic.js';
 
 // A representative BLOCKING integration-gate decision (a fabricated-data finding
@@ -27,8 +27,8 @@ function blockingDecision() {
   };
 }
 
-test('INTEGRATION_GATE_MODES exposes exactly the three modes', () => {
-  assert.deepEqual([...INTEGRATION_GATE_MODES], ['enforce', 'pending', 'monitor']);
+test('INTEGRATION_GATE_MODES exposes exactly the four modes', () => {
+  assert.deepEqual([...INTEGRATION_GATE_MODES], ['enforce', 'pending', 'monitor', 'off']);
 });
 
 test('normalizeGateMode accepts known modes and case-folds', () => {
@@ -55,7 +55,7 @@ test('enforce mode leaves a blocking decision untouched (still blocks)', () => {
 
 test('a non-blocking decision is never downgraded, whatever the mode', () => {
   const clean = { blocking: false, outcome: 'succeeded', reasons: [], checklist: [] };
-  for (const mode of ['enforce', 'pending', 'monitor']) {
+  for (const mode of ['enforce', 'pending', 'monitor', 'off']) {
     const res = applyIntegrationGateMode({ decision: clean, mode });
     assert.equal(res.downgraded, false);
     assert.equal(res.decision.blocking, false);
@@ -105,4 +105,72 @@ test('monitor mode clears the block without forcing a pending checklist (build p
   // No checklist manufactured — an empty-checklist decision succeeds downstream.
   assert.equal(res.decision.checklist.length, 0);
   assert.deepEqual(res.decision.would_block_reasons, decision.reasons);
+});
+
+test('off mode clears a block the same way monitor does', () => {
+  const res = applyIntegrationGateMode({ decision: blockingDecision(), mode: 'off' });
+  assert.equal(res.downgraded, true);
+  assert.equal(res.mode, GATE_MODE_OFF);
+  assert.equal(res.decision.blocking, false);
+  assert.equal(res.decision.outcome, 'monitor-recorded');
+});
+
+// ---- applyLiveCheckMode: the 'off' half that disables the live-verification hand-off ----
+
+// A clean decision that would land the cycle in pending-operator-verification:
+// credential-gated live checks derived from the manifest.
+function pendingDecision() {
+  return {
+    schema_version: 1,
+    outcome: 'pending-operator-verification',
+    blocking: false,
+    reasons: [],
+    checklist: [
+      { item_id: 'auth:test-connection', subsystem: 'auth', manifest_id: 'auth', manifest_hash: 'h1' },
+      { item_id: 'auth:login', subsystem: 'auth', manifest_id: 'auth', manifest_hash: 'h1' },
+    ],
+  };
+}
+
+test('applyLiveCheckMode passes a decision through untouched for enforce/pending/monitor', () => {
+  for (const mode of ['enforce', 'pending', 'monitor']) {
+    const decision = pendingDecision();
+    const res = applyLiveCheckMode({ decision, mode });
+    assert.equal(res.decision, decision);
+    assert.deepEqual(res.skipped, []);
+  }
+});
+
+test('off mode strips the live checklist and converts pending to succeeded — recorded, never hidden', () => {
+  const decision = pendingDecision();
+  const res = applyLiveCheckMode({ decision, mode: 'off' });
+  assert.equal(res.skipped.length, 2);
+  assert.equal(res.decision.checklist.length, 0);
+  assert.equal(res.decision.outcome, 'succeeded');
+  assert.equal(res.decision.live_checks_disabled, true);
+  // The skipped checks land on the record (auditable), not in the void.
+  assert.deepEqual(res.decision.skipped_checklist.map((c) => c.item_id), ['auth:test-connection', 'auth:login']);
+  // The input object is not mutated.
+  assert.equal(decision.checklist.length, 2);
+  assert.equal(decision.outcome, 'pending-operator-verification');
+});
+
+test('off mode converts a builder-declared pending outcome even with an empty checklist', () => {
+  const res = applyLiveCheckMode({ decision: { ...pendingDecision(), checklist: [] }, mode: 'off' });
+  assert.equal(res.decision.outcome, 'succeeded');
+  assert.deepEqual(res.skipped, []);
+});
+
+test('off mode leaves a succeeded no-checklist decision alone', () => {
+  const clean = { blocking: false, outcome: 'succeeded', checklist: [] };
+  const res = applyLiveCheckMode({ decision: clean, mode: 'off' });
+  assert.equal(res.decision, clean);
+  assert.deepEqual(res.skipped, []);
+});
+
+test('applyLiveCheckMode never touches a BLOCKING decision (that is applyIntegrationGateMode business)', () => {
+  const decision = blockingDecision();
+  const res = applyLiveCheckMode({ decision, mode: 'off' });
+  assert.equal(res.decision, decision);
+  assert.deepEqual(res.skipped, []);
 });

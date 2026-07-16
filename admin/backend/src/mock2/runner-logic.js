@@ -13,7 +13,7 @@
 // drives it is build_runner. Nothing here — or anywhere in M6 — is named "agent".
 
 import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
-import { buildComponentCatalogSection } from './component-logic.js';
+import { buildComponentCatalogSection, buildInstalledComponentsSection } from './component-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -278,7 +278,7 @@ export function parseFrameworkSkills(skillsJson) {
 // fresh from a pinned version, never travels through chat, cannot be talked out
 // of). constitution is the pinned constitution_md; skills the parsed skill list;
 // task the canned instruction; appDir/webPort orient the model in the container.
-export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [] } = {}) {
+export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [] } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -324,7 +324,7 @@ constitution, the approved exception WINS. Do not refuse or silently skip an
 approved exception; implementing it is the required work for this build.
 
 # Available skills
-${skillLines}${buildComponentCatalogSection(components, { access: 'tool' })}
+${skillLines}${buildInstalledComponentsSection(installedComponents)}${buildComponentCatalogSection(components, { access: 'tool' })}
 
 # Integration manifest (state/integrations.json — the EXACT shape is enforced)
 Any external capability (a third-party API, a directory bind, an external DB)
@@ -680,7 +680,7 @@ export const SDK_ALLOWED_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Bash',
 // system-prompt version. `task` is passed to the SDK as the prompt, so it is NOT
 // duplicated here; the administrator-decisions block (when present) rides on the
 // task like it does today.
-export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [] } = {}) {
+export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [] } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -727,7 +727,7 @@ constitution, the approved exception WINS. Do not refuse or silently skip an
 approved exception; implementing it is the required work for this build.
 
 ## Available skills
-${skillLines}${buildComponentCatalogSection(components, { access: 'files', dir: '.claude/components' }).replace(/^# /m, '## ')}
+${skillLines}${buildInstalledComponentsSection(installedComponents).replace(/^# /m, '## ')}${buildComponentCatalogSection(components, { access: 'files', dir: '.claude/components' }).replace(/^# /m, '## ')}
 
 ## Integration manifest (state/integrations.json — the EXACT shape is enforced)
 Any external capability (a third-party API, a directory bind, an external DB)

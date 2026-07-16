@@ -227,6 +227,7 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
     }
   ],
   "entities": [ { "name": "string", "fields": ["string"] } ],
+  "required_capabilities": [ "string — lowercase capability slugs, see below" ],
   "notes": "string — anything important the structure above doesn't capture"
 }
 
@@ -236,6 +237,13 @@ Rules:
 - Infer a field's type from how it looks and behaves; default to "text" when unsure.
 - entities and notes may be empty ([] / "") but screens must not be.
 - Do not invent screens, fields, or actions the mockup does not show.
+- required_capabilities are the INFRASTRUCTURE needs the mockup implies, as
+  lowercase slugs. Include "users" whenever the app has user accounts, sign-in,
+  profiles, or per-person data (i.e. it is not a static/public-only site);
+  "roles" when it distinguishes roles/permissions (admin areas, role labels);
+  "ldap" when it mentions an enterprise directory / LDAP / SSO-style corporate
+  sign-in; "notifications" for email/alert flows; "files" for upload/storage.
+  Only list what the mockup or brief actually implies — an empty list is valid.
 Return the JSON object only.`;
 }
 
@@ -282,10 +290,20 @@ export function parseInventory(text) {
   const entities = (Array.isArray(doc.entities) ? doc.entities : [])
     .filter((e) => e && typeof e === 'object')
     .map((e) => ({ name: String(e.name || ''), fields: (Array.isArray(e.fields) ? e.fields : []).map((x) => String(x)) }));
+  // Capability hints for define-time component selection (migration 524):
+  // lowercase slugs, deduped, tolerant of junk. Never fatal — an absent or
+  // malformed list is simply empty (older projects have none).
+  const requiredCapabilities = [...new Set(
+    (Array.isArray(doc.required_capabilities) ? doc.required_capabilities : [])
+      .map((c) => String(c || '').trim().toLowerCase())
+      .filter((c) => /^[a-z0-9][a-z0-9.-]*$/.test(c))
+      .slice(0, 32),
+  )];
   const inventory = {
     version: 1,
     screens,
     entities,
+    required_capabilities: requiredCapabilities,
     notes: String(doc.notes || ''),
   };
   return { ok: true, inventory };

@@ -1,5 +1,18 @@
 # API-driven components: define-time selection + zero-token pre-install
 
+**Build status (2026-07-16):** Phases C1–C4 are implemented (migration 524).
+Contract fields + validation + import/export + library UI display;
+`mock2_project_components` + `state/components.json` + the
+`preinstallComponents()` zero-token installer (files, migrations renumber, npm
+deps, `.env` defaults, manifest pre-declaration) wired into `proceedToBuild`
+and the operator routes; concept-stage `required_capabilities` extraction; the
+pure matcher + `component_suggestion` audit questions; installed-components
+prompt sections in both runners with catalog filtering. See
+`docs/features/component-library.md` (usage) and
+`docs/features/component-authoring.md` (contract spec). Remaining: C5 polish
+(mockup alignment, `adaptable` flags + hardened integrity gate, upgrade flow)
+and the C4 integrity drift report.
+
 Planning document. Goal: evolve the component library from "a catalog the build
 runner *may* adopt" into **declared infrastructure the platform installs
 deterministically** — so the mockup/define stage decides *which* components a

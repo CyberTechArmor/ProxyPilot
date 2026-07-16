@@ -58,11 +58,11 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { callModelTurn } from './model-client.js';
-import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
+import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
   formatComponentForModel, parseFilesJson, safeComponentPath, buildComponentManifest,
   buildPathsExistScript, parsePathsExistOutput, buildManifestVerifyScript, parseShaVerifyOutput,
-  formatMaterializeResult,
+  formatMaterializeResult, parseContractJson,
 } from './component-logic.js';
 import { logAudit } from '../db.js';
 import {
@@ -564,7 +564,22 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   // Best-effort — an empty/failed catalog just omits the prompt section.
   let componentCatalog = [];
   try { componentCatalog = listPublishedComponents(); } catch (err) { console.warn('[mock2] component catalog load failed:', err?.message); }
-  const system = buildRunnerSystemPrompt({ constitution: framework.constitution_md, skills, appDir: APP_DIR, webPort: project.web_port || 3000, components: componentCatalog });
+  // Components the platform PRE-INSTALLED for this project (migration 524) are
+  // presented as installed infrastructure to wire against — and filtered out of
+  // the adoptable catalog so the runner is never told to re-materialize them.
+  let installedComponents = [];
+  try {
+    installedComponents = listProjectComponents(project.id)
+      .filter((r) => r.status === 'installed')
+      .map((r) => ({ key: r.key, name: r.name, version: r.pinned_version, contract: parseContractJson(r.contract_json) }));
+  } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
+  const installedKeys = new Set(installedComponents.map((c) => c.key));
+  const system = buildRunnerSystemPrompt({
+    constitution: framework.constitution_md, skills, appDir: APP_DIR,
+    webPort: project.web_port || 3000,
+    components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
+    installedComponents,
+  });
   const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

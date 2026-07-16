@@ -39,7 +39,7 @@ import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
-import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard } from '@/components/mock2/ProjectTimeCard';
+import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
 import { fireConfetti } from '@/lib/confetti';
 
 // Background lifecycle jobs (archive/rehydrate/wake) return 202; the page polls
@@ -528,6 +528,10 @@ export default function ProjectDetail() {
       {/* Declared outbound egress — the internal hosts the app must reach, each
           admin-approved; anything not declared+approved stays blocked. */}
       <EgressGrantsCard projectId={id} isAdmin={isAdmin} />
+
+      {/* Standard components — what this app uses (suggested at define time or
+          picked here), installed by the platform with zero build credits. */}
+      <ProjectComponentsCard projectId={id} canEdit={canEdit} isActive={project.lifecycle === 'active'} />
 
       {/* (build cycle + build chat now live in the Chat tab above) */}
 

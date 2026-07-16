@@ -82,9 +82,62 @@ admin + sudo. All mutations are audit-logged.
    is offered it automatically. Nothing about this requires updating
    ProxyPilot itself.
 
-## Example component
+## Contracts, define-time selection, and zero-token pre-install (migration 524)
 
-`docs/features/examples/ldaps-auth.component.json` is a complete, importable
+A component version may carry a machine-readable **contract**
+(`contract_json`, validated by `component-logic.validateComponentContract`):
+`provides` (capability slugs), `requires_when` (when the define stage should
+suggest it), `api` (the endpoint surface the build wires the mockup to),
+`exports`, `config` (env vars, secrets flagged), `connections` (pre-declared
+integration-manifest entries + egress), `dependencies` (structured npm
+installs), and `migrations` (which files are SQL migrations). Components
+without a contract behave exactly as before. Full field spec:
+`docs/features/component-authoring.md`.
+
+The contract makes components **requirement-driven and free to install**:
+
+- **Concept** — the inventory extraction also emits
+  `required_capabilities` (e.g. `users`, `roles`, `ldap`) into
+  `state/inventory.json`.
+- **Define** — a PURE matcher (no model call) joins those capabilities against
+  the published contracts' `requires_when`; each match becomes a tappable
+  `component_suggestion` question in the build chat that gates the build like
+  any rule question. The decision lands on **`mock2_project_components`**
+  (suggested → confirmed/declined) — one row per (project, component), the
+  visible record of what the build uses. A declined component never re-suggests.
+- **Pre-install** — `component-install.js preinstallComponents()` runs inside
+  `proceedToBuild` (and from the operator's "Install now" button): every
+  confirmed selection is written into the container by the platform — files
+  (sha256-verified, keep-existing), migrations renumbered to append after the
+  project's own, `dependencies` npm-installed, non-secret `config` defaults
+  merged into `.env` (secrets are NEVER written), and each `connections` entry
+  pre-declared in `state/integrations.json`. **Zero model tokens.** The
+  selection is mirrored to `state/components.json`, checkpointed with a
+  hash-chained change record, audit-logged (`MOCK2_COMPONENT_PREINSTALL`), and
+  reported in the build chat. A failed install blocks the build (retry by
+  pressing Build again).
+- **Build** — both runners receive an "Installed components" prompt section
+  (key, version, API table, exports, secrets) with the instruction to WIRE the
+  approved design to those endpoints and never rebuild them; installed
+  components are filtered out of the adoptable catalog.
+
+HTTP surface: `GET/POST /projects/:id/components` (list the selection; an
+editor specifies a component by key or declines one) and
+`POST /projects/:id/components/install` (run the pre-install now). The
+project's Details tab shows the **Standard components** card (selection status,
+provides/API counts, add-a-component picker, "Install now (no credits)").
+
+## Example components
+
+`docs/features/examples/proxypilot-auth.component.json` is the flagship
+contract-bearing example: local password + LDAPS auth, JWT + rotating refresh
+tokens, DB-driven RBAC, and the **race-safe first-admin (superadmin) bootstrap**
+(first-come while zero users exist — `GET /api/auth/bootstrap/status`,
+`POST /api/auth/bootstrap/superadmin`, the first-run login page, and a CLI
+seeder). Its contract declares `auth.bootstrap-superadmin`, so any app whose
+design implies user accounts is offered the standard bootstrap automatically.
+
+`docs/features/examples/ldaps-auth.component.json` is a smaller, importable
 example — the canonical LDAPS auth module (search-then-bind, bounded connection
 pool, RFC 4515 escaping, group extraction) in `proxypilot-component@1` format.
 Import it via **Projects → Components → Import** (upload the .component.json

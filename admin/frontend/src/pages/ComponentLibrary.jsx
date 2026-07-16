@@ -396,6 +396,41 @@ export default function ComponentLibrary() {
             <DialogTitle className="flex flex-wrap items-center gap-2">{viewing?.name} <span className="rounded bg-muted px-2 py-0.5 font-mono text-xs">{viewing?.key}</span></DialogTitle>
             {viewing?.description && <DialogDescription>{viewing.description}</DialogDescription>}
           </DialogHeader>
+          {viewing?.contract && (
+            <div className="space-y-2">
+              <div className="text-sm font-medium">Contract (machine-readable — drives define-time suggestion + zero-credit install)</div>
+              {viewing.contract.provides?.length ? (
+                <p className="text-xs"><span className="text-muted-foreground">Provides:</span> <span className="font-mono break-all">{viewing.contract.provides.join(', ')}</span></p>
+              ) : null}
+              {viewing.contract.requires_when?.capabilities_any?.length ? (
+                <p className="text-xs"><span className="text-muted-foreground">Suggested when the app needs:</span> <span className="font-mono break-all">{viewing.contract.requires_when.capabilities_any.join(', ')}</span></p>
+              ) : null}
+              {viewing.contract.api?.length ? (
+                <div className="max-h-40 overflow-auto rounded border bg-muted/40 p-2 text-xs space-y-0.5">
+                  {viewing.contract.api.map((a) => (
+                    <div key={`${a.method} ${a.path}`} className="font-mono break-all">
+                      {a.method} {a.path} <span className="text-muted-foreground">[{a.auth}]{a.summary ? ` — ${a.summary}` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {viewing.contract.config?.length ? (
+                <p className="text-xs break-all"><span className="text-muted-foreground">Config:</span>{' '}
+                  {viewing.contract.config.map((k) => `${k.key}${k.secret ? ' (secret)' : k.default != null ? `=${k.default}` : ''}`).join(', ')}
+                </p>
+              ) : null}
+              {viewing.contract.connections?.length ? (
+                <p className="text-xs break-all"><span className="text-muted-foreground">Connections:</span>{' '}
+                  {viewing.contract.connections.map((c) => `${c.id} (${c.transport}, ${c.egress?.classification}${c.optional ? ', optional' : ''})`).join(', ')}
+                </p>
+              ) : null}
+              {viewing.contract.dependencies ? (
+                <p className="text-xs break-all"><span className="text-muted-foreground">Installs:</span>{' '}
+                  {[...(viewing.contract.dependencies.runtime || []), ...(viewing.contract.dependencies.peers || [])].join(', ') || '—'}
+                </p>
+              ) : null}
+            </div>
+          )}
           {viewing?.usage_md && (
             <div>
               <div className="mb-1 text-sm font-medium">Integration notes</div>

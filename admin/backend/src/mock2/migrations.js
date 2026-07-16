@@ -1059,4 +1059,72 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_egress_grants ADD COLUMN origin TEXT NOT NULL DEFAULT 'declared';`);
     },
   },
+  {
+    // API-driven components: (1) a version-pinned machine-readable CONTRACT on
+    // each component version (contract_json — provides/api/config/connections/
+    // dependencies/migrations, validated by component-logic.validateComponentContract;
+    // immutable like files_json); (2) per-project component SELECTION — which
+    // components a project uses, decided at define time (suggested → confirmed/
+    // declined) or by an operator, and installed deterministically by the
+    // platform (no model tokens) before the build runner starts. question_id
+    // links a 'suggested' row to its component_suggestion audit question so the
+    // answer handler can find it; install_manifest_json records exactly what
+    // landed (paths/bytes/sha256 — never contents). (3) the audit-question kind
+    // CHECK gains 'component_suggestion' — SQLite can't ALTER a CHECK, so the
+    // table is rebuilt (same idiom as the 517 queue rebuild); data is copied
+    // verbatim.
+    version: 524,
+    name: 'mock2_component_contracts_and_selection',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_component_versions ADD COLUMN contract_json TEXT;
+
+        CREATE TABLE mock2_project_components (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          component_id INTEGER NOT NULL,
+          version_id INTEGER,
+          status TEXT NOT NULL DEFAULT 'suggested'
+            CHECK (status IN ('suggested','confirmed','declined','installed','install_failed')),
+          origin TEXT NOT NULL DEFAULT 'define'
+            CHECK (origin IN ('concept','define','operator')),
+          options_json TEXT,
+          question_id INTEGER,
+          selected_by INTEGER,
+          decided_at TEXT,
+          installed_at TEXT,
+          install_manifest_json TEXT,
+          install_error TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          UNIQUE (project_id, component_id)
+        );
+        CREATE INDEX idx_mock2_project_components_project
+          ON mock2_project_components (project_id, status);
+
+        CREATE TABLE mock2_audit_questions_new (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          route TEXT NOT NULL CHECK (route IN ('editor','admin')),
+          kind TEXT NOT NULL CHECK (kind IN
+            ('domain_question','framework_deviation','rule_contradiction','rule_gap','component_suggestion')),
+          question TEXT NOT NULL,
+          choices_json TEXT,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered','dismissed')),
+          answer TEXT,
+          answered_by INTEGER,
+          answered_at TEXT,
+          rules_md_anchor TEXT,
+          created_at TEXT
+        );
+        INSERT INTO mock2_audit_questions_new
+          SELECT id, project_id, cycle_id, route, kind, question, choices_json,
+                 status, answer, answered_by, answered_at, rules_md_anchor, created_at
+            FROM mock2_audit_questions;
+        DROP TABLE mock2_audit_questions;
+        ALTER TABLE mock2_audit_questions_new RENAME TO mock2_audit_questions;
+      `);
+    },
+  },
 ];

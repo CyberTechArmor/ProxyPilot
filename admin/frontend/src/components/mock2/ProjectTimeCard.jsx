@@ -11,8 +11,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import {
   Clock, Sparkles, Hammer, Wrench, ShieldAlert, Keyboard, CheckCircle2, Ban, Timer, Coins,
-  Globe, RefreshCw, Wifi, WifiOff,
+  Globe, RefreshCw, Wifi, WifiOff, Package, Download, Loader2,
 } from 'lucide-react';
 
 function fmt(s) {
@@ -324,6 +327,160 @@ export function EgressGrantsCard({ projectId, isAdmin = false }) {
             })}
           </ul>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function componentStatusBadge(status) {
+  if (status === 'installed') return <span className="inline-flex items-center gap-1 text-emerald-500"><CheckCircle2 className="h-3.5 w-3.5" /> Installed</span>;
+  if (status === 'confirmed') return <span className="text-blue-500">Confirmed — installs at next build</span>;
+  if (status === 'suggested') return <span className="text-amber-500">Suggested — confirm in the build chat</span>;
+  if (status === 'install_failed') return <span className="inline-flex items-center gap-1 text-red-500"><Ban className="h-3.5 w-3.5" /> Install failed</span>;
+  if (status === 'declined') return <span className="text-muted-foreground">Declined</span>;
+  return <span className="text-muted-foreground">{status}</span>;
+}
+
+// ProjectComponentsCard — WHICH standard library components this app uses: the
+// visible record of define-time selections (suggested → confirmed in the build
+// chat), plus the operator lever to specify one directly and to run the
+// deterministic zero-token install now instead of at the next build.
+export function ProjectComponentsCard({ projectId, canEdit = false, isActive = true }) {
+  const [rows, setRows] = useState(null);
+  const [catalog, setCatalog] = useState([]);
+  const [pickKey, setPickKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const { toast } = useToast();
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.mock2ListProjectComponents(projectId);
+      setRows(r.components || []);
+      if (canEdit) {
+        const c = await api.mock2ListComponents('published');
+        setCatalog(c.components || []);
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load project components failed:', err);
+    }
+  }, [projectId, canEdit]);
+
+  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, [load]);
+
+  const decide = async (key, decision) => {
+    setBusy(true);
+    try {
+      await api.mock2SelectProjectComponent(projectId, { key, decision });
+      toast({ title: decision === 'confirmed' ? 'Component selected' : 'Component declined', description: key });
+      setPickKey('');
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not update selection', description: err?.message || 'Try again.' });
+    } finally { setBusy(false); }
+  };
+
+  const installNow = async () => {
+    setBusy(true);
+    try {
+      const r = await api.mock2InstallProjectComponents(projectId);
+      if (r.ok) {
+        toast({ title: 'Components installed', description: r.installed.map((i) => `${i.key} v${i.version}`).join(', ') || 'Nothing pending.' });
+      } else {
+        toast({ variant: 'destructive', title: 'Install incomplete', description: r.failed.map((f) => `${f.key}: ${f.error}`).join('; ') });
+      }
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Install failed', description: err?.message || 'Try again.' });
+    } finally { setBusy(false); }
+  };
+
+  const activeRows = (rows || []).filter((r) => r.status !== 'declined');
+  const declinedRows = (rows || []).filter((r) => r.status === 'declined');
+  const pendingInstall = activeRows.some((r) => ['confirmed', 'install_failed'].includes(r.status));
+  const selectable = catalog.filter((c) => !(rows || []).some((r) => r.key === c.key && r.status !== 'declined'));
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Package className="h-4 w-4" /> Standard components</CardTitle>
+        <CardDescription>
+          Audited building blocks this app uses (auth/bootstrap, directory, …). Suggested from the approved design,
+          confirmed in the build chat or picked here, then installed by the platform with no build credits — the build
+          only wires the design to their APIs.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {rows === null ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : activeRows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No components selected yet. Suggestions appear automatically when the approved design implies one
+            (an app with user accounts is offered the standard auth + superadmin bootstrap component).
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {activeRows.map((r) => (
+              <li key={r.id} className="rounded-md border px-3 py-2 text-xs space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono font-medium break-all">{r.key}{r.version ? ` v${r.version}` : ''}</span>
+                  <span className="font-medium">{componentStatusBadge(r.status)}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+                  {r.provides?.length ? <span className="break-all">provides: {r.provides.join(', ')}</span> : null}
+                  {r.api_count ? <span>{r.api_count} API endpoint{r.api_count === 1 ? '' : 's'}</span> : null}
+                  {r.files_installed != null ? <span>{r.files_installed} files installed</span> : null}
+                  <span>via {r.origin}</span>
+                </div>
+                {r.install_error ? <p className="break-words text-red-500">{r.install_error}</p> : null}
+                {canEdit && ['suggested', 'confirmed', 'install_failed'].includes(r.status) ? (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {r.status === 'suggested' ? (
+                      <Button size="sm" className="h-9" disabled={busy} onClick={() => decide(r.key, 'confirmed')}>
+                        <CheckCircle2 className="h-4 w-4 mr-1" /> Use it
+                      </Button>
+                    ) : null}
+                    <Button size="sm" variant="outline" className="h-9 text-red-500" disabled={busy} onClick={() => decide(r.key, 'declined')}>
+                      <Ban className="h-4 w-4 mr-1" /> {r.status === 'suggested' ? 'Skip' : 'Remove from selection'}
+                    </Button>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        {declinedRows.length ? (
+          <p className="text-xs text-muted-foreground">
+            Declined: {declinedRows.map((r) => r.key).join(', ')}{canEdit ? ' — re-add below to change your mind.' : ''}
+          </p>
+        ) : null}
+        {canEdit ? (
+          <div className="flex flex-col sm:flex-row gap-2 pt-1">
+            {selectable.length ? (
+              <>
+                <Select value={pickKey} onValueChange={setPickKey}>
+                  <SelectTrigger className="h-11 sm:h-9 w-full sm:w-64">
+                    <SelectValue placeholder="Use a library component…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {selectable.map((c) => (
+                      <SelectItem key={c.key} value={c.key}>{c.name} ({c.key})</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" className="h-11 sm:h-9" disabled={busy || !pickKey} onClick={() => decide(pickKey, 'confirmed')}>
+                  <Package className="h-4 w-4 mr-1" /> Use component
+                </Button>
+              </>
+            ) : null}
+            {pendingInstall ? (
+              <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={busy || !isActive} onClick={installNow}
+                title={isActive ? undefined : 'The project must be online to install'}>
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Download className="h-4 w-4 mr-1" />}
+                Install now (no credits)
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

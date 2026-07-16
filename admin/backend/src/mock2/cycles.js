@@ -9,6 +9,7 @@
 // its cycles. Nothing here is named "agent".
 
 import { getMock2Db } from './db.js';
+import { recordRoutingOutcomeForCycle } from './routing.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -91,6 +92,9 @@ const WRITABLE = new Set([
   // Integration truthfulness (migration 520): the pending-operator-verification
   // signal and the B.4 gate result stamped at finish.
   'verification_state', 'integration_gate_json',
+  // Model routing (migration 525): the decision stamped at start — which
+  // model/effort/rung ran and why (reviewable; the outcome recorder reads it).
+  'routing_json',
 ]);
 
 export function updateCycle(id, patch = {}) {
@@ -122,9 +126,15 @@ export function setInterrupt(id, interruptRequest) {
 }
 
 // Mark a cycle terminal with a status + optional error, stamping finished_at.
+// Every terminal build cycle that carries a routing stamp also lands one row
+// in mock2_routing_outcomes here (migration 525) — the append-only evidence
+// the routing knowledge base is tuned against. Best-effort: an outcome-write
+// failure must never block the terminal transition.
 export function finishCycle(id, { status, error = null } = {}) {
   getMock2Db()
     .prepare(`UPDATE mock2_cycles SET status = ?, error = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?`)
     .run(status, error, nowIso(), Number(id));
-  return getCycle(id);
+  const cycle = getCycle(id);
+  try { recordRoutingOutcomeForCycle(cycle); } catch (e) { console.warn('[mock2] routing outcome write failed:', e?.message); }
+  return cycle;
 }

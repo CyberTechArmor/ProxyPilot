@@ -1127,4 +1127,55 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Model routing (reviewable + tunable). (1) routing_json on mock2_cycles —
+    // the decision the cycle ran under (task kind, difficulty, model, effort,
+    // rung, reason), stamped at start so every build's routing is reviewable in
+    // the logs. (2) mock2_routing_rules — the KNOWLEDGE BASE / reference
+    // dictionary: one admin-editable row per task kind mapping to a model
+    // override, an escalation model, and an effort level (all nullable — a
+    // fresh install behaves exactly as before; routing.js seeds the default
+    // kinds). (3) mock2_routing_outcomes — append-only evidence: one row per
+    // terminal routed build cycle (model/effort/rung/status/cost/tokens), the
+    // data an operator reviews to fine-tune the dictionary. All additive.
+    version: 525,
+    name: 'mock2_model_routing',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_cycles ADD COLUMN routing_json TEXT;
+
+        CREATE TABLE mock2_routing_rules (
+          id INTEGER PRIMARY KEY,
+          task_kind TEXT NOT NULL UNIQUE,
+          label TEXT,
+          model TEXT,
+          escalate_model TEXT,
+          effort TEXT CHECK (effort IN ('low','medium','high','xhigh','max') OR effort IS NULL),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          notes TEXT,
+          updated_by INTEGER,
+          created_at TEXT,
+          updated_at TEXT
+        );
+
+        CREATE TABLE mock2_routing_outcomes (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          cycle_id INTEGER NOT NULL,
+          request_id INTEGER,
+          task_kind TEXT NOT NULL DEFAULT 'default',
+          difficulty INTEGER,
+          model TEXT,
+          effort TEXT,
+          rung INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          cost_cents INTEGER NOT NULL DEFAULT 0,
+          tokens INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_mock2_routing_outcomes_kind ON mock2_routing_outcomes (task_kind, id);
+        CREATE UNIQUE INDEX idx_mock2_routing_outcomes_cycle ON mock2_routing_outcomes (cycle_id);
+      `);
+    },
+  },
 ];

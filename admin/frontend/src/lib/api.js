@@ -1301,6 +1301,14 @@ export const api = {
     request(`/mock2/projects/${projectId}/ask`, { method: 'POST', body: JSON.stringify({ question }) }),
   mock2AskStatus: (projectId) => request(`/mock2/projects/${projectId}/ask/status`),
 
+  // Model routing knowledge base (admin): the task-kind → model/effort
+  // dictionary and the outcome evidence it is tuned against.
+  mock2RoutingRules: () => request('/mock2/routing/rules'),
+  mock2UpdateRoutingRule: (kind, body) =>
+    request(`/mock2/routing/rules/${kind}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  mock2RoutingOutcomes: (kind) =>
+    request(`/mock2/routing/outcomes${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+
   // ---- Mock2 M6: cycle runner + checkout lock ----
   mock2StartCycle: (id, instruction) =>
     request(`/mock2/projects/${id}/cycles`, { method: 'POST', body: JSON.stringify({ instruction }) }),

@@ -175,6 +175,12 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { startAsk, getAskJobStatus } from './ask.js';
+// ---- Model routing knowledge base (migration 525) ----
+import { listRoutingRules, getRoutingRule, updateRoutingRule, listRoutingOutcomes } from './routing.js';
+import {
+  ROUTING_TASK_KINDS, ROUTING_EFFORTS, routingMode,
+  publicRoutingRuleShape, aggregateRoutingOutcomes,
+} from './routing-logic.js';
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer } from './runner.js';
 import {
@@ -543,6 +549,14 @@ const componentVersionSchema = z.object({
 });
 // The ask lane's input — a question/task for the read-and-run assistant.
 const askSchema = z.object({ question: z.string().trim().min(1).max(4000) });
+// A routing-rule edit — every field optional; null/'' clears back to the default.
+const routingRuleSchema = z.object({
+  model: z.string().trim().max(120).nullish(),
+  escalate_model: z.string().trim().max(120).nullish(),
+  effort: z.enum(ROUTING_EFFORTS).nullable().optional(),
+  enabled: z.boolean().optional(),
+  notes: z.string().trim().max(2000).nullish(),
+}).refine((o) => Object.keys(o).length > 0, 'no fields to update');
 // A project's component selection: an editor picks a library component for the
 // project (or declines a suggestion) by key.
 const projectComponentSelectSchema = z.object({
@@ -2552,6 +2566,58 @@ export function createMock2Router() {
 
   router.get('/projects/:id/ask/status', requireMock2Role('viewer'), (req, res) => {
     res.json({ job: getAskJobStatus(req.mock2Project.id) });
+  });
+
+  // ============================================================
+  // MODEL ROUTING knowledge base (migration 525) — the reference dictionary
+  // mapping task kind → model / escalation model / effort, plus the append-only
+  // outcome evidence it is tuned against. Reads are admin (models + costs are
+  // operator concerns); edits are admin + audited.
+  // ============================================================
+
+  router.get('/routing/rules', requireAdmin, (req, res) => {
+    res.json({
+      mode: routingMode(process.env),
+      task_kinds: ROUTING_TASK_KINDS,
+      efforts: ROUTING_EFFORTS,
+      env_escalate_model: String(process.env.MOCK2_ESCALATE_MODEL || '').trim() || null,
+      rules: listRoutingRules().map((r) => publicRoutingRuleShape(r)),
+    });
+  });
+
+  router.patch('/routing/rules/:kind', requireAdmin, (req, res) => {
+    const kind = String(req.params.kind || '').trim().toLowerCase();
+    if (!ROUTING_TASK_KINDS.includes(kind)) return res.status(404).json({ error: 'unknown task kind' });
+    const parsed = routingRuleSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid update' });
+    const d = parsed.data;
+    const updated = updateRoutingRule(kind, {
+      ...(d.model !== undefined ? { model: d.model || null } : {}),
+      ...(d.escalate_model !== undefined ? { escalate_model: d.escalate_model || null } : {}),
+      ...(d.effort !== undefined ? { effort: d.effort || null } : {}),
+      ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
+      ...(d.notes !== undefined ? { notes: d.notes || null } : {}),
+      updatedBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_ROUTING_RULE_UPDATE', 'mock2_routing_rule', kind, { fields: Object.keys(d) }, req.ip);
+    res.json({ rule: publicRoutingRuleShape(updated) });
+  });
+
+  // The scoreboard: per task-kind × model — runs, success rate, escalation
+  // rate, avg cost/tokens — derived from the append-only outcome rows. This is
+  // the evidence an operator reviews before tuning the dictionary.
+  router.get('/routing/outcomes', requireAdmin, (req, res) => {
+    const taskKind = req.query.kind ? String(req.query.kind).trim().toLowerCase() : null;
+    if (taskKind && !ROUTING_TASK_KINDS.includes(taskKind)) return res.status(400).json({ error: 'unknown task kind' });
+    const rows = listRoutingOutcomes({ taskKind, limit: 1000 });
+    res.json({
+      stats: aggregateRoutingOutcomes(rows),
+      recent: rows.slice(0, 50).map((r) => ({
+        cycle_id: r.cycle_id, project_id: r.project_id, request_id: r.request_id,
+        task_kind: r.task_kind, difficulty: r.difficulty, model: r.model, effort: r.effort,
+        rung: r.rung, status: r.status, cost_cents: r.cost_cents, tokens: r.tokens, created_at: r.created_at,
+      })),
+    });
   });
 
   // Send a chat message (editor-gated — a chat write takes the lock and may

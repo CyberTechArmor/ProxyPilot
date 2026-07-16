@@ -13,6 +13,7 @@
 // drives it is build_runner. Nothing here is named "agent".
 
 import { USAGE_SCHEMA_VERSION } from './usage-logic.js';
+import { parseRoutingJson } from './routing-logic.js';
 
 // The mock2_cycles.status vocabulary (migration 502 CHECK), split into the sets
 // the runner branches on. refused_quota / abandoned / failed / succeeded are
@@ -290,6 +291,10 @@ export function publicCycleShape(row) {
       schema_version: row.usage_schema_version ?? null,
       comparable: Number(row.usage_schema_version || 0) >= USAGE_SCHEMA_VERSION,
     },
+    // Model routing (migration 525): the decision stamped at start — which
+    // model/effort ran and WHY ({ model, applied_model, effort, rung, task_kind,
+    // difficulty, reason, mode }). null on pre-routing cycles or MOCK2_ROUTING=off.
+    routing: parseRoutingJson(row.routing_json),
     started_at: row.started_at || null,
     finished_at: row.finished_at || null,
     created_at: row.created_at || null,

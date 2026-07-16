@@ -122,6 +122,10 @@ ${constitution || '(constitution content is still owed — risk R8)'}
 Output ONLY a JSON object, no markdown, no code fences, no commentary:
 
 {
+  "task": {
+    "kind": "chore|bugfix|feature|refactor|question",
+    "difficulty": 1
+  },
   "questions": [
     {
       "kind": "domain_question|rule_contradiction|rule_gap|framework_deviation",
@@ -131,6 +135,11 @@ Output ONLY a JSON object, no markdown, no code fences, no commentary:
     }
   ]
 }
+
+"task" classifies the BUILD REQUEST itself (used to pick the model/effort for
+the build — be honest, not flattering): kind is what the change fundamentally
+is; difficulty is 1 (trivial copy/config tweak) to 5 (large cross-cutting
+change, subtle debugging, or architectural work).
 
 An empty "questions" array is the correct answer when nothing blocks the build.`;
 }
@@ -161,11 +170,25 @@ export function buildAuditTask({ inventory = null, rulesMd = '', instruction = '
 // parseInventory). Each valid question is normalized to
 // { kind, route, question, choices[], rationale } with route derived by kind
 // (never trusted from the model). Invalid entries are dropped, not fatal.
-// Returns { ok, questions, error }. ok:true with an empty list means "no
-// questions — build proceeds".
+// Returns { ok, questions, task, error } — `task` is the request's routing
+// classification ({ kind, difficulty } or null when absent/malformed; the
+// routing layer treats null as 'default'). ok:true with an empty list means
+// "no questions — build proceeds".
+const TASK_KINDS = ['chore', 'bugfix', 'feature', 'refactor', 'question'];
+export function parseAuditTask(doc) {
+  const t = doc?.task;
+  if (!t || typeof t !== 'object') return null;
+  const kind = String(t.kind || '').trim().toLowerCase();
+  const difficulty = Number(t.difficulty);
+  return {
+    kind: TASK_KINDS.includes(kind) ? kind : 'default',
+    difficulty: Number.isFinite(difficulty) ? Math.min(5, Math.max(1, Math.round(difficulty))) : null,
+  };
+}
+
 export function parseAuditQuestions(text) {
   let s = String(text || '').trim();
-  if (!s) return { ok: false, error: 'empty audit response', questions: [] };
+  if (!s) return { ok: false, error: 'empty audit response', questions: [], task: null };
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence && fence[1]) s = fence[1].trim();
   else {
@@ -174,8 +197,9 @@ export function parseAuditQuestions(text) {
     if (start > 0 && end > start) s = s.slice(start, end + 1);
   }
   let doc;
-  try { doc = JSON.parse(s); } catch (e) { return { ok: false, error: `audit output is not valid JSON: ${e.message}`, questions: [] }; }
-  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, error: 'audit output must be a JSON object', questions: [] };
+  try { doc = JSON.parse(s); } catch (e) { return { ok: false, error: `audit output is not valid JSON: ${e.message}`, questions: [], task: null }; }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, error: 'audit output must be a JSON object', questions: [], task: null };
+  const task = parseAuditTask(doc);
   const rawList = Array.isArray(doc.questions) ? doc.questions : [];
   const questions = [];
   for (const q of rawList) {
@@ -193,7 +217,7 @@ export function parseAuditQuestions(text) {
       rationale: String(q.rationale || '').trim(),
     });
   }
-  return { ok: true, questions };
+  return { ok: true, questions, task };
 }
 
 // Normalize a choices value into a clean string array (deduped, trimmed, capped).

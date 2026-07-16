@@ -333,6 +333,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
     tools: [],
     transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }) }],
     maxTokens: 6000,
+    effort: 'medium', // a bounded classification/reasoning task — high depth buys nothing here
   });
   if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: ready.model, usage: auditRes.usage });
   const parsed = auditRes.ok ? parseAuditQuestions(auditRes.text) : { ok: false, error: auditRes.error, questions: [] };
@@ -345,13 +346,20 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 
   const { editor, admin } = splitQuestionsByRoute(parsed.questions);
 
+  // The audit's routing classification of the request (kind + difficulty) —
+  // stamped on the audit cycle so the deferred build (resumed after questions
+  // clear) still finds it, and reviewable in the logs either way.
+  if (parsed.task) {
+    try { updateCycle(cycle.id, { routing_json: JSON.stringify({ task: parsed.task }) }); } catch { /* best effort */ }
+  }
+
   // 3a) No questions (and no component suggestions) → the gate is clear; Build
   //     starts immediately (ADR-002).
   if (editor.length === 0 && admin.length === 0 && suggestionCount === 0) {
     finishCycle(cycle.id, { status: 'succeeded' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Audit passed — no rule questions. Starting the build.' });
     setJob(projectId, { phase: 'building', message: 'Audit passed — starting the build.', cycleId: cycle.id });
-    await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework, requestId: cycle.request_id ?? null });
+    await proceedToBuild({ project, instruction, initiatedBy: cycle.initiated_by, actingAsAdmin, framework, requestId: cycle.request_id ?? null, task: parsed.task });
     return scheduleJobCleanup(projectId);
   }
 
@@ -398,7 +406,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null, task = null }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
@@ -438,7 +446,7 @@ async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin
     // Thread the umbrella request EXPLICITLY (one build request = one log): the
     // build cycle joins the audit cycle's request instead of relying on the
     // latest-open-request fallback inside startCycle.
-    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build' });
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build', task });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };
@@ -566,12 +574,15 @@ async function maybeResumeBuild({ projectId, auditCycleId, actingAsAdmin = 0 }) 
   // runner's task so an APPROVED deviation is actually implemented (it overrides
   // the constitution) and a DENIED one is skipped.
   const adminDecisions = auditCycle ? buildAdminDecisionsBlock(listQuestionsForCycle(auditCycle.id)) : '';
+  // Recover the audit's routing classification stamped on the audit cycle.
+  let auditTask = null;
+  try { auditTask = auditCycle?.routing_json ? (JSON.parse(auditCycle.routing_json)?.task ?? null) : null; } catch { auditTask = null; }
   insertMessage({ projectId, kind: 'system', cycleId: auditCycle?.id || null, body: 'All rules confirmed — starting the build.' });
   setJob(projectId, { phase: 'building', message: 'Rules confirmed — starting the build.', cycleId: auditCycle?.id || null });
   await proceedToBuild({
     project, instruction: auditCycle?.instruction || 'Build the app from the approved inventory and confirmed rules.',
     initiatedBy: auditCycle?.initiated_by || project.created_by, actingAsAdmin, framework, adminDecisions,
-    requestId: auditCycle?.request_id ?? null,
+    requestId: auditCycle?.request_id ?? null, task: auditTask,
   });
   scheduleJobCleanup(projectId);
   return true;

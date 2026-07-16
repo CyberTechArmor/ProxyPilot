@@ -167,7 +167,7 @@ async function runAsk({ project, projectId, holder, ready, question }) {
       finalText = res.text || finalText;
       break;
     }
-    transcript.push({ role: 'assistant', text: res.text || '', toolCalls: res.toolCalls });
+    transcript.push({ role: 'assistant', text: res.text || '', toolCalls: res.toolCalls, raw: res.raw || null });
     for (const call of res.toolCalls) {
       const out = await executeAskTool({ call, containerName });
       transcript.push({ role: 'tool', toolCallId: call.id, name: call.name, content: out.slice(0, 20000) });

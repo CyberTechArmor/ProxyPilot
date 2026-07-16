@@ -410,6 +410,19 @@ export default function BuildStatus({
               </div>
             </div>
 
+            {/* Model routing (reviewable): which model ran this build, at what
+                effort, and why — including deterministic escalation to a stronger
+                model after a failed attempt. null on pre-routing cycles. */}
+            {cycle.routing?.applied_model || cycle.routing?.model ? (
+              <p className="text-[11px] text-muted-foreground break-words">
+                Model: <code>{cycle.routing.applied_model || cycle.routing.model}</code>
+                {cycle.routing.mode === 'on' && cycle.routing.effort ? <> · effort {cycle.routing.effort}</> : null}
+                {cycle.routing.rung > 0 ? <span className="text-amber-500"> · escalated</span> : null}
+                {cycle.routing.task_kind && cycle.routing.task_kind !== 'default' ? <> · task: {cycle.routing.task_kind}{cycle.routing.difficulty ? ` (difficulty ${cycle.routing.difficulty}/5)` : ''}</> : null}
+                {cycle.routing.mode === 'shadow' ? <span className="text-amber-500"> · routing shadow (would pick {cycle.routing.model})</span> : null}
+              </p>
+            ) : null}
+
             {/* The Claude-Code-style task list — what's running and how many steps are left. */}
             <BuildTaskList cycle={cycle} job={job} />
 

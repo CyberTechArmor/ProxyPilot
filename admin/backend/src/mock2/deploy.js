@@ -23,6 +23,7 @@ import { sh, b64 } from './host.js';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
+  freeWebPortScript,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
 
@@ -101,7 +102,11 @@ export async function deployProject({
     `printf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\n`
       + `systemctl daemon-reload\n`
       + `systemctl enable mock2-dev.service >/dev/null 2>&1 || true\n`
-      + `systemctl restart mock2-dev.service\n`,
+      // Free the web port before starting so a fresh instance never races an
+      // orphan a prior deploy left on it (the EADDRINUSE crash-loop). Then a
+      // clean start rather than restart-into-a-storm.
+      + `${freeWebPortScript(webPort)}\n`
+      + `systemctl start mock2-dev.service\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.start },
   );
   if (swap.code !== 0) {

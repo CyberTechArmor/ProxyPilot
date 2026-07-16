@@ -114,6 +114,32 @@ WantedBy=multi-user.target
 `;
 }
 
+// freeWebPortScript(webPort) → a shell snippet that frees the app's web port
+// BEFORE the deploy (re)starts the unit. Without it, a fresh `systemctl restart`
+// can race a listener a PRIOR deploy left holding the port — a detached child /
+// orphan that escaped the unit's control group, which `restart` cannot reap — so
+// the new instance crash-loops on EADDRINUSE (Restart=on-failure, every 2s) until
+// the old holder finally dies, often long after the health window has closed and
+// the deploy has been marked failed. This stops the unit (killing its cgroup),
+// then best-effort kills anything STILL bound to the port (psmisc `fuser`, else
+// `lsof`, else an `ss`-parsed PID), clears any tripped restart-rate limiter, and
+// pauses briefly so the kernel releases the socket. All steps are `|| true`: a
+// clean deploy has nothing extra to kill and passes straight through.
+export function freeWebPortScript(webPort = 3000) {
+  const p = Number(webPort) || 3000;
+  return [
+    `systemctl stop mock2-dev.service 2>/dev/null || true`,
+    `if command -v fuser >/dev/null 2>&1; then fuser -k ${p}/tcp 2>/dev/null || true;`,
+    `elif command -v lsof >/dev/null 2>&1; then kill $(lsof -t -i:${p} 2>/dev/null) 2>/dev/null || true;`,
+    `elif command -v ss >/dev/null 2>&1; then`,
+    `  pid=$(ss -ltnpH "sport = :${p}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2);`,
+    `  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true;`,
+    `fi`,
+    `systemctl reset-failed mock2-dev.service 2>/dev/null || true`,
+    `sleep 1`,
+  ].join('\n');
+}
+
 // The ordered deploy steps and their bounded timeouts (R5 — an install/build
 // spends wall-clock; every step is time-bounded). `migrate` and `build` are
 // skipped when the contract omits them; `install` and `start` are the minimum.

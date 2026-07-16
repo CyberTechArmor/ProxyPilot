@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, execStartForServePy, deployProjectStatus,
-  deployFailureMessage, DEFAULT_RUN_CONTRACT,
+  deployFailureMessage, DEFAULT_RUN_CONTRACT, freeWebPortScript,
 } from '../mock2/deploy-logic.js';
 import {
   defaultManifest, buildSeedFiles, buildContainerSetupScript, parseManifestWebPort,
@@ -39,6 +39,31 @@ test('parseRunContract: no run block ⇒ hasContract false (old placeholder)', (
   const c = parseRunContract(yaml);
   assert.equal(c.hasContract, false);
   assert.equal(c.start, undefined);
+});
+
+// ---- freeWebPortScript (EADDRINUSE crash-loop fix — free the port before start) ----
+
+test('freeWebPortScript stops the unit, kills the port holder, and clears the limiter', () => {
+  const s = freeWebPortScript(3000);
+  assert.match(s, /systemctl stop mock2-dev\.service/);
+  assert.match(s, /fuser -k 3000\/tcp/);      // primary reaper
+  assert.match(s, /lsof -t -i:3000/);         // fallback reaper
+  assert.match(s, /sport = :3000/);           // last-resort ss parse
+  assert.match(s, /systemctl reset-failed mock2-dev\.service/); // clear the restart-rate limit
+  assert.match(s, /sleep 1/);                 // pauses for socket release
+  // The unit is STARTED by deploy.js, not by this snippet (which only frees).
+  assert.doesNotMatch(s, /systemctl start mock2-dev/);
+  // Every step is best-effort so a clean deploy passes straight through.
+  assert.ok(s.includes('|| true'));
+});
+
+test('freeWebPortScript interpolates the actual web port and defaults safely', () => {
+  assert.match(freeWebPortScript(8080), /fuser -k 8080\/tcp/);
+  assert.match(freeWebPortScript(8080), /:8080/);
+  // A missing/garbage port falls back to 3000 rather than emitting `:NaN`.
+  assert.match(freeWebPortScript(), /fuser -k 3000\/tcp/);
+  assert.match(freeWebPortScript('nope'), /fuser -k 3000\/tcp/);
+  assert.doesNotMatch(freeWebPortScript(undefined), /NaN/);
 });
 
 test('parseRunContract: start alone is enough for hasContract', () => {

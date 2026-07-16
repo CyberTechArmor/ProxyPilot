@@ -43,20 +43,13 @@ export function useChatImages({ onError } = {}) {
     } finally { setBusy(false); }
   }, [onError]);
 
+  // previewUrl is a data: URL (the app CSP blocks blob:), so removal needs no
+  // revoke bookkeeping — the string is garbage-collected with the state.
   const remove = useCallback((idx) => {
-    setImages((cur) => {
-      const gone = cur[idx];
-      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
-      return cur.filter((_, i) => i !== idx);
-    });
+    setImages((cur) => cur.filter((_, i) => i !== idx));
   }, []);
 
-  const clear = useCallback(() => {
-    setImages((cur) => {
-      for (const i of cur) if (i.previewUrl) URL.revokeObjectURL(i.previewUrl);
-      return [];
-    });
-  }, []);
+  const clear = useCallback(() => setImages([]), []);
 
   // Wire these to the composer textarea / wrapper.
   const handlePaste = useCallback((e) => {

@@ -77,7 +77,9 @@ function CycleChangeSummary({ projectId, cycle }) {
   }, [projectId, cycle.id, cycle.status]);
   if (!records?.length) return null;
   return (
-    <details className="rounded-md border bg-muted/30 text-xs" open={records.length === 1}>
+    // Collapsed by default — even for a single record — so a finished build
+    // fits on screen; the review is one tap away.
+    <details className="rounded-md border bg-muted/30 text-xs">
       <summary className="cursor-pointer select-none px-3 py-2 font-medium text-muted-foreground">
         What was done — review this build&apos;s change{records.length === 1 ? '' : `s (${records.length})`}
       </summary>

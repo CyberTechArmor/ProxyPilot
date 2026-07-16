@@ -6,9 +6,15 @@
 // gates going green. Derivation is pure (lib/build-tasks.js); this is just the
 // view.
 //
+// A SUCCEEDED build collapses to its one-line header ("Build complete · 5/5
+// steps") so the completed panel fits on screen — the steps are a tap away.
+// Live, failed, and paused builds stay expanded (that's where the user needs
+// to see which step is running or where it stopped).
+//
 // MOBILE_FIRST: single column, wraps, no fixed widths; renders clean at 360px.
 
-import { CheckCircle2, XCircle, Loader2, Circle, Clock, PauseCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { CheckCircle2, XCircle, Loader2, Circle, Clock, PauseCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { deriveBuildTasks } from '@/lib/build-tasks';
 
 function StateIcon({ state, className = 'h-4 w-4' }) {
@@ -21,11 +27,24 @@ function StateIcon({ state, className = 'h-4 w-4' }) {
 
 export default function BuildTaskList({ cycle, job }) {
   const { tasks, done, total, remaining, terminal, headline } = deriveBuildTasks(cycle, job);
+  // null = automatic (collapsed only when succeeded); a tap overrides for this
+  // cycle. Reset to automatic when a new cycle starts.
+  const [expandOverride, setExpandOverride] = useState(null);
+  useEffect(() => { setExpandOverride(null); }, [cycle?.id]);
   if (!tasks.length) return null;
+
+  const succeeded = terminal === 'succeeded';
+  const expanded = expandOverride == null ? !succeeded : expandOverride;
 
   return (
     <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 text-left"
+        aria-expanded={expanded}
+        onClick={() => setExpandOverride(!expanded)}
+        title={expanded ? 'Collapse the steps' : 'Show the steps'}
+      >
         <p className="text-sm font-medium flex items-center gap-2">
           {!terminal ? <Loader2 className="h-4 w-4 animate-spin text-cyan-500" /> : (
             terminal === 'succeeded'
@@ -36,12 +55,13 @@ export default function BuildTaskList({ cycle, job }) {
           )}
           {headline}
         </p>
-        <span className="text-xs text-muted-foreground whitespace-nowrap">
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap">
           {terminal
             ? `${done}/${total} steps`
             : `Step ${Math.min(done + 1, total)} of ${total}${remaining ? ` · ~${remaining} left` : ''}`}
+          {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </span>
-      </div>
+      </button>
 
       {/* Thin progress bar — approximate, since exact timing is unknown. */}
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -51,31 +71,33 @@ export default function BuildTaskList({ cycle, job }) {
         />
       </div>
 
-      <ul className="space-y-1.5 pt-1">
-        {tasks.map((t) => (
-          <li key={t.key}>
-            <div className="flex items-start gap-2 text-sm">
-              <span className="mt-0.5 shrink-0"><StateIcon state={t.state} /></span>
-              <span className="min-w-0">
-                <span className={t.state === 'pending' ? 'text-muted-foreground' : 'text-foreground'}>{t.label}</span>
-                {t.detail ? (
-                  <span className="block text-xs text-muted-foreground break-words">{t.detail}</span>
-                ) : null}
-              </span>
-            </div>
-            {t.sub?.length ? (
-              <ul className="mt-1 ml-6 space-y-1">
-                {t.sub.map((g) => (
-                  <li key={g.key} className="flex items-center gap-2 text-xs">
-                    <span className="shrink-0"><StateIcon state={g.state} className="h-3.5 w-3.5" /></span>
-                    <span className={`min-w-0 truncate ${g.state === 'pending' ? 'text-muted-foreground' : 'text-foreground/90'}`}>{g.label}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      {expanded ? (
+        <ul className="space-y-1.5 pt-1">
+          {tasks.map((t) => (
+            <li key={t.key}>
+              <div className="flex items-start gap-2 text-sm">
+                <span className="mt-0.5 shrink-0"><StateIcon state={t.state} /></span>
+                <span className="min-w-0">
+                  <span className={t.state === 'pending' ? 'text-muted-foreground' : 'text-foreground'}>{t.label}</span>
+                  {t.detail ? (
+                    <span className="block text-xs text-muted-foreground break-words">{t.detail}</span>
+                  ) : null}
+                </span>
+              </div>
+              {t.sub?.length ? (
+                <ul className="mt-1 ml-6 space-y-1">
+                  {t.sub.map((g) => (
+                    <li key={g.key} className="flex items-center gap-2 text-xs">
+                      <span className="shrink-0"><StateIcon state={g.state} className="h-3.5 w-3.5" /></span>
+                      <span className={`min-w-0 truncate ${g.state === 'pending' ? 'text-muted-foreground' : 'text-foreground/90'}`}>{g.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

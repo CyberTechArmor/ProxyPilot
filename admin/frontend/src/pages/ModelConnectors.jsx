@@ -29,7 +29,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import {
-  ArrowLeft, Loader2, Plus, Trash2, CheckCircle2, XCircle, CircleDashed, ShieldCheck, Cpu, GitBranch,
+  ArrowLeft, Loader2, Plus, Trash2, CheckCircle2, XCircle, CircleDashed, ShieldCheck, Cpu, GitBranch, Route,
 } from 'lucide-react';
 
 const PROVIDERS = ['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible'];
@@ -81,18 +81,24 @@ export default function ModelConnectors() {
   const [connectors, setConnectors] = useState([]);
   const [slots, setSlots] = useState([]);
   const [gitConnectors, setGitConnectors] = useState([]);
+  const [routing, setRouting] = useState(null);   // { mode, rules, env_escalate_model, efforts }
+  const [outcomes, setOutcomes] = useState(null); // { stats, recent }
   const [busyId, setBusyId] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const [c, s, g] = await Promise.all([
+      const [c, s, g, r, o] = await Promise.all([
         api.mock2ListConnectors(),
         api.mock2ListModelSlots(),
         api.mock2ListGitConnectors().catch(() => ({ connectors: [] })),
+        api.mock2RoutingRules().catch(() => null),
+        api.mock2RoutingOutcomes().catch(() => null),
       ]);
       setConnectors(c.connectors || []);
       setSlots(s.slots || []);
       setGitConnectors(g.connectors || []);
+      setRouting(r);
+      setOutcomes(o);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load connectors failed:', err);
     }
@@ -205,6 +211,7 @@ export default function ModelConnectors() {
         <TabsList className="flex-wrap">
           <TabsTrigger value="models">Model connectors</TabsTrigger>
           <TabsTrigger value="slots">Slots</TabsTrigger>
+          <TabsTrigger value="routing">Routing</TabsTrigger>
           <TabsTrigger value="git">Git connectors</TabsTrigger>
         </TabsList>
 
@@ -269,6 +276,84 @@ export default function ModelConnectors() {
             const eligible = connectors.filter((c) => c.enabled && c.capabilities.includes(SLOT_CAP[slot]));
             return <SlotRow key={slot} slot={slot} cur={cur} eligible={eligible} onAssign={assignSlot} onClear={() => act(slot, () => api.mock2ClearModelSlot(slot), 'Cleared')} />;
           })}
+        </TabsContent>
+
+        {/* ---- Model routing knowledge base ---- */}
+        <TabsContent value="routing" className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            The routing <strong>knowledge base</strong>: the define audit classifies every build task
+            (kind + difficulty 1–5), and these rules decide which model runs it, at what reasoning effort,
+            and which stronger model to <strong>escalate</strong> to after a failed/blocked attempt (or a
+            difficulty-5 task). Leave a field empty to keep the default (the build_runner slot model, the
+            lane&apos;s effort). Every decision is stamped on the cycle and logged; the scoreboard below is
+            the evidence to tune against.
+          </p>
+          {routing ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className={`rounded px-2 py-0.5 ${routing.mode === 'on' ? 'bg-emerald-500/10 text-emerald-500' : routing.mode === 'shadow' ? 'bg-amber-500/10 text-amber-500' : 'bg-muted text-muted-foreground'}`}>
+                  routing: {routing.mode}{routing.mode === 'shadow' ? ' (recorded, not applied)' : routing.mode === 'off' ? ' (disabled)' : ''}
+                </span>
+                <span className="text-muted-foreground">
+                  Fallback escalation model (MOCK2_ESCALATE_MODEL): {routing.env_escalate_model ? <code>{routing.env_escalate_model}</code> : 'not set'}
+                </span>
+              </div>
+              {(routing.rules || []).map((r) => (
+                <RoutingRuleRow key={r.task_kind} rule={r} efforts={routing.efforts || []}
+                  onSave={async (patch) => {
+                    try {
+                      const res = await api.mock2UpdateRoutingRule(r.task_kind, patch);
+                      setRouting((cur) => ({ ...cur, rules: (cur.rules || []).map((x) => (x.task_kind === r.task_kind ? res.rule : x)) }));
+                      toast({ title: `Rule "${r.task_kind}" saved` });
+                    } catch (err) {
+                      toast({ variant: 'destructive', title: 'Save failed', description: err.message });
+                    }
+                  }} />
+              ))}
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Outcome scoreboard</CardTitle>
+                  <CardDescription>Per task kind × model that actually ran — from every finished routed build. Success counts deployed builds (succeeded / awaiting review); failure counts failed / blocked ones.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {outcomes?.stats?.length ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[560px] text-sm">
+                        <thead>
+                          <tr className="border-b text-left text-xs text-muted-foreground">
+                            <th className="py-1.5 pr-2 font-medium">Task kind</th>
+                            <th className="py-1.5 pr-2 font-medium">Model</th>
+                            <th className="py-1.5 pr-2 font-medium">Runs</th>
+                            <th className="py-1.5 pr-2 font-medium">Success</th>
+                            <th className="py-1.5 pr-2 font-medium">Escalated</th>
+                            <th className="py-1.5 font-medium">Avg cost</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {outcomes.stats.map((s) => (
+                            <tr key={`${s.task_kind}|${s.model}`} className="border-b last:border-0">
+                              <td className="py-1.5 pr-2">{s.task_kind}</td>
+                              <td className="py-1.5 pr-2"><code className="text-xs">{s.model}</code></td>
+                              <td className="py-1.5 pr-2">{s.runs}</td>
+                              <td className={`py-1.5 pr-2 ${s.success_rate != null && s.success_rate < 50 ? 'text-red-500' : s.success_rate != null && s.success_rate >= 80 ? 'text-emerald-500' : ''}`}>
+                                {s.success_rate != null ? `${s.success_rate}%` : '—'}
+                              </td>
+                              <td className="py-1.5 pr-2">{s.escalated}</td>
+                              <td className="py-1.5">{s.avg_cost_cents != null ? `$${(s.avg_cost_cents / 100).toFixed(2)}` : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No routed builds have finished yet — the scoreboard fills in as builds complete.</p>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <Card><CardContent className="p-6 text-center text-sm text-muted-foreground">Routing rules could not be loaded.</CardContent></Card>
+          )}
         </TabsContent>
 
         {/* ---- Git connectors ---- */}
@@ -396,6 +481,80 @@ export default function ModelConnectors() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// One knowledge-base rule: task kind → model / escalation model / effort /
+// notes. Empty model fields mean "the default applies" (slot model / env
+// fallback); the effort select uses a 'default' sentinel for the same reason.
+function RoutingRuleRow({ rule, efforts, onSave }) {
+  const [model, setModel] = useState(rule.model || '');
+  const [escalate, setEscalate] = useState(rule.escalate_model || '');
+  const [effort, setEffort] = useState(rule.effort || 'default');
+  const [notes, setNotes] = useState(rule.notes || '');
+  const [saving, setSaving] = useState(false);
+
+  const dirty = (model.trim() || null) !== (rule.model || null)
+    || (escalate.trim() || null) !== (rule.escalate_model || null)
+    || (effort === 'default' ? null : effort) !== (rule.effort || null)
+    || (notes.trim() || null) !== (rule.notes || null);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave({
+        model: model.trim() || null,
+        escalate_model: escalate.trim() || null,
+        effort: effort === 'default' ? null : effort,
+        notes: notes.trim() || null,
+      });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Card>
+      <CardContent className="space-y-2 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-medium"><Route className="h-4 w-4 text-muted-foreground" /> {rule.label}</div>
+          <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">{rule.task_kind}</code>
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div>
+            <Label htmlFor={`rm-${rule.task_kind}`} className="text-xs">Model</Label>
+            <Input id={`rm-${rule.task_kind}`} value={model} onChange={(e) => setModel(e.target.value)}
+              placeholder="slot model" className="min-h-[44px]" />
+          </div>
+          <div>
+            <Label htmlFor={`re-${rule.task_kind}`} className="text-xs">Escalate to (on failure / difficulty 5)</Label>
+            <Input id={`re-${rule.task_kind}`} value={escalate} onChange={(e) => setEscalate(e.target.value)}
+              placeholder="e.g. claude-opus-4-8" className="min-h-[44px]" />
+          </div>
+          <div>
+            <Label className="text-xs">Reasoning effort</Label>
+            <Select value={effort} onValueChange={setEffort}>
+              <SelectTrigger className="min-h-[44px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">default (by difficulty)</SelectItem>
+                {efforts.map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div>
+          <Label htmlFor={`rn-${rule.task_kind}`} className="text-xs">Notes (why this rule is set this way)</Label>
+          <Input id={`rn-${rule.task_kind}`} value={notes} onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. Haiku handles chores fine — 95% success over 40 runs" className="min-h-[44px]" />
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-muted-foreground">
+            {rule.updated_at ? `Last tuned ${new Date(rule.updated_at).toLocaleDateString()}` : 'Seed defaults'}
+          </span>
+          <Button size="sm" className="min-h-[44px]" onClick={save} disabled={!dirty || saving}>
+            {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} Save
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

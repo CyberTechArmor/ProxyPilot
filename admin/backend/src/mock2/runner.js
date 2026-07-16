@@ -42,6 +42,8 @@ import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
+import { getRoutingRule } from './routing.js';
+import { decideRouting, escalationAttempts, routingMode, parseRoutingJson } from './routing-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -184,7 +186,7 @@ function quotaVerdict(projectId, estCostCents) {
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
   // Cost-truth: attach this cycle to its umbrella request as a SEGMENT. When the caller
@@ -193,8 +195,47 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const reqId = requestId != null ? requestId : latestOpenRequestId(projectId);
   const seg = segment || (resumeContext ? 'resumed' : 'build');
 
-  const ready = buildRunnerReady();
+  let ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
+
+  // Model ROUTING (migration 525): pick model + effort from the knowledge base
+  // (task kind → rule), the audit's difficulty score, and the deterministic
+  // escalation signal (a prior attempt of this same request failed/halted →
+  // step up to the rule's escalation model). The decision is stamped on the
+  // cycle + logged as a cycle event, and its terminal outcome is recorded, so
+  // every build's routing is reviewable and the dictionary can be tuned from
+  // evidence. MOCK2_ROUTING=shadow records without applying; =off skips.
+  let routing = null;
+  const mode = routingMode(process.env);
+  if (mode !== 'off') {
+    try {
+      const priorCycles = listCyclesForProject(projectId, { limit: 20 });
+      // A resume carries no fresh classification — recover the task from the
+      // most recent routed build cycle of the same request.
+      let effTask = task;
+      if (!effTask) {
+        for (const c of priorCycles) {
+          if (c.stage !== 'build' || !c.routing_json) continue;
+          if (reqId != null && Number(c.request_id) !== Number(reqId)) continue;
+          const prev = parseRoutingJson(c.routing_json);
+          if (prev?.task_kind) { effTask = { kind: prev.task_kind, difficulty: prev.difficulty ?? null }; break; }
+        }
+      }
+      const rule = getRoutingRule(effTask?.kind || null);
+      const attempts = escalationAttempts({ priorCycles, requestId: reqId, instruction });
+      routing = decideRouting({
+        rule, slotModel: ready.model, difficulty: effTask?.difficulty ?? null,
+        priorAttempts: attempts, env: process.env, laneDefaultEffort: 'high',
+      });
+      routing.mode = mode;
+      // The model that will ACTUALLY run (shadow mode records the decision but
+      // keeps the slot model) — the outcome recorder needs ground truth.
+      routing.applied_model = mode === 'on' ? (routing.model || ready.model) : ready.model;
+      if (mode === 'on') {
+        ready = { ...ready, model: routing.model || ready.model, effort: routing.effort };
+      }
+    } catch (e) { console.warn('[mock2] routing decision failed (slot defaults apply):', e?.message); }
+  }
 
   // No-work-remaining backstop: when the last NOOP_CYCLE_LIMIT cycles for this
   // exact instruction each completed as a VERIFIED no-op (success-family
@@ -256,6 +297,11 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // Persist the resume context (operator guidance) so runCycle injects it as a
   // labeled turn after the task.
   if (resumeContext) updateCycle(cycle.id, { resume_context_json: JSON.stringify(resumeContext) });
+  // Stamp the routing decision on the cycle (reviewable; the outcome recorder
+  // and the Build panel read it back).
+  if (routing) {
+    try { updateCycle(cycle.id, { routing_json: JSON.stringify(routing) }); } catch { /* best effort */ }
+  }
   const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
   if (!lock.ok) {
     finishCycle(cycle.id, { status: 'failed', error: `could not acquire checkout lock: ${lock.reason}` });
@@ -560,6 +606,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
   const logEvent = (kind, { role = null, content = null, meta = null } = {}) =>
     insertCycleEvent({ projectId, cycleId: cycle.id, kind, role, content, meta });
   logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model: ready.model, framework_version: framework.version } });
+  // The routing decision, durably in the cycle transcript (request-log review).
+  try {
+    const routing = parseRoutingJson(getCycle(cycle.id)?.routing_json);
+    if (routing) {
+      logEvent('routing', {
+        role: 'system',
+        content: `model=${ready.model} effort=${ready.effort || 'default'} rung=${routing.rung} kind=${routing.task_kind}${routing.reason ? ` (${routing.reason})` : ''}${routing.mode === 'shadow' ? ' [shadow — slot defaults applied]' : ''}`,
+        meta: routing,
+      });
+    }
+  } catch { /* best effort */ }
 
   const skills = parseFrameworkSkills(framework.skills_json);
   // The PUBLISHED component-library catalog (migration 516): the runner is told
@@ -737,6 +794,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     const result = await callModelTurn({
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: 8000,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
+      effort: ready.effort || null,
     });
     if (!result.ok) {
       // Transient model failure — retry up to MAX_CYCLE_RETRIES, then escalate.
@@ -783,7 +841,9 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     // re-sending it would 400 every subsequent call and derail the cycle. When
     // the model stalls with nothing, we skip its turn and nudge below instead.
     if (result.text || (result.toolCalls && result.toolCalls.length)) {
-      transcript.push({ role: 'assistant', text: result.text || '', toolCalls: result.toolCalls || [] });
+      // `raw` carries the verbatim Anthropic blocks (thinking/server-tool) for
+      // same-model replay — required with adaptive thinking on. Null elsewhere.
+      transcript.push({ role: 'assistant', text: result.text || '', toolCalls: result.toolCalls || [], raw: result.raw || null });
     }
     // Log the AI's turn: its reasoning/text and the tool calls it requested, with
     // this turn's token/cost so the transcript doubles as a per-step spend trail.

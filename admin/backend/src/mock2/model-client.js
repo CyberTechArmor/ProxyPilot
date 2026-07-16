@@ -22,6 +22,8 @@
 //
 // Terminology (risk R7): the slot is build_runner; nothing here is named "agent".
 
+import { anthropicTuning } from './routing-logic.js';
+
 const DEFAULT_TIMEOUT_MS = 120000;
 
 function openAiBase(provider, baseUrl) {
@@ -41,8 +43,14 @@ function openAiBase(provider, baseUrl) {
 // egress, and no toolCalls handling here. Only the Anthropic path supports them;
 // other providers ignore the parameter (callers gate on connector.provider via
 // ask-logic.webSearchServerTools, so nothing is silently dropped in practice).
+// `effort` ('low'|'medium'|'high'|'xhigh'|'max' or null) tunes reasoning depth
+// and token spend. Anthropic path only: routing-logic.anthropicTuning gates it
+// per model id — capable models also get adaptive thinking switched ON (they
+// otherwise run WITHOUT thinking on Opus 4.7/4.8, where omitting the parameter
+// means off). Unrecognized/older models and other providers get neither field,
+// so behavior there is byte-identical to before.
 export async function callModelTurn({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [],
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null,
 }) {
   const provider = connector?.provider;
   // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
@@ -55,7 +63,7 @@ export async function callModelTurn({
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -78,12 +86,14 @@ export async function callModelTurn({
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [] }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
   const body = {
     model,
     max_tokens: maxTokens,
+    // Adaptive thinking + effort, gated per model id (see routing-logic).
+    ...anthropicTuning({ model, effort }),
     // Prompt caching (rate-limit mitigation): the framework constitution / design
     // system / rules are large and STABLE across a conversation, and so is the
     // growing message history — reprocessing them every back-and-forth burns ITPM
@@ -120,7 +130,13 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     else if (block.type === 'tool_use') toolCalls.push({ id: block.id, name: block.name, input: block.input || {} });
   }
   return {
-    ok: true, text: outText, toolCalls, stopReason: j.stop_reason || null,
+    // `raw` is the verbatim Anthropic content array. With adaptive thinking on,
+    // thinking blocks MUST be replayed unchanged on the same model (stripping
+    // them can 400 on signature/ordering), and server-tool blocks round-trip
+    // the same way — so callers store `raw` on the assistant turn and
+    // anthropicMessages replays it verbatim. Other providers ignore it.
+    ok: true, text: outText, toolCalls, raw: Array.isArray(j.content) ? j.content : null,
+    stopReason: j.stop_reason || null,
     usage: {
       inputTokens: j.usage?.input_tokens || 0,
       outputTokens: j.usage?.output_tokens || 0,
@@ -156,6 +172,13 @@ function anthropicMessages(transcript) {
     if (turn.role === 'user') {
       out.push({ role: 'user', content: [{ type: 'text', text: turn.text || '' }] });
     } else if (turn.role === 'assistant') {
+      // Verbatim replay when the raw Anthropic blocks were captured — REQUIRED
+      // once adaptive thinking is on (thinking blocks must return unchanged,
+      // in their original interleaved order, on the same model).
+      if (Array.isArray(turn.raw) && turn.raw.length) {
+        out.push({ role: 'assistant', content: turn.raw });
+        continue;
+      }
       const content = [];
       if (turn.text) content.push({ type: 'text', text: turn.text });
       for (const tc of turn.toolCalls || []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input || {} });

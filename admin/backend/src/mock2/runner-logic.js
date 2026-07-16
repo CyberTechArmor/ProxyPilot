@@ -433,6 +433,38 @@ export function buildRunnerTask(instruction) {
   return `Task: ${String(instruction || '').trim()}`;
 }
 
+// buildCompletionSummaryBody — the review summary posted into the BUILD CHAT
+// when a cycle reaches a calm terminal (succeeded / pending-operator-
+// verification), so the person who asked for the change can see WHAT was done
+// without opening the change history: outcome headline, the build's own
+// finish summary, the orchestrator-verified changed-file list (never a model
+// claim), and any live checks left for the operator. Pure so both runners
+// post the identical shape.
+export function buildCompletionSummaryBody({ summary = '', changedFiles = [], deployed = null, pendingChecklist = [] } = {}) {
+  const pending = Array.isArray(pendingChecklist) ? pendingChecklist : [];
+  const headline = pending.length
+    ? `Build complete — deployed, with ${pending.length} live verification${pending.length === 1 ? '' : 's'} left for you to run`
+    : deployed?.noop
+      ? 'Build complete — nothing needed changing (the work was already done and verified)'
+      : deployed?.skipped
+        ? 'Build complete — change checkpointed into the repo'
+        : 'Build complete — deployed and live on the app URL';
+  const parts = [`${headline}.`];
+  const s = String(summary || '').trim();
+  if (s) parts.push(`What was done:\n${s}`);
+  const files = (Array.isArray(changedFiles) ? changedFiles : []).filter(Boolean);
+  if (files.length) {
+    const shown = files.slice(0, 15);
+    parts.push(`Files changed (${files.length}):\n${shown.map((f) => `- ${f}`).join('\n')}${files.length > shown.length ? `\n… and ${files.length - shown.length} more` : ''}`);
+  }
+  if (pending.length) {
+    const items = pending.slice(0, 8).map((c) => `- ${c?.description || c?.item_id || 'live external check'}`);
+    parts.push(`Verify live when ready (Build panel → Live verification):\n${items.join('\n')}${pending.length > 8 ? `\n… and ${pending.length - 8} more` : ''}`);
+  }
+  parts.push('The full record (acceptance evidence, diff, hashes) is under Change history.');
+  return parts.join('\n\n').slice(0, 8000);
+}
+
 // Render finish's acceptance + assumptions into the block appended to the
 // change record's summary (and mirrored into the cycle event log) — the
 // human-runnable evidence a Reviewer replays. Pure so the record shape is

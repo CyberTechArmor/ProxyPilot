@@ -341,11 +341,13 @@ function componentStatusBadge(status) {
   return <span className="text-muted-foreground">{status}</span>;
 }
 
-// ProjectComponentsCard — WHICH standard library components this app uses: the
+// ProjectComponentsPanel — WHICH standard library components this app uses: the
 // visible record of define-time selections (suggested → confirmed in the build
 // chat), plus the operator lever to specify one directly and to run the
-// deterministic zero-token install now instead of at the next build.
-export function ProjectComponentsCard({ projectId, canEdit = false, isActive = true }) {
+// deterministic zero-token install now instead of at the next build. Card-less
+// so it renders both on the Details tab (ProjectComponentsCard wraps it) and as
+// the Build panel's "Components" view.
+export function ProjectComponentsPanel({ projectId, canEdit = false, isActive = true }) {
   const [rows, setRows] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [pickKey, setPickKey] = useState('');
@@ -400,17 +402,13 @@ export function ProjectComponentsCard({ projectId, canEdit = false, isActive = t
   const selectable = catalog.filter((c) => !(rows || []).some((r) => r.key === c.key && r.status !== 'declined'));
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2"><Package className="h-4 w-4" /> Standard components</CardTitle>
-        <CardDescription>
-          Audited building blocks this app uses (auth/bootstrap, directory, …). Suggested from the approved design,
-          confirmed in the build chat or picked here, then installed by the platform with no build credits — the build
-          only wires the design to their APIs.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {rows === null ? (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Audited building blocks this app uses (auth/bootstrap, directory, …). Suggested from the approved design,
+        confirmed in the build chat or picked here, then installed by the platform with no build credits — the build
+        only wires the design to their APIs.
+      </p>
+      {rows === null ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : activeRows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -481,6 +479,19 @@ export function ProjectComponentsCard({ projectId, canEdit = false, isActive = t
             ) : null}
           </div>
         ) : null}
+    </div>
+  );
+}
+
+// The Details-tab wrapper: the same panel with card chrome.
+export function ProjectComponentsCard({ projectId, canEdit = false, isActive = true }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Package className="h-4 w-4" /> Standard components</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ProjectComponentsPanel projectId={projectId} canEdit={canEdit} isActive={isActive} />
       </CardContent>
     </Card>
   );

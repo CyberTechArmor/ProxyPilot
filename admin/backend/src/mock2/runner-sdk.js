@@ -40,7 +40,7 @@ import { initialGateReports, allGatesGreen, interruptDecision, shouldStopForBudg
 import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
-  parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask,
+  parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask, buildCompletionSummaryBody,
   SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
   isRefusalStop, REFUSAL_HALT_REASON,
@@ -49,7 +49,8 @@ import { buildResumeContextBlock } from './unblock-logic.js';
 import { closeRequest } from './requests.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
-import { smokeAfterDeploy, smokeFailSummary } from './smoke.js';
+import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
+import { insertMessage } from './chats.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, deployStage, formatGateReports, containerSh, haltCycle,
@@ -482,6 +483,20 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         return scheduleJobCleanup(cycle.id);
       }
     }
+    // The review summary posted into the build chat at either calm terminal
+    // (parity with the hand-rolled runner). The changed-file list is read from
+    // the checkpoint commit — orchestrator-verified, never a model claim.
+    let summaryFiles = [];
+    try { summaryFiles = record?.commit_sha ? await changedFilesForCommit(containerName, APP_DIR, record.commit_sha) : []; } catch { summaryFiles = []; }
+    const postCompletionSummary = (pending = []) => {
+      try {
+        insertMessage({
+          projectId, kind: 'assistant', cycleId: cycle.id,
+          body: buildCompletionSummaryBody({ summary: '', changedFiles: summaryFiles, deployed, pendingChecklist: pending }),
+        });
+      } catch (e) { console.warn('[mock2] completion summary message failed:', e?.message); }
+    };
+
     // B.5 lifecycle branch (parity with the hand-rolled runner): a clean gate
     // with live-verification-required integrations in scope lands in
     // pending-operator-verification, not succeeded.
@@ -493,12 +508,14 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       releaseLock(projectId, holder);
       updateProject(projectId, { last_activity_at: nowIso() });
       logEvent('pending_verification', { role: 'system', content: `Deployed; ${pendingChecklist.length} live verification item(s) outstanding.`, meta: { checklist: pendingChecklist } });
+      postCompletionSummary(pendingChecklist);
       setJob(cycle.id, { phase: 'pending_verification', message: `Deployed — ${pendingChecklist.length} live external verification(s) outstanding.`, commit: record?.commit_sha || null });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
       return scheduleJobCleanup(cycle.id);
     }
     finishCycle(cycle.id, { status: 'succeeded' });
     try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+    postCompletionSummary();
     releaseLock(projectId, holder);
     updateProject(projectId, { last_activity_at: nowIso() });
     setJob(cycle.id, {

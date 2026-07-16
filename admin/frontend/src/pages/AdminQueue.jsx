@@ -56,6 +56,10 @@ const GATE_MODE_LABEL = {
     title: 'Monitor — never block',
     desc: 'Integration findings are recorded but never block or pend the build — it completes so you can test it. Loosest; use when you just need to see the code run. Findings stay on the record.',
   },
+  off: {
+    title: 'Off — no live-verification checks',
+    desc: 'Monitor, plus the live-verification hand-off is disabled entirely: builds never enter “pending operator verification” and no credential-gated live checks are asked of you. Skipped checks are still recorded on the build record.',
+  },
 };
 
 const KIND_TONE = {

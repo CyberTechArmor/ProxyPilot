@@ -82,7 +82,7 @@ import {
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
 import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, recordIntegrationResolution, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
-import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation, applyIntegrationGateMode } from './accept-pending-logic.js';
+import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation, applyIntegrationGateMode, applyLiveCheckMode } from './accept-pending-logic.js';
 import { getIntegrationGateMode } from './settings.js';
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
@@ -1033,6 +1033,24 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
             role: 'system',
             content: `relaxed:${relax.mode}`,
             meta: { mode: relax.mode, would_block: true, outcome: integrationDecision.outcome, reasons: relax.wouldBlockReasons },
+          });
+        }
+      }
+      // integration_gate_mode 'off' additionally disables the live-verification
+      // hand-off: a non-blocking decision that would land this cycle in
+      // pending-operator-verification (a credential-gated live checklist, or a
+      // builder-declared pending outcome) completes as a plain success instead.
+      // The skipped checks are recorded on the gate record (skipped_checklist)
+      // and in the event log — disabled, never hidden.
+      if (!integrationDecision.blocking) {
+        const strip = applyLiveCheckMode({ decision: integrationDecision, mode: getIntegrationGateMode() });
+        if (strip.skipped.length || strip.decision !== integrationDecision) {
+          integrationDecision = strip.decision;
+          recordIntegrationGate(cycle.id, integrationDecision);
+          logEvent('integration_gate', {
+            role: 'system',
+            content: 'live-checks-disabled:off',
+            meta: { mode: 'off', skipped_checklist: strip.skipped.map((c) => c.item_id), outcome: integrationDecision.outcome },
           });
         }
       }

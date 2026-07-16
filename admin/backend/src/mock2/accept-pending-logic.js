@@ -108,10 +108,17 @@ export const ACCEPT_PENDING_INTEGRATION_HALT_REASONS = INTEGRATION_HALT_REASONS;
 //   'monitor' — a would-be block is recorded but never blocks or pends; the cycle
 //               proceeds to its normal terminal. Loosest — for "I just need to
 //               see it run" — the findings stay on the record, nothing is hidden.
+//   'off'     — monitor, PLUS the live-verification hand-off is disabled: the
+//               harness never routes a build to pending-operator-verification.
+//               Any live-check checklist the gate derives is recorded as skipped
+//               (skipped_checklist on the gate record — auditable, never hidden)
+//               and the cycle completes as succeeded. For operators who do not
+//               want credential-gated live checks in their build loop at all.
 export const GATE_MODE_ENFORCE = 'enforce';
 export const GATE_MODE_PENDING = 'pending';
 export const GATE_MODE_MONITOR = 'monitor';
-export const INTEGRATION_GATE_MODES = Object.freeze([GATE_MODE_ENFORCE, GATE_MODE_PENDING, GATE_MODE_MONITOR]);
+export const GATE_MODE_OFF = 'off';
+export const INTEGRATION_GATE_MODES = Object.freeze([GATE_MODE_ENFORCE, GATE_MODE_PENDING, GATE_MODE_MONITOR, GATE_MODE_OFF]);
 
 // Normalize any stored/env value to a known mode; anything unrecognized (or
 // empty/undefined) falls back to the safe default 'enforce'.
@@ -153,9 +160,41 @@ export function applyIntegrationGateMode({ decision, mode, subsystems = [] } = {
       subsystems: subsystems.length ? subsystems : (decision.touched_subsystems || []),
     });
   } else {
+    // 'monitor' and 'off' both convert the block to a recorded, non-blocking
+    // outcome. Leave checklist as whatever the decision already had (empty for
+    // a pure block) — neither mode manufactures a pending check; 'off'
+    // additionally strips any existing checklist via applyLiveCheckMode below.
     next.outcome = 'monitor-recorded';
-    // Leave checklist as whatever the decision already had (empty for a pure
-    // block) — monitor mode does not manufacture a pending check.
   }
   return { decision: next, downgraded: true, mode: m, wouldBlockReasons };
+}
+
+// applyLiveCheckMode({ decision, mode }) → { decision, skipped }. PURE.
+//
+// The 'off' half of GATE_MODE_OFF: with any other mode the decision passes
+// through untouched. In 'off' mode a NON-BLOCKING decision that would route the
+// cycle to pending-operator-verification (a live-check checklist derived from
+// credential-gated integrations, or a pending outcome the builder declared) is
+// converted to a plain completion: the checklist moves to skipped_checklist on
+// the gate record (recorded and auditable — never silently dropped; nothing
+// under `checklist` means downstream code derives no pending items from it) and
+// a pending outcome becomes 'succeeded'. A BLOCKING decision is not this
+// function's business — run applyIntegrationGateMode first.
+export function applyLiveCheckMode({ decision, mode } = {}) {
+  const m = normalizeGateMode(mode);
+  if (!decision || decision.blocking || m !== GATE_MODE_OFF) {
+    return { decision, skipped: [] };
+  }
+  const skipped = Array.isArray(decision.checklist) ? decision.checklist : [];
+  if (!skipped.length && decision.outcome !== 'pending-operator-verification') {
+    return { decision, skipped: [] };
+  }
+  const next = {
+    ...decision,
+    checklist: [],
+    skipped_checklist: [...(Array.isArray(decision.skipped_checklist) ? decision.skipped_checklist : []), ...skipped],
+    live_checks_disabled: true,
+    outcome: decision.outcome === 'pending-operator-verification' ? 'succeeded' : decision.outcome,
+  };
+  return { decision: next, skipped };
 }

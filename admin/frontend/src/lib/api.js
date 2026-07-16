@@ -1373,6 +1373,11 @@ export const api = {
   // bug-fix build. body: { item_id, reason }.
   mock2DeferCapabilityCheck: (id, body) =>
     request(`/mock2/projects/${id}/capability-checks/defer`, { method: 'POST', body: JSON.stringify(body) }),
+  // Admin escape hatch: release EVERY outstanding live capability check at once
+  // (recorded as admin waivers) and advance the pending build(s) to succeeded —
+  // the guaranteed way out of pending-operator-verification. body: { reason? }.
+  mock2ReleaseCapabilityChecks: (id, body = {}) =>
+    request(`/mock2/projects/${id}/capability-checks/release`, { method: 'POST', body: JSON.stringify(body) }),
   // Self-heal a malformed state/integrations.json: archive the broken text,
   // salvage valid entries, write a valid scaffold, resume any blocked cycle.
   mock2RepairIntegrationManifest: (id) =>

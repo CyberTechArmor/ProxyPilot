@@ -159,6 +159,20 @@ export function capabilityCheckStatus({ checklistItems = [], activeVerifications
   };
 }
 
+// requireActorId(value, column) — coerce a NOT NULL actor column (operator_id /
+// decided_by). null/undefined/NaN must fail HERE with an actionable message:
+// better-sqlite3 binds NaN as NULL, so an unguarded Number(undefined) surfaces
+// as an opaque "NOT NULL constraint failed" 500 with no working button behind
+// it — and Number(null) === 0 would silently mis-attribute the record to a
+// nonexistent user 0. Throws; callers surface err.message to the operator.
+export function requireActorId(value, column = 'actor') {
+  const n = Number(value);
+  if (value == null || !Number.isFinite(n) || n <= 0) {
+    throw new Error(`the acting user's id could not be resolved (${column}) — sign out, sign back in, and retry`);
+  }
+  return n;
+}
+
 // validateConfirmation(record) — an operator confirmation (or admin waiver) is
 // valid only with a real OBSERVED RESULT (never a bare checkbox), an identity, an
 // environment, and an endpoint classification. Operators confirm; admins waive.

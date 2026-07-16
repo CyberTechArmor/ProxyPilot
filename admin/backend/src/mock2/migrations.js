@@ -1193,4 +1193,18 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Per-response spend: assistant chat messages carry what they cost (the ask
+    // lane's whole tool loop; a concept turn's chat + mockup calls), so the
+    // price of an answer is visible ON the answer. cost_cents is REAL —
+    // fractional cents accumulate exactly like used_cost_cents on cycles.
+    version: 527,
+    name: 'mock2_chat_message_spend',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_chat_messages ADD COLUMN cost_cents REAL;
+        ALTER TABLE mock2_chat_messages ADD COLUMN tokens INTEGER;
+      `);
+    },
+  },
 ];

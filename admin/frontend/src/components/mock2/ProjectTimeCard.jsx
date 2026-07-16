@@ -123,6 +123,9 @@ export function ProjectTimeCard({ projectId }) {
                 <UsageRow label="Mockup build" tokens={usage.by_stage?.mockup?.tokens} cents={usage.by_stage?.mockup?.cost_cents} indent />
                 <UsageRow label="Building the app" tokens={usage.by_stage?.building?.tokens} cents={usage.by_stage?.building?.cost_cents} indent />
                 <UsageRow label="Adjustments" tokens={usage.by_stage?.adjustments?.tokens} cents={usage.by_stage?.adjustments?.cost_cents} indent />
+                {/* The ask lane — chat questions spend tokens but run no cycle,
+                    so they get their own line (cycle-less ledger entries). */}
+                <UsageRow label="Questions (ask)" tokens={usage.by_stage?.questions?.tokens} cents={usage.by_stage?.questions?.cost_cents} indent />
               </div>
             ) : null}
           </>

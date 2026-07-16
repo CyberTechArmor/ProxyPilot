@@ -93,12 +93,14 @@ export function computeTimeSummary({ project = {}, cycles = [], deviations = [],
   };
 }
 
-// computeUsageSummary({ cycles }) → the model spend (tokens + cost) a project has
-// accrued across its cycles, broken out by the same stage buckets the time card
-// uses (mockup / building / adjustments) plus a total. Costs are whole cents (as
-// stored on the cycle); tokens are whole tokens. Pure — same stage classification
-// as computeTimeSummary so the two cards agree on which cycle is "the first build".
-export function computeUsageSummary({ cycles = [] } = {}) {
+// computeUsageSummary({ cycles, askEntries }) → the model spend (tokens + cost)
+// a project has accrued, broken out by the same stage buckets the time card
+// uses (mockup / building / adjustments) plus QUESTIONS — the ask lane's
+// cycle-less ledger entries (chat questions spend tokens but run no cycle) —
+// and a total. Costs are whole cents (as stored on the cycle); tokens are whole
+// tokens. Pure — same stage classification as computeTimeSummary so the two
+// cards agree on which cycle is "the first build".
+export function computeUsageSummary({ cycles = [], askEntries = [] } = {}) {
   const concept = cycles.filter((c) => c && c.stage === 'concept');
   const appBuilds = cycles
     .filter((c) => c && c.stage !== 'concept')
@@ -119,9 +121,17 @@ export function computeUsageSummary({ cycles = [] } = {}) {
   for (const c of concept) add(mockup, c);
   appBuilds.forEach((c, i) => add(i === 0 ? building : adjustments, c));
 
+  // Questions (the ask lane): cycle-less quota-ledger rows.
+  const questions = bucket();
+  for (const e of askEntries || []) {
+    if (!e) continue;
+    questions.tokens += Math.max(0, Math.round(Number(e.input_tokens) || 0)) + Math.max(0, Math.round(Number(e.output_tokens) || 0));
+    questions.cost_cents += Math.max(0, Number(e.cost_cents) || 0);
+  }
+
   return {
-    by_stage: { mockup, building, adjustments },
-    total_tokens: mockup.tokens + building.tokens + adjustments.tokens,
-    total_cost_cents: mockup.cost_cents + building.cost_cents + adjustments.cost_cents,
+    by_stage: { mockup, building, adjustments, questions },
+    total_tokens: mockup.tokens + building.tokens + adjustments.tokens + questions.tokens,
+    total_cost_cents: mockup.cost_cents + building.cost_cents + adjustments.cost_cents + questions.cost_cents,
   };
 }

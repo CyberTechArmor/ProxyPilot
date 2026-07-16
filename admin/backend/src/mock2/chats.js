@@ -55,17 +55,19 @@ export function getMessage(id) {
 // acting_as_admin=1 (ADR-007). Creates the chat row on first write.
 // `attachments` (migration 526) is the image descriptor list from
 // chat-images.saveChatImages — small refs only, bytes live on disk.
-export function insertMessage({ projectId, chatId = null, authorUserId = null, actingAsAdmin = 0, kind, body, questionId = null, cycleId = null, attachments = null }) {
+// `costCents`/`tokens` (migration 527) stamp what an assistant response cost.
+export function insertMessage({ projectId, chatId = null, authorUserId = null, actingAsAdmin = 0, kind, body, questionId = null, cycleId = null, attachments = null, costCents = null, tokens = null }) {
   const db = getMock2Db();
   const cid = chatId != null ? Number(chatId) : getOrCreateChat(projectId).id;
   const info = db
     .prepare(
       `INSERT INTO mock2_chat_messages
-         (chat_id, author_user_id, acting_as_admin, kind, body, question_id, cycle_id, created_at, attachments_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (chat_id, author_user_id, acting_as_admin, kind, body, question_id, cycle_id, created_at, attachments_json, cost_cents, tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(cid, authorUserId, actingAsAdmin ? 1 : 0, kind, String(body ?? ''), questionId, cycleId, nowIso(),
-      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null);
+      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null,
+      costCents == null ? null : Number(costCents), tokens == null ? null : Math.round(Number(tokens)));
   return db.prepare(`SELECT * FROM mock2_chat_messages WHERE id = ?`).get(info.lastInsertRowid);
 }
 

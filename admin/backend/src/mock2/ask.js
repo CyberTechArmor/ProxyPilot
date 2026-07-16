@@ -180,6 +180,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
 
   let finalText = '';
   let totalCents = 0;
+  let totalTokens = 0;
   for (let turn = 0; turn < ASK_MAX_TURNS; turn += 1) {
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
     turnStreamed = false;
@@ -194,6 +195,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
       return scheduleJobCleanup(projectId);
     }
     totalCents += recordSpend({ projectId, connector: ready.connector, model: ready.model, usage: res.usage });
+    totalTokens += (res.usage.inputTokens || 0) + (res.usage.outputTokens || 0);
     touchLock(projectId, holder);
 
     if (!res.toolCalls.length) {
@@ -210,7 +212,9 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   if (!finalText) {
     finalText = 'I ran out of steps before finishing — try a narrower question, or run the task as a build.';
   }
-  insertMessage({ projectId, kind: 'assistant', body: finalText });
+  // The answer carries what it cost (migration 527) — the whole tool loop's
+  // spend, shown on the bubble and rolled into Details → Questions.
+  insertMessage({ projectId, kind: 'assistant', body: finalText, costCents: totalCents, tokens: totalTokens });
   updateProject(projectId, { last_activity_at: nowIso() });
   try {
     logAudit(holder.id, 'MOCK2_ASK', 'mock2_project', projectId, { chars: question.length, cost_cents: totalCents, web_search: serverTools.length > 0 }, null);

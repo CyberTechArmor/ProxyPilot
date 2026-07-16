@@ -529,6 +529,10 @@ export function publicChatMessageShape(row) {
     // Image attachments (migration 526): [{id, media_type, name}] — the client
     // renders thumbnails from GET /projects/:id/chat-images/:imageId.
     attachments: parseAttachmentsJson(row.attachments_json).map(publicAttachmentShape).filter(Boolean),
+    // What this response cost (migration 527) — set on assistant messages
+    // (ask answers, design-turn replies); null elsewhere/on older rows.
+    cost_cents: row.cost_cents ?? null,
+    tokens: row.tokens ?? null,
     created_at: row.created_at || null,
   };
 }

@@ -546,7 +546,13 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   //    the model only called the tool with no text.
   const replyText = String(chatRes.text || '').trim()
     || (mockupNote ? "I've updated the mockup — take a look and tell me what to change." : "I'm here — tell me a bit more about what you'd like to build.");
-  insertMessage({ projectId, authorUserId: null, kind: 'assistant', cycleId: cycle.id, body: replyText });
+  // The reply carries the TURN's spend (chat call + any mockup render — both
+  // recorded onto this cycle), so the price of a design turn shows on it.
+  const spent = getCycle(cycle.id);
+  insertMessage({
+    projectId, authorUserId: null, kind: 'assistant', cycleId: cycle.id, body: replyText,
+    costCents: spent?.used_cost_cents ?? null, tokens: spent?.used_tokens ?? null,
+  });
 
   finishCycle(cycle.id, { status: 'succeeded' });
   // Keep the human lock held (the Builder is actively working — the idle sweep

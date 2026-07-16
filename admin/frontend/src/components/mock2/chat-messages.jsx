@@ -158,6 +158,13 @@ export function ChatBubble({ m, projectId = null }) {
         {/* Assistant replies are markdown (headers, lists, code); the user's
             own text stays verbatim pre-wrap. */}
         {mine ? m.body : <Markdown>{m.body}</Markdown>}
+        {/* What this response cost (assistant messages carry their spend). */}
+        {!mine && m.cost_cents != null ? (
+          <span className="block mt-1.5 text-[10px] text-muted-foreground border-t border-border/50 pt-1">
+            {Number(m.tokens) > 0 ? `${Math.round(Number(m.tokens)).toLocaleString()} tok · ` : ''}
+            {Number(m.cost_cents) >= 1 ? `$${(Number(m.cost_cents) / 100).toFixed(2)}` : '<$0.01'}
+          </span>
+        ) : null}
         {m.acting_as_admin ? (
           <span className={`block mt-1 text-[10px] ${mine ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
             (admin)

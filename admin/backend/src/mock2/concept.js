@@ -459,9 +459,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'thinking', message: 'Writing…', kind: 'turn', cycleId: cycle.id, partial });
     }
   };
+  // maxTokens covers the reply + the generate_mockup tool call AND, on capable
+  // models, adaptive thinking (routing turned it on; it shares the budget) —
+  // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
   const chatRes = await callModelTurn({
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
-    system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 4000,
+    system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 6000,
     onDelta,
   });
   if (!chatRes.ok) {
@@ -478,7 +481,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
 
   // 2) If the model asked for a mockup, render it on the mockup slot and write it
   //    into the container (the only container write the concept stage performs).
-  let mockupNote = null;
+  //    The OUTCOME note (updated / failed) is collected here and posted AFTER
+  //    the assistant reply below — the reply is the chat model's text from
+  //    BEFORE the render, so posting the outcome first read backwards ("render
+  //    failed" above "let me get a first version up").
+  let mockupNote = null;        // success (also drives the reply fallback)
+  let mockupSystemNote = null;  // posted after the reply, success or failure
   if (decision.generateMockup) {
     let currentHtml = null;
     if (hasMockup) {
@@ -489,61 +497,85 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       brief: decision.brief, currentHtml, projectName: project.name,
       conversation: conversationRecap(listMessages(projectId)),
     });
-    // A full mockup is a LONG single generation (up to 16k tokens — several
-    // minutes). Give it a proportionate window, narrate progress while it
-    // renders (the job heartbeat below is what the Builder reads in the chat —
-    // and it makes clear the work continues server-side across tab switches),
-    // and retry ONCE on a pure timeout before giving up.
+    // A full mockup is a LONG single generation (several minutes). Give it a
+    // proportionate window and narrate progress via the heartbeat. The token
+    // budget must now cover ADAPTIVE THINKING too (routing turned it on for
+    // capable models — it shares max_tokens with the HTML), so it is sized
+    // well above the old 16k: a thinking-heavy render otherwise truncates and
+    // fails the plausibility check with nothing to show.
     // The mockup model doesn't see the chat transcript — but it SHOULD see the
     // images the Builder just attached (design references / screenshots are
     // exactly what a render needs). This turn's attachments ride the task.
     const mockupImages = hydrateAttachments(projectId, userAttachments);
-    const mockupCall = () => callModelTurn({
+    const mockupCall = (budget) => callModelTurn({
       connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
       system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
-      tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }], maxTokens: 16000,
+      tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
+      maxTokens: budget,
       timeoutMs: 900000,
+      // A render is transcription of the brief onto the design system — cap
+      // the thinking spend so the budget goes to the page itself.
+      effort: 'low',
     });
     const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
-    let mockupRes;
+    let html = '';
+    let failureDetail = null;
     try {
-      mockupRes = await mockupCall();
-      if (!mockupRes.ok && mockupRes.timedOut) {
+      let res = await mockupCall(24000);
+      if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
-        insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'The mockup render timed out once — retrying automatically.' });
-        mockupRes = await mockupCall();
+        res = await mockupCall(24000);
+      }
+      if (res.ok) {
+        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: res.usage });
+        html = extractMockupHtml(res.text).slice(0, MAX_MOCKUP_CHARS);
+        if (!isPlausibleMockup(html)) {
+          // Not a usable page (truncated on budget, or prose instead of HTML).
+          // ONE automatic retry with a bigger budget before giving up — a
+          // failed render wastes the whole turn, so the retry is the cheaper
+          // outcome in expectation.
+          const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
+          setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
+          const retry = await mockupCall(32000);
+          if (retry.ok) {
+            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: retry.usage });
+            const h2 = extractMockupHtml(retry.text).slice(0, MAX_MOCKUP_CHARS);
+            if (isPlausibleMockup(h2)) html = h2;
+            else failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
+          } else {
+            failureDetail = retry.error;
+          }
+        }
+      } else {
+        failureDetail = res.error;
       }
     } finally {
       heartbeat.stop();
     }
-    if (mockupRes.ok) {
-      recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: mockupRes.usage });
-      const html = extractMockupHtml(mockupRes.text).slice(0, MAX_MOCKUP_CHARS);
-      if (isPlausibleMockup(html)) {
-        const mockupId = mockupIdForCycle(cycle.id);
-        setJob(projectId, { phase: 'saving', message: 'Saving the mockup…', kind: 'turn', cycleId: cycle.id });
-        const w1 = await writeWorkingFile(containerName, mockupFileName(mockupId), html);
-        const w2 = await writeWorkingFile(containerName, MOCKUP_CURRENT, html);
-        if (w1.ok && w2.ok) {
-          touchLock(projectId, holder);
-          const sha = await checkpoint(containerName, `mock2: concept mockup ${mockupId}`);
-          await maybePushRemote(projectId);
-          updateProject(projectId, { current_mockup_id: mockupId, last_activity_at: nowIso() });
-          mockupNote = 'Updated the mockup — open the preview to see it (it opens in a new tab).';
-          insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `${mockupNote}${sha ? ` (checkpoint ${sha.slice(0, 8)})` : ''}` });
-        } else {
-          insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The mockup couldn't be saved: ${w1.error || w2.error}` });
-        }
+
+    if (isPlausibleMockup(html)) {
+      const mockupId = mockupIdForCycle(cycle.id);
+      setJob(projectId, { phase: 'saving', message: 'Saving the mockup…', kind: 'turn', cycleId: cycle.id });
+      const w1 = await writeWorkingFile(containerName, mockupFileName(mockupId), html);
+      const w2 = await writeWorkingFile(containerName, MOCKUP_CURRENT, html);
+      if (w1.ok && w2.ok) {
+        touchLock(projectId, holder);
+        const sha = await checkpoint(containerName, `mock2: concept mockup ${mockupId}`);
+        await maybePushRemote(projectId);
+        updateProject(projectId, { current_mockup_id: mockupId, last_activity_at: nowIso() });
+        mockupNote = 'Updated the mockup — it is live in the preview.';
+        mockupSystemNote = `${mockupNote}${sha ? ` (checkpoint ${sha.slice(0, 8)})` : ''}`;
       } else {
-        insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'The design model did not return a usable mockup this time — the previous version is unchanged. Try rephrasing what you want to see.' });
+        mockupSystemNote = `The mockup couldn't be saved: ${w1.error || w2.error}`;
       }
     } else {
-      insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The design model couldn't render a mockup: ${mockupRes.error}` });
+      mockupSystemNote = `The design model did not return a usable mockup${failureDetail ? ` (${failureDetail})` : ''} — the previous version is unchanged. Send the message again or rephrase what you want to see.`;
     }
   }
 
   // 3) Always post the concept partner's plain-language reply. Synthesize one if
-  //    the model only called the tool with no text.
+  //    the model only called the tool with no text. The mockup OUTCOME note
+  //    follows it, so the chat reads in event order.
   const replyText = String(chatRes.text || '').trim()
     || (mockupNote ? "I've updated the mockup — take a look and tell me what to change." : "I'm here — tell me a bit more about what you'd like to build.");
   // The reply carries the TURN's spend (chat call + any mockup render — both
@@ -553,6 +585,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     projectId, authorUserId: null, kind: 'assistant', cycleId: cycle.id, body: replyText,
     costCents: spent?.used_cost_cents ?? null, tokens: spent?.used_tokens ?? null,
   });
+  if (mockupSystemNote) {
+    insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: mockupSystemNote });
+  }
 
   finishCycle(cycle.id, { status: 'succeeded' });
   // Keep the human lock held (the Builder is actively working — the idle sweep

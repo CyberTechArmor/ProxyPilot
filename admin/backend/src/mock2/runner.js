@@ -82,7 +82,8 @@ import {
 import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
 import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, recordIntegrationResolution, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
-import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation } from './accept-pending-logic.js';
+import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation, applyIntegrationGateMode } from './accept-pending-logic.js';
+import { getIntegrationGateMode } from './settings.js';
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
@@ -1011,6 +1012,29 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         // Fail closed on an analysis error too: a crash must not read as clean.
         console.warn('[mock2] integration gate crashed:', e?.message);
         integrationDecision = { blocking: true, outcome: 'blocked-deviation', reasons: [`integration gate could not run: ${e?.message || e}`], gate: { verdict: 'fail' }, egress: { ok: false }, screening: { blocking: false }, checklist: [] };
+      }
+      // integration_gate_mode operator switch (settings.js / accept-pending-logic).
+      // DEFAULT 'enforce' leaves a blocking decision untouched → it halts below,
+      // exactly as before. 'pending' downgrades the block to pending-operator-
+      // verification (the build deploys; live checks are recorded); 'monitor'
+      // records the findings but never blocks. The relaxation is logged and the
+      // downgraded decision is re-stamped on the cycle, so it is auditable — never
+      // a silent bypass. The gate is fully authoritative unless an admin opted out.
+      if (integrationDecision.blocking) {
+        const relax = applyIntegrationGateMode({
+          decision: integrationDecision,
+          mode: getIntegrationGateMode(),
+          subsystems: integrationDecision.touched_subsystems || touchedSubsystemsOf(changedThisCycle),
+        });
+        if (relax.downgraded) {
+          integrationDecision = relax.decision;
+          recordIntegrationGate(cycle.id, integrationDecision);
+          logEvent('integration_gate', {
+            role: 'system',
+            content: `relaxed:${relax.mode}`,
+            meta: { mode: relax.mode, would_block: true, outcome: integrationDecision.outcome, reasons: relax.wouldBlockReasons },
+          });
+        }
       }
       if (integrationDecision.blocking) {
         try {

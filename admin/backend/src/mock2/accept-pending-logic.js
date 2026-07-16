@@ -89,3 +89,73 @@ export function normalizeAttestation(text) {
 }
 
 export const ACCEPT_PENDING_INTEGRATION_HALT_REASONS = INTEGRATION_HALT_REASONS;
+
+// ---- integration_gate_mode operator switch (PURE) ----
+//
+// The operator-facing relief valve for the block → approve → code → same-block
+// loop. It mirrors the egress_mode allowlist/allow-all pattern in settings.js:
+// a small, auditable dial the admin controls, NOT a silent bypass. The default
+// is 'enforce' — a blocking integration-truthfulness decision halts the cycle
+// (awaiting an admin), exactly as before. The relaxed modes let an operator get
+// a build to COMPLETE and deploy (so the live app can be tested) without gutting
+// the gate for everyone:
+//   'enforce' — block (unchanged; the safe default).
+//   'pending' — a would-be block routes to pending-operator-verification instead:
+//               the build deploys and the outstanding LIVE checks are recorded,
+//               so the honesty guarantee moves to a named human's live check —
+//               it is downgraded, never dropped. (Same end state as clicking
+//               "accept as pending" on every block, but automatic.)
+//   'monitor' — a would-be block is recorded but never blocks or pends; the cycle
+//               proceeds to its normal terminal. Loosest — for "I just need to
+//               see it run" — the findings stay on the record, nothing is hidden.
+export const GATE_MODE_ENFORCE = 'enforce';
+export const GATE_MODE_PENDING = 'pending';
+export const GATE_MODE_MONITOR = 'monitor';
+export const INTEGRATION_GATE_MODES = Object.freeze([GATE_MODE_ENFORCE, GATE_MODE_PENDING, GATE_MODE_MONITOR]);
+
+// Normalize any stored/env value to a known mode; anything unrecognized (or
+// empty/undefined) falls back to the safe default 'enforce'.
+export function normalizeGateMode(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  return INTEGRATION_GATE_MODES.includes(v) ? v : GATE_MODE_ENFORCE;
+}
+
+// applyIntegrationGateMode({ decision, mode, subsystems }) → { decision, downgraded,
+// mode, wouldBlockReasons }. PURE (no DB/container).
+//
+// A non-blocking decision, or 'enforce' mode, is returned untouched
+// (downgraded:false). In a relaxed mode a BLOCKING decision is converted to a
+// non-blocking one, preserving the original block reasons on the returned record
+// (would_block_reasons / relaxed_mode) so the gate record and the event log show
+// exactly WHAT was relaxed:
+//   pending → outcome 'pending-operator-verification' + a synthesized live-check
+//             checklist (reusing buildAcceptPendingChecklist), so the runner's
+//             existing pending path deploys it and opens the checklist.
+//   monitor → outcome 'monitor-recorded', no forced checklist (the cycle then
+//             succeeds unless the decision already carried real live checks).
+export function applyIntegrationGateMode({ decision, mode, subsystems = [] } = {}) {
+  const m = normalizeGateMode(mode);
+  if (!decision || !decision.blocking || m === GATE_MODE_ENFORCE) {
+    return { decision, downgraded: false, mode: m, wouldBlockReasons: [] };
+  }
+  const wouldBlockReasons = Array.isArray(decision.reasons) ? decision.reasons.slice() : [];
+  const next = {
+    ...decision,
+    blocking: false,
+    relaxed_from_block: true,
+    relaxed_mode: m,
+    would_block_reasons: wouldBlockReasons,
+  };
+  if (m === GATE_MODE_PENDING) {
+    next.outcome = 'pending-operator-verification';
+    next.checklist = buildAcceptPendingChecklist({
+      gateDecision: decision,
+      subsystems: subsystems.length ? subsystems : (decision.touched_subsystems || []),
+    });
+  } else {
+    next.outcome = 'monitor-recorded';
+    // Leave checklist as whatever the decision already had (empty for a pure
+    // block) — monitor mode does not manufacture a pending check.
+  }
+  return { decision: next, downgraded: true, mode: m, wouldBlockReasons };
+}

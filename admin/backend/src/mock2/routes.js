@@ -90,7 +90,8 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY } from './settings.js';
+import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
 import { reconcileMock2Firewall } from './firewall.js';
@@ -964,6 +965,27 @@ export function createMock2Router() {
     setMock2Setting(CHAT_MAX_CHARS_KEY, parsed.data.max_chars, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_CHAT_MAX_CHARS', 'mock2_setting', 0, { max_chars: parsed.data.max_chars }, req.ip);
     res.json({ max_chars: getChatMaxChars(), options: CHAT_MAX_CHARS_OPTIONS });
+  });
+
+  // Integration-gate mode — the block/approve loop relief valve. Admin-gated
+  // read/write of mock2_settings.integration_gate_mode. 'enforce' (default)
+  // blocks a build that ships a simulated/undeclared integration; 'pending'
+  // downgrades that block to pending-operator-verification (the build deploys and
+  // the live checks are recorded); 'monitor' records the findings but never
+  // blocks. See accept-pending-logic.js for the exact semantics.
+  router.get('/settings/integration-gate-mode', requireAdmin, (_req, res) => {
+    res.json({ mode: getIntegrationGateMode(), options: INTEGRATION_GATE_MODES });
+  });
+  router.post('/settings/integration-gate-mode', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      mode: z.string().refine((m) => INTEGRATION_GATE_MODES.includes(m), 'unsupported mode'),
+    }).safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: `mode must be one of ${INTEGRATION_GATE_MODES.join(', ')}` });
+    }
+    setMock2Setting(INTEGRATION_GATE_MODE_KEY, parsed.data.mode, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_INTEGRATION_GATE_MODE', 'mock2_setting', 0, { mode: parsed.data.mode }, req.ip);
+    res.json({ mode: getIntegrationGateMode(), options: INTEGRATION_GATE_MODES });
   });
 
   // Egress traffic log — what this project's container actually reached, as the

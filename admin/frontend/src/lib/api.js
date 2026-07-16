@@ -1286,6 +1286,15 @@ export const api = {
   mock2GetComponentSubmission: (id) => request(`/mock2/component-submissions/${id}`),
   mock2ReviewComponentSubmission: (id, body) =>
     request(`/mock2/component-submissions/${id}/review`, { method: 'POST', body: JSON.stringify(body) }),
+  // Per-project component selection (migration 524): which library components a
+  // project uses — suggested at define time, confirmed in chat, or picked here —
+  // and the deterministic zero-token install.
+  mock2ListProjectComponents: (projectId) =>
+    request(`/mock2/projects/${projectId}/components`),
+  mock2SelectProjectComponent: (projectId, { key, decision = 'confirmed', options } = {}) =>
+    request(`/mock2/projects/${projectId}/components`, { method: 'POST', body: JSON.stringify({ key, decision, ...(options ? { options } : {}) }) }),
+  mock2InstallProjectComponents: (projectId) =>
+    request(`/mock2/projects/${projectId}/components/install`, { method: 'POST' }),
 
   // ---- Mock2 M6: cycle runner + checkout lock ----
   mock2StartCycle: (id, instruction) =>

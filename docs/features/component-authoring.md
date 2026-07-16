@@ -45,6 +45,7 @@ One JSON object, conventionally saved as `<key>.component.json`:
 | `category` | no | Short label (e.g. `auth`, `networking`); truncated to 80 chars. |
 | `tags` | no | Array or comma-separated string; lowercased, deduped, each tag capped at 40 chars, max 12 tags kept. |
 | `usage_md` | no (strongly recommended) | Markdown integration notes; truncated to 20 000 chars. This is what the build runner reads to wire the component in — see "What usage_md must cover". |
+| `contract` | no (strongly recommended) | Machine-readable contract object — see "The contract" below. A document with an invalid contract is rejected; an absent one is fine (the component just isn't suggested or auto-installed). |
 | `version` | ignored | Informational in exports. The receiving install assigns its own version number (1 for a new key, current+1 for an existing one). |
 
 Unknown extra fields are ignored. Install-specific data (ids, authors,
@@ -91,6 +92,29 @@ Exclude:
 - `package.json` as a manifest (dependencies belong in `usage_md` as an
   explicit `npm install …` line; there is no automatic dependency install),
 - secrets of any kind — documents are stored and offered to builds verbatim.
+
+## The contract (`contract` — automation reads this, not `usage_md`)
+
+The contract is what makes a component API-driven: the define stage suggests it
+from `requires_when`, the platform installs it deterministically (no model
+tokens) from `dependencies`/`migrations`/`config`/`connections`, and the build
+runner wires the mockup to `api`. Every field is optional; every field is
+validated (`component-logic.validateComponentContract`) and the error names the
+offending entry.
+
+| Field | Shape | Purpose |
+| --- | --- | --- |
+| `provides` | `["auth", "auth.bootstrap-superadmin", …]` | Capability slugs (lowercase, dot-separated) this component supplies. Max 64. |
+| `requires_when` | `{ "capabilities_any": ["users","login"], "suggest_prompt": "…" }` | When the define stage should SUGGEST this component: any listed capability appearing in the inventory's `required_capabilities` triggers a tappable confirmation. `suggest_prompt` is the question shown (≤500 chars). |
+| `api` | `[{ "method": "GET", "path": "/api/auth/login", "summary": "…", "auth": "public\|user\|role:admin" }]` | The HTTP surface the build wires the approved design to. Max 64 entries; paths must start with `/`. |
+| `exports` | `["initAuth", "requireRole"]` | Code exports the glue may use. Names only. |
+| `config` | `[{ "key": "AUTH_JWT_SECRET", "secret": true, "required": true, "default": null, "description": "…" }]` | Structured env vars. Non-secret defaults are merged into the project `.env` at install; **secrets are never written** — they surface on the operator verification checklist. Max 48. |
+| `connections` | `[{ "id": "ldaps-directory", "transport": "ldaps", "optional": true, "egress": { "classification": "private", "port": 636, "protocol": "tcp" }, "config_keys": ["…"], "live_verification": { "required": true } }]` | External connections. Each is pre-declared in `state/integrations.json` at install so the truthfulness gate sees an honest manifest from cycle start. Max 8. |
+| `dependencies` | `{ "runtime": ["cookie"], "peers": ["express"], "dev": ["vitest"] }` | Deterministic npm installs at pre-install time (runtime+peers regular, dev with `-D`). Keep the same lines in `usage_md` for human readers. |
+| `migrations` | `{ "dir": "migrations", "renumber": "append" }` | Files under `dir` ending in `.sql` are SQL migrations: at install they are renumbered to APPEND after the project's existing `migrations/*.sql` (a same-suffix migration already present is skipped — idempotent re-install). `"renumber": "none"` writes them as-is. |
+
+`docs/features/examples/proxypilot-auth.component.json` carries a complete,
+validated contract to copy from.
 
 ## What `usage_md` must cover
 

@@ -151,6 +151,7 @@ export function publicComponentShape(row, { currentVersion = null, includeFiles 
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
   };
+  if (currentVersion) out.contract = parseContractJson(currentVersion.contract_json);
   if (includeFiles && currentVersion) {
     out.files = parseFilesJson(currentVersion.files_json);
     out.usage_md = currentVersion.usage_md || null;
@@ -172,6 +173,7 @@ export function publicComponentVersionShape(row, { includeFiles = false } = {}) 
     created_by: row.created_by ?? null,
     created_at: row.created_at || null,
   };
+  out.contract = parseContractJson(row.contract_json);
   if (includeFiles) {
     out.files = parseFilesJson(row.files_json);
     out.usage_md = row.usage_md || null;
@@ -214,6 +216,7 @@ export function publicSubmissionShape(row, { includeFiles = false } = {}) {
 // receiving install needs to recreate it (files, notes, metadata); nothing
 // install-specific (ids, authors).
 export function buildComponentExport(component, version) {
+  const contract = parseContractJson(version.contract_json);
   return {
     format: COMPONENT_EXPORT_FORMAT,
     key: component.key,
@@ -223,6 +226,7 @@ export function buildComponentExport(component, version) {
     tags: parseTagsJson(component.tags),
     version: Number(version.version),
     usage_md: version.usage_md || null,
+    ...(contract ? { contract } : {}),
     files: parseFilesJson(version.files_json),
   };
 }
@@ -241,6 +245,8 @@ export function parseComponentImport(doc) {
   if (!keyCheck.ok) return { ok: false, error: keyCheck.error };
   const filesCheck = validateComponentFiles(doc.files);
   if (!filesCheck.ok) return { ok: false, error: filesCheck.error };
+  const contractCheck = validateComponentContract(doc.contract === undefined ? null : doc.contract);
+  if (!contractCheck.ok) return { ok: false, error: contractCheck.error };
   return {
     ok: true,
     data: {
@@ -250,6 +256,7 @@ export function parseComponentImport(doc) {
       category: String(doc.category || '').trim().slice(0, 80) || null,
       tags: normalizeTags(doc.tags),
       usage_md: typeof doc.usage_md === 'string' ? doc.usage_md.slice(0, 20000) : null,
+      contract: contractCheck.contract,
       files: filesCheck.files,
     },
   };
@@ -395,6 +402,406 @@ export function parseShaVerifyOutput(stdout) {
     if (m) out.set(m[1], null);
   }
   return out;
+}
+
+// ---- the component CONTRACT (machine-readable half of usage_md) ----
+//
+// A contract makes a component API-DRIVEN: it declares what the component IS
+// (provides), when the define stage should suggest it (requires_when), the HTTP
+// surface the build wires the mockup to (api), the exported code surface
+// (exports), structured config (config — the machine half of usage_md §3),
+// external connections (connections — pre-declares integration-manifest entries
+// and egress), dependency installs (dependencies), and which files are SQL
+// migrations to renumber on install (migrations). Everything here is validated
+// pure so no route or import can persist a malformed contract; automation reads
+// ONLY the contract (usage_md stays the model-facing narrative).
+
+export const MAX_CONTRACT_PROVIDES = 64;
+export const MAX_CONTRACT_API = 64;
+export const MAX_CONTRACT_CONFIG = 48;
+export const MAX_CONTRACT_CONNECTIONS = 8;
+export const MAX_CONTRACT_EXPORTS = 64;
+
+const API_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+const capSlug = (v, n = 80) => String(v || '').trim().slice(0, n);
+
+// A capability/provides slug: lowercase, dot-separated segments of [a-z0-9-].
+const CAPABILITY_RE = /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*$/;
+export function normalizeCapability(value) {
+  const v = String(value || '').trim().toLowerCase().slice(0, 80);
+  return CAPABILITY_RE.test(v) ? v : null;
+}
+
+// validateComponentContract — validate + normalize a candidate contract object.
+// Absent/empty input is fine ({ ok: true, contract: null }) — the contract is
+// optional; components without one behave exactly as before. Returns
+// { ok, error } or { ok: true, contract } with every field normalized.
+export function validateComponentContract(input) {
+  if (input == null) return { ok: true, contract: null };
+  if (typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'contract must be a JSON object' };
+  const out = {};
+
+  if (input.provides !== undefined) {
+    if (!Array.isArray(input.provides)) return { ok: false, error: 'contract.provides must be an array of capability slugs' };
+    const seen = new Set();
+    out.provides = [];
+    for (const p of input.provides.slice(0, MAX_CONTRACT_PROVIDES)) {
+      const cap = normalizeCapability(p);
+      if (!cap) return { ok: false, error: `contract.provides has an invalid capability "${String(p).slice(0, 40)}" — lowercase slug segments separated by dots` };
+      if (!seen.has(cap)) { seen.add(cap); out.provides.push(cap); }
+    }
+  }
+
+  if (input.requires_when !== undefined) {
+    const rw = input.requires_when;
+    if (!rw || typeof rw !== 'object' || Array.isArray(rw)) return { ok: false, error: 'contract.requires_when must be an object' };
+    const caps = Array.isArray(rw.capabilities_any) ? rw.capabilities_any : [];
+    const normalized = [];
+    for (const c of caps.slice(0, MAX_CONTRACT_PROVIDES)) {
+      const cap = normalizeCapability(c);
+      if (!cap) return { ok: false, error: `contract.requires_when.capabilities_any has an invalid capability "${String(c).slice(0, 40)}"` };
+      if (!normalized.includes(cap)) normalized.push(cap);
+    }
+    out.requires_when = {
+      capabilities_any: normalized,
+      suggest_prompt: String(rw.suggest_prompt || '').trim().slice(0, 500),
+    };
+  }
+
+  if (input.api !== undefined) {
+    if (!Array.isArray(input.api)) return { ok: false, error: 'contract.api must be an array of endpoint entries' };
+    if (input.api.length > MAX_CONTRACT_API) return { ok: false, error: `contract.api has too many entries (max ${MAX_CONTRACT_API})` };
+    out.api = [];
+    for (const e of input.api) {
+      if (!e || typeof e !== 'object') return { ok: false, error: 'each contract.api entry must be an object' };
+      const method = String(e.method || '').trim().toUpperCase();
+      if (!API_METHODS.includes(method)) return { ok: false, error: `contract.api entry has an invalid method "${String(e.method).slice(0, 12)}"` };
+      const path = String(e.path || '').trim().slice(0, 200);
+      if (!path.startsWith('/')) return { ok: false, error: `contract.api path "${path.slice(0, 60)}" must start with "/"` };
+      out.api.push({
+        method, path,
+        summary: capSlug(e.summary, 300),
+        auth: capSlug(e.auth, 40) || 'user',
+      });
+    }
+  }
+
+  if (input.exports !== undefined) {
+    if (!Array.isArray(input.exports)) return { ok: false, error: 'contract.exports must be an array of names' };
+    out.exports = input.exports.slice(0, MAX_CONTRACT_EXPORTS).map((x) => capSlug(x, 120)).filter(Boolean);
+  }
+
+  if (input.config !== undefined) {
+    if (!Array.isArray(input.config)) return { ok: false, error: 'contract.config must be an array of {key, ...} entries' };
+    if (input.config.length > MAX_CONTRACT_CONFIG) return { ok: false, error: `contract.config has too many entries (max ${MAX_CONTRACT_CONFIG})` };
+    out.config = [];
+    const seen = new Set();
+    for (const c of input.config) {
+      if (!c || typeof c !== 'object') return { ok: false, error: 'each contract.config entry must be an object' };
+      const key = String(c.key || '').trim().slice(0, 120);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return { ok: false, error: `contract.config key "${key.slice(0, 40)}" is not a valid env var name` };
+      if (seen.has(key)) return { ok: false, error: `contract.config has a duplicate key "${key}"` };
+      seen.add(key);
+      out.config.push({
+        key,
+        secret: c.secret === true,
+        required: c.required === true,
+        default: c.default === undefined || c.default === null ? null : String(c.default).slice(0, 400),
+        description: capSlug(c.description, 300),
+      });
+    }
+  }
+
+  if (input.connections !== undefined) {
+    if (!Array.isArray(input.connections)) return { ok: false, error: 'contract.connections must be an array' };
+    if (input.connections.length > MAX_CONTRACT_CONNECTIONS) return { ok: false, error: `contract.connections has too many entries (max ${MAX_CONTRACT_CONNECTIONS})` };
+    out.connections = [];
+    for (const c of input.connections) {
+      if (!c || typeof c !== 'object') return { ok: false, error: 'each contract.connections entry must be an object' };
+      const id = normalizeCapability(c.id);
+      if (!id) return { ok: false, error: `contract.connections entry needs a slug id (got "${String(c.id).slice(0, 40)}")` };
+      const classification = String(c.egress?.classification || 'private');
+      if (!['public', 'private', 'local'].includes(classification)) return { ok: false, error: `connection "${id}" has an invalid egress.classification` };
+      out.connections.push({
+        id,
+        transport: capSlug(c.transport, 40) || 'https',
+        optional: c.optional === true,
+        egress: {
+          classification,
+          port: Number.isInteger(c.egress?.port) && c.egress.port > 0 && c.egress.port < 65536 ? c.egress.port : null,
+          protocol: ['tcp', 'udp'].includes(c.egress?.protocol) ? c.egress.protocol : 'tcp',
+        },
+        config_keys: (Array.isArray(c.config_keys) ? c.config_keys : []).map((k) => capSlug(k, 120)).filter(Boolean).slice(0, 12),
+        live_verification: { required: c.live_verification?.required !== false },
+      });
+    }
+  }
+
+  if (input.dependencies !== undefined) {
+    const d = input.dependencies;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, error: 'contract.dependencies must be {runtime, peers, dev} arrays' };
+    const pkgList = (arr) => (Array.isArray(arr) ? arr : []).map((p) => String(p || '').trim().slice(0, 120))
+      .filter((p) => /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@[\w.^~>=<-]+)?$/.test(p)).slice(0, 40);
+    out.dependencies = { runtime: pkgList(d.runtime), peers: pkgList(d.peers), dev: pkgList(d.dev) };
+  }
+
+  if (input.migrations !== undefined) {
+    const m = input.migrations;
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return { ok: false, error: 'contract.migrations must be an object' };
+    const dir = safeComponentPath(m.dir || 'migrations');
+    if (!dir) return { ok: false, error: 'contract.migrations.dir must be a safe relative path' };
+    out.migrations = { dir, renumber: m.renumber === 'none' ? 'none' : 'append' };
+  }
+
+  return { ok: true, contract: Object.keys(out).length ? out : null };
+}
+
+export function parseContractJson(contractJson) {
+  try {
+    const doc = JSON.parse(contractJson || 'null');
+    const check = validateComponentContract(doc);
+    return check.ok ? check.contract : null;
+  } catch { return null; }
+}
+
+// ---- define-time capability matching (pure — no model, no DB) ----
+
+// extractCapabilities — pull the capability hints out of an inventory document
+// (state/inventory.json). Tolerant of any shape; returns a deduped slug list.
+// `required_capabilities` is written by the concept-stage extraction
+// (concept-logic.js) as {users: true, roles: [...], external_directories: [...]}
+// or a plain array of slugs — both forms are accepted.
+export function extractCapabilities(inventory) {
+  const rc = inventory?.required_capabilities;
+  const out = new Set();
+  const add = (v) => { const cap = normalizeCapability(v); if (cap) out.add(cap); };
+  if (Array.isArray(rc)) {
+    for (const v of rc) add(v);
+  } else if (rc && typeof rc === 'object') {
+    for (const [k, v] of Object.entries(rc)) {
+      if (v === true) add(k);
+      else if (Array.isArray(v) && v.length) { add(k); for (const item of v) add(item); }
+    }
+  }
+  return [...out];
+}
+
+// suggestComponentsForCapabilities — join the app's capabilities against the
+// published components' contracts. A component is suggested when any of its
+// requires_when.capabilities_any matches, unless it was already decided for
+// this project (decidedKeys — confirmed OR declined; a decline must not nag).
+// `components` are catalog rows carrying contract (parsed). Order-stable by key.
+export function suggestComponentsForCapabilities(components = [], capabilities = [], decidedKeys = new Set()) {
+  const caps = new Set(capabilities || []);
+  const out = [];
+  for (const c of components || []) {
+    if (!c || !c.key || decidedKeys.has(c.key)) continue;
+    const rw = c.contract?.requires_when;
+    if (!rw || !Array.isArray(rw.capabilities_any) || !rw.capabilities_any.length) continue;
+    const matched = rw.capabilities_any.filter((cap) => caps.has(cap));
+    if (!matched.length) continue;
+    out.push({ key: c.key, name: c.name, matched, suggest_prompt: rw.suggest_prompt || '' });
+  }
+  return out.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+// The tappable choices for a component_suggestion question, and the parse of
+// the editor's answer. The affirmative choice leads; anything that reads as a
+// refusal declines; unrecognized free text also DECLINES — a component must
+// never be installed on an ambiguous answer (the build can still adopt it
+// explicitly via the catalog).
+export const COMPONENT_SUGGESTION_ACCEPT = 'Use the standard component';
+export const COMPONENT_SUGGESTION_DECLINE = 'Skip it — build this from scratch';
+
+export function buildComponentSuggestionQuestion({ key, name, suggest_prompt = '' }) {
+  const question = suggest_prompt
+    || `This app appears to need "${name}". Use the standard ${key} component (installed automatically, no build credits) instead of building it from scratch?`;
+  return { question, choices: [COMPONENT_SUGGESTION_ACCEPT, COMPONENT_SUGGESTION_DECLINE] };
+}
+
+export function parseComponentSuggestionAnswer(answer) {
+  const a = String(answer || '').trim();
+  if (a === COMPONENT_SUGGESTION_ACCEPT || /^(use|yes|install|adopt)\b/i.test(a)) return { decision: 'confirmed' };
+  return { decision: 'declined' };
+}
+
+// ---- deterministic install plans (pure halves of component-install.js) ----
+
+// planMigrationRenumber — slot a component's SQL migrations AFTER the project's
+// existing migrations/*.sql. `componentFiles` are the version's files; those
+// under contract.migrations.dir become {from, to} renames numbered from the
+// highest existing NNNN_ prefix. A component migration whose SUFFIX (the part
+// after the number) already exists in the project is skipped — the component
+// was installed before; re-numbering it again would re-run its DDL.
+export function planMigrationRenumber(componentFiles = [], existingNames = [], migrations = { dir: 'migrations', renumber: 'append' }) {
+  const dir = (migrations?.dir || 'migrations').replace(/\/+$/, '');
+  const isMigration = (p) => p.startsWith(`${dir}/`) && p.endsWith('.sql') && !p.slice(dir.length + 1).includes('/');
+  const inDir = (componentFiles || []).filter((f) => f && isMigration(f.path));
+  if (!inDir.length || migrations?.renumber === 'none') {
+    return { renames: [], skipped: [], migrationPaths: new Set(inDir.map((f) => f.path)) };
+  }
+  const suffixOf = (name) => name.replace(/^\d+/, '');
+  let max = 0;
+  const existingSuffixes = new Set();
+  for (const n of existingNames || []) {
+    const base = String(n || '').trim();
+    if (!base.endsWith('.sql')) continue;
+    const m = base.match(/^(\d+)/);
+    if (m) max = Math.max(max, Number(m[1]));
+    existingSuffixes.add(suffixOf(base));
+  }
+  const width = Math.max(4, String(max).length);
+  const renames = [];
+  const skipped = [];
+  // Stable order: the component's own numbering decides relative order.
+  const ordered = [...inDir].sort((a, b) => a.path.localeCompare(b.path));
+  for (const f of ordered) {
+    const base = f.path.slice(dir.length + 1);
+    if (existingSuffixes.has(suffixOf(base))) { skipped.push(f.path); continue; }
+    max += 1;
+    renames.push({ from: f.path, to: `${dir}/${String(max).padStart(width, '0')}${suffixOf(base)}`, content: f.content });
+  }
+  return { renames, skipped, migrationPaths: new Set(inDir.map((f) => f.path)) };
+}
+
+// mergeEnvDefaults — append a contract's NON-SECRET defaults to a project .env,
+// preserving everything already there. Secrets are NEVER written (they go to
+// the operator verification checklist). Returns { text, added } — added empty
+// means no write needed.
+export function mergeEnvDefaults(envText = '', config = []) {
+  const existing = new Set();
+  for (const line of String(envText || '').split('\n')) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (m) existing.add(m[1]);
+  }
+  const added = [];
+  const lines = [];
+  for (const c of config || []) {
+    if (!c || c.secret === true || c.default == null || existing.has(c.key)) continue;
+    lines.push(`${c.key}=${c.default}`);
+    added.push(c.key);
+  }
+  if (!added.length) return { text: String(envText || ''), added };
+  const base = String(envText || '').replace(/\s+$/, '');
+  return { text: `${base ? `${base}\n\n` : ''}# Added by component install (defaults — override as needed)\n${lines.join('\n')}\n`, added };
+}
+
+// manifestEntryFromConnection — pre-declare a component connection in
+// state/integrations.json (the exact shape integration-logic validates), so the
+// truthfulness gate sees an honest manifest from cycle start instead of relying
+// on the build to declare it.
+export function manifestEntryFromConnection({ componentKey, connection, subsystem = null }) {
+  return {
+    id: `${componentKey}-${connection.id}`.slice(0, 80),
+    subsystem: subsystem || componentKey,
+    actions: [{ name: 'connect', operation: connection.transport || 'https' }],
+    destination: { source: 'env', key: connection.config_keys?.[0] || `${componentKey.replace(/-/g, '_').toUpperCase()}_URL` },
+    transport: connection.transport || 'https',
+    provenance: { response_to_output: 'required' },
+    live_verification: { required: connection.live_verification?.required !== false },
+    egress: { classification: connection.egress?.classification || 'private' },
+  };
+}
+
+// deriveComponentSubsystem — the src/<subsystem>/ a component's code lands in
+// (the integration manifest's `subsystem` field). First src/* file wins; a
+// component with no src/ files falls back to its key.
+export function deriveComponentSubsystem(files = [], fallback = null) {
+  for (const f of files || []) {
+    const m = String(f?.path || '').match(/^src\/([^/]+)\//);
+    if (m) return m[1];
+  }
+  return fallback;
+}
+
+// publicProjectComponentShape — client-safe view of one project-selection row
+// (joined with component key/name and the pinned version's contract).
+export function publicProjectComponentShape(row) {
+  if (!row) return null;
+  let options = null;
+  try { options = row.options_json ? JSON.parse(row.options_json) : null; } catch { options = null; }
+  let manifest = null;
+  try { manifest = row.install_manifest_json ? JSON.parse(row.install_manifest_json) : null; } catch { manifest = null; }
+  const contract = parseContractJson(row.contract_json);
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    component_id: row.component_id,
+    key: row.key,
+    name: row.name || row.key,
+    description: row.description || null,
+    status: row.status,
+    origin: row.origin,
+    version: row.pinned_version ?? null,
+    options,
+    question_id: row.question_id ?? null,
+    decided_at: row.decided_at || null,
+    installed_at: row.installed_at || null,
+    install_error: row.install_error || null,
+    files_installed: Array.isArray(manifest) ? manifest.length : null,
+    provides: contract?.provides || [],
+    api_count: Array.isArray(contract?.api) ? contract.api.length : 0,
+  };
+}
+
+// ---- state/components.json (the repo mirror of the project's selection) ----
+
+export const COMPONENTS_STATE_PATH = 'state/components.json';
+
+// buildComponentsStateDoc — the committed artifact recording WHICH components
+// this project uses, at what version, and why. Entries ride the hash-chained
+// history like integrations.json; the build runner and the gates read it.
+export function buildComponentsStateDoc(entries = []) {
+  return `${JSON.stringify({
+    schema_version: 1,
+    entries: (entries || []).map((e) => ({
+      key: e.key,
+      version: e.version ?? null,
+      status: e.status,
+      origin: e.origin || null,
+      options: e.options ?? null,
+      api: Array.isArray(e.api) ? e.api : undefined,
+      installed_at: e.installed_at || null,
+    })),
+  }, null, 2)}\n`;
+}
+
+// ---- installed-components prompt section (the build wiring contract) ----
+
+// buildInstalledComponentsSection — the section the BUILD prompt carries when
+// components were pre-installed by the platform. Unlike the catalog (things the
+// runner MAY adopt), these are already on disk and audited: the runner's job is
+// to WIRE the approved design to their API surface, not to rebuild them.
+// Entries carry {key, name, version, contract, usage_md?}. Empty → ''.
+export function buildInstalledComponentsSection(entries = []) {
+  const list = (entries || []).filter((e) => e && e.key);
+  if (!list.length) return '';
+  const blocks = list.map((e) => {
+    const c = e.contract || {};
+    const lines = [`## ${e.key} v${e.version ?? '?'} — ${e.name || e.key}`];
+    if (Array.isArray(c.provides) && c.provides.length) lines.push(`Provides: ${c.provides.join(', ')}`);
+    if (Array.isArray(c.api) && c.api.length) {
+      lines.push('API surface (wire the UI to these — they exist and are audited):');
+      for (const a of c.api) lines.push(`- ${a.method} ${a.path} [${a.auth}]${a.summary ? ` — ${a.summary}` : ''}`);
+    }
+    if (Array.isArray(c.exports) && c.exports.length) lines.push(`Code exports for glue: ${c.exports.join(', ')}`);
+    if (Array.isArray(c.config) && c.config.length) {
+      const secrets = c.config.filter((k) => k.secret).map((k) => k.key);
+      if (secrets.length) lines.push(`Secrets the operator supplies (never hardcode): ${secrets.join(', ')}`);
+    }
+    lines.push(`Integration notes: get_component "${e.key}" (do NOT re-materialize — the files are already in the source tree).`);
+    return lines.join('\n');
+  });
+  return `
+
+# Installed components (already in the source tree — wire, don't rebuild)
+The platform pre-installed these audited components into this project (files,
+migrations, and dependencies are already in place). Treat them as the app's
+standard infrastructure: connect the approved design to their API surface and
+write only the glue (mounts, config, calls). Do NOT rewrite, fork, or duplicate
+what they provide, and do not re-implement their endpoints.
+
+${blocks.join('\n\n')}`;
 }
 
 // The materialize_component tool result: what landed where, verbatim-verified —

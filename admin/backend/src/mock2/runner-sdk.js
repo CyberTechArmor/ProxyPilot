@@ -62,8 +62,8 @@ import { recordIntegrationGate, recordIntegrationFindings, openVerificationCheck
 import { capabilityCheckStatus } from './verification-logic.js';
 import { readDeclaredEgress } from './deploy.js';
 import { listApprovedEgressGrants } from './egress-grants.js';
-import { listPublishedComponents, getPublishedComponentWithVersion } from './components.js';
-import { parseFilesJson, safeComponentPath } from './component-logic.js';
+import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
+import { parseFilesJson, safeComponentPath, parseContractJson } from './component-logic.js';
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, acceptanceRecord,
@@ -191,13 +191,23 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     const skills = parseFrameworkSkills(framework.skills_json);
     let componentCatalog = [];
     try { componentCatalog = listPublishedComponents(); } catch (err) { console.warn('[mock2] component catalog load failed:', err?.message); }
+    // Platform pre-installed selections (migration 524): presented as installed
+    // infrastructure to wire against, and filtered out of the adoptable catalog.
+    let installedComponents = [];
+    try {
+      installedComponents = listProjectComponents(project.id)
+        .filter((r) => r.status === 'installed')
+        .map((r) => ({ key: r.key, name: r.name, version: r.pinned_version, contract: parseContractJson(r.contract_json) }));
+    } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
+    const installedKeys = new Set(installedComponents.map((c) => c.key));
+    const adoptableCatalog = componentCatalog.filter((c) => !installedKeys.has(c.key));
     const claudeMd = buildRunnerClaudeMd({
       constitution: framework.constitution_md, skills, appDir: checkoutDir, webPort: project.web_port || 3000,
-      components: componentCatalog,
+      components: adoptableCatalog, installedComponents,
     });
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
-    await materializeComponents(checkoutDir, componentCatalog);
+    await materializeComponents(checkoutDir, adoptableCatalog);
     logEvent('note', { role: 'system', content: 'Constitution loaded from .claude/CLAUDE.md (auto-loaded by the SDK, not re-explored).', meta: { components: componentCatalog.length } });
 
     // 3) Drive the SDK loop, then verify the pinned gates. Bounded gate-feedback

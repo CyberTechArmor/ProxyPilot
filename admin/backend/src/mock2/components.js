@@ -60,7 +60,7 @@ export function listPublishedComponents() {
   return getMock2Db()
     .prepare(
       `SELECT c.id, c.key, c.name, c.description, c.category, c.tags,
-              c.current_version_id, v.version AS current_version
+              c.current_version_id, v.version AS current_version, v.contract_json
          FROM mock2_components c
          JOIN mock2_component_versions v ON v.id = c.current_version_id
         WHERE c.status = 'published'
@@ -87,7 +87,7 @@ export function getPublishedComponentWithVersion(key) {
 // first. Returns { component, version }.
 export function insertComponent({
   key, name, description = null, category = null, tags = [],
-  status = 'published', files, usage_md = null, change_reason,
+  status = 'published', files, usage_md = null, contract = null, change_reason,
   source = 'in_app', sourceProjectId = null, submissionId = null, createdBy,
 }) {
   const db = getMock2Db();
@@ -103,10 +103,11 @@ export function insertComponent({
     const vinfo = db
       .prepare(
         `INSERT INTO mock2_component_versions
-           (component_id, version, files_json, usage_md, change_reason, source, source_project_id, submission_id, created_by, created_at)
-         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (component_id, version, files_json, usage_md, contract_json, change_reason, source, source_project_id, submission_id, created_by, created_at)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(componentId, JSON.stringify(files), usage_md, change_reason, source, sourceProjectId, submissionId, createdBy, nowIso());
+      .run(componentId, JSON.stringify(files), usage_md, contract ? JSON.stringify(contract) : null,
+        change_reason, source, sourceProjectId, submissionId, createdBy, nowIso());
     db.prepare(`UPDATE mock2_components SET current_version_id = ? WHERE id = ?`).run(vinfo.lastInsertRowid, componentId);
     out = {
       component: db.prepare(`SELECT * FROM mock2_components WHERE id = ?`).get(componentId),
@@ -120,7 +121,7 @@ export function insertComponent({
 // Append a new version (the ONLY way content changes; the version number is
 // assigned monotonically inside the transaction). Returns the new version row.
 export function insertComponentVersion(componentId, {
-  files, usage_md = null, change_reason, revertedFromVersion = null,
+  files, usage_md = null, contract = null, change_reason, revertedFromVersion = null,
   source = 'in_app', sourceProjectId = null, submissionId = null, createdBy,
 }) {
   const db = getMock2Db();
@@ -131,12 +132,12 @@ export function insertComponentVersion(componentId, {
     const info = db
       .prepare(
         `INSERT INTO mock2_component_versions
-           (component_id, version, files_json, usage_md, change_reason, reverted_from_version,
+           (component_id, version, files_json, usage_md, contract_json, change_reason, reverted_from_version,
             source, source_project_id, submission_id, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(Number(componentId), version, JSON.stringify(files), usage_md, change_reason, revertedFromVersion,
-        source, sourceProjectId, submissionId, createdBy, nowIso());
+      .run(Number(componentId), version, JSON.stringify(files), usage_md, contract ? JSON.stringify(contract) : null,
+        change_reason, revertedFromVersion, source, sourceProjectId, submissionId, createdBy, nowIso());
     db.prepare(`UPDATE mock2_components SET current_version_id = ?, updated_at = ? WHERE id = ?`)
       .run(info.lastInsertRowid, nowIso(), Number(componentId));
     row = db.prepare(`SELECT * FROM mock2_component_versions WHERE id = ?`).get(info.lastInsertRowid);
@@ -255,6 +256,109 @@ export function approveSubmission(submission, { reviewerId, reason = null, overr
   });
   tx();
   return out;
+}
+
+// ---- per-project component selection (migration 524) ----
+//
+// WHICH components a project uses: suggested at define time (from the app's
+// required capabilities), confirmed/declined by the editor, or picked directly
+// by an operator — then installed deterministically by component-install.js
+// (no model tokens) before the build runner starts. One row per
+// (project, component); status is the lifecycle, install_manifest_json records
+// exactly what landed (paths/bytes/sha256, never contents).
+
+export function listProjectComponents(projectId) {
+  return getMock2Db()
+    .prepare(
+      `SELECT pc.*, c.key, c.name, c.description, c.status AS component_status,
+              v.version AS pinned_version, v.contract_json
+         FROM mock2_project_components pc
+         JOIN mock2_components c ON c.id = pc.component_id
+         LEFT JOIN mock2_component_versions v ON v.id = pc.version_id
+        WHERE pc.project_id = ?
+        ORDER BY c.key`,
+    )
+    .all(Number(projectId));
+}
+
+export function getProjectComponent(projectId, componentId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_project_components WHERE project_id = ? AND component_id = ?`)
+    .get(Number(projectId), Number(componentId));
+}
+
+export function getProjectComponentByQuestion(questionId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_project_components WHERE question_id = ?`)
+    .get(Number(questionId));
+}
+
+// Insert a define-time suggestion row (status 'suggested'), linked to its
+// component_suggestion audit question. No-op (returns the existing row) when
+// the component was already decided for this project.
+export function insertProjectComponentSuggestion({ projectId, componentId, versionId = null, questionId = null }) {
+  const db = getMock2Db();
+  const existing = getProjectComponent(projectId, componentId);
+  if (existing) return existing;
+  const info = db
+    .prepare(
+      `INSERT INTO mock2_project_components
+         (project_id, component_id, version_id, status, origin, question_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'suggested', 'define', ?, ?, ?)`,
+    )
+    .run(Number(projectId), Number(componentId), versionId, questionId, nowIso(), nowIso());
+  return db.prepare(`SELECT * FROM mock2_project_components WHERE id = ?`).get(info.lastInsertRowid);
+}
+
+// Record a decision (confirmed/declined) — from an editor's suggestion answer
+// or an operator's direct pick. Upserts so an operator can select a component
+// that was never suggested, or re-confirm a previously declined one.
+export function decideProjectComponent({
+  projectId, componentId, versionId = null, status, origin = 'operator',
+  options = null, questionId = null, decidedBy = null,
+}) {
+  const db = getMock2Db();
+  const existing = getProjectComponent(projectId, componentId);
+  if (existing) {
+    db.prepare(
+      `UPDATE mock2_project_components
+          SET status = ?, version_id = COALESCE(?, version_id), options_json = ?,
+              question_id = COALESCE(?, question_id), selected_by = ?, decided_at = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(status, versionId, options ? JSON.stringify(options) : null, questionId,
+      decidedBy, nowIso(), nowIso(), existing.id);
+    return db.prepare(`SELECT * FROM mock2_project_components WHERE id = ?`).get(existing.id);
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO mock2_project_components
+         (project_id, component_id, version_id, status, origin, options_json, question_id, selected_by, decided_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(Number(projectId), Number(componentId), versionId, status, origin,
+      options ? JSON.stringify(options) : null, questionId, decidedBy, nowIso(), nowIso(), nowIso());
+  return db.prepare(`SELECT * FROM mock2_project_components WHERE id = ?`).get(info.lastInsertRowid);
+}
+
+// Record an install outcome. 'installed' pins the version that landed and its
+// manifest; 'install_failed' records the error for the queue item / UI.
+export function markProjectComponentInstall({ id, ok, versionId = null, manifest = null, error = null }) {
+  const db = getMock2Db();
+  if (ok) {
+    db.prepare(
+      `UPDATE mock2_project_components
+          SET status = 'installed', version_id = COALESCE(?, version_id),
+              install_manifest_json = ?, install_error = NULL, installed_at = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(versionId, manifest ? JSON.stringify(manifest) : null, nowIso(), nowIso(), Number(id));
+  } else {
+    db.prepare(
+      `UPDATE mock2_project_components
+          SET status = 'install_failed', install_error = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(String(error || 'install failed').slice(0, 2000), nowIso(), Number(id));
+  }
+  return db.prepare(`SELECT * FROM mock2_project_components WHERE id = ?`).get(Number(id));
 }
 
 export function rejectSubmission(submissionId, { reviewerId, reason }) {

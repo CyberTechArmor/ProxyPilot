@@ -45,6 +45,15 @@ import {
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
 import { getChatMaxChars } from './settings.js';
+import {
+  listPublishedComponents, listProjectComponents, insertProjectComponentSuggestion,
+  getProjectComponentByQuestion, decideProjectComponent,
+} from './components.js';
+import {
+  parseContractJson, extractCapabilities, suggestComponentsForCapabilities,
+  buildComponentSuggestionQuestion, parseComponentSuggestionAnswer,
+} from './component-logic.js';
+import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { callModelTurn } from './model-client.js';
 import {
@@ -287,6 +296,36 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   const inventoryText = String(inv.content).slice(0, MAX_AUDIT_INPUT_CHARS);
   const rulesMd = rules.ok ? String(rules.content || '').slice(0, MAX_AUDIT_INPUT_CHARS) : '';
 
+  // 1b) Component suggestions — define-time selection, PURE CODE (no model, no
+  //     tokens): the inventory's required capabilities are matched against the
+  //     published components' contracts; each match becomes a tappable
+  //     component_suggestion question that gates the build exactly like a rule
+  //     question. Already-decided components (confirmed OR declined) never
+  //     re-suggest. Best-effort — a failure here must not break the audit.
+  let suggestionCount = 0;
+  try {
+    let inventoryDoc = null;
+    try { inventoryDoc = JSON.parse(inv.content); } catch { inventoryDoc = null; }
+    const capabilities = extractCapabilities(inventoryDoc);
+    if (capabilities.length) {
+      const catalog = listPublishedComponents().map((c) => ({ ...c, contract: parseContractJson(c.contract_json) }));
+      const decided = new Set(listProjectComponents(projectId).map((r) => r.key));
+      const suggestions = suggestComponentsForCapabilities(catalog, capabilities, decided);
+      for (const s of suggestions) {
+        const catRow = catalog.find((c) => c.key === s.key);
+        if (!catRow) continue;
+        const q = buildComponentSuggestionQuestion(s);
+        const row = insertQuestion({ projectId, cycleId: cycle.id, route: 'editor', kind: 'component_suggestion', question: q.question, choices: q.choices });
+        insertProjectComponentSuggestion({ projectId, componentId: catRow.id, versionId: catRow.current_version_id, questionId: row.id });
+        insertMessage({
+          projectId, kind: 'rule_question', cycleId: cycle.id, questionId: row.id,
+          body: buildRuleQuestionBody({ question: q.question, choices: q.choices }),
+        });
+        suggestionCount += 1;
+      }
+    }
+  } catch (e) { console.warn('[mock2] component suggestion failed:', e?.message); }
+
   // 2) Run the audit on the audit slot (a reasoning task; no tools — JSON out).
   const auditRes = await callModelTurn({
     connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
@@ -306,8 +345,9 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 
   const { editor, admin } = splitQuestionsByRoute(parsed.questions);
 
-  // 3a) No questions → the gate is clear; Build starts immediately (ADR-002).
-  if (editor.length === 0 && admin.length === 0) {
+  // 3a) No questions (and no component suggestions) → the gate is clear; Build
+  //     starts immediately (ADR-002).
+  if (editor.length === 0 && admin.length === 0 && suggestionCount === 0) {
     finishCycle(cycle.id, { status: 'succeeded' });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: 'Audit passed — no rule questions. Starting the build.' });
     setJob(projectId, { phase: 'building', message: 'Audit passed — starting the build.', cycleId: cycle.id });
@@ -340,14 +380,15 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   }
 
   // 4) Block the build in the derived status and tell the Builder what's next.
-  const blocked = blockedBuildStatus({ openEditorQuestions: editor.length, openAdminItems: admin.length }) || 'awaiting_user';
+  const blocked = blockedBuildStatus({ openEditorQuestions: editor.length + suggestionCount, openAdminItems: admin.length }) || 'awaiting_user';
   updateCycle(cycle.id, { status: blocked });
   const bits = [];
   if (editor.length) bits.push(`${editor.length} rule question${editor.length === 1 ? '' : 's'} to confirm below`);
+  if (suggestionCount) bits.push(`${suggestionCount} standard component${suggestionCount === 1 ? '' : 's'} to confirm below`);
   if (admin.length) bits.push(`${admin.length} framework deviation${admin.length === 1 ? '' : 's'} sent to the admin queue`);
   insertMessage({
     projectId, kind: 'system', cycleId: cycle.id,
-    body: `Before building, the audit needs ${bits.join(' and ')}. ${editor.length ? 'Answer the rule questions to continue — Build starts automatically once every one is confirmed.' : 'Build is blocked until an admin resolves the framework deviation(s).'}`,
+    body: `Before building, the audit needs ${bits.join(' and ')}. ${(editor.length || suggestionCount) ? 'Answer the questions to continue — Build starts automatically once every one is confirmed.' : 'Build is blocked until an admin resolves the framework deviation(s).'}`,
   });
   setJob(projectId, { phase: blocked, message: `Build blocked: ${bits.join('; ')}.`, cycleId: cycle.id });
   scheduleJobCleanup(projectId);
@@ -361,6 +402,32 @@ async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
+
+  // Deterministic component pre-install (ZERO model tokens): every confirmed
+  // selection lands in the container BEFORE the runner's first turn — files
+  // (sha256-verified), renumbered migrations, declared npm deps, .env defaults,
+  // and pre-declared integration-manifest entries. The writes take the checkout
+  // lock like any other writer (ADR-004). A failed install BLOCKS the build —
+  // a half-installed component is worse than none; pressing Build retries.
+  const holder = { type: 'user', id: initiatedBy };
+  const lock = acquireLock({ projectId, requester: holder, role: actingAsAdmin ? 'admin' : 'editor' });
+  if (!lock.ok) {
+    insertMessage({ projectId, kind: 'system', body: `Build did not start — ${lock.reason || 'the project is checked out by another writer.'}` });
+    return { ok: false, error: lock.reason || 'project locked' };
+  }
+  try {
+    const pre = await preinstallComponents({ project: getProject(projectId), initiatedBy, actingAsAdmin });
+    if (!pre.ok) {
+      const keys = pre.failed.map((f) => f.row.key).join(', ');
+      insertMessage({ projectId, kind: 'system', body: `Build not started — component pre-install failed (${keys}). Fix the cause and press Build to retry.` });
+      return { ok: false, error: `component pre-install failed: ${keys}` };
+    }
+  } catch (err) {
+    insertMessage({ projectId, kind: 'system', body: `Build not started — component pre-install crashed: ${err?.message || err}` });
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    try { releaseLock(projectId, holder); } catch { /* ignore */ }
+  }
   // Carry the admin's deviation decisions INTO the build instruction (so they
   // persist on the cycle and survive a resume) — the runner honors an approved
   // exception as an override of the constitution. Without this the runner never
@@ -440,6 +507,23 @@ export async function answerAuditQuestion({ project, question, answer, user, act
     // 3) Record the answer + post the rule_answer (linked by question_id, ADR-002).
     const updated = answerQuestion(question.id, { answer: text, answeredBy: user.id, rulesMdAnchor: anchor });
     insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'rule_answer', cycleId: question.cycle_id || null, questionId: question.id, body: text });
+    // A component_suggestion answer ALSO records the structured decision on the
+    // project's selection row (mock2_project_components) — the pre-installer
+    // and the build prompt read that, not the rules prose. An ambiguous answer
+    // declines (a component is never installed on an unclear yes).
+    if (question.kind === 'component_suggestion') {
+      try {
+        const sel = getProjectComponentByQuestion(question.id);
+        if (sel) {
+          const { decision } = parseComponentSuggestionAnswer(text);
+          decideProjectComponent({
+            projectId, componentId: sel.component_id, versionId: sel.version_id,
+            status: decision, origin: 'define', options: { answer: text },
+            questionId: question.id, decidedBy: user.id,
+          });
+        }
+      } catch (e) { console.warn('[mock2] component decision record failed:', e?.message); }
+    }
     updateProject(projectId, { last_activity_at: nowIso() });
     releaseLock(projectId, holder);
 

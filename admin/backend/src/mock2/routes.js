@@ -163,14 +163,17 @@ import {
   insertComponent, insertComponentVersion, updateComponentMeta, deleteComponent,
   insertSubmission, getSubmission, listSubmissions, countPendingSubmissions,
   approveSubmission, rejectSubmission,
+  listProjectComponents, decideProjectComponent,
 } from './components.js';
 import {
   COMPONENT_STATUSES, MAX_COMPONENT_FILES,
   validateComponentKey, deriveComponentKey, normalizeTags,
-  validateComponentFiles, validateChangeReason,
-  publicComponentShape, publicComponentVersionShape, publicSubmissionShape,
+  validateComponentFiles, validateChangeReason, validateComponentContract,
+  parseContractJson, publicComponentShape, publicComponentVersionShape,
+  publicSubmissionShape, publicProjectComponentShape,
   buildComponentExport, parseComponentImport,
 } from './component-logic.js';
+import { preinstallComponents } from './component-install.js';
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer } from './runner.js';
 import {
@@ -520,6 +523,7 @@ const componentCreateSchema = z.object({
   tags: z.array(z.string()).optional(),
   status: z.enum(COMPONENT_STATUSES).optional(),
   usage_md: z.string().max(20000).optional(),
+  contract: z.record(z.any()).nullish(),
   files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
   change_reason: z.string().trim().max(2000).optional(),
 });
@@ -533,7 +537,15 @@ const componentMetaSchema = z.object({
 const componentVersionSchema = z.object({
   files: z.array(componentFileSchema).min(1).max(MAX_COMPONENT_FILES),
   usage_md: z.string().max(20000).optional(),
+  contract: z.record(z.any()).nullish(),
   change_reason: z.string().trim().min(1).max(2000),
+});
+// A project's component selection: an editor picks a library component for the
+// project (or declines a suggestion) by key.
+const projectComponentSelectSchema = z.object({
+  key: z.string().trim().min(2).max(64),
+  decision: z.enum(['confirmed', 'declined']).default('confirmed'),
+  options: z.record(z.any()).optional(),
 });
 const componentImportSchema = z.object({
   doc: z.record(z.any()),
@@ -1600,11 +1612,13 @@ export function createMock2Router() {
     if (getComponentByKey(keyCheck.key)) return res.status(409).json({ error: `A component with key "${keyCheck.key}" already exists — publish a new version of it instead` });
     const filesCheck = validateComponentFiles(d.files);
     if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const contractCheck = validateComponentContract(d.contract ?? null);
+    if (!contractCheck.ok) return res.status(400).json({ error: contractCheck.error });
     const { component, version } = insertComponent({
       key: keyCheck.key, name: d.name, description: d.description || null,
       category: d.category || null, tags: normalizeTags(d.tags),
       status: d.status || 'published', files: filesCheck.files,
-      usage_md: d.usage_md || null,
+      usage_md: d.usage_md || null, contract: contractCheck.contract,
       change_reason: (d.change_reason || '').trim() || 'Initial version',
       createdBy: req.user.id,
     });
@@ -1663,8 +1677,11 @@ export function createMock2Router() {
     if (!reasonCheck.ok) return res.status(400).json({ error: reasonCheck.error });
     const filesCheck = validateComponentFiles(parsed.data.files);
     if (!filesCheck.ok) return res.status(400).json({ error: filesCheck.error });
+    const contractCheck = validateComponentContract(parsed.data.contract ?? null);
+    if (!contractCheck.ok) return res.status(400).json({ error: contractCheck.error });
     const version = insertComponentVersion(row.id, {
       files: filesCheck.files, usage_md: parsed.data.usage_md || null,
+      contract: contractCheck.contract,
       change_reason: reasonCheck.reason, createdBy: req.user.id,
     });
     logAudit(req.user.id, 'MOCK2_COMPONENT_VERSION_PUBLISH', 'mock2_component', row.id, { key: row.key, version: version.version }, req.ip);
@@ -1681,6 +1698,7 @@ export function createMock2Router() {
     const reason = String(req.body?.change_reason || '').trim() || `Revert to v${source.version}`;
     const version = insertComponentVersion(row.id, {
       files: JSON.parse(source.files_json), usage_md: source.usage_md,
+      contract: parseContractJson(source.contract_json),
       change_reason: reason, revertedFromVersion: source.version,
       source: 'revert', createdBy: req.user.id,
     });
@@ -1712,7 +1730,7 @@ export function createMock2Router() {
     const existing = getComponentByKey(d.key);
     if (existing) {
       const version = insertComponentVersion(existing.id, {
-        files: d.files, usage_md: d.usage_md, change_reason: reason,
+        files: d.files, usage_md: d.usage_md, contract: d.contract, change_reason: reason,
         source: 'import', createdBy: req.user.id,
       });
       logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', existing.id, { key: d.key, as: 'new_version', version: version.version }, req.ip);
@@ -1720,11 +1738,66 @@ export function createMock2Router() {
     }
     const { component, version } = insertComponent({
       key: d.key, name: d.name, description: d.description, category: d.category,
-      tags: d.tags, files: d.files, usage_md: d.usage_md,
+      tags: d.tags, files: d.files, usage_md: d.usage_md, contract: d.contract,
       change_reason: reason, source: 'import', createdBy: req.user.id,
     });
     logAudit(req.user.id, 'MOCK2_COMPONENT_IMPORT', 'mock2_component', component.id, { key: d.key, as: 'new_component', version: version.version }, req.ip);
     res.status(201).json({ component: publicComponentShape(component, { currentVersion: version }), created: true });
+  });
+
+  // ---- per-project component selection (migration 524) ----
+  //
+  // WHICH components a project uses: suggested at define time, confirmed via
+  // the chat questions, or picked here directly. The list is the visible record
+  // of what the build was given; POST lets an editor specify a component to use
+  // (or decline one) without waiting for a suggestion; /install runs the
+  // deterministic zero-token pre-install immediately instead of at next build.
+
+  router.get('/projects/:id/components', requireMock2Role('viewer'), (req, res) => {
+    const rows = listProjectComponents(req.mock2Project.id).map((r) => publicProjectComponentShape(r));
+    res.json({ components: rows });
+  });
+
+  router.post('/projects/:id/components', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const parsed = projectComponentSelectSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid selection' });
+    const d = parsed.data;
+    const component = getComponentByKey(d.key);
+    if (!component) return res.status(404).json({ error: `No component with key "${d.key}"` });
+    if (d.decision === 'confirmed' && component.status !== 'published') {
+      return res.status(409).json({ error: `Component "${d.key}" is not published (${component.status}) — only published components can be used` });
+    }
+    const row = decideProjectComponent({
+      projectId: project.id, componentId: component.id,
+      versionId: component.current_version_id, status: d.decision,
+      origin: 'operator', options: d.options || null, decidedBy: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_PROJECT_COMPONENT_SELECT', 'mock2_project_component', row.id,
+      { project_id: project.id, key: component.key, decision: d.decision }, req.ip);
+    const joined = listProjectComponents(project.id).find((r) => r.id === row.id);
+    res.status(201).json({ component: publicProjectComponentShape(joined || row) });
+  });
+
+  // Run the deterministic pre-install NOW (it otherwise runs automatically when
+  // the next build starts). Zero model tokens; requires the container online.
+  router.post('/projects/:id/components/install', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') {
+      return res.status(409).json({ error: `The project must be online to install components (it is "${project.lifecycle}").` });
+    }
+    try {
+      const result = await preinstallComponents({ project, initiatedBy: req.user.id, actingAsAdmin: req.mock2Access?.actingAsAdmin ? 1 : 0 });
+      const rows = listProjectComponents(project.id).map((r) => publicProjectComponentShape(r));
+      res.status(result.ok ? 200 : 502).json({
+        ok: result.ok,
+        installed: result.installed.map((i) => ({ key: i.component.key, version: i.version.version, ...i.counts })),
+        failed: result.failed.map((f) => ({ key: f.row.key, error: f.error })),
+        components: rows,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err?.message || 'install failed' });
+    }
   });
 
   // ---- submissions: the in-platform promotion path ----

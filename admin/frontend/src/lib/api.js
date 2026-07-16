@@ -1167,6 +1167,12 @@ export const api = {
   mock2SetChatMaxChars: (maxChars) =>
     request('/mock2/settings/chat-max-chars', { method: 'POST', body: JSON.stringify({ max_chars: maxChars }) }),
 
+  // Mock2 integration-gate mode (admin-only) — the block/approve loop relief
+  // valve. Read returns the current mode and the options (enforce/pending/monitor).
+  mock2GetIntegrationGateMode: () => request('/mock2/settings/integration-gate-mode'),
+  mock2SetIntegrationGateMode: (mode) =>
+    request('/mock2/settings/integration-gate-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
+
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid
   // was removed). Read-only, member-visible. Entries are destination IP:port.

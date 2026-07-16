@@ -42,6 +42,22 @@ const KIND_LABEL = {
   egress_grant: 'Egress request',
 };
 
+// Integration-gate mode option copy (the block/approve loop relief valve).
+const GATE_MODE_LABEL = {
+  enforce: {
+    title: 'Enforce — block (default)',
+    desc: 'A build that ships a simulated or undeclared external integration is blocked until an admin resolves it. The safe default.',
+  },
+  pending: {
+    title: 'Pending verification — deploy, verify live',
+    desc: 'A build the gate would block instead deploys as “pending operator verification”, with the live checks recorded for you to confirm against the real system. Lets a build complete so you can test the site; the honesty check moves to a live check, it is not dropped.',
+  },
+  monitor: {
+    title: 'Monitor — never block',
+    desc: 'Integration findings are recorded but never block or pend the build — it completes so you can test it. Loosest; use when you just need to see the code run. Findings stay on the record.',
+  },
+};
+
 const KIND_TONE = {
   framework_deviation: 'bg-amber-500/10 text-amber-600',
   drift: 'bg-sky-500/10 text-sky-600',
@@ -133,6 +149,9 @@ export default function AdminQueue() {
   const [chatMax, setChatMax] = useState(null);          // current limit (number) or null while loading
   const [chatOptions, setChatOptions] = useState([]);    // selectable ceilings
   const [savingChat, setSavingChat] = useState(false);
+  const [gateMode, setGateMode] = useState(null);        // 'enforce' | 'pending' | 'monitor' or null while loading
+  const [gateModeOptions, setGateModeOptions] = useState([]);
+  const [savingGateMode, setSavingGateMode] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -187,6 +206,30 @@ export default function AdminQueue() {
       toast({ variant: 'destructive', title: 'Could not update limit', description: err.message });
     } finally {
       setSavingChat(false);
+    }
+  };
+
+  // Integration-gate mode (admin-configurable — enforce/pending/monitor).
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetIntegrationGateMode()
+      .then((r) => { setGateMode(r.mode); setGateModeOptions(r.options || []); })
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load gate mode failed:', err); });
+  }, [gate]);
+
+  const onGateModeChange = async (value) => {
+    const prev = gateMode;
+    setGateMode(value); // optimistic
+    setSavingGateMode(true);
+    try {
+      const res = await api.mock2SetIntegrationGateMode(value);
+      setGateMode(res.mode);
+      toast({ title: 'Integration gate mode updated', description: GATE_MODE_LABEL[res.mode]?.title || res.mode });
+    } catch (err) {
+      setGateMode(prev); // roll back
+      toast({ variant: 'destructive', title: 'Could not update mode', description: err.message });
+    } finally {
+      setSavingGateMode(false);
     }
   };
 
@@ -259,6 +302,38 @@ export default function AdminQueue() {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Integration gate mode — the block/approve loop relief valve. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Integration gate mode</CardTitle>
+          <CardDescription>
+            How the integration-truthfulness gate treats a build it would block. Relax it to let a build complete and deploy for live testing — the findings stay on the record either way.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-1.5 max-w-md">
+            <label className="text-xs text-muted-foreground" htmlFor="gate-mode">Mode</label>
+            <Select
+              value={gateMode || undefined}
+              onValueChange={onGateModeChange}
+              disabled={gateMode == null || savingGateMode}
+            >
+              <SelectTrigger id="gate-mode" className="h-11 sm:h-10">
+                <SelectValue placeholder="Loading…" />
+              </SelectTrigger>
+              <SelectContent>
+                {gateModeOptions.map((m) => (
+                  <SelectItem key={m} value={m}>{GATE_MODE_LABEL[m]?.title || m}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {gateMode && GATE_MODE_LABEL[gateMode] && (
+              <p className="pt-1 text-xs text-muted-foreground">{GATE_MODE_LABEL[gateMode].desc}</p>
+            )}
           </div>
         </CardContent>
       </Card>

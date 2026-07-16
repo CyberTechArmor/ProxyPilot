@@ -9,6 +9,7 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { getMock2Db } from './db.js';
+import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -79,4 +80,16 @@ export function getChatMaxChars() {
   const raw = getMock2Setting(CHAT_MAX_CHARS_KEY, process.env.MOCK2_CHAT_MAX_CHARS || String(DEFAULT_CHAT_MAX_CHARS));
   const n = Number(raw);
   return CHAT_MAX_CHARS_OPTIONS.includes(n) ? n : DEFAULT_CHAT_MAX_CHARS;
+}
+
+// ---- Integration-gate mode (the block/approve loop relief valve) ----
+export const INTEGRATION_GATE_MODE_KEY = 'integration_gate_mode';
+
+// The integration-truthfulness gate mode the runner consults at finish. The
+// decision logic + mode meanings live in accept-pending-logic.js (pure); this is
+// just the native reader. Precedence: stored setting → MOCK2_INTEGRATION_GATE_MODE
+// env → 'enforce' (safe default). Any unknown value normalizes to 'enforce'.
+export function getIntegrationGateMode() {
+  const raw = getMock2Setting(INTEGRATION_GATE_MODE_KEY, process.env.MOCK2_INTEGRATION_GATE_MODE || GATE_MODE_ENFORCE);
+  return normalizeGateMode(raw);
 }

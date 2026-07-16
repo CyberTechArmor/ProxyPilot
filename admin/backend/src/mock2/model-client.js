@@ -14,9 +14,12 @@
 // every other outbound call (see connectors.js testConnector).
 //
 // Neutral transcript turn shapes:
-//   { role:'user', text }
+//   { role:'user', text, images?:[{ media_type, data(base64) }] }
 //   { role:'assistant', text, toolCalls:[{ id, name, input }] }
 //   { role:'tool', toolCallId, name, content }
+// User-turn images (multi-modal chat) map to each provider's native block:
+// Anthropic image blocks, OpenAI image_url data URIs, Gemini inlineData. Images
+// precede the text block (the recommended order for vision prompts).
 // callModelTurn returns:
 //   { ok, text, toolCalls:[{ id, name, input }], usage:{ inputTokens, outputTokens }, stopReason, error }
 //
@@ -170,7 +173,11 @@ function anthropicMessages(transcript) {
   const out = [];
   for (const turn of transcript) {
     if (turn.role === 'user') {
-      out.push({ role: 'user', content: [{ type: 'text', text: turn.text || '' }] });
+      const content = (turn.images || []).map((img) => ({
+        type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data },
+      }));
+      content.push({ type: 'text', text: turn.text || '' });
+      out.push({ role: 'user', content });
     } else if (turn.role === 'assistant') {
       // Verbatim replay when the raw Anthropic blocks were captured — REQUIRED
       // once adaptive thinking is on (thinking blocks must return unchanged,
@@ -232,7 +239,17 @@ function openAiMessages(transcript) {
   const out = [];
   for (const turn of transcript) {
     if (turn.role === 'user') {
-      out.push({ role: 'user', content: turn.text || '' });
+      if (turn.images?.length) {
+        out.push({
+          role: 'user',
+          content: [
+            ...turn.images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.media_type};base64,${img.data}` } })),
+            { type: 'text', text: turn.text || '' },
+          ],
+        });
+      } else {
+        out.push({ role: 'user', content: turn.text || '' });
+      }
     } else if (turn.role === 'assistant') {
       const m = { role: 'assistant', content: turn.text || null };
       if (turn.toolCalls?.length) {
@@ -279,7 +296,9 @@ function geminiContents(transcript) {
   const out = [];
   for (const turn of transcript) {
     if (turn.role === 'user') {
-      out.push({ role: 'user', parts: [{ text: turn.text || '' }] });
+      const parts = (turn.images || []).map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } }));
+      parts.push({ text: turn.text || '' });
+      out.push({ role: 'user', parts });
     } else if (turn.role === 'assistant') {
       const parts = [];
       if (turn.text) parts.push({ text: turn.text });

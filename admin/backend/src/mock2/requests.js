@@ -37,13 +37,14 @@ export function latestOpenRequestId(projectId) {
   return row ? Number(row.id) : null;
 }
 
-export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0 }) {
+export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0, attachments = null }) {
   const info = getMock2Db()
     .prepare(
-      `INSERT INTO mock2_requests (project_id, instruction, status, initiated_by, acting_as_admin, created_at)
-       VALUES (?, ?, 'open', ?, ?, ?)`,
+      `INSERT INTO mock2_requests (project_id, instruction, status, initiated_by, acting_as_admin, created_at, attachments_json)
+       VALUES (?, ?, 'open', ?, ?, ?, ?)`,
     )
-    .run(Number(projectId), instruction == null ? null : String(instruction), initiatedBy ?? null, actingAsAdmin ? 1 : 0, nowIso());
+    .run(Number(projectId), instruction == null ? null : String(instruction), initiatedBy ?? null, actingAsAdmin ? 1 : 0, nowIso(),
+      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null);
   return getRequest(info.lastInsertRowid);
 }
 

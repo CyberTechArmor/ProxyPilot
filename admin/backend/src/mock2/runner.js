@@ -49,7 +49,9 @@ import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
 import { buildResumeContextBlock, resolveSelectedOption, validateAuthScope, validateHaltOptions } from './unblock-logic.js';
-import { latestOpenRequestId, closeRequest } from './requests.js';
+import { latestOpenRequestId, closeRequest, getRequest } from './requests.js';
+import { hydrateAttachments } from './chat-images.js';
+import { parseAttachmentsJson } from './chat-image-logic.js';
 import { countConsultsForCycle, countConsultsForRequest } from './consults.js';
 import { runConsult } from './consult.js';
 import { consultAutoEnabled, consultTrigger, consultAllowed } from './consult-logic.js';
@@ -640,7 +642,17 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
     installedComponents,
   });
-  const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction) }];
+  // Multi-modal: images attached to the Build press live on the REQUEST row
+  // (migration 526), so every segment of the request — the first build, a
+  // deferred build after rule questions, a resume — re-hydrates the same
+  // screenshots/design references onto its task turn.
+  let taskImages = [];
+  try {
+    const req = cycle.request_id != null ? getRequest(cycle.request_id) : null;
+    if (req?.attachments_json) taskImages = hydrateAttachments(cycle.project_id, parseAttachmentsJson(req.attachments_json));
+  } catch (e) { console.warn('[mock2] task image hydration failed:', e?.message); }
+  const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction), ...(taskImages.length ? { images: taskImages } : {}) }];
+  if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no
   // longer build on top of a shipped stub blind (AUDIT.md A.4). Cycles whose

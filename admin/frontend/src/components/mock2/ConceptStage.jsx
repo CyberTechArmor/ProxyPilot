@@ -31,6 +31,8 @@ import {
   ChevronDown, ChevronUp, Hammer,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion } from './chat-messages';
+import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
+import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
 const STAGE_LABELS = { concept: 'Concept', define: 'Define', build: 'Build', run: 'Run' };
@@ -279,16 +281,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   }, [data, onMockupChanged]);
 
+  // Multi-modal: design references / screenshots pasted, dropped, or picked
+  // into the composer ride the turn (and the mockup render) — downscaled
+  // client-side before upload (lib/chat-images.js).
+  const attach = useChatImages({ onError: (m) => toast({ variant: 'destructive', title: 'Image not attached', description: m }) });
+
   const send = async () => {
     const text = message.trim();
     if (!text) return;
     setBusy(true);
     try {
-      const res = await api.mock2SendChatMessage(projectId, text, mode);
+      const res = await api.mock2SendChatMessage(projectId, text, mode, toWireImages(attach.images));
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Message not processed', description: res.reason || 'Quota exceeded.' });
       } else {
         setMessage('');
+        attach.clear();
       }
       await load();
     } catch (err) {
@@ -451,7 +459,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             shownMessages.map((m) => (
               m.kind === 'rule_question'
                 ? <RuleQuestion key={m.id} m={m} open={openIds.has(m.question_id)} canEdit={editable} busy={answering} onAnswer={answerQuestion} />
-                : <ChatBubble key={m.id} m={m} />
+                : <ChatBubble key={m.id} m={m} projectId={projectId} />
             ))
           )}
           {!archived && (jobActive || auditActive) ? (
@@ -476,6 +484,16 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
               }}
+              onPaste={attach.handlePaste}
+              onDrop={attach.handleDrop}
+              onDragOver={(e) => e.preventDefault()}
+            />
+            {/* Image attachments — paste/drop into the box above or pick with "+".
+                Design references and screenshots reach both the design partner
+                and the mockup render. */}
+            <ImageAttachmentBar
+              images={attach.images} busy={attach.busy} disabled={composerDisabled}
+              onPickFiles={attach.addFiles} onRemove={attach.remove}
             />
             <div className="flex items-center justify-between gap-2">
               {/* Build — lives at the bottom of the design chat: when the mockup

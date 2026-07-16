@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Loader2, CheckCircle2, HelpCircle } from 'lucide-react';
 import ExplainThis from './ExplainThis';
+import { chatImageUrl } from '@/lib/chat-images';
 
 // A rule_question body carries { question, choices } as JSON (M8, ADR-002).
 // Tolerant of a plain-text body (older rows).
@@ -95,7 +96,34 @@ export function RuleQuestion({ m, open, canEdit, busy, onAnswer, projectId = nul
   );
 }
 
-export function ChatBubble({ m }) {
+// Image attachments on a message ([{id, media_type, name}]) — thumbnails that
+// open the full image in a new tab. The URL is content-addressed and served
+// immutable, so the browser caches each image once.
+function AttachmentThumbs({ m, projectId, mine }) {
+  if (!projectId || !m.attachments?.length) return null;
+  return (
+    <div className={`flex flex-wrap gap-1.5 ${m.body ? 'mb-1.5' : ''}`}>
+      {m.attachments.map((a) => (
+        <a
+          key={a.id}
+          href={chatImageUrl(projectId, a.id)}
+          target="_blank" rel="noreferrer"
+          title={a.name || 'attached image'}
+          className={`block overflow-hidden rounded-lg border ${mine ? 'border-primary-foreground/30' : 'border-border'}`}
+        >
+          <img
+            src={chatImageUrl(projectId, a.id)}
+            alt={a.name || 'attached image'}
+            loading="lazy"
+            className="h-24 max-w-[9rem] object-cover"
+          />
+        </a>
+      ))}
+    </div>
+  );
+}
+
+export function ChatBubble({ m, projectId = null }) {
   if (m.kind === 'system') {
     return (
       <div className="flex justify-center">
@@ -125,6 +153,7 @@ export function ChatBubble({ m }) {
           mine ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm'
         }`}
       >
+        <AttachmentThumbs m={m} projectId={projectId} mine={mine} />
         {m.body}
         {m.acting_as_admin ? (
           <span className={`block mt-1 text-[10px] ${mine ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
@@ -156,7 +185,7 @@ export function ChatMessageList({
         messages.map((m) => (
           m.kind === 'rule_question'
             ? <RuleQuestion key={m.id} m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
-            : <ChatBubble key={m.id} m={m} />
+            : <ChatBubble key={m.id} m={m} projectId={projectId} />
         ))
       )}
       {working ? (

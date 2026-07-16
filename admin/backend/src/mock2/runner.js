@@ -40,6 +40,7 @@ import {
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
+import { insertMessage } from './chats.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -54,6 +55,7 @@ import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
+  buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
@@ -1213,6 +1215,14 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
         // NOTE: no admin-attention `flag` is raised — pending-operator-verification
         // is ambient capability status (Run-stage badge + status endpoint), NOT a
         // blocker. It is surfaced through verification_state, not the `!` overlay.
+        // The review summary in the build chat: what was done, which files, and
+        // the live checks left. Best-effort — a chat write must not fail the cycle.
+        try {
+          insertMessage({
+            projectId, kind: 'assistant', cycleId: cycle.id,
+            body: buildCompletionSummaryBody({ summary: decision.finishSummary, changedFiles: changedThisCycle, deployed, pendingChecklist }),
+          });
+        } catch (e) { console.warn('[mock2] completion summary message failed:', e?.message); }
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'pending_verification' });
         return scheduleJobCleanup(cycle.id);
       }
@@ -1223,6 +1233,15 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       }
       finishCycle(cycle.id, { status: 'succeeded' });
       try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+      // The review summary in the build chat: what was done and which files —
+      // so the requester can review without opening the change history.
+      // Best-effort — a chat write must not fail the cycle.
+      try {
+        insertMessage({
+          projectId, kind: 'assistant', cycleId: cycle.id,
+          body: buildCompletionSummaryBody({ summary: decision.finishSummary, changedFiles: changedThisCycle, deployed }),
+        });
+      } catch (e) { console.warn('[mock2] completion summary message failed:', e?.message); }
       // Anomaly tripwire (heuristic, never blocks): a bug-fix that closed at a
       // small fraction of its estimate with no reproduced red test / no test
       // touched is a Goodhart signature — flag it for a human, loudly.

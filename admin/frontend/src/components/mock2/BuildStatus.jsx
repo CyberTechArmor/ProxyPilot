@@ -16,12 +16,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench,
+  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
 import ExplainThis from './ExplainThis';
 import VerificationChecklist from './VerificationChecklist';
+import { ProjectComponentsPanel } from './ProjectTimeCard';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
@@ -58,13 +59,49 @@ const HALT_KIND_META = {
   abandon: { label: 'Abandon', adminOnly: false },
 };
 
+// CycleChangeSummary — the review panel for a completed build: this cycle's
+// change-record summaries (the build's own "what was done" + acceptance
+// evidence + diff stat), fetched lazily so the requester can review the change
+// without leaving the Build panel. Renders nothing until records exist.
+function CycleChangeSummary({ projectId, cycle }) {
+  const [records, setRecords] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.mock2GetChangeRecords(projectId)
+      .then((r) => {
+        if (cancelled) return;
+        setRecords((r.records || []).filter((rec) => Number(rec.cycle_id) === Number(cycle.id)));
+      })
+      .catch((err) => { if (!cancelled && !(err instanceof ApiError)) console.error('load cycle summary failed:', err); });
+    return () => { cancelled = true; };
+  }, [projectId, cycle.id, cycle.status]);
+  if (!records?.length) return null;
+  return (
+    <details className="rounded-md border bg-muted/30 text-xs" open={records.length === 1}>
+      <summary className="cursor-pointer select-none px-3 py-2 font-medium text-muted-foreground">
+        What was done — review this build&apos;s change{records.length === 1 ? '' : `s (${records.length})`}
+      </summary>
+      <div className="max-h-72 overflow-auto border-t px-3 py-2 space-y-3">
+        {records.map((rec) => (
+          <div key={rec.seq} className="space-y-1">
+            <p className="font-mono text-[11px] text-muted-foreground">
+              change #{rec.seq}{rec.commit_sha ? ` · ${rec.commit_sha.slice(0, 10)}` : ''}{rec.created_at ? ` · ${rec.created_at.slice(0, 16).replace('T', ' ')}` : ''}
+            </p>
+            <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground/90">{rec.summary}</pre>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export default function BuildStatus({
   projectId, canEdit, isAdmin, online, project, cycle, job, busy,
   onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll, onRefresh,
   needsFeedback = false, onFeedback,
 }) {
   const { toast } = useToast();
-  const [view, setView] = useState('build'); // 'build' | 'changes'
+  const [view, setView] = useState('build'); // 'build' | 'changes' | 'components'
   const [deviations, setDeviations] = useState([]); // open framework_deviation queue items (admin)
   const [devBusy, setDevBusy] = useState(false);
   const [fbRating, setFbRating] = useState(null); // 'up' | 'down' | null — note composer open for this rating
@@ -310,10 +347,19 @@ export default function BuildStatus({
           >
             <GitBranch className="h-3.5 w-3.5" /> Change history
           </button>
+          <button
+            type="button" role="tab" aria-selected={view === 'components'}
+            onClick={() => setView('components')}
+            className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${view === 'components' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+          >
+            <Package className="h-3.5 w-3.5" /> Components
+          </button>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {view === 'changes' ? <ChangeHistory projectId={projectId} canRestore={!!canEdit && !!online && !active} /> : (
+        {view === 'changes' ? <ChangeHistory projectId={projectId} canRestore={!!canEdit && !!online && !active} />
+        : view === 'components' ? <ProjectComponentsPanel projectId={projectId} canEdit={!!canEdit} isActive={!!online} />
+        : (
         <>{/* ---- Build panel ---- */}
         {/* Drift banner (ADR-003) — the framework moved since the last build. */}
         {driftAvailable ? (
@@ -777,6 +823,13 @@ export default function BuildStatus({
                   ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
                   : 'Gates green — change checkpointed into the repo.'}
               </p>
+            ) : null}
+
+            {/* Review summary — what this completed build actually did (its
+                change records: summary, acceptance evidence, diff stat). Shown
+                for a success and for a pending-live-verification completion. */}
+            {cycle.status === 'succeeded' || (cycle.status === 'awaiting_user' && cycle.verification_state === 'pending') ? (
+              <CycleChangeSummary projectId={projectId} cycle={cycle} />
             ) : null}
 
             {/* Redeploy (restart) the app from the last checkpoint. A deployed app

@@ -21,7 +21,7 @@ import {
   publicProjectComponentShape, COMPONENTS_STATE_PATH,
 } from '../mock2/component-logic.js';
 import { parseIntegrationManifest } from '../mock2/integration-logic.js';
-import { buildRunnerSystemPrompt, buildRunnerClaudeMd } from '../mock2/runner-logic.js';
+import { buildRunnerSystemPrompt, buildRunnerClaudeMd, buildCompletionSummaryBody } from '../mock2/runner-logic.js';
 import { parseInventory } from '../mock2/concept-logic.js';
 
 const FULL_CONTRACT = {
@@ -270,6 +270,42 @@ test('publicProjectComponentShape: client-safe, contract summarized', () => {
   assert.deepEqual(shape.provides, ['auth', 'auth.bootstrap-superadmin', 'rbac']);
   assert.equal(shape.api_count, 3);
   assert.equal(shape.options.answer, 'Use the standard component');
+});
+
+// ---- the completion review summary (posted into the build chat) ----
+
+test('buildCompletionSummaryBody: deployed success with summary + files', () => {
+  const body = buildCompletionSummaryBody({
+    summary: 'Added the login page and wired it to the auth component.',
+    changedFiles: ['src/app.ts', 'src/auth-wiring.ts', 'public/login.css'],
+    deployed: { ok: true },
+  });
+  assert.match(body, /^Build complete — deployed and live/);
+  assert.match(body, /What was done:\nAdded the login page/);
+  assert.match(body, /Files changed \(3\):/);
+  assert.match(body, /- src\/app\.ts/);
+  assert.match(body, /Change history/);
+  assert.doesNotMatch(body, /Verify live/);
+});
+
+test('buildCompletionSummaryBody: no-op, checkpoint-only, and file overflow', () => {
+  assert.match(buildCompletionSummaryBody({ deployed: { ok: true, skipped: true, noop: true } }), /nothing needed changing/);
+  assert.match(buildCompletionSummaryBody({ deployed: { ok: true, skipped: true } }), /checkpointed into the repo/);
+  const many = buildCompletionSummaryBody({ changedFiles: Array.from({ length: 20 }, (_, i) => `f${i}.ts`), deployed: { ok: true } });
+  assert.match(many, /Files changed \(20\):/);
+  assert.match(many, /… and 5 more/);
+});
+
+test('buildCompletionSummaryBody: pending live verification lists the checks', () => {
+  const body = buildCompletionSummaryBody({
+    summary: 'LDAPS transport implemented.',
+    changedFiles: ['src/auth/ldap.ts'],
+    deployed: { ok: true },
+    pendingChecklist: [{ item_id: 'ldaps-bind', description: 'Bind against the production directory' }],
+  });
+  assert.match(body, /1 live verification left/);
+  assert.match(body, /Verify live when ready/);
+  assert.match(body, /Bind against the production directory/);
 });
 
 // ---- the shipped example: bootstrap must be there ----

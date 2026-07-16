@@ -136,6 +136,21 @@ tokens, DB-driven RBAC, and the **race-safe first-admin (superadmin) bootstrap**
 `POST /api/auth/bootstrap/superadmin`, the first-run login page, and a CLI
 seeder). Its contract declares `auth.bootstrap-superadmin`, so any app whose
 design implies user accounts is offered the standard bootstrap automatically.
+It also ships **external (self-signup) accounts** for outside individuals —
+LDAPS stays the employee path; third parties (e.g. providers submitting
+licenses to a credentialing portal) sign up with their own email, verify it
+(via the email component's `sendEmail` hook), hold the least-privileged
+`external` role, and see only their own data (`ownerScopeUserId`) while
+internal roles see every submitting account. The whole feature is **off until
+an admin enables it** (`PUT /api/admin/external`).
+
+`docs/features/examples/proxypilot-email.component.json` is the standard
+outbound-email component: **Resend** (HTTPS API) or **any SMTP server**
+(dependency-free client — implicit TLS / STARTTLS / AUTH PLAIN / AUTH LOGIN)
+or a console dev sink, selected by configuration. Admin-configurable at
+runtime (`PUT /api/admin/email`, secrets encrypted at rest, test-send button,
+append-only send log). Its `sendEmail()` drops straight into the auth
+component's verification-email hook.
 
 `docs/features/examples/ldaps-auth.component.json` is a smaller, importable
 example — the canonical LDAPS auth module (search-then-bind, bounded connection

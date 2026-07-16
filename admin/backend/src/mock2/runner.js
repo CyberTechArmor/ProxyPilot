@@ -371,13 +371,26 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
 // crash-loops the app). Fire-and-forget like startCycle; returns { status, cycle }.
 export async function retryDeploy({ project, cycle }) {
   if (!cycle) return { status: 'error', error: 'No cycle to redeploy.' };
-  if (!(cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed')) {
-    return { status: 'error', error: 'This build has no failed deploy to retry.' };
+  // Redeploy applies to any settled cycle, not only a failed deploy: a build that
+  // deployed fine can stop serving LATER (the app crashed, the container
+  // restarted into a bad state) and the operator needs a way to restart it from
+  // the UI without a model round. Only an actively running build is refused —
+  // it already holds the checkout lock and is mid-flight.
+  const ACTIVE_STATUSES = ['queued', 'estimating', 'running'];
+  if (ACTIVE_STATUSES.includes(cycle.status)) {
+    return { status: 'error', error: 'This build is still running — wait for it to finish before redeploying.' };
   }
   const projectId = Number(project.id);
   if (project.lifecycle !== 'active') {
     return { status: 'error', error: 'Bring the project online to redeploy.' };
   }
+  // What the cycle should settle back to when the redeploy succeeds. A failed
+  // deploy heals to succeeded (the original semantics); any other terminal
+  // (succeeded, awaiting_user pending live verification, …) is RESTORED — a
+  // restart must not rewrite history (e.g. it must never promote a
+  // pending-verification build to succeeded).
+  const hadFailedDeploy = cycle.status === 'failed' && cycle.deploy_status === 'deploy_failed';
+  const restoreStatus = hadFailedDeploy ? 'succeeded' : cycle.status;
   const lock = acquireLock({ projectId, requester: { type: 'cycle', id: cycle.id }, role: 'admin' });
   if (!lock.ok) return { status: 'error', error: `Could not acquire the checkout lock: ${lock.reason}` };
   const holder = { type: 'cycle', id: cycle.id };
@@ -385,7 +398,7 @@ export async function retryDeploy({ project, cycle }) {
 
   // Reopen the finished cycle as running so the task list shows deploy progress.
   updateCycle(cycle.id, { status: 'running', error: null, deploy_status: 'deploying' });
-  setJob(cycle.id, { phase: 'deploying', message: 'Retrying the deploy…', startedAt: Date.now() });
+  setJob(cycle.id, { phase: 'deploying', message: 'Redeploying the app…', startedAt: Date.now() });
 
   // Fire-and-forget; always lands terminal + releases the lock.
   (async () => {
@@ -396,8 +409,10 @@ export async function retryDeploy({ project, cycle }) {
         setJob(cycle.id, { phase: 'deploy_failed', message: deployed.error });
         void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'deploy_failed' });
       } else {
-        finishCycle(cycle.id, { status: 'succeeded' });
-        try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+        finishCycle(cycle.id, { status: restoreStatus, error: null });
+        if (restoreStatus === 'succeeded') {
+          try { const rc = getCycle(cycle.id); if (rc?.request_id) closeRequest(rc.request_id, 'succeeded'); } catch { /* best effort */ }
+        }
         updateProject(projectId, { last_activity_at: nowIso() });
         setJob(cycle.id, {
           phase: deployed.skipped ? 'succeeded' : 'serving',
@@ -405,7 +420,11 @@ export async function retryDeploy({ project, cycle }) {
             ? 'Nothing to deploy — the placeholder is still serving.'
             : 'Deployed — the app is live on its URL.',
         });
-        void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });
+        // Only a heal-to-succeeded is a state change worth notifying; restoring
+        // the prior terminal (a plain restart) changes nothing to announce.
+        if (restoreStatus === 'succeeded') {
+          void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });
+        }
       }
     } catch (err) {
       finishCycle(cycle.id, { status: 'failed', error: `deploy retry crashed: ${err?.message || err}` });

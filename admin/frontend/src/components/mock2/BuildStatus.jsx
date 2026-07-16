@@ -779,6 +779,23 @@ export default function BuildStatus({
               </p>
             ) : null}
 
+            {/* Redeploy (restart) the app from the last checkpoint. A deployed app
+                can stop serving AFTER a successful build (it crashed, the container
+                restarted into a bad state) — the site 502s while the build reads
+                green. This reruns install → migrate → build → start → health with
+                no model round and restores the build's status when done. */}
+            {canEdit && online
+              && (cycle.status === 'succeeded' || (cycle.status === 'awaiting_user' && cycle.verification_state === 'pending')) ? (
+              <div className="space-y-1.5">
+                <Button variant="outline" size="sm" className="h-11 sm:h-9" disabled={busy}
+                  title="App not loading (502)? Redeploys the existing build — reinstall, rebuild, restart, health-check. No model calls, nothing about the build changes."
+                  onClick={onRetryDeploy}>
+                  {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCcw className="h-4 w-4 mr-1" />}
+                  Redeploy app — restart it on its URL
+                </Button>
+              </div>
+            ) : null}
+
             {/* Post-build rating — required before the next cycle. A thumbs-down
                 opens a note (saved to the build log for evaluation). */}
             {cycle.status === 'succeeded' && cycle.feedback ? (

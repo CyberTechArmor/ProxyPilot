@@ -149,6 +149,13 @@ Hard requirements:
   are at least 44×44px.
 - Interactivity is fine (tabs, toggles, showing/hiding, fake navigation between
   in-page screens) but it must be self-contained and non-persistent.
+- RENDER-ON-LOAD: the first/default screen must be VISIBLE immediately from the
+  HTML + CSS alone, before any JavaScript runs. Do NOT hide the initial content
+  with an inline style/attribute that a <script> later reveals — if the script
+  errors the page must still show the first screen, never a blank/black page.
+  JS only ENHANCES (switching screens, toggles); it never gates first paint.
+- Output the COMPLETE document ending with </body></html>. Never stop partway —
+  a truncated document renders as a blank page.
 
 # Locked design system (binding)
 ${designSystem || '(design system content is still owed — risk R8)'}
@@ -197,7 +204,15 @@ export function extractMockupHtml(text) {
 export function isPlausibleMockup(html) {
   const s = String(html || '');
   if (s.length < 40) return false;
-  return /<!doctype html|<html[\s>]|<body[\s>]/i.test(s) && /<\/\w+>/.test(s);
+  // Must LOOK like an HTML document AND be COMPLETE. A render truncated on the
+  // token budget (adaptive thinking eats into it) keeps its opening
+  // <!doctype><html><body> and early closing tags (</style>, </title>) but
+  // loses its tail — it renders as a black/blank screen. Requiring the document
+  // to actually close (</html>, or at least </body>) rejects that truncation so
+  // the pipeline retries with a bigger budget instead of saving a broken page.
+  const opensDoc = /<!doctype html|<html[\s>]|<body[\s>]/i.test(s);
+  const closesDoc = /<\/html\s*>|<\/body\s*>/i.test(s);
+  return opensDoc && closesDoc;
 }
 
 // ---- design-inventory extraction (the concept-stage exit artifact) ----

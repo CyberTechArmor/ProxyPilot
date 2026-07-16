@@ -71,10 +71,15 @@ const XHIGH_RE = /(opus-4-[78]|sonnet-5|fable-5|mythos)/;
 // anthropicTuning — the extra body fields for an Anthropic request, or {} when
 // the model isn't recognized (send nothing — never risk a 400 on an unknown or
 // older model). Effort is clamped down where a level isn't supported.
-export function anthropicTuning({ model, effort = null } = {}) {
+//
+// `thinking: 'off'` OMITS the adaptive-thinking switch — for pure-output tasks
+// (the mockup render) where thinking only eats into max_tokens and risks
+// truncating the document. It never sends `{type:'disabled'}` (that 400s on
+// Fable 5); omitting is the safe way to keep thinking off across models.
+export function anthropicTuning({ model, effort = null, thinking = null } = {}) {
   const id = String(model || '');
   const out = {};
-  if (ADAPTIVE_THINKING_RE.test(id)) out.thinking = { type: 'adaptive' };
+  if (thinking !== 'off' && ADAPTIVE_THINKING_RE.test(id)) out.thinking = { type: 'adaptive' };
   let e = effort && ROUTING_EFFORTS.includes(effort) ? effort : null;
   if (e && EFFORT_RE.test(id)) {
     if (e === 'xhigh' && !XHIGH_RE.test(id)) e = 'high';

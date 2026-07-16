@@ -58,7 +58,7 @@ function openAiBase(provider, baseUrl) {
 // call (including the replayable `raw` content array). Providers without a
 // streaming path here simply ignore the callback — same result, one delivery.
 export async function callModelTurn({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null,
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null, thinking = null,
 }) {
   const provider = connector?.provider;
   // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
@@ -71,7 +71,7 @@ export async function callModelTurn({
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools, effort, onDelta, thinking });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -94,7 +94,7 @@ export async function callModelTurn({
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null, thinking = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
   // Stream when the caller wants deltas OR the request is HEAVY: images in the
@@ -114,7 +114,9 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     max_tokens: maxTokens,
     ...(streaming ? { stream: true } : {}),
     // Adaptive thinking + effort, gated per model id (see routing-logic).
-    ...anthropicTuning({ model, effort }),
+    // thinking:'off' suppresses adaptive thinking (pure-output tasks like the
+    // mockup render, where thinking would just consume the output budget).
+    ...anthropicTuning({ model, effort, thinking }),
     // Prompt caching (rate-limit mitigation): the framework constitution / design
     // system / rules are large and STABLE across a conversation, and so is the
     // growing message history — reprocessing them every back-and-forth burns ITPM

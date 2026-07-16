@@ -70,8 +70,13 @@ const INITIAL_BUILD_INSTRUCTION = 'Build the working application from the approv
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.
-const MAX_MOCKUP_CHARS = 200000;
-const MAX_MOCKUP_FEEDBACK_CHARS = 60000; // how much prior HTML we feed back for iteration
+// Sized for a full multi-screen app mockup (inline CSS + JS): a ~64k-token
+// render can approach ~250k chars, so the save cap must not slice a COMPLETE
+// document (slicing strips the closing </html> → the plausibility check would
+// then reject a page that was actually fine). Feedback for iteration is large
+// enough that the model sees the whole prior mockup, not a truncated head.
+const MAX_MOCKUP_CHARS = 400000;
+const MAX_MOCKUP_FEEDBACK_CHARS = 160000; // how much prior HTML we feed back for iteration
 
 // Live concept-job progress, keyed by project id (house 202+poll pattern). The
 // chat/concept poll endpoints read this; entries drop a couple minutes after the
@@ -538,9 +543,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
         maxTokens: budget,
         timeoutMs: 900000,
-        // A render is transcription of the brief onto the design system — cap
-        // the thinking spend so the budget goes to the page itself.
+        // A render is transcription of the brief onto the design system — pure
+        // output. Turn thinking OFF so the WHOLE budget goes to the HTML:
+        // adaptive thinking otherwise eats into max_tokens and truncates the
+        // document mid-page (which renders as a black screen).
         effort: 'low',
+        thinking: 'off',
         onDelta: onMockupDelta,
       });
     };
@@ -548,10 +556,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     let html = '';
     let failureDetail = null;
     try {
-      let res = await mockupCall(24000);
+      // Generous budgets: with thinking off and the response streamed (no HTTP
+      // timeout), the full budget is HTML — a whole multi-screen app mockup
+      // (inline CSS + JS) is large, and under-budgeting is what truncated it
+      // into a black screen. First 40k, retry 64k.
+      let res = await mockupCall(40000);
       if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
-        res = await mockupCall(24000);
+        res = await mockupCall(40000);
       }
       if (res.ok) {
         recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: res.usage });
@@ -563,7 +575,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           // outcome in expectation.
           const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
-          const retry = await mockupCall(32000);
+          const retry = await mockupCall(64000);
           if (retry.ok) {
             recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: retry.usage });
             const h2 = extractMockupHtml(retry.text).slice(0, MAX_MOCKUP_CHARS);

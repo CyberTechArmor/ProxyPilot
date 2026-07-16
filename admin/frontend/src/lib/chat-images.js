@@ -47,6 +47,23 @@ async function decodeToBitmap(file) {
   });
 }
 
+// A tiny composer-preview thumbnail as a data: URL. The admin app's CSP is
+// img-src 'self' data: — blob: object URLs are BLOCKED and render as a broken
+// image, so previews must be data URLs. At ~112px a JPEG thumb is a few KB;
+// transparency is flattened onto white (it's a 56px preview, not the payload).
+const THUMB_EDGE = 112;
+function thumbDataUrl(bmp, w, h) {
+  const scale = Math.min(1, THUMB_EDGE / Math.max(w, h));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.8);
+}
+
 // prepareChatImage(file) → { media_type, data (bare base64), name, width,
 // height, bytes, previewUrl }. Throws with a user-facing message on an
 // unusable file. Animated GIFs are passed through untouched below the size cap
@@ -60,12 +77,22 @@ export async function prepareChatImage(file) {
     throw new Error(`That image is too large (${Math.round(file.size / 1024 / 1024)}MB — max ${MAX_INPUT_FILE_BYTES / 1024 / 1024}MB).`);
   }
 
-  // GIF: preserve animation by passing through when already small enough.
+  // GIF: preserve animation by passing through when already small enough. The
+  // preview thumb is the (static) first frame; if that decode fails, fall back
+  // to the full image as a data URL (CSP allows data:, not blob:).
   if (file.type === 'image/gif' && file.size <= 2_000_000) {
     const data = await blobToBase64(file);
+    let previewUrl = `data:image/gif;base64,${data}`;
+    try {
+      const gifBmp = await decodeToBitmap(file);
+      const gw = gifBmp.width || gifBmp.naturalWidth;
+      const gh = gifBmp.height || gifBmp.naturalHeight;
+      if (gw && gh) previewUrl = thumbDataUrl(gifBmp, gw, gh);
+      if (gifBmp.close) gifBmp.close();
+    } catch { /* keep the full-image data URL */ }
     return {
       media_type: 'image/gif', data, name: file.name || null,
-      bytes: file.size, previewUrl: URL.createObjectURL(file),
+      bytes: file.size, previewUrl,
     };
   }
 
@@ -73,6 +100,7 @@ export async function prepareChatImage(file) {
   const w = bmp.width || bmp.naturalWidth;
   const h = bmp.height || bmp.naturalHeight;
   if (!w || !h) throw new Error('Could not read the image dimensions.');
+  const previewUrl = thumbDataUrl(bmp, w, h);
   const scale = Math.min(1, MAX_EDGE / Math.max(w, h));
   const outW = Math.max(1, Math.round(w * scale));
   const outH = Math.max(1, Math.round(h * scale));
@@ -103,7 +131,7 @@ export async function prepareChatImage(file) {
   return {
     media_type: mediaType, data, name: file.name || null,
     width: outW, height: outH, bytes: blob.size,
-    previewUrl: URL.createObjectURL(blob),
+    previewUrl,
   };
 }
 

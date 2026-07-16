@@ -18,6 +18,7 @@
 
 import { slugFqdn } from './slug.js';
 import { conceptStageInfo, mockupPreviewUrl } from './concept-logic.js';
+import { normalizeDesignSystemKey } from './design-systems-logic.js';
 
 // ---- role / access resolution (ADR-007) ----
 
@@ -237,6 +238,10 @@ export function publicProjectShape(project, extra = {}) {
     // a mockup exists / the project has a live URL.
     stage: conceptStageInfo(project),
     design_approved_at: project.design_approved_at || null,
+    // The up-front design-system choice (NULL → 'default', the framework's own).
+    // Normalized so the UI always gets a real catalog key; editable in the
+    // Concept stage until the design is approved.
+    design_system_key: normalizeDesignSystemKey(project.design_system_key),
     current_mockup_id: project.current_mockup_id || null,
     preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
     // The archived design mockup — the record of where the design started. Set

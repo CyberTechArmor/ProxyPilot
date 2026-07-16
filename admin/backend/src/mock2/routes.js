@@ -103,6 +103,8 @@ import {
 import { computeTimeSummary, computeUsageSummary } from './time-logic.js';
 import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
 import { deployProjectStatus } from './deploy-logic.js';
+import { designSystemOptions } from './design-systems.js';
+import { isDesignSystemKey, normalizeDesignSystemKey } from './design-systems-logic.js';
 import { requireMock2Role } from './authz.js';
 import {
   startProvision,
@@ -2687,6 +2689,43 @@ export function createMock2Router() {
       message: result.userMessage ? publicChatMessageShape(result.userMessage) : null,
       refused: result.status === 'refused', reason: result.error || null,
       job: getConceptJobStatus(project.id),
+    });
+  });
+
+  // The design-system catalog for a project: the built-in options + which one
+  // this project has chosen (NULL → the framework's own 'default'). Any member
+  // may view it; `editable` reports whether it can still be changed (only before
+  // the design is approved). Drives the Concept-stage selector.
+  router.get('/projects/:id/design-systems', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const catalog = designSystemOptions(project.design_system_key);
+    res.json({
+      ...catalog,
+      editable: !project.design_approved_at && !isProjectReadOnly(project),
+    });
+  });
+
+  // Choose the project's design system (Concept stage, up front). Editor-gated;
+  // refuses on an archived project and once the design is approved (the look is
+  // then locked with the inventory — changing it would desync the approved
+  // mockup from the tokens the build reproduces). The next concept turn / mockup
+  // render obeys the new choice.
+  router.post('/projects/:id/design-system', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (project.design_approved_at) {
+      return res.status(409).json({ error: 'The design has been approved — the design system is locked. Reset the design to change it.' });
+    }
+    const key = req.body?.key;
+    if (!isDesignSystemKey(key)) {
+      return res.status(400).json({ error: 'key must be one of the available design systems' });
+    }
+    const norm = normalizeDesignSystemKey(key);
+    const updated = updateProject(project.id, { design_system_key: norm });
+    logAudit(req.user.id, 'MOCK2_DESIGN_SYSTEM_SET', 'mock2_project', project.id,
+      { key: norm, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.json({
+      ...designSystemOptions(updated.design_system_key),
+      editable: true,
     });
   });
 

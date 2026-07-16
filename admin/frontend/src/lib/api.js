@@ -1377,6 +1377,12 @@ export const api = {
     }),
   mock2ApproveDesign: (id) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
+  // Design SYSTEM (the up-front look chosen in the Concept stage): the catalog +
+  // which one this project uses ({ selected_key, options, editable }); set it
+  // (editor, before approval only). Every concept turn + mockup render obeys it.
+  mock2GetDesignSystems: (id) => request(`/mock2/projects/${id}/design-systems`),
+  mock2SetDesignSystem: (id, key) =>
+    request(`/mock2/projects/${id}/design-system`, { method: 'POST', body: JSON.stringify({ key }) }),
   // Design template — the design/mockup only (mockup HTML + original brief +
   // conversation + tokens), never code. Export returns the portable JSON doc
   // (the caller blob-downloads it); import seeds THIS project's Concept stage

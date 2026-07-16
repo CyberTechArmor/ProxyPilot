@@ -1207,4 +1207,20 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Up-front design-system choice: a project picks its design LANGUAGE before
+    // the design is approved (the Concept stage), and every concept turn + mockup
+    // render obeys it. NULL = the framework's own design_system_md ('default');
+    // 'clarity-clinical' (and any future built-in) selects a vendored seed body
+    // instead. The catalog + resolution live in design-systems-logic.js; this is
+    // just the per-project pointer. Editable until design_approved_at is set,
+    // then locked with the inventory.
+    version: 528,
+    name: 'mock2_project_design_system_key',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN design_system_key TEXT;
+      `);
+    },
+  },
 ];

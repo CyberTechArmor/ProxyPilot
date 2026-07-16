@@ -125,6 +125,9 @@ const WRITABLE = new Set([
   // design-import record (519) carries an imported template's original brief.
   'design_approved_at', 'design_inventory_seq', 'current_mockup_id', 'mockup_archived_id',
   'design_import_json',
+  // The up-front design-system choice (migration 528); NULL = the framework's own
+  // design system. Editable until design_approved_at, then locked with the design.
+  'design_system_key',
   // M8 drift comparison input — the framework a build last pinned (ADR-003).
   'last_built_framework_version_id',
 ]);

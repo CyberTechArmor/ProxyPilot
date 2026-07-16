@@ -33,6 +33,7 @@ import { parseCapabilities, slotAssignmentError, isCloudProvider } from './conne
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { getCurrentFrameworkVersion } from './framework.js';
+import { designSystemBody } from './design-systems.js';
 import {
   insertCycle, getCycle, updateCycle, addCycleUsage, finishCycle, countRunningCycles,
 } from './cycles.js';
@@ -448,7 +449,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // recent few as real image blocks; older ones as stable placeholders).
   const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, listMessages(projectId)));
   const hasMockup = !!project.current_mockup_id;
-  const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup, mode });
+  // The project's up-front design-system choice (Concept stage). NULL/unknown →
+  // the framework's own design_system_md; 'clarity-clinical' (etc.) selects a
+  // vendored seed body. Both the chat and the mockup render obey the SAME design
+  // system so the design stays coherent across the turn.
+  const designSystem = designSystemBody(project.design_system_key, framework.design_system_md);
+  const system = buildConceptChatSystemPrompt({ designSystem, projectName: project.name, hasMockup, mode });
 
   // Stream the reply where the provider supports it (Anthropic): visible text
   // deltas accumulate on the job as `partial`, which the poll surfaces as a
@@ -539,7 +545,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       streamedChars = 0;
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
-        system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
+        system: buildMockupSystemPrompt({ designSystem }),
         tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
         maxTokens: budget,
         timeoutMs: 900000,

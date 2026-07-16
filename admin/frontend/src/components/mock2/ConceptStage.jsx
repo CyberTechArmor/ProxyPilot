@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
-  ChevronDown, ChevronUp, Hammer,
+  ChevronDown, ChevronUp, Hammer, Palette,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -75,6 +75,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
+  // The up-front design-system choice (Concept stage). { selected_key, options,
+  // editable } — editable only before the design is approved.
+  const [designSys, setDesignSys] = useState(null);
+  const [designSysBusy, setDesignSysBusy] = useState(false);
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
@@ -96,6 +100,32 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   }, [projectId, onApproved]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Load the design-system catalog once — it's static per project until approval.
+  // Not polled: it only changes when THIS user sets it (we update state inline).
+  const loadDesignSystems = useCallback(async () => {
+    try {
+      setDesignSys(await api.mock2GetDesignSystems(projectId));
+    } catch (err) {
+      if (!(err instanceof ApiError)) console.error('load design systems failed:', err);
+    }
+  }, [projectId]);
+  useEffect(() => { loadDesignSystems(); }, [loadDesignSystems]);
+
+  const chooseDesignSystem = async (key) => {
+    if (!designSys || key === designSys.selected_key || designSysBusy) return;
+    setDesignSysBusy(true);
+    try {
+      const r = await api.mock2SetDesignSystem(projectId, key);
+      setDesignSys((prev) => ({ ...(prev || {}), ...r }));
+      const chosen = r.options?.find((o) => o.selected);
+      toast({ title: 'Design system set', description: `New designs will use ${chosen?.label || key}. It's locked once you approve the design.` });
+    } catch (err) {
+      toast({ title: 'Could not change the design system', description: err?.message || 'Please try again.', variant: 'destructive' });
+    } finally {
+      setDesignSysBusy(false);
+    }
+  };
 
   // Poll while a background turn/approval job is running, while the M8 audit is
   // in flight, or while any rule question is open (so answers + the "starting the
@@ -396,6 +426,51 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               </Button>
             ) : null}
           </div>
+        ) : null}
+
+        {/* Design system — the up-front look every mockup obeys. Chosen before
+            the design is approved; locked with the design after. Editors pick;
+            after approval (or in the archive) it's shown read-only so anyone can
+            see which language the design used. */}
+        {designSys ? (
+          (editable && !approved && designSys.editable) ? (
+            <div className="space-y-2 shrink-0">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <Palette className="h-3.5 w-3.5" /> Design system
+                <span className="font-normal">— new mockups use this look. Locked once you approve.</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Design system">
+                {(designSys.options || []).map((o) => (
+                  <button
+                    key={o.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={o.selected}
+                    disabled={designSysBusy}
+                    onClick={() => chooseDesignSystem(o.key)}
+                    className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left min-h-[44px] transition-colors disabled:opacity-60 ${
+                      o.selected ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:border-primary/50'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 w-full">
+                      <span
+                        aria-hidden
+                        className={`h-4 w-4 rounded-full border shrink-0 ${o.theme === 'light' ? 'bg-slate-100 border-slate-300' : 'bg-slate-900 border-slate-700'}`}
+                      />
+                      <span className="text-sm font-medium flex-1 min-w-0">{o.label}</span>
+                      {o.selected ? <CheckCircle2 className="h-4 w-4 text-primary shrink-0" /> : null}
+                    </span>
+                    <span className="text-xs text-muted-foreground">{o.summary}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+              <Palette className="h-3.5 w-3.5 shrink-0" />
+              <span>Design system: <span className="font-medium text-foreground">{(designSys.options || []).find((o) => o.selected)?.label || 'Studio Dark'}</span>{approved ? ' (locked)' : ''}</span>
+            </div>
+          )
         ) : null}
 
         {/* Plan vs Design — above the chat. Plan talks through the idea without

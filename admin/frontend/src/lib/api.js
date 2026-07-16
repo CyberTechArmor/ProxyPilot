@@ -1310,8 +1310,10 @@ export const api = {
   mock2ListAuthorizations: (id) => request(`/mock2/projects/${id}/authorizations`),
   mock2DecideAuthorization: (id, authId, approved, conditions) =>
     request(`/mock2/projects/${id}/authorizations/${authId}/decision`, { method: 'POST', body: JSON.stringify({ approved, ...(conditions ? { conditions } : {}) }) }),
-  // Retry only the deploy (from the existing checkpoint) for a gates-passed cycle
-  // whose deploy failed — no model calls, no gate battery.
+  // Redeploy the app from the existing checkpoint (install → migrate → build →
+  // start → health) — no model calls, no gate battery. Works for a failed deploy
+  // AND for restarting a finished build whose app stopped serving (502); the
+  // cycle's terminal status is restored afterwards.
   mock2RetryDeploy: (id, cycleId) =>
     request(`/mock2/projects/${id}/cycles/${cycleId}/retry-deploy`, { method: 'POST' }),
   mock2StopAllCycles: () => request('/mock2/cycles/stop-all', { method: 'POST' }),

@@ -159,18 +159,23 @@ export function capabilityCheckStatus({ checklistItems = [], activeVerifications
   };
 }
 
-// requireActorId(value, column) — coerce a NOT NULL actor column (operator_id /
-// decided_by). null/undefined/NaN must fail HERE with an actionable message:
-// better-sqlite3 binds NaN as NULL, so an unguarded Number(undefined) surfaces
-// as an opaque "NOT NULL constraint failed" 500 with no working button behind
-// it — and Number(null) === 0 would silently mis-attribute the record to a
-// nonexistent user 0. Throws; callers surface err.message to the operator.
+// requireActorId(value, column) — guard a NOT NULL actor column (operator_id /
+// decided_by). users.id is a UUID (TEXT), so the value must pass through AS-IS
+// — coercing with Number() is exactly the bug this guards against: Number(uuid)
+// is NaN, better-sqlite3 binds NaN as NULL, and the insert dies with an opaque
+// "NOT NULL constraint failed" 500 with no working button behind it (while
+// Number(null) === 0 would silently mis-attribute the record to a nonexistent
+// user 0). Non-empty strings pass unchanged; positive finite numbers pass as
+// numbers (legacy tolerance); everything else throws an actionable message the
+// caller surfaces to the operator.
 export function requireActorId(value, column = 'actor') {
-  const n = Number(value);
-  if (value == null || !Number.isFinite(n) || n <= 0) {
-    throw new Error(`the acting user's id could not be resolved (${column}) — sign out, sign back in, and retry`);
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (s) return s;
+  } else if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
   }
-  return n;
+  throw new Error(`the acting user's id could not be resolved (${column}) — sign out, sign back in, and retry`);
 }
 
 // validateConfirmation(record) — an operator confirmation (or admin waiver) is

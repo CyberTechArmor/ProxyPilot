@@ -22,29 +22,33 @@ const requireAdmin = requireAdminOrPermission('developer');
 
 import { logAudit, getDb } from '../db.js';
 
-// The acting user's id for attribution and NOT NULL actor columns. The JWT
-// payload's `id` is absent on some sessions/tokens; an undefined id becomes NaN →
-// SQLite stores NULL → a NOT NULL actor column (mock2_integration_verifications
-// .operator_id, mock2_integration_resolutions.decided_by) rejects the insert with
-// an opaque error. Resolve robustly through four sources, ending with lookups of
-// the session row by the token's `jti` and the users row by the token's
-// `username` (both present on every token this system has ever minted), so the
-// id is found regardless of how req.user / req.session were populated.
+// The acting user's id for attribution and NOT NULL actor columns.
+//
+// users.id is a UUID (TEXT PRIMARY KEY, uuidv4) — NEVER coerce it to Number:
+// Number("6f1c…") is NaN, better-sqlite3 binds NaN as NULL, and a NOT NULL
+// actor column (mock2_integration_verifications.operator_id,
+// mock2_integration_resolutions.decided_by) then rejects the insert with an
+// opaque error. That coercion was the root cause of the unrecoverable
+// pending-operator-verification deadlock. Resolve robustly through four
+// sources — JWT id, session row, sessions lookup by `jti`, users lookup by
+// `username` — accepting any non-empty id value as-is.
+const usableActorId = (v) => v != null && String(v).trim() !== '';
+
 function mock2ActorId(req) {
   const direct = req?.user?.id ?? req?.session?.user_id;
-  if (direct != null && Number.isFinite(Number(direct))) return Number(direct);
+  if (usableActorId(direct)) return direct;
   const jti = req?.user?.jti;
   if (jti) {
     try {
       const row = getDb().prepare('SELECT user_id FROM sessions WHERE id = ?').get(jti);
-      if (row?.user_id != null) return row.user_id;
+      if (usableActorId(row?.user_id)) return row.user_id;
     } catch { /* fall through — the username lookup below still applies */ }
   }
   const username = req?.user?.username;
   if (username) {
     try {
       const row = getDb().prepare('SELECT id FROM users WHERE username = ?').get(String(username));
-      if (row?.id != null) return row.id;
+      if (usableActorId(row?.id)) return row.id;
     } catch { /* fall through to null — the caller returns a clean error */ }
   }
   return null;
@@ -849,7 +853,7 @@ export function createMock2Router() {
 
   router.delete('/projects/:id/members/:userId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
-    const userId = Number(req.params.userId);
+    const userId = String(req.params.userId);  // users.id is a UUID, never coerce to Number
     removeMember(project.id, userId);
     logAudit(req.user.id, 'MOCK2_PROJECT_MEMBER_REMOVE', 'mock2_project', project.id, { user_id: userId }, req.ip);
     // Surface the resulting editor count so the UI can warn about an

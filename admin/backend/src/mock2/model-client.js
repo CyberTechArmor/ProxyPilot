@@ -97,7 +97,18 @@ export async function callModelTurn({
 async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [], effort = null, onDelta = null }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
-  const streaming = typeof onDelta === 'function';
+  // Stream when the caller wants deltas OR the request is HEAVY: images in the
+  // transcript, or a large output budget. A heavy non-streaming request can
+  // take minutes to first byte (image processing + adaptive thinking), and
+  // Node's undici transport drops the socket at its ~5-min headers timeout —
+  // surfacing as a bare "fetch failed". Streaming keeps bytes flowing so the
+  // timeout never trips (Anthropic's own guidance for long output / large
+  // max_tokens / image input). onDelta still only fires when the caller
+  // provided one — heavy internal calls stream transparently.
+  const hasImages = (transcript || []).some((t) => t?.role === 'user' && Array.isArray(t.images) && t.images.length);
+  const HEAVY_MAX_TOKENS = 12000;
+  const streaming = typeof onDelta === 'function' || hasImages || Number(maxTokens) >= HEAVY_MAX_TOKENS;
+  const emitDelta = typeof onDelta === 'function' ? onDelta : null;
   const body = {
     model,
     max_tokens: maxTokens,
@@ -137,7 +148,7 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
   // Streaming path: accumulate SSE events back into the exact non-streaming
   // response shape (a proxy that strips SSE falls through to the JSON path).
   if (streaming && String(res.headers.get('content-type') || '').includes('text/event-stream')) {
-    return anthropicAccumulateStream(res, onDelta);
+    return anthropicAccumulateStream(res, emitDelta);
   }
   const text = await res.text();
   let j; try { j = JSON.parse(text); } catch { return { ok: false, error: 'anthropic: non-JSON response', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; }
@@ -203,7 +214,7 @@ async function anthropicAccumulateStream(res, onDelta) {
         if (!b) break;
         if (d.type === 'text_delta') {
           b.text = (b.text || '') + (d.text || '');
-          if (b.type === 'text' && d.text) { try { onDelta(d.text); } catch { /* UI callback must never kill the call */ } }
+          if (onDelta && b.type === 'text' && d.text) { try { onDelta(d.text); } catch { /* UI callback must never kill the call */ } }
         } else if (d.type === 'input_json_delta') {
           jsonAcc.set(ev.index, (jsonAcc.get(ev.index) || '') + (d.partial_json || ''));
         } else if (d.type === 'thinking_delta') {

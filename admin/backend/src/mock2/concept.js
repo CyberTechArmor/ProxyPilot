@@ -507,16 +507,43 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // images the Builder just attached (design references / screenshots are
     // exactly what a render needs). This turn's attachments ride the task.
     const mockupImages = hydrateAttachments(projectId, userAttachments);
-    const mockupCall = (budget) => callModelTurn({
-      connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
-      system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
-      tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
-      maxTokens: budget,
-      timeoutMs: 900000,
-      // A render is transcription of the brief onto the design system — cap
-      // the thinking spend so the budget goes to the page itself.
-      effort: 'low',
-    });
+    // STREAM the render (Anthropic guidance for long output / large max_tokens /
+    // image input): a big non-streaming render — worsened by attached images and
+    // adaptive thinking pushing time-to-first-byte past Node's ~5-min undici
+    // headers timeout — fails at the transport layer with a bare "fetch failed"
+    // (exactly the 3-image case reported). Streaming keeps the socket producing
+    // bytes so the timeout never trips; the onDelta also narrates live progress.
+    // The chunks are NOT surfaced as chat text (the HTML isn't a chat reply) —
+    // onDelta only exists to flip the client into streaming mode + drive the
+    // heartbeat. The 15-min AbortController still bounds total wall-clock.
+    let streamedChars = 0;
+    let lastStreamPush = 0;
+    const onMockupDelta = (t) => {
+      streamedChars += t.length;
+      const now = Date.now();
+      if (now - lastStreamPush > 1500) {
+        lastStreamPush = now;
+        setJob(projectId, {
+          phase: 'designing',
+          message: `${currentHtml ? 'Updating' : 'Designing'} the mockup… (${Math.round(streamedChars / 1000)}k characters)`,
+          kind: 'turn', cycleId: cycle.id,
+        });
+      }
+    };
+    const mockupCall = (budget) => {
+      streamedChars = 0;
+      return callModelTurn({
+        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
+        system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
+        tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
+        maxTokens: budget,
+        timeoutMs: 900000,
+        // A render is transcription of the brief onto the design system — cap
+        // the thinking spend so the budget goes to the page itself.
+        effort: 'low',
+        onDelta: onMockupDelta,
+      });
+    };
     const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
     let html = '';
     let failureDetail = null;

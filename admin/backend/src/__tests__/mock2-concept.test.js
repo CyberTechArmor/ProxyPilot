@@ -79,6 +79,10 @@ test('isPlausibleMockup: needs real HTML structure', () => {
   assert.equal(isPlausibleMockup('sorry, I cannot do that'), false);
   assert.equal(isPlausibleMockup(''), false);
   assert.equal(isPlausibleMockup('<html>'), false); // no closing tag
+  // A document must CLOSE — a render truncated on the token budget keeps its
+  // opening + early closing tags but loses </body></html> and renders black.
+  assert.equal(isPlausibleMockup('<!doctype html><html><head><style>body{}</style></head><body><div>cut off here'), false);
+  assert.equal(isPlausibleMockup('<!doctype html><html><body><main>ok</main></body>'), true); // </body> alone is enough
 });
 
 // ---- design inventory parse (the concept-stage exit artifact) ----

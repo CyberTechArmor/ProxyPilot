@@ -702,22 +702,37 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     const s = Math.round((Date.now() - extractStarted) / 1000);
     setJob(projectId, { phase: 'approving', message: `Extracting the design inventory — every screen, field, and action in the approved mockup… (${s}s; it keeps working if you switch tabs)`, kind: 'approval', cycleId: cycle.id });
   }, 9000);
-  let extractRes;
+  // The extraction is a pure structured-JSON task over a (potentially very
+  // large) mockup. thinking:'off' keeps the whole budget for the JSON —
+  // adaptive thinking otherwise ate into it and truncated the output mid-value
+  // ("Unterminated string in JSON"). A generous budget (it streams: the large
+  // HTML input would otherwise risk a transport timeout too), and — because
+  // approval is a hard gate — ONE automatic retry on a parse failure before we
+  // make the Builder redo it.
+  const extractCall = () => callModelTurn({
+    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+    system: buildInventoryExtractionPrompt(), tools: [],
+    transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
+    maxTokens: 16000,
+    thinking: 'off',
+  });
+  let parsed;
   try {
-    extractRes = await callModelTurn({
-      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
-      system: buildInventoryExtractionPrompt(), tools: [],
-      transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
-      maxTokens: 8000,
-    });
+    let extractRes = await extractCall();
+    if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
+    parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
+    if (!parsed.ok) {
+      setJob(projectId, { phase: 'approving', message: 'The inventory came back malformed — extracting once more…', kind: 'approval', cycleId: cycle.id });
+      extractRes = await extractCall();
+      if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
+      parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
+    }
   } finally {
     clearInterval(extractTicker);
   }
-  if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
-  const parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
   if (!parsed.ok) {
     finishCycle(cycle.id, { status: 'failed', error: `inventory extraction failed: ${parsed.error}` });
-    insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Couldn't extract the design inventory: ${parsed.error}. The design is not approved — try again.` });
+    insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Couldn't extract the design inventory: ${parsed.error}. The design is not approved — try approving again.` });
     setJob(projectId, { phase: 'failed', message: parsed.error });
     return scheduleJobCleanup(projectId);
   }
@@ -747,7 +762,11 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
       system: buildDesignTokenExtractionPrompt(), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
-      maxTokens: 2000,
+      maxTokens: 3000,
+      // Small structured-JSON output — thinking off so the tiny budget isn't
+      // consumed by reasoning (best-effort: parseDesignTokens falls back to
+      // framework defaults on any failure, so this never blocks approval).
+      thinking: 'off',
     });
     if (tokRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: tokRes.usage });
     const { tokens } = parseDesignTokens(tokRes.ok ? tokRes.text : '');

@@ -43,17 +43,20 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   useEffect(() => { load(); }, [load]);
 
   // Poll while a build cycle is live, a rule question is open, or an ask is
-  // being answered, so answers and transitions settle on their own.
+  // being answered, so answers and transitions settle on their own. While an
+  // ask is STREAMING (partial text arriving), poll faster so the live bubble
+  // reads as a stream rather than paragraph jumps.
   const askJob = data?.ask_job || null;
   const askActive = !!askJob && !['done', 'failed'].includes(askJob.phase);
+  const askPartial = askActive ? (askJob?.partial || null) : null;
   const openQuestionCount = (data?.open_question_ids || []).length;
   const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
   const shouldPoll = active || askActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
-    const t = setInterval(load, 2500);
+    const t = setInterval(load, askActive ? 900 : 2500);
     return () => clearInterval(t);
-  }, [shouldPoll, load]);
+  }, [shouldPoll, askActive, load]);
 
   // Land on the work, not the bottom: while rule questions are open, bring the
   // first still-open one into view (answering one then lands on the next); once
@@ -68,7 +71,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       if (firstOpen) { firstOpen.scrollIntoView({ block: 'start' }); return; }
     }
     el.scrollTop = el.scrollHeight;
-  }, [data?.messages?.length, active, openQuestionKey]);
+  }, [data?.messages?.length, active, openQuestionKey, askPartial?.length]);
 
   const openIds = new Set(data?.open_question_ids || []);
   // Only the post-approval slice of the conversation belongs here (the design
@@ -179,6 +182,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           onAnswer={answerQuestion}
           working={active || askActive}
           workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
+          partialText={askPartial}
           emptyLabel={online
             ? 'Describe a change below to run a build cycle, or switch to Ask to question the codebase / run a test. Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}

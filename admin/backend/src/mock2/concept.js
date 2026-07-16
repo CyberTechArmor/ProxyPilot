@@ -419,7 +419,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
     console.error(`[mock2] concept turn crashed for project ${projectId}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `concept turn crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Something went wrong on that turn: ${err?.message || err}` }); } catch { /* ignore */ }
-    setJob(projectId, { phase: 'failed', message: `turn crashed: ${err?.message || err}` });
+    setJob(projectId, { phase: 'failed', message: `turn crashed: ${err?.message || err}`, partial: null });
     scheduleJobCleanup(projectId);
   });
 
@@ -445,16 +445,34 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   const hasMockup = !!project.current_mockup_id;
   const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup, mode });
 
+  // Stream the reply where the provider supports it (Anthropic): visible text
+  // deltas accumulate on the job as `partial`, which the poll surfaces as a
+  // live assistant bubble. Throttled — a Map write is cheap, but no need to
+  // churn per token.
+  let partial = '';
+  let lastPartialPush = 0;
+  const onDelta = (t) => {
+    partial += t;
+    const now = Date.now();
+    if (now - lastPartialPush > 250) {
+      lastPartialPush = now;
+      setJob(projectId, { phase: 'thinking', message: 'Writing…', kind: 'turn', cycleId: cycle.id, partial });
+    }
+  };
   const chatRes = await callModelTurn({
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 4000,
+    onDelta,
   });
   if (!chatRes.ok) {
     finishCycle(cycle.id, { status: 'failed', error: chatRes.error });
     insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `The design partner couldn't respond: ${chatRes.error}` });
-    setJob(projectId, { phase: 'failed', message: chatRes.error });
+    setJob(projectId, { phase: 'failed', message: chatRes.error, partial: null });
     return scheduleJobCleanup(projectId);
   }
+  // NOTE: `partial` stays on the job through a mockup render (the streamed
+  // reply remains visible while the design generates) and is cleared exactly
+  // when the durable assistant message lands below.
   recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: chatRes.usage });
   const decision = classifyConceptTurn(chatRes.toolCalls);
 
@@ -534,7 +552,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // Keep the human lock held (the Builder is actively working — the idle sweep
   // reclaims it, or design approval releases it: ADR-004 "release on idle/approval").
   touchLock(projectId, holder);
-  setJob(projectId, { phase: 'done', message: 'Ready', kind: 'turn', cycleId: cycle.id });
+  // partial cleared here — the durable assistant message above replaces the
+  // streamed preview in the same poll.
+  setJob(projectId, { phase: 'done', message: 'Ready', kind: 'turn', cycleId: cycle.id, partial: null });
   scheduleJobCleanup(projectId);
 }
 

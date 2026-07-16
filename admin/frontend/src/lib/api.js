@@ -1295,6 +1295,11 @@ export const api = {
     request(`/mock2/projects/${projectId}/components`, { method: 'POST', body: JSON.stringify({ key, decision, ...(options ? { options } : {}) }) }),
   mock2InstallProjectComponents: (projectId) =>
     request(`/mock2/projects/${projectId}/components/install`, { method: 'POST' }),
+  // Ask lane: a codebase question / bounded read-and-run task in the build chat
+  // (no build cycle). 202 + poll; the answer lands as a chat message.
+  mock2Ask: (projectId, question) =>
+    request(`/mock2/projects/${projectId}/ask`, { method: 'POST', body: JSON.stringify({ question }) }),
+  mock2AskStatus: (projectId) => request(`/mock2/projects/${projectId}/ask/status`),
 
   // ---- Mock2 M6: cycle runner + checkout lock ----
   mock2StartCycle: (id, instruction) =>

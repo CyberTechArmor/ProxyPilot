@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
@@ -25,6 +25,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const [instruction, setInstruction] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
+  const [mode, setMode] = useState('build'); // 'build' (run a cycle) | 'ask' (question / read-and-run task, no build)
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
@@ -36,11 +37,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
 
   useEffect(() => { load(); }, [load]);
 
-  // Poll while a build cycle is live or a rule question is open, so answers and
-  // the "starting the build" transitions settle on their own.
+  // Poll while a build cycle is live, a rule question is open, or an ask is
+  // being answered, so answers and transitions settle on their own.
+  const askJob = data?.ask_job || null;
+  const askActive = !!askJob && !['done', 'failed'].includes(askJob.phase);
   const openQuestionCount = (data?.open_question_ids || []).length;
   const projectOpenQuestions = Number(project?.open_editor_questions) || 0;
-  const shouldPoll = active || openQuestionCount > 0 || projectOpenQuestions > 0;
+  const shouldPoll = active || askActive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, 2500);
@@ -107,11 +110,33 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     } finally { setBusy(false); }
   };
 
+  // Ask mode: a question about the codebase or a bounded read-and-run task
+  // ("run the tests", "curl the API with the stored credentials") — answered in
+  // chat with NO build cycle. It takes the checkout lock while running, so it
+  // waits its turn behind a live build.
+  const startAsk = async () => {
+    const body = instruction.trim();
+    if (!body) return;
+    setBusy(true);
+    try {
+      await api.mock2Ask(projectId, body);
+      setInstruction('');
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not ask', description: err.message });
+    } finally { setBusy(false); }
+  };
+
   // When the cycle is blocked/awaiting an admin, the composer becomes the
   // resume-message input: what you type is carried into the resumed cycle as operator
   // guidance (bare resume — empty — is still allowed). Otherwise it starts a new cycle.
-  const resumeMode = cycle?.status === 'awaiting_admin' && !needsFeedback;
-  const composerDisabled = busy || (active && !resumeMode) || !online || needsFeedback;
+  const resumeMode = mode === 'build' && cycle?.status === 'awaiting_admin' && !needsFeedback;
+  // Ask is deliberately NOT gated by the post-build rating (asking a question
+  // shouldn't require rating the last build first) — but it does wait for a
+  // running build/ask (the lock serializes writers anyway).
+  const composerDisabled = mode === 'ask'
+    ? (busy || askActive || active || !online)
+    : (busy || (active && !resumeMode) || !online || needsFeedback);
 
   const sendResume = async () => {
     const body = instruction.trim();
@@ -126,7 +151,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setBusy(false); }
   };
-  const submitComposer = () => (resumeMode ? sendResume() : startBuild());
+  const submitComposer = () => (mode === 'ask' ? startAsk() : resumeMode ? sendResume() : startBuild());
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -144,26 +169,30 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           canEdit={canEdit}
           answering={answering}
           onAnswer={answerQuestion}
-          working={active}
-          workingLabel={job?.message || 'Building…'}
+          working={active || askActive}
+          workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           emptyLabel={online
-            ? 'Describe a change below to run a build cycle. Rule questions and build events appear here.'
+            ? 'Describe a change below to run a build cycle, or switch to Ask to question the codebase / run a test. Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
         />
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">
-            {needsFeedback ? (
-              <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next change.</p>
+            {needsFeedback && mode === 'build' ? (
+              <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next change — or switch to Ask.</p>
             ) : null}
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
-                ? (needsFeedback ? 'Rate the last build to continue…'
-                  : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
-                    : active ? 'A build is running — wait for it to finish…'
-                      : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”')
-                : 'Project must be online to run a build.'}
+                ? (mode === 'ask'
+                  ? (askActive ? 'Answering — one ask at a time…'
+                    : active ? 'A build is running — ask when it finishes…'
+                      : 'Ask about the codebase or a bounded task, e.g. “Why does login 403?” or “Run the test suite” — nothing is built or changed')
+                  : (needsFeedback ? 'Rate the last build to continue…'
+                    : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
+                      : active ? 'A build is running — wait for it to finish…'
+                        : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”'))
+                : 'Project must be online.'}
               value={instruction}
               disabled={composerDisabled}
               onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
@@ -172,10 +201,27 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               }}
             />
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground hidden sm:block">⌘/Ctrl+Enter to {resumeMode ? 'resume' : 'run'}</span>
+              {/* Build ↔ Ask mode toggle: Build runs a full audited cycle; Ask
+                  answers questions / runs bounded tasks with no build. */}
+              <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Composer mode">
+                <button
+                  type="button" role="tab" aria-selected={mode === 'build'}
+                  onClick={() => setMode('build')}
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'build' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                >
+                  <Hammer className="h-3.5 w-3.5" /> Build
+                </button>
+                <button
+                  type="button" role="tab" aria-selected={mode === 'ask'}
+                  onClick={() => setMode('ask')}
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'ask' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                >
+                  <HelpCircle className="h-3.5 w-3.5" /> Ask
+                </button>
+              </div>
               <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || (!resumeMode && !instruction.trim())} onClick={submitComposer}>
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
-                {resumeMode ? 'Resume build' : 'Run a cycle'}
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : mode === 'ask' ? <HelpCircle className="h-4 w-4 mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
+                {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Run a cycle'}
               </Button>
             </div>
           </div>

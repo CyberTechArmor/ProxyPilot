@@ -174,6 +174,7 @@ import {
   buildComponentExport, parseComponentImport,
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
+import { startAsk, getAskJobStatus } from './ask.js';
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer } from './runner.js';
 import {
@@ -540,6 +541,8 @@ const componentVersionSchema = z.object({
   contract: z.record(z.any()).nullish(),
   change_reason: z.string().trim().min(1).max(2000),
 });
+// The ask lane's input — a question/task for the read-and-run assistant.
+const askSchema = z.object({ question: z.string().trim().min(1).max(4000) });
 // A project's component selection: an editor picks a library component for the
 // project (or declines a suggestion) by key.
 const projectComponentSelectSchema = z.object({
@@ -2508,6 +2511,7 @@ export function createMock2Router() {
       messages: listMessages(project.id).map(publicChatMessageShape),
       job: getConceptJobStatus(project.id),
       audit_job: getAuditJobStatus(project.id),
+      ask_job: getAskJobStatus(project.id),
       stage: shaped.stage,
       current_mockup_id: shaped.current_mockup_id,
       preview_url: shaped.preview_url,
@@ -2520,6 +2524,34 @@ export function createMock2Router() {
       open_admin_items: shaped.open_admin_items,
       my_role: req.mock2Access.role,
     });
+  });
+
+  // ASK lane — a question about the codebase or a bounded read-and-run task
+  // ("run the tests", "curl the API with the stored credentials"), answered by
+  // a tool loop over the fenced container with NO build ceremony (no audit, no
+  // checkpoint, no deploy). Takes the checkout lock while it runs (exec is a
+  // writer for locking purposes), records spend to the quota ledger, and posts
+  // the answer into the build chat. 202 + poll (ask_job on GET /chat).
+  router.post('/projects/:id/ask', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const parsed = askSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'question is required (1–4000 chars)' });
+    let result;
+    try {
+      result = await startAsk({
+        project: req.mock2Project, question: parsed.data.question,
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not start the ask: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_ASK_START', 'mock2_project', req.mock2Project.id,
+      { chars: parsed.data.question.length, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.status(202).json({ status: 'started' });
+  });
+
+  router.get('/projects/:id/ask/status', requireMock2Role('viewer'), (req, res) => {
+    res.json({ job: getAskJobStatus(req.mock2Project.id) });
   });
 
   // Send a chat message (editor-gated — a chat write takes the lock and may

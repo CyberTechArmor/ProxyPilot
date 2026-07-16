@@ -35,8 +35,14 @@ function openAiBase(provider, baseUrl) {
 // the decrypted key (orchestrator-side, may be null for a local ollama); model is
 // the per-slot id; tools are the neutral RUNNER_TOOLS; system is the assembled
 // prompt; transcript is the neutral turn list.
+// `serverTools` are provider-executed tool entries passed RAW (e.g. Anthropic's
+// {type:'web_search_20250305', name:'web_search', max_uses}) — the provider runs
+// them inside the API call itself, so they need no local execution, no fence
+// egress, and no toolCalls handling here. Only the Anthropic path supports them;
+// other providers ignore the parameter (callers gate on connector.provider via
+// ask-logic.webSearchServerTools, so nothing is silently dropped in practice).
 export async function callModelTurn({
-  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null,
+  connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [],
 }) {
   const provider = connector?.provider;
   // The abort deadline scales with the REQUESTED OUTPUT unless the caller pins
@@ -49,7 +55,7 @@ export async function callModelTurn({
   try {
     switch (provider) {
       case 'anthropic':
-        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
+        return await callAnthropic({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal, serverTools });
       case 'gemini':
         return await callGemini({ apiKey, baseUrl: connector.base_url, model, system, tools, transcript, maxTokens, signal: controller.signal });
       case 'openai':
@@ -72,7 +78,7 @@ export async function callModelTurn({
 }
 
 // ---- Anthropic Messages API (tool use) ----
-async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal }) {
+async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript, maxTokens, signal, serverTools = [] }) {
   const url = `${String(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`;
   const messages = withMessageCacheBreakpoint(anthropicMessages(transcript));
   const body = {
@@ -88,7 +94,14 @@ async function callAnthropic({ apiKey, baseUrl, model, system, tools, transcript
     // prefix — each new turn then only pays for the new turns. Below the model's
     // minimum cacheable size it silently no-ops, which is fine.
     ...(system ? { system: [{ type: 'text', text: String(system), cache_control: { type: 'ephemeral' } }] } : {}),
-    tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
+    // Function tools first, then provider-executed server tools verbatim (e.g.
+    // web_search — Anthropic runs the search server-side during this call; the
+    // response's server_tool_use / web_search_tool_result blocks are informational
+    // and fall through the block loop below, which only lifts text + tool_use).
+    tools: [
+      ...tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
+      ...(Array.isArray(serverTools) ? serverTools : []),
+    ],
     messages,
   };
   const res = await fetch(url, {

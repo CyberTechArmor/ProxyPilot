@@ -41,6 +41,7 @@ import {
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { insertMessage } from './chats.js';
+import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -730,7 +731,13 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     }
 
     // 3) Call the build_runner model for the next step.
-    const result = await callModelTurn({ connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: 8000 });
+    // Web search rides along ONLY when the operator opted the build lane in
+    // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
+    // the search server-side during the call, so the fence stays sealed.
+    const result = await callModelTurn({
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: 8000,
+      serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
+    });
     if (!result.ok) {
       // Transient model failure — retry up to MAX_CYCLE_RETRIES, then escalate.
       const retries = (getCycle(cycle.id).retries || 0) + 1;

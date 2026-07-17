@@ -37,6 +37,7 @@ import {
 } from './component-logic.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { componentWiresBootstrap, planAuthWiring, AUTH_WIRING_TARGETS } from './scaffold-auth.js';
+import { SCAFFOLD_DEPENDENCIES } from './scaffold.js';
 import { buildCheckpointScript } from './template.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getCurrentFrameworkVersion } from './framework.js';
@@ -233,6 +234,30 @@ export async function ensureComponentDeps({ containerName, rows }) {
   return { ok: failed.length === 0, repaired, failed };
 }
 
+// ensureScaffoldDeps — restore scaffold dependencies a corrupted package.json
+// lost. Two npm processes racing in the same tree (the pre-serialization
+// double base-app deploy) could rewrite package.json/package-lock.json and drop
+// entries the scaffold was born with (e.g. @types/pg) — after which `npm ci`
+// exits 0 against the consistent-but-wrong lockfile and the deploy fails at
+// tsc. Add-only merge: never overrides a version the project declares.
+export async function ensureScaffoldDeps({ containerName }) {
+  const cur = await readFileInContainer(containerName, 'package.json');
+  if (!cur.ok) return { ok: false, added: [], error: 'package.json unreadable' };
+  let pkg;
+  try { pkg = JSON.parse(cur.content); } catch { return { ok: false, added: [], error: 'package.json unparseable' }; }
+  const added = [];
+  for (const [section, wanted] of Object.entries(SCAFFOLD_DEPENDENCIES)) {
+    const target = pkg[section] && typeof pkg[section] === 'object' ? pkg[section] : (pkg[section] = {});
+    for (const [name, version] of Object.entries(wanted)) {
+      if (!target[name]) { target[name] = version; added.push(name); }
+    }
+  }
+  if (added.length) {
+    await writeFileInContainer(containerName, 'package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+  }
+  return { ok: true, added };
+}
+
 // ---- the pre-install pass (all confirmed selections for a project) ----
 
 // preinstallComponents — install every confirmed (or previously failed)
@@ -268,8 +293,11 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     } catch (e) { console.warn('[mock2] component auto-apply failed:', e?.message); }
   }
 
+  // NO early return when nothing is freshly installable: the repair passes
+  // below must still run for selections already marked 'installed' — healing
+  // installed-but-broken state is their whole point, and that state has, by
+  // definition, no confirmed/install_failed rows left.
   const rows = listProjectComponents(projectId).filter((r) => INSTALLABLE.has(r.status));
-  if (!rows.length) return { ok: true, installed: [], failed: [] };
   const containerName = project.container_name || containerNameForProject(projectId);
 
   const installed = [];
@@ -306,8 +334,18 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   } catch (e) { console.warn('[mock2] component dep repair failed:', e?.message); }
   for (const f of ensured.failed) failedRows.push(f);
 
+  // Restore scaffold deps a corrupted package.json lost (see ensureScaffoldDeps)
+  // — the deploy's install step materializes them (`npm ci` fails on the now
+  // out-of-sync lockfile and falls back to `npm install`, which resolves both).
+  let scaffoldDeps = { ok: true, added: [] };
+  try {
+    scaffoldDeps = await ensureScaffoldDeps({ containerName });
+  } catch (e) { console.warn('[mock2] scaffold dep repair failed:', e?.message); }
+
   // Mirror the full selection to state/components.json (rides the hash-chained
-  // history like integrations.json), checkpoint, and record the change.
+  // history like integrations.json), checkpoint, and record the change. Skipped
+  // when the project has no component selections at all (nothing to mirror —
+  // and this now runs on every build, not only when something was installable).
   try {
     const all = listProjectComponents(projectId).map((r) => {
       const shape = publicProjectComponentShape(r);
@@ -327,7 +365,7 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
         api: contract?.api, files,
       };
     });
-    await writeFileInContainer(containerName, COMPONENTS_STATE_PATH, buildComponentsStateDoc(all));
+    if (all.length) await writeFileInContainer(containerName, COMPONENTS_STATE_PATH, buildComponentsStateDoc(all));
     if (installed.length) {
       const summary = `Installed component${installed.length === 1 ? '' : 's'}: ${installed.map((i) => `${i.component.key} v${i.version.version}`).join(', ')} (platform pre-install — no build credits)`;
       const cp = buildCheckpointScript({ appDir: APP_DIR, message: `mock2: ${summary}` });
@@ -363,6 +401,12 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
       insertMessage({
         projectId, kind: 'system', cycleId,
         body: `Repaired missing component dependencies (a past install reported success but npm had failed):\n${lines.join('\n')}`,
+      });
+    }
+    if (scaffoldDeps.added?.length) {
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Restored scaffold dependencies that had been lost from package.json: ${scaffoldDeps.added.join(', ')} — the deploy's install step lands them.`,
       });
     }
     for (const f of failedRows) {

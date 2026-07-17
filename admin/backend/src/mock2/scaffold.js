@@ -25,6 +25,28 @@
 // scaffold a project was born from.
 export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v1';
 
+// The canonical dependency set every scaffolded app is born with. Exported so
+// the repair pass (component-install ensureScaffoldDeps) can restore entries a
+// corrupted package.json lost — e.g. two npm processes racing rewrote it and
+// dropped @types/pg, after which every deploy failed at tsc. Add-only merges:
+// versions here never override what a project already declares.
+export const SCAFFOLD_DEPENDENCIES = {
+  dependencies: {
+    express: '^4.19.2',
+    'drizzle-orm': '^0.33.0',
+    pg: '^8.12.0',
+    zod: '^3.23.8',
+  },
+  devDependencies: {
+    typescript: '^5.5.4',
+    tsx: '^4.16.2',
+    vitest: '^2.0.5',
+    '@types/express': '^4.17.21',
+    '@types/node': '^20.14.0',
+    '@types/pg': '^8.11.6',
+  },
+};
+
 // package.json — the run scripts the mock2.yaml run contract points at
 // (declared, not discovered — ADR-005). `dev` is the tsx watch server used
 // during interactive editing; `start` is what the deployed systemd unit runs.
@@ -43,20 +65,8 @@ function packageJson(project) {
         migrate: 'node scripts/migrate.mjs',
         test: 'vitest run',
       },
-      dependencies: {
-        express: '^4.19.2',
-        'drizzle-orm': '^0.33.0',
-        pg: '^8.12.0',
-        zod: '^3.23.8',
-      },
-      devDependencies: {
-        typescript: '^5.5.4',
-        tsx: '^4.16.2',
-        vitest: '^2.0.5',
-        '@types/express': '^4.17.21',
-        '@types/node': '^20.14.0',
-        '@types/pg': '^8.11.6',
-      },
+      dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies },
+      devDependencies: { ...SCAFFOLD_DEPENDENCIES.devDependencies },
     },
     null,
     2,

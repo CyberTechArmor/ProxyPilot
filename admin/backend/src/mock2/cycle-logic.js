@@ -136,6 +136,35 @@ export function parseGateScripts(gatesJson) {
     .sort((a, b) => a.order - b.order);
 }
 
+// ---- build modes (full vs MVP) ----
+//
+// 'full' is the everything path: audit interview, whole gate battery,
+// acceptance discipline. 'mvp' is the speed path from an approved design to a
+// TESTABLE first version — closer to a one-shot scaffold: the rule interview is
+// skipped, the authoring-discipline gates (the ones that force spec/test
+// artifacts to exist) are dropped from the battery, and finish does not demand
+// a state/acceptance.json. The correctness gates (typecheck, constitution-lint,
+// security-scan, test, component-reuse) still run — an MVP that doesn't compile
+// or leaks a secret is not testable. A later full Build adds the discipline.
+
+export const BUILD_MODE_FULL = 'full';
+export const BUILD_MODE_MVP = 'mvp';
+export const BUILD_MODES = Object.freeze([BUILD_MODE_FULL, BUILD_MODE_MVP]);
+
+export function normalizeBuildMode(raw) {
+  return String(raw || '').trim().toLowerCase() === BUILD_MODE_MVP ? BUILD_MODE_MVP : BUILD_MODE_FULL;
+}
+
+// The gates an MVP build SKIPS: the ones whose job is to force authored
+// artifacts (per-rule tests, ui-check specs, the acceptance spec) rather than
+// to verify the code itself.
+export const MVP_SKIPPED_GATES = Object.freeze(['rule-coverage', 'ui-interaction', 'acceptance']);
+
+export function filterGatesForBuildMode(gates = [], mode = BUILD_MODE_FULL) {
+  if (normalizeBuildMode(mode) !== BUILD_MODE_MVP) return gates;
+  return (gates || []).filter((g) => g && !MVP_SKIPPED_GATES.includes(g.name));
+}
+
 // The initial gates_json the runner stamps on a cycle from the pinned gate
 // scripts — every gate 'pending' before the battery runs.
 export function initialGateReports(gateScripts = []) {

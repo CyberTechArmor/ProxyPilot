@@ -32,8 +32,8 @@ export const CONSULT_TRIGGERS = Object.freeze([
 
 // Hard cost containment: no tools, input ~30k tokens, output ~4k tokens ⇒ ≈ $0.50 at
 // Fable 5 rates ($10/$50 per M): 30k×$10/M + 4k×$50/M = $0.30 + $0.20 = $0.50.
-export const CONSULT_INPUT_TOKEN_CAP = 30_000;
-export const CONSULT_OUTPUT_TOKEN_CAP = 4_000;
+export const CONSULT_INPUT_TOKEN_CAP = 200_000;
+export const CONSULT_OUTPUT_TOKEN_CAP = 16_000;
 
 // Caps: at most 1 consult per halt, 2 per request; beyond that the operator button is
 // required (an auto trigger is refused, the operator may still ask).

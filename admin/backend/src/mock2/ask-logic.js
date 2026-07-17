@@ -16,8 +16,8 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 export const ASK_MAX_TURNS = 15;
-export const ASK_MAX_TOKENS = 4000;
-export const ASK_MAX_QUESTION_CHARS = 4000;
+export const ASK_MAX_TOKENS = 16000;
+export const ASK_MAX_QUESTION_CHARS = 32000;
 
 // A generous reservation for the quota check (the ask is refused when the
 // project budget can't cover it, exactly like a cycle).

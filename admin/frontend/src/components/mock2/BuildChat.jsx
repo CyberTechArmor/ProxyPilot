@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, Rocket } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -96,14 +96,21 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     }
   };
 
-  const startBuild = async () => {
+  // buildMode: 'full' runs the audited build (rule questions, whole gate
+  // battery); 'mvp' is the speed path — rule interview skipped, reduced
+  // battery, fast model — for a testable first version.
+  const startBuild = async (buildMode = 'full') => {
     const body = instruction.trim();
     if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images));
+      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode);
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
+      } else if (buildMode === 'mvp') {
+        toast({ title: 'MVP build started', description: 'Skipping the rule interview — building a fast first testable version.' });
+        setInstruction('');
+        attach.clear();
       } else if (res.audit) {
         toast({ title: 'Auditing the build…', description: 'Checking the change against the rules and framework.' });
         setInstruction('');
@@ -223,7 +230,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 onPickFiles={attach.addFiles} onRemove={attach.remove}
               />
             ) : null}
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Build ↔ Ask mode toggle: Build runs a full audited cycle; Ask
                   answers questions / runs bounded tasks with no build. */}
               <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Composer mode">
@@ -242,7 +249,20 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                   <HelpCircle className="h-3.5 w-3.5" /> Ask
                 </button>
               </div>
-              <Button className="h-11 sm:h-10 ml-auto" disabled={composerDisabled || (!resumeMode && !instruction.trim())} onClick={submitComposer}>
+              {/* MVP build — the speed path: rule interview skipped, reduced
+                  gate battery, fast model. A later full Build adds the tests
+                  and acceptance discipline. Only offered for a fresh build. */}
+              {mode === 'build' && !resumeMode ? (
+                <Button
+                  variant="outline" className="h-11 sm:h-10 ml-auto"
+                  disabled={composerDisabled || !instruction.trim()}
+                  onClick={() => startBuild('mvp')}
+                  title="Fast first version: skips the rule interview and the spec/test gates — run a full Build later for those"
+                >
+                  <Rocket className="h-4 w-4 mr-1" /> Build MVP
+                </Button>
+              ) : null}
+              <Button className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`} disabled={composerDisabled || (!resumeMode && !instruction.trim())} onClick={submitComposer}>
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : mode === 'ask' ? <HelpCircle className="h-4 w-4 mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
                 {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Run a cycle'}
               </Button>

@@ -182,8 +182,8 @@ test('consult caps: 1/halt, 2/request; a 3rd auto is refused; operator button ov
   assert.equal(consultAllowed({ trigger: 'operator', perHaltCount: 5, perRequestCount: 9 }).allowed, true);
 });
 
-test('consult cost is ~$0.50 and the digest is capped (no tools, input bounded)', () => {
-  assert.ok(Math.abs(estimateConsultCostCents() - 50) < 1e-9); // 30k*$10/M + 4k*$50/M = $0.50
+test('consult cost is ~$2.80 and the digest is capped (no tools, input bounded)', () => {
+  assert.ok(Math.abs(estimateConsultCostCents() - 280) < 1e-9); // 200k*$10/M + 16k*$50/M = $2.80
   const huge = 'x'.repeat(CONSULT_INPUT_TOKEN_CAP * 8); // way over the char cap
   const { text, truncated } = buildConsultDigest({ task: 'build', haltReason: 'stuck', fileExcerpts: [{ path: 'a.ts', content: huge }] });
   assert.equal(truncated, true);

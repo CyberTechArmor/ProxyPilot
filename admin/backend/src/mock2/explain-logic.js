@@ -12,7 +12,7 @@
 
 // Bound the card text handed to the explainer (a runaway transcript can't blow the
 // summary lane's context or cost). The route validates a slightly larger ceiling.
-export const EXPLAIN_MAX_INPUT_CHARS = 8000;
+export const EXPLAIN_MAX_INPUT_CHARS = 32000;
 
 // The risk vocabulary the badge renders. Ordered low→high.
 export const RISK_LEVELS = Object.freeze(['low', 'medium', 'high']);
@@ -63,7 +63,7 @@ export function buildExplainTranscript({ text = '', title = '', status = '', kin
 // Bound the operator's follow-up question and the prior-explanation context we hand
 // back to the model (both are client-supplied; the route validates the same limits).
 export const FOLLOWUP_MAX_QUESTION_CHARS = 1000;
-export const FOLLOWUP_MAX_PRIOR_CHARS = 6000;
+export const FOLLOWUP_MAX_PRIOR_CHARS = 24000;
 
 // The fixed follow-up prompt: same plain-language rules as the explainer, but the
 // output is a short direct answer (plain text, no JSON) to the operator's question.

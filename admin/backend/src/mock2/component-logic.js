@@ -17,9 +17,15 @@ import { createHash } from 'node:crypto';
 // ---- limits (bounds the prompt/DB cost of a single component) ----
 
 export const MAX_COMPONENT_FILES = 40;
-export const MAX_COMPONENT_FILE_CHARS = 200_000;
-export const MAX_COMPONENT_TOTAL_CHARS = 600_000;
-export const MAX_COMPONENT_PROMPT_CHARS = 60_000; // one get_component tool result
+// Library size ceilings — storage sanity bounds, not working limits: a real
+// prebuilt component (an auth module, a billing stack) must fit whole.
+export const MAX_COMPONENT_FILE_CHARS = 1_000_000;
+export const MAX_COMPONENT_TOTAL_CHARS = 4_000_000;
+// One get_component tool result. Raised from 60k (which withheld the file
+// contents of any real-sized component, forcing the build to read files one by
+// one): at 600k chars (~150k tokens) any component within the library ceiling
+// above still renders with a full manifest, and most render fully inline.
+export const MAX_COMPONENT_PROMPT_CHARS = 600_000;
 
 // The export/import document format tag. Bump only on breaking shape changes.
 export const COMPONENT_EXPORT_FORMAT = 'proxypilot-component@1';

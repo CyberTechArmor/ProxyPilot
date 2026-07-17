@@ -154,7 +154,7 @@ async function deployProjectUnqueued({
   report('health');
   const health = await containerSh(
     containerName,
-    `last="000"\ni=0\nwhile [ $i -lt 12 ]; do\n`
+    `last="000"\ni=0\nwhile [ $i -lt 20 ]; do\n`
       + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
       + `  [ -n "$code" ] && last="$code"\n`
       + `  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi\n`
@@ -162,6 +162,10 @@ async function deployProjectUnqueued({
       + `done\n`
       + `echo "MOCK2_NOT_SERVING (last http_code: $last)"\n`
       + `echo "# service state:"; systemctl is-active mock2-dev.service 2>&1 || true\n`
+      // Who holds the web port RIGHT NOW — when the crash reason is
+      // EADDRINUSE this line names the offending process instead of leaving
+      // the operator guessing (orphaned placeholder, stray dev server, …).
+      + `echo "# port ${webPort} holders:"; ss -ltnp 2>/dev/null | grep ":${webPort} " || echo "(nothing bound)"\n`
       + `echo "# recent app output (this is the crash reason if it exits after starting, or the 5xx cause):"\n`
       + `journalctl -u mock2-dev.service --no-pager -n 60 2>/dev/null || true\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },

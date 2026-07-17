@@ -97,25 +97,26 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     }
   };
 
-  // The base app never made it live (provision-time deploy failed — e.g. a
-  // component dependency that never installed) and no build cycle exists to
-  // retry from. One tap re-runs the pre-install (which repairs missing deps)
-  // and the deploy. Hidden once anything serves or a build is deploying.
+  // Base-app banner states: a deploy is RUNNING right now (base_app_deploying,
+  // from the backend's in-flight guard — show progress, no button), or the app
+  // never made it live and nothing is deploying (offer the one-tap retry that
+  // repairs missing deps first). Hidden once anything serves.
+  const baseAppDeploying = !!project?.base_app_deploying;
   const baseAppMissing = canEdit && online && !active
+    && !baseAppDeploying
     && !project?.base_app_deployed_at
     && !['serving', 'deploying'].includes(project?.deploy_state);
   const deployBaseApp = async () => {
     setDeployingBase(true);
     try {
       await api.mock2DeployBaseApp(projectId);
-      toast({ title: 'Deploying the base app…', description: 'Missing component dependencies are repaired first. Progress lands in this chat.' });
+      toast({ title: 'Deploying the base app…', description: 'Missing component dependencies are repaired first. The outcome lands in this chat.' });
       if (onStarted) onStarted();
       await load();
-      // Keep the button disabled while the deploy runs (it takes a few
-      // minutes; the banner disappears once the app serves). Re-enable after a
-      // minute so a failed deploy can be retried — the server refuses a
-      // duplicate while one is still in flight, so an early press is harmless.
-      setTimeout(() => setDeployingBase(false), 60000);
+      // The next project refresh flips the banner to its "deploying" state
+      // (base_app_deploying from the server); this local flag just bridges the
+      // gap so the button can't be double-pressed meanwhile.
+      setTimeout(() => setDeployingBase(false), 15000);
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not start the deploy', description: err.message });
       setDeployingBase(false);

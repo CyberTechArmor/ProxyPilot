@@ -659,7 +659,10 @@ function shapeProject(project, { isAdmin }) {
   // shaper so the tile and the detail page derive the deploy state identically.
   const latest = latestDeployCycle(project.id);
   const deployState = deployProjectStatus(latest?.deploy_status);
+  let baseAppDeploying = false;
+  try { baseAppDeploying = isBaseAppDeploying(project.id); } catch { /* shape stays false */ }
   return publicProjectShape(project, {
+    baseAppDeploying,
     parentDomain: parent?.domain || null,
     editorCount: counts.editor,
     viewerCount: counts.viewer,

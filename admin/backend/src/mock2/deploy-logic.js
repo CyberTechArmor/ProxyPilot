@@ -162,7 +162,11 @@ export const DEPLOY_STEP_TIMEOUTS_MS = Object.freeze({
   migrate: 180000,
   build: 300000,
   start: 60000,
-  health: 45000,
+  // Covers the 20-poll × (3s curl + 2s sleep) serving loop in deploy.js plus
+  // the journal dump — a first boot that spends a while in a restart loop
+  // (e.g. waiting out a lingering port holder) still gets counted as serving
+  // once it recovers, instead of being marked failed while actually fine.
+  health: 120000,
 });
 
 // deployPlan(contract) → the ordered [{ key, command, timeoutMs }] the deploy

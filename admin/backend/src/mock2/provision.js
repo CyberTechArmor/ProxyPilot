@@ -411,6 +411,28 @@ async function deployBaseAppInner(project, projectId, { reason }) {
     catch { /* best effort */ }
   };
   try {
+    // Fast path: the app may ALREADY be serving — a deploy whose health window
+    // closed during a transient port conflict is marked failed, but the unit
+    // keeps restarting and wins once the holder dies. If the unit runs the
+    // built app (node, not the serve.py placeholder) and the port answers,
+    // record the truth instead of redeploying.
+    try {
+      const probe = await sh(
+        `incus exec ${containerName} -- sh -c 'code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null); exec_line=$(grep -h "^ExecStart" /etc/systemd/system/mock2-dev.service 2>/dev/null); echo "$code|$exec_line"'`,
+        { timeoutMs: 20000 },
+      );
+      const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
+      const code = Number(codeStr);
+      if (code >= 200 && code < 500 && /node/.test(execLine)) {
+        updateProject(projectId, { base_app_deployed_at: new Date().toISOString() });
+        setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
+        try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }
+        await say('The base app is already live on your project URL — open it to create the first administrator and sign in. (An earlier deploy was marked failed because its health window closed during a temporary port conflict, but the app recovered on its own.)');
+        console.log(`[mock2] project ${projectId} base app already serving (${reason}) — stamped without redeploy`);
+        return { ok: true, alreadyServing: true };
+      }
+    } catch { /* fall through to the full deploy */ }
+
     setStatus(projectId, { phase: 'base-app', message: 'Setting up the base app (sign-in + first-admin bootstrap)…' });
     // Dynamic import: component-install imports this module (container
     // naming), so a static import would be a cycle.
@@ -441,6 +463,7 @@ async function deployBaseAppInner(project, projectId, { reason }) {
     if (result.ok && !result.skipped) {
       setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
       try { updateProject(projectId, { base_app_deployed_at: new Date().toISOString() }); } catch { /* best effort */ }
+      try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }
       await say('The base app is live on your project URL — open it to create the first administrator and sign in. From here you can mock up a design and apply it, or skip the mockup and start making quick updates to the running app.');
       console.log(`[mock2] project ${projectId} base app deployed (${reason})`);
       return { ok: true };

@@ -88,8 +88,12 @@ class Entry:
 
     def host_block(self, hostname: str) -> Optional[Dict[str, Any]]:
         """Return this host's hosts block, normalising both spec
-        forms: dict-keyed-by-hostname (current schema) and the older
-        list-of-objects form. Returns None if the host is not listed."""
+        forms: list-of-objects (the schema every entry in the inbox
+        actually uses — one dict per host, richer per-host metadata
+        like reachability/act_now_score alongside action_class/tier)
+        and dict-keyed-by-hostname (a terser alternate form, accepted
+        for compatibility but not what's on disk). Returns None if the
+        host is not listed."""
         hosts = self.raw.get("hosts")
         if isinstance(hosts, dict):
             block = hosts.get(hostname)

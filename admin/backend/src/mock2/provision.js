@@ -502,7 +502,19 @@ async function redeployIfBuilt(project, { containerName, webPort }) {
   let built = false;
   try { built = projectHasBeenDeployed(projectId) || !!project.base_app_deployed_at; }
   catch (e) { console.warn('[mock2] rehydrate deploy check failed:', e?.message); }
-  if (!built) return;
+  if (!built) {
+    // Never-deployed but the Builder already committed to working on the live
+    // app (design approved/skipped): a rehydrate would otherwise park them on
+    // the placeholder waiting for a manual "Deploy base app" press. Run the
+    // base-app deploy instead — it pre-installs components (repairing deps and
+    // upgrading an unwireable auth version) before deploying, so a project
+    // that failed under an older backend heals on its next wake.
+    if (project.design_approved_at) {
+      await deployBaseApp(project, { reason: 'rehydrate' })
+        .catch((e) => console.warn('[mock2] rehydrate base-app deploy failed:', e?.message));
+    }
+    return;
+  }
   setStatus(projectId, { phase: 'deploy', message: 'Restoring the built app (install, migrate, build, start)…' });
   const result = await deployProject({
     containerName, appDir: APP_DIR, webPort,

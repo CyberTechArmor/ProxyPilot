@@ -327,6 +327,31 @@ test('GET /research/config does not collide with /:cveId', async () => {
   }
 });
 
+test('GET /research/status reports idle when no pass is running', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/research/status');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.busy, false);
+    assert.equal(r.body.started_at, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('POST /research/run-now 400s when research is not configured (no background pass)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/research/run-now', { method: 'POST' });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /not configured/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('the retired git-sync routes are gone (wildcard 400s them as invalid ids)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
   try {

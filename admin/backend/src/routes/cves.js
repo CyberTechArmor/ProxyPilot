@@ -408,6 +408,12 @@ cvesRouter.get('/research/runs', requireAdmin, async (_req, res) => {
   res.json({ runs: getResearchRunLog() });
 });
 
+// Live run state: { busy, started_at, trigger }. The dashboard polls
+// this after starting a run (run-now returns before the pass ends).
+cvesRouter.get('/research/status', requireAdmin, async (_req, res) => {
+  res.json(cveResearchScheduler.status());
+});
+
 // Connectors already configured under Projects (mock2) that could be
 // reused here, so the operator isn't forced to paste a key twice. Empty
 // list (not an error) when Projects is disabled or has nothing usable.
@@ -470,15 +476,19 @@ cvesRouter.post('/research/run-now', requireAdmin, requireSudo, async (req, res)
   if (cveResearchScheduler.isBusy()) {
     return res.status(409).json({ error: 'a research run is already in progress' });
   }
-  try {
-    // runResearchPass() itself writes the CVE_RESEARCH_RUN audit row
-    // (actorUserId flows through so manual runs still attribute to the
-    // operator) — no second logAudit call needed here.
-    const out = await cveResearchScheduler.runNow('manual', { actorUserId: req.user.id });
-    res.json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  const settings = getResearchSettings();
+  if (!settings.configured) {
+    return res.status(400).json({ error: 'CVE research is not configured — set a provider, model, and API key first.' });
   }
+  // Fire-and-forget: a pass legitimately runs for many minutes — longer
+  // than browsers and reverse proxies keep an idle HTTP request open, so
+  // awaiting it here made the UI look like nothing happened. The pass
+  // records its own outcome (run log + audit; actorUserId flows through
+  // so manual runs still attribute to the operator), and the dashboard
+  // polls /research/status then reads the report from /research/runs.
+  cveResearchScheduler.runNow('manual', { actorUserId: req.user.id })
+    .catch((err) => console.error('[cves] background research run threw:', err?.message));
+  res.status(202).json({ ok: true, started: true });
 });
 
 // ── wildcard `:cveId` routes (must register AFTER literal paths above) ────

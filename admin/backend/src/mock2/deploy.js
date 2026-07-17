@@ -63,11 +63,32 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
   return parseDeclaredEgress(r.stdout || '');
 }
 
+// All deploy entry points — the build cycle's deploy stage, "Retry deploy",
+// the base-app deploy, the rehydrate restore — can fire independently, and two
+// deploys interleaving on ONE container stomp the same unit and web port: each
+// runs freeWebPortScript then `systemctl start`, so one instance binds and the
+// other crash-loops on EADDRINUSE until the health window closes. One
+// in-process queue per container serializes them; a queued deploy simply runs
+// after the current one finishes (idempotent — it redeploys the same checkout).
+const deployQueues = new Map();
+
 // deployProject({ containerName, appDir, webPort, runContract, onStep }) →
 // { ok, step, error }. Runs the ordered plan, then swaps the unit and restarts,
 // then health-checks the web port. onStep(key, label) reports progress (wired to
 // setJob so the CycleCard shows "Installing dependencies…" etc.).
-export async function deployProject({
+export async function deployProject(args) {
+  const key = String(args?.containerName || '');
+  const prev = deployQueues.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(() => deployProjectUnqueued(args));
+  deployQueues.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (deployQueues.get(key) === run) deployQueues.delete(key);
+  }
+}
+
+async function deployProjectUnqueued({
   containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null,
 }) {
   const contract = runContract && runContract.hasContract

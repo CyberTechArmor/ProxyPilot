@@ -209,7 +209,7 @@ import { buildRequestLog, requestLogArtifact } from './request-log.js';
 import { runConsult } from './consult.js';
 import { consultAllowed } from './consult-logic.js';
 import {
-  getCycle, listCyclesForProject, latestCycle, setInterrupt, finishCycle, updateCycle,
+  getCycle, listCyclesForProject, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
   countRunningCycles,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
@@ -653,10 +653,11 @@ function shapeProject(project, { isAdmin }) {
   const current = getCurrentFrameworkVersion();
   const frameworkUpdateAvailable = isFrameworkDrifted(project.last_built_framework_version_id, current?.id ?? null);
   const lastBuilt = project.last_built_framework_version_id ? getFrameworkVersion(project.last_built_framework_version_id) : null;
-  // Run phase — the derived deploy signal from the latest cycle's deploy_status
-  // (deploying/serving/deploy_failed). One cheap lookup, kept in the shaper so
-  // the tile and the detail page derive the deploy state identically.
-  const latest = latestCycle(project.id);
+  // Run phase — the derived deploy signal from the latest cycle THAT DEPLOYED
+  // (deploying/serving/deploy_failed). Cycles without a deploy signal (the
+  // design-skip marker record) must not mask it. One cheap lookup, kept in the
+  // shaper so the tile and the detail page derive the deploy state identically.
+  const latest = latestDeployCycle(project.id);
   const deployState = deployProjectStatus(latest?.deploy_status);
   return publicProjectShape(project, {
     parentDomain: parent?.domain || null,

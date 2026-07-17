@@ -85,7 +85,16 @@ export async function deployProject({
   // 1) install → migrate → build (each bounded, proxy env sourced).
   for (const step of deployPlan(contract)) {
     report(step.key);
-    const r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
+    let r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
+    // ETXTBSY on install is a transient race on a native binary (esbuild's
+    // postinstall re-executes the file npm just wrote — a known npm flake on
+    // container filesystems, or the wake of a concurrent install that has
+    // since been serialized away). One clean retry after the tree settles
+    // resolves it; any other failure is real and returned as-is.
+    if (r.code !== 0 && step.key === 'install' && /ETXTBSY|text file busy/i.test(tail(r))) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
+    }
     if (r.code !== 0) {
       return { ok: false, step: step.key, error: deployFailureMessage(step.key, tail(r)) };
     }

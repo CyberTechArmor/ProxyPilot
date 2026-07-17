@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SMOKE_CONFIG, smokeConfigFromEnv, matchGlob,
   evaluateSmokeTriggers, applyEscalations, resolveConnectorRun,
-  resolveSmokeConnectors, smokeLogLines,
+  resolveSmokeConnectors, smokeLogLines, smokeGateOk,
 } from '../mock2/smoke-triggers.js';
 
 test('matchGlob: * stays within a segment, ** spans segments', () => {
@@ -123,17 +123,50 @@ test('applyEscalations: unknown connector is rejected', () => {
   assert.match(rejected[0].why, /unknown connector/);
 });
 
-// ---- no silent skips: a triggered-but-disabled connector is 'unavailable' ----
+// ---- toggle off = ship for live testing: a triggered-but-toggled-off connector is
+//      a VISIBLE 'disabled' disposition (logged, never a silent skip) that the gate
+//      ACCEPTS, so the deployed build ships for a person to test live ----
 
-test('resolveConnectorRun: fired but disabled → unavailable (visible), not a skip', () => {
+test('resolveConnectorRun: fired but toggled off → disabled (visible), ships for live testing', () => {
   const r = resolveConnectorRun({ fire: true, reason: 'public/** touched' }, false);
-  assert.equal(r.disposition, 'unavailable');
-  assert.match(r.reason, /disabled/);
+  assert.equal(r.disposition, 'disabled');
+  assert.match(r.reason, /turned off|live/i);
+  // Still logged loudly — no silent skip.
+  assert.equal(smokeLogLines({ browser: r, db: { disposition: 'skipped', reason: 'x' } })[0].startsWith('browser: disabled'), true);
 });
 
 test('resolveConnectorRun: fired and enabled → ran; not fired → skipped', () => {
   assert.equal(resolveConnectorRun({ fire: true, reason: 'x' }, true).disposition, 'ran');
   assert.equal(resolveConnectorRun({ fire: false, reason: 'x' }, true).disposition, 'skipped');
+});
+
+// ---- gate verdict: a toggled-off connector SHIPS; an enabled-but-unrunnable one fails ----
+
+test('smokeGateOk: a warranted connector TURNED OFF ships the build (gate passes)', () => {
+  // Operator turned the browser connector off for a user-facing change. It is
+  // 'disabled' upstream and never started, so `report` carries no browser entry —
+  // the gate accepts the build for live human testing even under requireTriggered.
+  const http = { ok: true };
+  const report = { http, browser: null, db: null };
+  assert.equal(smokeGateOk({ http, report, config: DEFAULT_SMOKE_CONFIG }), true);
+});
+
+test('smokeGateOk: an ENABLED connector that could not run fails under requireTriggered', () => {
+  // Browser connector left ON, fired, but playwright is missing → unavailable at
+  // run time. That is the change-69 fail-visibly case: it must NOT read as success.
+  const http = { ok: true };
+  const report = { http, browser: { ok: false, unavailable: true, detail: 'playwright not installed' }, db: null };
+  assert.equal(smokeGateOk({ http, report, config: DEFAULT_SMOKE_CONFIG }), false);
+  // ...but an install that opted out of requireTriggered still ships it.
+  assert.equal(smokeGateOk({ http, report, config: { ...DEFAULT_SMOKE_CONFIG, requireTriggered: false } }), true);
+});
+
+test('smokeGateOk: an invoked connector whose ASSERTION failed always fails the gate', () => {
+  const http = { ok: true };
+  const report = { http, browser: { ok: false, detail: 'a control rendered disabled' }, db: null };
+  assert.equal(smokeGateOk({ http, report, config: DEFAULT_SMOKE_CONFIG }), false);
+  // requireTriggered=false does NOT rescue a real assertion failure.
+  assert.equal(smokeGateOk({ http, report, config: { ...DEFAULT_SMOKE_CONFIG, requireTriggered: false } }), false);
 });
 
 // ---- config from env ----

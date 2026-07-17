@@ -189,10 +189,19 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     const all = listProjectComponents(projectId).map((r) => {
       const shape = publicProjectComponentShape(r);
       const contract = parseContractJson(r.contract_json);
+      // The installed file paths (from the verified install manifest) — the
+      // component-reuse gate needs them to tell adaptation (edits inside these
+      // paths) from reimplementation (parallel copies / re-registered endpoints
+      // outside them).
+      let files;
+      try {
+        const manifest = r.install_manifest_json ? JSON.parse(r.install_manifest_json) : null;
+        files = Array.isArray(manifest) ? manifest.map((m) => m.path).filter(Boolean) : undefined;
+      } catch { files = undefined; }
       return {
         key: shape.key, version: shape.version, status: shape.status, origin: shape.origin,
         options: shape.options, installed_at: shape.installed_at,
-        api: contract?.api,
+        api: contract?.api, files,
       };
     });
     await writeFileInContainer(containerName, COMPONENTS_STATE_PATH, buildComponentsStateDoc(all));

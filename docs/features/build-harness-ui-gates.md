@@ -19,15 +19,28 @@ live app). The new layer is split accordingly:
 | DB smoke connector | orchestrator → container, post-deploy | diff touches `migrations/`, `**/*.sql`, `**/schema/**`, `**/drizzle/**`, seed/bootstrap paths |
 | Cross-layer lint (in `constitution-lint`) | container, every gate run | always (checks tracked + untracked `public/*.js`) |
 | Acceptance criteria on `finish` | orchestrator, every cycle | always |
+| `component-reuse` gate (battery order 8) | container, every gate run | `state/components.json` lists installed components and the diff exists |
 
-## 1–2. Smoke connectors: enabled, and never a silent skip
+## 1–2. Smoke connectors: enabled by default, off = ship for live testing
 
-`SMOKE_BROWSER_ENABLED`, `SMOKE_DB_ENABLED`, and `SMOKE_REQUIRE_TRIGGERED` now
+`SMOKE_BROWSER_ENABLED`, `SMOKE_DB_ENABLED`, and `SMOKE_REQUIRE_TRIGGERED`
 **default to true** (`smoke-triggers.js`). A connector still only *runs* on a
-relevance hit — a backend-only diff invokes neither — but a diff that warrants a
-connector which cannot run (playwright missing, no DSN) now **fails the cycle**
-with the reason in the cycle log, instead of logging and passing. Operators can
-opt out per install; `SMOKE_BROWSER_EXECUTABLE` points at a system Chromium.
+relevance hit — a backend-only diff invokes neither.
+
+Two outcomes are deliberately distinct (`smokeGateOk`):
+
+- **Operator turned the connector OFF** (`SMOKE_BROWSER_ENABLED=0` /
+  `SMOKE_DB_ENABLED=0`) — this is the per-install toggle. The connector resolves to
+  the **`disabled`** disposition, is never started, and the cycle **ships** (logged
+  loudly, never a silent skip). Turning it off is an explicit decision to test the
+  deployed build live by hand, so the gate accepts it — getting the build out for a
+  person to test is the priority. This holds even under `requireTriggered`.
+- **Connector left ON but it cannot run** (playwright missing, no DSN) on a diff
+  that warrants it — this is the change-69 fail-visibly case. It reports
+  `unavailable` at run time and **fails the cycle** under `requireTriggered`, with
+  the reason in the cycle log, instead of logging and passing.
+
+`SMOKE_BROWSER_EXECUTABLE` points the browser connector at a system Chromium.
 
 The **browser connector** executes the project's `state/ui-checks.json`
 interaction checks matched by the diff (below); with no matching checks it falls
@@ -206,3 +219,41 @@ committed key, allowlist-waivable); and the live "Test connection turns all
 three checks green" acceptance check fails against a fixture reproducing the
 defect and passes once fixed (`mock2-acceptance.test.js`,
 `mock2-ui-checks.e2e.test.js`).
+
+---
+
+# Addendum: component-reuse detection (the request-36 hardening)
+
+A third failure shape: asked to "build the first-visit bootstrap super admin
+creation", a build re-implemented capability the pre-installed auth component
+already shipped, then fought unrelated gates for five attempts on a feature that
+was effectively done. Reuse guidance existed but was advisory prose only.
+
+Two-sided fix:
+
+- **Process (build skill)**: a mandatory "Reuse before you rebuild — ALWAYS check
+  first" step precedes the work loop — installed components, then the component
+  library, then the existing tree; a capability already fully present finishes as
+  a verified finding (chore), never a manufactured diff.
+- **Detector (`component-reuse` gate, battery order 8, deterministic, no AI)**:
+  `state/components.json` now mirrors each installed component's **API contract**
+  and **installed file paths** (from the verified install manifest). The gate
+  fails the cycle when the working-tree diff:
+  1. **re-registers a component endpoint** outside the component's own files —
+     an express-looking receiver (`app`/`router`/`xRouter`/`r`) registering a
+     path that exactly matches a contract endpoint, or suffix-matches it with
+     ≥2 segments (mounted routers); method must match. Client code *calling* an
+     endpoint (`api.post`, `axios.post`, `fetch`) is wiring and never flags;
+  2. **adds a parallel copy of a component file** — same basename (generic names
+     like `index.ts`/`routes.ts` and numbered migrations exempt) while the
+     component's original is still on disk. A move/rename does not flag.
+
+  Edits *inside* a component's installed files are adaptation and always pass.
+  Waivers follow the standard gate-waiver protocol: the exact path goes in
+  `state/component-reuse-allowlist.txt` as a distinct reviewed act with a
+  halt/deviation explaining why — never a restructure to dodge the detector.
+
+Tests execute the gate's real embedded script from the seed against fixtures
+(`mock2-component-reuse-gate.test.js`): the request-36 shape (re-registering
+`POST /api/auth/bootstrap/superadmin`, a parallel `bootstrap-superadmin.mjs`)
+fails; wiring calls, own-file adaptation, moves, and waivers pass.

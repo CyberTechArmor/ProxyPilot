@@ -289,11 +289,14 @@ their sources inline). Then adapt only the glue (imports, config, wiring).`;
   return `
 
 # Component library (reuse before you rebuild)
-This installation maintains a library of approved, versioned components — audited
-implementations of recurring needs. When the task overlaps one of these, REUSE IT:
-take the component's code as-is and write only the minimal glue to connect it,
-instead of writing your own version. That keeps every project consistent and keeps
-review cost near zero. Only build from scratch what no component covers.
+Checking this list against the task is a REQUIRED first step of every build cycle,
+not an optional optimization. This installation maintains a library of approved,
+versioned components — audited implementations of recurring needs. When the task
+overlaps one of these, REUSE IT: take the component's code as-is and write only the
+minimal glue to connect it, instead of writing your own version. That keeps every
+project consistent and keeps review cost near zero. Re-implementing what a component
+already provides is a defect, not thoroughness. Only build from scratch what no
+component covers.
 
 Available components:
 ${lines}
@@ -751,6 +754,10 @@ export const COMPONENTS_STATE_PATH = 'state/components.json';
 // buildComponentsStateDoc — the committed artifact recording WHICH components
 // this project uses, at what version, and why. Entries ride the hash-chained
 // history like integrations.json; the build runner and the gates read it.
+// `api` (the contract's endpoints) and `files` (the installed file paths from the
+// install manifest) are what the component-reuse gate matches the working-tree
+// diff against — an endpoint or file re-implemented OUTSIDE these paths is a
+// duplication, an edit INSIDE them is adaptation.
 export function buildComponentsStateDoc(entries = []) {
   return `${JSON.stringify({
     schema_version: 1,
@@ -761,6 +768,7 @@ export function buildComponentsStateDoc(entries = []) {
       origin: e.origin || null,
       options: e.options ?? null,
       api: Array.isArray(e.api) ? e.api : undefined,
+      files: Array.isArray(e.files) ? e.files : undefined,
       installed_at: e.installed_at || null,
     })),
   }, null, 2)}\n`;
@@ -795,11 +803,15 @@ export function buildInstalledComponentsSection(entries = []) {
   return `
 
 # Installed components (already in the source tree — wire, don't rebuild)
-The platform pre-installed these audited components into this project (files,
+CHECK this list against the task BEFORE writing anything: if one of these already
+provides what the task asks for, your job is to WIRE it, not to rebuild it. The
+platform pre-installed these audited components into this project (files,
 migrations, and dependencies are already in place). Treat them as the app's
 standard infrastructure: connect the approved design to their API surface and
 write only the glue (mounts, config, calls). Do NOT rewrite, fork, or duplicate
-what they provide, and do not re-implement their endpoints.
+what they provide, and do not re-implement their endpoints — a task whose capability
+an installed component already ships needs wiring or nothing at all, never a
+from-scratch reimplementation.
 
 ${blocks.join('\n\n')}`;
 }

@@ -1504,6 +1504,9 @@ export const api = {
   // error, created, updated, tool_errors, fetches, tokens, turns,
   // duration_s, summary}] }.
   getCveResearchRuns: () => request('/cves/research/runs'),
+  // Live run state { busy, started_at, trigger } — run-now returns 202
+  // immediately, so the page polls this until the pass finishes.
+  getCveResearchStatus: () => request('/cves/research/status'),
 
   // Housekeeping — disk-usage view (docker df + backup dir) plus
   // opt-in prune actions for stale artifacts. Pruning is sudo-gated

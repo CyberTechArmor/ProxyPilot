@@ -1382,10 +1382,52 @@ function CveList({ onOpen, refreshKey }) {
       ]);
       setResearch(cfg);
       setResearchRuns(runs?.runs || []);
-    } catch { /* panel just stays empty */ }
+      return runs?.runs || [];
+    } catch { return []; /* panel just stays empty */ }
   }, []);
 
-  useEffect(() => { refreshResearchMeta(); }, [refreshResearchMeta]);
+  // A research pass outlives its HTTP request — run-now returns 202
+  // immediately and the pass runs server-side. Poll /research/status
+  // until it goes idle, then pull the report, toast the outcome, and
+  // refresh the list. Also armed on mount when a pass (scheduled or
+  // started in another tab) is already in flight.
+  const pollTimerRef = useRef(null);
+  const stopResearchPoll = useCallback(() => {
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+  }, []);
+
+  const startResearchPoll = useCallback(() => {
+    stopResearchPoll();
+    setResearchRunning(true);
+    pollTimerRef.current = setInterval(async () => {
+      let st;
+      try { st = await api.getCveResearchStatus(); } catch { return; /* transient; keep polling */ }
+      if (st?.busy) return;
+      stopResearchPoll();
+      setResearchRunning(false);
+      const runs = await refreshResearchMeta();
+      const latest = runs[0];
+      if (latest) {
+        toast({
+          title: latest.ok ? 'Research run complete' : 'Research run failed',
+          description: latest.ok
+            ? `${latest.created ?? 0} created, ${latest.updated ?? 0} updated — see Research reports for the full summary`
+            : latest.error || 'see Research reports for details',
+          variant: latest.ok ? undefined : 'destructive',
+        });
+      }
+      refresh();
+    }, 5000);
+  }, [stopResearchPoll, refreshResearchMeta, refresh, toast]);
+
+  useEffect(() => {
+    refreshResearchMeta();
+    // Reflect a pass already in flight (scheduled run / other tab).
+    api.getCveResearchStatus()
+      .then((st) => { if (st?.busy) startResearchPoll(); })
+      .catch(() => {});
+    return stopResearchPoll;
+  }, [refreshResearchMeta, startResearchPoll, stopResearchPoll]);
 
   const setBusyFor = (cve, action) => setRowBusy(m => {
     const next = { ...m };
@@ -1562,24 +1604,21 @@ function CveList({ onOpen, refreshKey }) {
   const onRunResearchNow = async () => {
     setResearchRunning(true);
     try {
-      const out = await api.runCveResearchNow();
+      await api.runCveResearchNow();  // 202 — the pass runs in the background
       toast({
-        title: out.ok ? 'Research run complete' : 'Research run failed',
-        description: out.ok
-          ? `${out.entries_created ?? 0} created, ${out.entries_updated ?? 0} updated`
-          : out.error,
-        variant: out.ok ? undefined : 'destructive',
+        title: 'Research started',
+        description: 'Running in the background — the report appears under Research reports when it finishes.',
       });
-      await refreshResearchMeta();
-      await refresh();
+      startResearchPoll();
     } catch (err) {
-      toast({
-        title: 'Run failed',
-        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
-        variant: 'destructive',
-      });
-    } finally {
       setResearchRunning(false);
+      const already = err instanceof ApiError && err.status === 409;
+      if (already) startResearchPoll();  // someone else's run — track it
+      toast({
+        title: already ? 'Already running' : 'Failed to start research',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: already ? undefined : 'destructive',
+      });
     }
   };
 
@@ -1756,7 +1795,7 @@ function CveList({ onOpen, refreshKey }) {
           dialog. Collapsed: a one-line latest-run status. Expanded:
           the recent run history (newest first). Scrolls away under
           the sticky chrome when browsing rows. */}
-      {researchRuns.length > 0 && (() => {
+      {(researchRuns.length > 0 || researchRunning) && (() => {
         const latest = researchRuns[0];
         return (
           <div className="border rounded-lg bg-card">
@@ -1771,19 +1810,33 @@ function CveList({ onOpen, refreshKey }) {
                 : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
               <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="font-medium shrink-0">Research reports</span>
-              <span className="text-xs text-muted-foreground truncate">
-                latest: <span className={latest.ok ? 'text-emerald-500' : 'text-red-500'}>
-                  {latest.ok ? 'ok' : 'failed'}
+              {researchRunning ? (
+                <span className="text-xs text-muted-foreground inline-flex items-center gap-1.5 truncate">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  a research pass is running — the report lands here when it finishes
                 </span>
-                {' · '}{relTime(latest.at)}
-                {' · '}{latest.created ?? 0} created, {latest.updated ?? 0} updated
-              </span>
-              <span className="ml-auto text-xs text-muted-foreground shrink-0">
-                {researchRuns.length} run{researchRuns.length === 1 ? '' : 's'}
-              </span>
+              ) : latest && (
+                <span className="text-xs text-muted-foreground truncate">
+                  latest: <span className={latest.ok ? 'text-emerald-500' : 'text-red-500'}>
+                    {latest.ok ? 'ok' : 'failed'}
+                  </span>
+                  {' · '}{relTime(latest.at)}
+                  {' · '}{latest.created ?? 0} created, {latest.updated ?? 0} updated
+                </span>
+              )}
+              {researchRuns.length > 0 && (
+                <span className="ml-auto text-xs text-muted-foreground shrink-0">
+                  {researchRuns.length} run{researchRuns.length === 1 ? '' : 's'}
+                </span>
+              )}
             </button>
             {reportsOpen && (
               <div className="border-t px-3 py-2 space-y-2 max-h-80 overflow-y-auto">
+                {researchRuns.length === 0 && researchRunning && (
+                  <div className="text-xs text-muted-foreground py-1">
+                    No finished runs yet.
+                  </div>
+                )}
                 {researchRuns.map((run, i) => (
                   <ResearchRunReport key={run.at || i} run={run} />
                 ))}

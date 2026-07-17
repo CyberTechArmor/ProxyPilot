@@ -471,7 +471,7 @@ async function deployBaseAppInner(project, projectId, { reason }) {
     if (!result.ok) {
       setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — base app deploy failed at "${result.step}": ${result.error}` });
       console.warn(`[mock2] base-app deploy failed for ${projectId} (${reason}): ${result.step} — ${result.error}`);
-      await say(`Base app deploy failed at "${result.step}": ${String(result.error || '').slice(0, 400)} — the placeholder keeps serving. Fix the cause (or run any build, which deploys the app) and try again.`);
+      await say(`Base app deploy failed at "${result.step}": ${String(result.error || '').slice(0, 900)} — the placeholder keeps serving. Fix the cause (or run any build, which deploys the app) and try again.`);
       try {
         raiseQueueItem({
           kind: 'flag', project_id: projectId, dedupe_key: `mock2-base-app:${projectId}`,

@@ -1138,10 +1138,12 @@ export const api = {
   // (202 → poll provision-status); delete requires sudo.
   mock2ListProjects: () => request('/mock2/projects'),
   mock2GetProject: (id) => request(`/mock2/projects/${id}`),
-  mock2CreateProject: ({ name, description, parent_domain_id }) =>
+  // Curated base-design presets for the new-project picker.
+  mock2DesignPresets: () => request('/mock2/design-presets'),
+  mock2CreateProject: ({ name, description, parent_domain_id, design_preset }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id }),
+      body: JSON.stringify({ name, description, parent_domain_id, design_preset }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   mock2RotateProjectSlug: (id) => request(`/mock2/projects/${id}/rotate-slug`, { method: 'POST' }),

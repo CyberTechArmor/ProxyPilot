@@ -63,8 +63,9 @@ export default function Projects() {
   const [domains, setDomains] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '' });
+  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '', design_preset: 'ai' });
   const [creating, setCreating] = useState(false);
+  const [presets, setPresets] = useState([]);
 
   const load = useCallback(async () => {
     try {
@@ -74,6 +75,7 @@ export default function Projects() {
       ]);
       setProjects(pRes.projects || []);
       setDomains((dRes.domains || []).filter((d) => d.selectable));
+      api.mock2DesignPresets().then((r) => setPresets(r.presets || [])).catch(() => {});
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load projects failed:', err);
     } finally {
@@ -109,9 +111,10 @@ export default function Projects() {
         name: form.name.trim(),
         description: form.description.trim() || undefined,
         parent_domain_id: Number(form.parent_domain_id),
+        design_preset: form.design_preset === 'ai' ? undefined : form.design_preset,
       });
       setCreateOpen(false);
-      setForm({ name: '', description: '', parent_domain_id: '' });
+      setForm({ name: '', description: '', parent_domain_id: '', design_preset: 'ai' });
       toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
       if (res.project?.id) navigate(`/projects/${res.project.id}`);
       else load();
@@ -309,6 +312,42 @@ export default function Projects() {
               </Select>
               <p className="text-xs text-muted-foreground">Only verified &amp; enabled domains appear here.</p>
             </div>
+            {presets.length > 0 && (
+              <div className="space-y-1.5">
+                <Label>Base design</Label>
+                <div className="grid grid-cols-1 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, design_preset: 'ai' }))}
+                    className={`min-h-[44px] rounded-md border p-2.5 text-left text-sm ${form.design_preset === 'ai' ? 'border-primary bg-primary/10' : 'text-muted-foreground'}`}
+                  >
+                    <span className="font-medium text-foreground">Let the AI design it</span>
+                    <span className="block text-xs text-muted-foreground">No preset — the mockup model picks the look during the design chat.</span>
+                  </button>
+                  {presets.map((p) => (
+                    <button
+                      key={p.key}
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, design_preset: p.key }))}
+                      className={`min-h-[44px] rounded-md border p-2.5 text-left text-sm ${form.design_preset === p.key ? 'border-primary bg-primary/10' : ''}`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="flex shrink-0 gap-1" aria-hidden="true">
+                          {[p.tokens.colors.background, p.tokens.colors.surface, p.tokens.colors.primary, p.tokens.colors.accent, p.tokens.colors.text].map((c, i) => (
+                            <span key={i} className="h-4 w-4 rounded-full border" style={{ backgroundColor: c }} />
+                          ))}
+                        </span>
+                        <span className="font-medium">{p.name}</span>
+                      </span>
+                      <span className="block pt-1 text-xs text-muted-foreground">{p.description}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  The base app and every mockup start styled with the chosen look; you can still refine it in the design chat.
+                </p>
+              </div>
+            )}
             <DialogFooter className="flex-col sm:flex-row gap-2">
               <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={creating} className="h-11 sm:h-10">
                 Cancel

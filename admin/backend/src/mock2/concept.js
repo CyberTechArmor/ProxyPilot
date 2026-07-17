@@ -59,6 +59,7 @@ import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
+import { applyDesignPreset } from './design-presets.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -450,7 +451,10 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // recent few as real image blocks; older ones as stable placeholders).
   const transcript = buildConceptTranscript(hydrateChatMessagesForModel(projectId, listMessages(projectId)));
   const hasMockup = !!project.current_mockup_id;
-  const system = buildConceptChatSystemPrompt({ designSystem: framework.design_system_md, projectName: project.name, hasMockup, mode });
+  // The locked design system, plus the binding palette of the base preset the
+  // Builder chose at creation (no preset → unchanged, the model picks the look).
+  const boundDesignSystem = applyDesignPreset(framework.design_system_md, project.design_preset);
+  const system = buildConceptChatSystemPrompt({ designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode });
 
   // Stream the reply where the provider supports it (Anthropic): visible text
   // deltas accumulate on the job as `partial`, which the poll surfaces as a
@@ -548,7 +552,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       const mockupTuned = applyLaneTuning({ model: ready.mockup.model, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupTuned.model,
-        system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
+        system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
         tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
         maxTokens: budget,
         timeoutMs: 900000,

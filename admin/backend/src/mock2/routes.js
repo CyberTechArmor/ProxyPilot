@@ -117,6 +117,7 @@ import {
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
+import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI } from './design-presets.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
@@ -331,6 +332,9 @@ const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(2000).optional(),
   parent_domain_id: z.union([z.number().int(), z.string()]),
+  // Base design preset (design-presets.js); omitted/'ai' → the mockup model
+  // picks the look, exactly as before.
+  design_preset: z.string().trim().max(40).optional(),
 });
 const memberSchema = z.object({
   user_id: z.union([z.number().int(), z.string()]),
@@ -835,9 +839,21 @@ export function createMock2Router() {
       return res.status(500).json({ error: `Could not create project: ${err?.message || 'unknown error'}` });
     }
 
-    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain }, req.ip);
+    // Persist the chosen design preset BEFORE provisioning starts — the seed
+    // files (template.js) read it off the project row to style the base app.
+    const presetKey = normalizeDesignPresetKey(parsed.data.design_preset);
+    if (presetKey !== DESIGN_PRESET_AI) {
+      project = updateProject(project.id, { design_preset: presetKey });
+    }
+
+    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain, design_preset: presetKey }, req.ip);
     startProvision(project);
     res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+  });
+
+  // The curated base-design presets a new project can start from (picker UI).
+  router.get('/design-presets', (_req, res) => {
+    res.json({ presets: publicDesignPresets() });
   });
 
   router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {

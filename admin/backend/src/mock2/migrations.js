@@ -1259,4 +1259,15 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_requests ADD COLUMN build_mode TEXT NOT NULL DEFAULT 'full';`);
     },
   },
+  {
+    // Design presets (base look chosen at project creation): the project
+    // remembers which preset seeded its design tokens, so the Concept prompts
+    // stay bound to it. NULL/'ai' = no preset (the mockup model picks the look
+    // — pre-existing behavior, unchanged).
+    version: 530,
+    name: 'mock2_project_design_preset',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN design_preset TEXT;`);
+    },
+  },
 ];

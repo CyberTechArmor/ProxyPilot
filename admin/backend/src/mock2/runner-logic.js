@@ -222,8 +222,15 @@ export const RUNNER_TOOL_NAMES = Object.freeze(RUNNER_TOOLS.map((t) => t.name));
 // wall-clock budget. Each resume starts a fresh cycle continuing from the
 // checkpoint, so it gets a fresh budget window. Tuned generously — a pause is a
 // "this is taking a lot; continue?" checkpoint, not an error.
-export const SOFT_PAUSE_TOKENS = 1_000_000;      // ~1M tokens of model spend in one run
-export const SOFT_PAUSE_MS = 45 * 60 * 1000;     // ~45 minutes of wall-clock in one run
+// Both ceilings are operator-tunable via env (MOCK2_SOFT_PAUSE_TOKENS /
+// MOCK2_SOFT_PAUSE_MINUTES) — these are SPEND guards, not context caps; a
+// pause is always resumable in one click with the work checkpointed.
+const envNum = (name, fallback) => {
+  const n = Number(process.env?.[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+export const SOFT_PAUSE_TOKENS = envNum('MOCK2_SOFT_PAUSE_TOKENS', 1_000_000); // ~1M tokens of model spend in one run
+export const SOFT_PAUSE_MS = envNum('MOCK2_SOFT_PAUSE_MINUTES', 45) * 60 * 1000; // wall-clock in one run
 
 // softPauseReason — pure decision for the runner's step-boundary check. Returns
 // 'budget_tokens' | 'budget_time' when this run has crossed a soft ceiling, or
@@ -239,10 +246,18 @@ export function softPauseReason({
 // Hard runaway backstop — far above any real build. The soft pause above almost
 // always trips first (a build burning tokens/time hits those long before this);
 // this exists only so a pathological cheap-fast loop (no tool calls, tiny turns)
-// still can't spin forever. A single tool result is truncated to
-// MAX_TOOL_RESULT_CHARS so a huge exec output can't blow the context (R5).
+// still can't spin forever.
 export const MAX_TURNS = 300;
-export const MAX_TOOL_RESULT_CHARS = 12000;
+// Per-tool-result truncation. 12k proved far too tight — reading one large
+// source file truncated mid-function, forcing re-reads in chunks. With 1M-token
+// context windows and prompt caching, 200k chars (~50k tokens) fits comfortably;
+// the cap now exists only so a pathological dump (a binary cat, a megaline log)
+// can't blow the context in one turn. Override via MOCK2_MAX_TOOL_RESULT_CHARS.
+export const MAX_TOOL_RESULT_CHARS = (() => {
+  const n = Number(process.env?.MOCK2_MAX_TOOL_RESULT_CHARS);
+  if (!Number.isFinite(n) || n <= 0) return 200_000;
+  return Math.max(1000, Math.round(n));
+})();
 
 export function truncateToolResult(text) {
   const s = String(text ?? '');

@@ -49,7 +49,7 @@ export async function explainCard({ text, title = '', status = '', kind = '' }) 
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: EXPLAIN_SYSTEM_PROMPT, tools: [],
       transcript: buildExplainTranscript({ text, title, status, kind }),
-      maxTokens: 1024,
+      maxTokens: 4000,
     });
   } catch (err) {
     return { ok: false, error: `the explainer call failed: ${err?.message || String(err)}` };
@@ -72,7 +72,7 @@ export async function explainFollowup({ text, title = '', status = '', kind = ''
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, tools: [],
       transcript: buildFollowupTranscript({ text, title, status, kind, prior, question }),
-      maxTokens: 1024,
+      maxTokens: 4000,
     });
   } catch (err) {
     return { ok: false, error: `the explainer call failed: ${err?.message || String(err)}` };

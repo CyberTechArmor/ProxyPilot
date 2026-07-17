@@ -469,7 +469,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
   const chatRes = await callModelTurn({
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
-    system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 6000,
+    system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 16000,
     onDelta,
   });
   if (!chatRes.ok) {
@@ -713,7 +713,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
     system: buildInventoryExtractionPrompt(), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
-    maxTokens: 16000,
+    maxTokens: 32000,
     thinking: 'off',
   });
   let parsed;
@@ -762,7 +762,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
       system: buildDesignTokenExtractionPrompt(), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
-      maxTokens: 3000,
+      maxTokens: 8000,
       // Small structured-JSON output — thinking off so the tiny budget isn't
       // consumed by reasoning (best-effort: parseDesignTokens falls back to
       // framework defaults on any failure, so this never blocks approval).

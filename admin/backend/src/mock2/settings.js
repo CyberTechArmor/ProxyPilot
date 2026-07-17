@@ -68,10 +68,11 @@ export function getIdleStopDays() {
 
 // ---- Concept chat message limit (max characters per chat message) ----
 export const CHAT_MAX_CHARS_KEY = 'chat_max_chars';
-// The selectable ceilings the operator may choose from. Bounded at 32k so a
-// single chat turn can't blow past the concept model's input budget.
-export const CHAT_MAX_CHARS_OPTIONS = [4000, 8000, 16000, 32000];
-const DEFAULT_CHAT_MAX_CHARS = 16000;
+// The selectable ceilings the operator may choose from. Extended past the old
+// 32k bound: with 1M-token context windows a 128k-char message (~32k tokens)
+// is comfortably within the concept model's input budget.
+export const CHAT_MAX_CHARS_OPTIONS = [4000, 8000, 16000, 32000, 64000, 128000];
+const DEFAULT_CHAT_MAX_CHARS = 32000;
 
 // The configured per-message character ceiling for the concept chat composer.
 // Only the discrete CHAT_MAX_CHARS_OPTIONS are honoured; any stored/env value

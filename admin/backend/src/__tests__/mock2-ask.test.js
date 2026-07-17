@@ -38,7 +38,7 @@ test('buildAskSystemPrompt: states web-search availability truthfully, forbids e
 
 test('buildAskTask: trims and caps', () => {
   assert.equal(buildAskTask('  why does login 403?  '), 'why does login 403?');
-  assert.equal(buildAskTask('x'.repeat(9000)).length, 4000);
+  assert.equal(buildAskTask('x'.repeat(40000)).length, 32000);
   assert.equal(buildAskTask(null), '');
 });
 

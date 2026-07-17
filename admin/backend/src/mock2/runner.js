@@ -110,14 +110,17 @@ const nowIso = () => new Date().toISOString();
 // Per-turn output ceiling for build-runner model calls. 8k proved to be the
 // dominant wall-clock sink on large builds: a big file hit the cap turn after
 // turn (15 consecutive truncated 8k turns on one SPA file ≈ 20 minutes), each
-// truncation costing a full re-prompt round-trip. 32k lets a large file land in
-// one turn; model-client streams automatically above its 12k threshold and
-// scales the HTTP timeout with the budget, so a bigger cap is safe. Clamped to
-// [8k, 64k]; override via MOCK2_RUNNER_MAX_TOKENS.
+// truncation costing a full re-prompt round-trip. Default 64k — the maximum
+// every current Claude model supports (Opus 4.8 / Sonnet 5 go to 128k; Haiku
+// 4.5 caps at 64k, and a max_tokens above the model's limit 400s, so 64k is
+// the highest universally-safe default). model-client streams automatically
+// above its 12k threshold and scales the HTTP timeout with the budget.
+// Uncapped override via MOCK2_RUNNER_MAX_TOKENS (e.g. 128000 when the build
+// slot model supports it); floored at 1024 so a typo can't brick the runner.
 const RUNNER_MAX_TOKENS = (() => {
   const n = Number(process.env.MOCK2_RUNNER_MAX_TOKENS);
-  if (!Number.isFinite(n) || n <= 0) return 32000;
-  return Math.min(64000, Math.max(8000, Math.round(n)));
+  if (!Number.isFinite(n) || n <= 0) return 64000;
+  return Math.max(1024, Math.round(n));
 })();
 
 // Live cycle-job progress, keyed by cycle id (house 202+poll pattern). The poll
@@ -1554,7 +1557,7 @@ export function containerSh(containerName, script, { timeoutMs = 120000 } = {}) 
 export async function execInContainer(containerName, command) {
   const script = `cd '${APP_DIR}' 2>/dev/null || cd /\n${command}\n`;
   const r = await containerSh(containerName, script, { timeoutMs: 180000 });
-  return { code: r.code, stdout: (r.stdout || '').slice(0, MAX_TOOL_RESULT_CHARS), stderr: (r.stderr || '').slice(0, 2000) };
+  return { code: r.code, stdout: (r.stdout || '').slice(0, MAX_TOOL_RESULT_CHARS), stderr: (r.stderr || '').slice(0, 20000) };
 }
 
 // Exported for the component-submission route ("promote what the last build

@@ -58,11 +58,26 @@ function bigComponentFiles() {
 const FIXTURE = bigComponentFiles();
 const FIXTURE_TOTAL = FIXTURE.reduce((n, f) => n + f.content.length, 0);
 
-test('fixture matches the failing shape: 27 files, ~142KB, well over the 60k budget', () => {
+test('fixture matches the failing shape: 27 files, ~142KB — now UNDER the raised tool budget', () => {
   assert.equal(FIXTURE.length, 27);
   assert.ok(FIXTURE_TOTAL > 130_000 && FIXTURE_TOTAL < 200_000, `total ${FIXTURE_TOTAL}`);
-  assert.ok(FIXTURE_TOTAL > MAX_COMPONENT_PROMPT_CHARS * 2);
+  // The budget was raised precisely so a real-sized component fits WHOLE — the
+  // shape that used to be served as a content-less manifest now inlines fully.
+  assert.ok(FIXTURE_TOTAL < MAX_COMPONENT_PROMPT_CHARS, 'a real-sized component must fit the tool budget whole');
 });
+
+// A fixture genuinely over the RAISED budget (675KB > 600k) — manifest mode
+// must still engage there with zero truncation.
+function hugeComponentFiles() {
+  const files = [];
+  for (let i = 0; i < 27; i += 1) {
+    let s = `// src/big/mod${String(i).padStart(2, '0')}.ts\n`;
+    while (s.length < 25_000) s += `const x_${s.length} = "${i}"; // ${'.'.repeat(37)}\n`;
+    files.push({ path: `src/big/mod${String(i).padStart(2, '0')}.ts`, content: s });
+  }
+  return files;
+}
+const HUGE = hugeComponentFiles();
 
 // ---- manifest ----
 
@@ -106,15 +121,23 @@ test('round-trip: a 27-file 142KB component imports and every file survives byte
 
 // ---- get_component: no silent truncation, ever ----
 
-test('get_component over budget: full manifest for ALL 27 files, zero content, explicit hand-off', () => {
+test('the request-37 shape now renders FULLY INLINE (the raised budget in action)', () => {
   const component = { key: 'proxypilot-auth', name: 'ProxyPilot Auth', description: 'auth' };
   const version = { version: 1, usage_md: '# notes', files_json: JSON.stringify(FIXTURE) };
   const out = formatComponentForModel(component, version);
+  assert.ok(out.includes('CREATE TABLE auth_users'), 'the migration DDL must be inline now');
+  assert.doesNotMatch(out, /materialize_component|inline contents withheld|…\[truncated/);
+});
+
+test('get_component over budget: full manifest for ALL 27 files, zero content, explicit hand-off', () => {
+  const component = { key: 'proxypilot-huge', name: 'Huge Component', description: 'big' };
+  const version = { version: 1, usage_md: '# notes', files_json: JSON.stringify(HUGE) };
+  const out = formatComponentForModel(component, version);
   assert.ok(out.length < MAX_COMPONENT_PROMPT_CHARS, `manifest mode must be small, got ${out.length}`);
   assert.doesNotMatch(out, /…\[truncated/);
-  for (const f of FIXTURE) assert.ok(out.includes(`- ${f.path} (`), `manifest missing ${f.path}`);
-  assert.ok(out.includes(sha256Hex(FIXTURE[0].content)), 'migration sha missing');
-  assert.ok(!out.includes('CREATE TABLE auth_users'), 'file contents must not leak into manifest mode');
+  for (const f of HUGE) assert.ok(out.includes(`- ${f.path} (`), `manifest missing ${f.path}`);
+  assert.ok(out.includes(sha256Hex(HUGE[0].content)), 'first file sha missing');
+  assert.ok(!out.includes('const x_'), 'file contents must not leak into manifest mode');
   assert.match(out, /materialize_component/);
   assert.match(out, /## Integration notes\n# notes/); // usage_md still delivered
 });

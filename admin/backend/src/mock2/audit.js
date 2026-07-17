@@ -70,7 +70,10 @@ const APP_DIR = '/srv/app';
 const RULES_PATH = 'state/rules.md';
 const nowIso = () => new Date().toISOString();
 
-const MAX_AUDIT_INPUT_CHARS = 120000; // cap inventory/rules fed to the auditor (R5)
+// Cap on inventory/rules fed to the auditor. Raised from 120k: with 1M-token
+// context windows this is a runaway guard, not a working limit — 1M chars
+// (~250k tokens) means a real inventory is never silently truncated.
+const MAX_AUDIT_INPUT_CHARS = 1_000_000;
 
 // Live audit-job progress, keyed by project id (house 202+poll pattern). The
 // chat/build poll endpoints read this; entries drop a couple minutes after the
@@ -381,7 +384,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
     system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
     tools: [],
     transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }), ...(auditImages.length ? { images: auditImages } : {}) }],
-    maxTokens: 6000,
+    maxTokens: 16000,
     effort: 'medium', // a bounded classification/reasoning task — high depth buys nothing here
   });
   if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: ready.model, usage: auditRes.usage });

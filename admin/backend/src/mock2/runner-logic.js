@@ -310,7 +310,14 @@ This is an MVP build: deliver a WORKING, testable end-to-end version fast.
   integrations, and the remaining gates (typecheck, constitution-lint,
   security-scan, test, component-reuse) must be green before finish.
 - Wire the installed standard components instead of re-implementing them.
-- Prefer fewer, larger file writes over many small ones; avoid detours.
+- SPEED IS THE POINT — minimize turn count, not just token count:
+  - BATCH tool calls: emit MULTIPLE independent tool calls in ONE turn (write
+    several files at once; run several independent commands together). One
+    call per turn wastes a full model round-trip each time.
+  - Write each file COMPLETE in a single write_file. Never draft-then-extend.
+  - Do not re-read files you just wrote, and skip exploratory reads of
+    scaffold files whose content the task description already tells you.
+  - Plan once, briefly, then execute; target well under 40 turns total.
 - finish still requires the one-line summary, at least one human-runnable
   acceptance check, and the verified-vs-assumed assumption split.
 A later FULL build adds the rule interview, per-rule tests, ui-checks, and the

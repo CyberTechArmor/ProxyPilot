@@ -44,7 +44,7 @@ What `mode: 'mvp'` changes (`POST /api/mock2/projects/:id/cycles`):
 |---|---|---|
 | Rule interview (audit) | model call + blocking questions | **skipped** (zero-cost define segment records the skip) |
 | Component pre-install | yes | yes (unchanged — zero tokens) |
-| Model / effort | routing knowledge base | fast model at `MOCK2_MVP_EFFORT` (default `medium`) |
+| Model / effort | routing knowledge base | fast model at `MOCK2_MVP_EFFORT` (default `low`) |
 | Gate battery | all 8 gates | typecheck, constitution-lint, security-scan, test, component-reuse (**rule-coverage / ui-interaction / acceptance dropped**) |
 | Finish discipline | acceptance spec + reproduce-first | finish summary + human-runnable checks + assumptions only |
 | Integration truthfulness gate | yes | yes (honesty is not an MVP casualty) |
@@ -68,7 +68,7 @@ running a reduced gate battery…" so the record shows which mode ran.
 |---|---|---|
 | `MOCK2_RUNNER_MAX_TOKENS` | `32000` | per-turn output ceiling (clamped 8k–64k) |
 | `MOCK2_FAST_MODEL` | `claude-sonnet-5` | fast code model; `off` disables |
-| `MOCK2_MVP_EFFORT` | `medium` | effort for MVP builds |
+| `MOCK2_MVP_EFFORT` | `low` | effort for MVP builds (raised from the default if MVPs come out too shallow). Low effort means fewer, more-consolidated tool calls — the observed 17-minute MVP spent ~95% of wall-clock on ~90 small model turns, so per-turn thinking and turn count are the levers; the MVP system prompt now also mandates batching multiple tool calls per turn and complete single-shot file writes. |
 | `MOCK2_INITIAL_BUILD_MODE` | `mvp` | mode of the auto build after design approval |
 
 Note: the flag-gated Agent-SDK runner (`BUILD_RUNNER=sdk`) inherits the reduced

@@ -1185,6 +1185,9 @@ export const api = {
   mock2GetLaneTuning: () => request('/mock2/settings/lane-tuning'),
   mock2SetLaneTuning: (lane, patch) =>
     request('/mock2/settings/lane-tuning', { method: 'POST', body: JSON.stringify({ lane, ...patch }) }),
+  // Global thinking switch — 'off' disables thinking for every lane at once.
+  mock2SetGlobalThinking: (thinking) =>
+    request('/mock2/settings/global-thinking', { method: 'POST', body: JSON.stringify({ thinking }) }),
 
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid

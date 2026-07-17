@@ -115,8 +115,8 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning } from './settings.js';
-import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING } from './lane-tuning-logic.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
+import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
@@ -1085,8 +1085,20 @@ export function createMock2Router() {
   router.get('/settings/lane-tuning', requireAdmin, (_req, res) => {
     res.json({
       lanes: getAllLaneTuning(),
+      global_thinking: getGlobalThinking(),
       options: { lanes: TUNING_LANES, labels: TUNING_LANE_LABELS, efforts: TUNING_EFFORTS, thinking: TUNING_THINKING },
     });
+  });
+  // Global thinking switch — 'off' disables thinking for every lane at once
+  // (overlays per-lane tuning at read time; the stored per-lane doc is kept).
+  router.post('/settings/global-thinking', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      thinking: z.string().refine((t) => GLOBAL_THINKING_MODES.includes(t), 'unknown thinking mode'),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid thinking mode' });
+    const mode = setGlobalThinking(parsed.data.thinking, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_GLOBAL_THINKING', 'mock2_setting', 0, { thinking: mode }, req.ip);
+    res.json({ global_thinking: mode });
   });
   router.post('/settings/lane-tuning', requireAdmin, (req, res) => {
     const parsed = z.object({

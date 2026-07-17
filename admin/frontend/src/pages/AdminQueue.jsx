@@ -26,7 +26,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Input } from '@/components/ui/input';
+import { modelOptionsWith } from '@/lib/model-options';
 import {
   Inbox, Loader2, ArrowLeft, CheckCircle2, XCircle, PlayCircle, RotateCcw, AlertTriangle,
 } from 'lucide-react';
@@ -297,6 +297,29 @@ export default function AdminQueue() {
     }
   };
 
+  // Flip the global thinking switch — 'off' disables thinking for every lane
+  // at once (per-lane settings are kept and come back when re-enabled).
+  const saveGlobalThinking = async (off) => {
+    const mode = off ? 'off' : 'default';
+    setLaneTuning((cur) => cur && ({ ...cur, global_thinking: mode }));
+    setSavingTune(true);
+    try {
+      const res = await api.mock2SetGlobalThinking(mode);
+      setLaneTuning((cur) => cur && ({ ...cur, global_thinking: res.global_thinking }));
+      toast({
+        title: res.global_thinking === 'off' ? 'Thinking disabled everywhere' : 'Thinking re-enabled',
+        description: res.global_thinking === 'off'
+          ? 'Every lane now runs without thinking, regardless of per-lane settings.'
+          : 'Per-lane thinking settings apply again.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+      api.mock2GetLaneTuning().then(setLaneTuning).catch(() => {});
+    } finally {
+      setSavingTune(false);
+    }
+  };
+
   const onStatus = async (item, status) => {
     setBusy(true);
     try {
@@ -419,7 +442,25 @@ export default function AdminQueue() {
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
           ) : (
-            laneTuning.options.lanes.map((lane) => {
+            <>
+            {/* Global thinking kill switch — overrides every lane at once. */}
+            <label htmlFor="global-thinking-off" className="flex min-h-11 items-center gap-3 cursor-pointer rounded-md border p-3">
+              <Switch
+                id="global-thinking-off"
+                checked={laneTuning.global_thinking === 'off'}
+                disabled={savingTune}
+                onCheckedChange={saveGlobalThinking}
+              />
+              <span className="text-sm">
+                <span className="font-medium">Turn off thinking everywhere</span>
+                <span className="block text-xs text-muted-foreground">
+                  {laneTuning.global_thinking === 'off'
+                    ? 'On — every model call runs without thinking (fastest, least reasoning depth).'
+                    : 'Off — each lane uses its own thinking setting below.'}
+                </span>
+              </span>
+            </label>
+            {laneTuning.options.lanes.map((lane) => {
               const entry = laneTuning.lanes[lane] || { model: null, effort: 'default', thinking: 'default' };
               return (
                 <div key={lane} className="space-y-1.5">
@@ -427,19 +468,26 @@ export default function AdminQueue() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground" htmlFor={`tune-model-${lane}`}>Model override</label>
-                      <Input
-                        id={`tune-model-${lane}`}
-                        key={`${lane}-${entry.model || ''}`}
-                        className="h-11 sm:h-10"
-                        placeholder="slot / routing default"
-                        defaultValue={entry.model || ''}
+                      <Select
+                        value={entry.model || 'default'}
                         disabled={savingTune}
-                        onBlur={(e) => {
-                          const v = e.target.value.trim();
-                          if (v !== (entry.model || '')) saveLaneTuning(lane, { model: v || null });
-                        }}
-                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-                      />
+                        onValueChange={(v) => saveLaneTuning(lane, { model: v === 'default' ? null : v })}
+                      >
+                        <SelectTrigger id={`tune-model-${lane}`} className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">Default (recommended) — slot / routing choice</SelectItem>
+                          {modelOptionsWith(entry.model).map((m) => (
+                            <SelectItem key={m.id} value={m.id}>
+                              <span className="flex flex-col">
+                                <span>{m.label}</span>
+                                <span className="text-[11px] text-muted-foreground">
+                                  {m.tier}{m.inPerM != null ? ` · $${m.inPerM}/$${m.outPerM} per M tok` : ''}
+                                </span>
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground" htmlFor={`tune-effort-${lane}`}>Effort</label>
@@ -473,7 +521,8 @@ export default function AdminQueue() {
                   </div>
                 </div>
               );
-            })
+            })}
+            </>
           )}
           <p className="text-xs text-muted-foreground">
             A pinned model must be one the lane&apos;s connector can serve; effort levels above a model&apos;s

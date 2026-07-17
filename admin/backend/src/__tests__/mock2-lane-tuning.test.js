@@ -6,8 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  TUNING_LANES, TUNING_EFFORTS, TUNING_THINKING,
-  normalizeTuningEntry, normalizeLaneTuning, applyLaneTuning,
+  TUNING_LANES, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES,
+  normalizeTuningEntry, normalizeLaneTuning, applyLaneTuning, normalizeGlobalThinking,
 } from '../mock2/lane-tuning-logic.js';
 
 test('lane/effort/thinking option sets are what the UI expects', () => {
@@ -59,4 +59,25 @@ test('applyLaneTuning: empty base fields fall through cleanly', () => {
   assert.equal(out.model, '');
   assert.equal(out.effort, 'medium');
   assert.equal(out.thinking, null);
+});
+
+test('normalizeGlobalThinking: only "off" disables; everything else is default', () => {
+  assert.deepEqual([...GLOBAL_THINKING_MODES], ['default', 'off']);
+  assert.equal(normalizeGlobalThinking('off'), 'off');
+  assert.equal(normalizeGlobalThinking('  OFF  '), 'off');
+  assert.equal(normalizeGlobalThinking('default'), 'default');
+  assert.equal(normalizeGlobalThinking('on'), 'default');
+  assert.equal(normalizeGlobalThinking(''), 'default');
+  assert.equal(normalizeGlobalThinking(null), 'default');
+  assert.equal(normalizeGlobalThinking(undefined), 'default');
+});
+
+test('global thinking off overlays a lane entry into thinking-off (settings.getLaneTuning contract)', () => {
+  // The native settings reader applies this overlay: entry stays intact except
+  // thinking is forced 'off'. Modeled here at the pure layer.
+  const entry = normalizeTuningEntry({ model: 'claude-opus-4-8', effort: 'high', thinking: 'default' });
+  const overlaid = normalizeGlobalThinking('off') === 'off' ? { ...entry, thinking: 'off' } : entry;
+  assert.deepEqual(overlaid, { model: 'claude-opus-4-8', effort: 'high', thinking: 'off' });
+  const call = applyLaneTuning({ model: 'claude-sonnet-5', effort: 'low', thinking: null }, overlaid);
+  assert.equal(call.thinking, 'off');
 });

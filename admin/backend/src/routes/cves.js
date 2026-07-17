@@ -27,6 +27,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getInboxDir, getHostname, CVE_ID_RE, safePath, runEngine } from '../lib/engine-cli.js';
 import {
   getResearchSettings, saveResearchSettings, testConnectorConnectivity,
+  listReusableMock2Connectors, resolveConnectorSource,
 } from '../lib/cve-research.js';
 import * as cveResearchScheduler from '../lib/cve-research-scheduler.js';
 
@@ -431,17 +432,36 @@ cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
 // calls the same runResearchPass() this route's run-now hits.
 
 const researchConfigSchema = z.object({
-  provider: z.enum(['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible']),
+  // provider/api_key are required for a standalone connector; omit both
+  // and set import_connector_id instead to reuse a connector already
+  // configured under Projects (mock2) — the route resolves the actual
+  // provider/base_url/key server-side from that connector's stored key.
+  provider: z.enum(['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible']).optional(),
   base_url: z.string().trim().max(500).optional(),
   model: z.string().trim().min(1).max(200),
-  // Optional on update — omit/empty to keep the previously stored key.
+  // Optional on a standalone update — omit/empty to keep the previously stored key.
   api_key: z.string().trim().max(2000).optional(),
+  import_connector_id: z.number().int().positive().optional(),
   enabled: z.boolean(),
   interval_hours: z.number().int().min(1).max(168),
-}).strict();
+}).strict().refine(
+  (v) => v.import_connector_id != null || v.provider,
+  { message: 'provider is required unless import_connector_id is set' },
+);
 
 cvesRouter.get('/research/config', requireAdmin, async (_req, res) => {
   res.json(getResearchSettings());
+});
+
+// Connectors already configured under Projects (mock2) that could be
+// reused here, so the operator isn't forced to paste a key twice. Empty
+// list (not an error) when Projects is disabled or has nothing usable.
+cvesRouter.get('/research/connectors', requireAdmin, async (_req, res) => {
+  try {
+    res.json(await listReusableMock2Connectors());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 cvesRouter.put('/research/config', requireAdmin, requireSudo, async (req, res) => {
@@ -451,18 +471,30 @@ cvesRouter.put('/research/config', requireAdmin, requireSudo, async (req, res) =
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
+  let source;
+  try {
+    source = await resolveConnectorSource(body);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
   let saved;
   try {
-    saved = saveResearchSettings(body);
+    saved = saveResearchSettings({
+      ...source,
+      model: body.model,
+      enabled: body.enabled,
+      interval_hours: body.interval_hours,
+    });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
   if (body.enabled) cveResearchScheduler.register({ interval_hours: body.interval_hours });
   else cveResearchScheduler.unregister();
   logAudit(req.user.id, 'CVE_RESEARCH_CONFIG', 'cve', null, {
-    provider: body.provider, model: body.model,
+    provider: source.provider, model: body.model,
     enabled: body.enabled, interval_hours: body.interval_hours,
-    api_key_changed: !!body.api_key,
+    imported_from: source.sourceConnectorName,
+    api_key_changed: !!source.api_key,
   }, req.ip);
   res.json(saved);
 });

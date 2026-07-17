@@ -127,6 +127,9 @@ const WRITABLE = new Set([
   'design_import_json',
   // The base design preset chosen at creation (migration 530); NULL/'ai' = none.
   'design_preset',
+  // When the base app (scaffold + auth) was deployed outside a build cycle
+  // (migration 532) — provision-time or the skip self-heal.
+  'base_app_deployed_at',
   // M8 drift comparison input — the framework a build last pinned (ADR-003).
   'last_built_framework_version_id',
 ]);

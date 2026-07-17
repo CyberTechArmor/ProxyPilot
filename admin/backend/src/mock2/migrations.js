@@ -1300,4 +1300,16 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Base-app deploy marker: the provision-time (or skip-triggered) deploy of
+    // the scaffold has no build cycle, so projectHasBeenDeployed (which scans
+    // cycle deploy_status) can't see it. Stamp it on the project row so the
+    // skip self-heal doesn't redeploy needlessly and rehydrate restores the
+    // base app instead of the placeholder.
+    version: 532,
+    name: 'mock2_project_base_app_deployed',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN base_app_deployed_at TEXT;`);
+    },
+  },
 ];

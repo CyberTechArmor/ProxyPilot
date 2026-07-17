@@ -26,7 +26,8 @@
 
 import { sh, b64 } from './host.js';
 import { getProject, updateProject } from './projects.js';
-import { containerNameForProject } from './provision.js';
+import { containerNameForProject, deployBaseApp } from './provision.js';
+import { projectHasBeenDeployed } from './cycles.js';
 import { buildCheckpointScript } from './template.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
@@ -702,10 +703,28 @@ export async function skipDesign({ project, user, actingAsAdmin = 0 }) {
       last_activity_at: nowIso(),
     });
     finishCycle(cycle.id, { status: 'succeeded' });
-    insertMessage({
-      projectId, kind: 'system', cycleId: cycle.id,
-      body: 'Mockup skipped — Build is unlocked. The base app is live (sign-in + first-admin setup + your chosen look); describe changes in the build chat and land them as Quick updates.',
-    });
+
+    // Self-heal: skipping the mockup means "work on the RUNNING app" — if the
+    // provision-time base-app deploy never happened (older project, or it
+    // failed), deploy it now in the background so the URL stops serving the
+    // placeholder. Progress + outcome land in the chat.
+    let deployed = false;
+    try { deployed = projectHasBeenDeployed(projectId) || !!getProject(projectId)?.base_app_deployed_at; }
+    catch { deployed = false; }
+    if (deployed) {
+      insertMessage({
+        projectId, kind: 'system', cycleId: cycle.id,
+        body: 'Mockup skipped — Build is unlocked. The base app is live (sign-in + first-admin setup + your chosen look); describe changes in the build chat and land them as Quick updates.',
+      });
+    } else {
+      insertMessage({
+        projectId, kind: 'system', cycleId: cycle.id,
+        body: 'Mockup skipped — Build is unlocked. Deploying the base app now (sign-in + first-admin setup + your chosen look); the chat will confirm when it is live on the project URL — a couple of minutes.',
+      });
+      const fresh = getProject(projectId);
+      deployBaseApp(fresh, { reason: 'design-skip' })
+        .catch((e) => console.warn('[mock2] base-app deploy after skip failed:', e?.message));
+    }
     return { status: 'ok', cycle: getCycle(cycle.id) };
   } finally {
     releaseLock(projectId, holder);

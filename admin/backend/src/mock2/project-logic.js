@@ -240,6 +240,10 @@ export function publicProjectShape(project, extra = {}) {
     // Set once the provision-time (or self-heal) base-app deploy succeeds — the
     // UI offers "Deploy base app" retry while this is null and nothing serves.
     base_app_deployed_at: project.base_app_deployed_at || null,
+    // A base-app deploy is running RIGHT NOW (no cycle carries it, so without
+    // this the UI has no signal — the banner invited a press mid-deploy and the
+    // user got a bare 409). Derived from the in-process guard, never stored.
+    base_app_deploying: !!extra.baseAppDeploying,
     current_mockup_id: project.current_mockup_id || null,
     preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
     // The archived design mockup — the record of where the design started. Set

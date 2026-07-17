@@ -135,7 +135,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
       } else if (buildMode === 'quick') {
-        toast({ title: 'Quick update started', description: 'One small scoped change — minimal gates, straight to deploy.' });
+        toast({ title: 'Quick update started', description: 'One small scoped change — no gate battery, straight to deploy.' });
         setInstruction('');
         attach.clear();
       } else if (buildMode === 'mvp') {
@@ -323,7 +323,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`}
                 disabled={composerDisabled || (!resumeMode && !instruction.trim())}
                 onClick={submitComposer}
-                title={mode === 'build' && !resumeMode ? 'One small scoped change on the fast model — minimal gates, straight to deploy' : undefined}
+                title={mode === 'build' && !resumeMode ? 'One small scoped change — no gate battery, straight to deploy' : undefined}
               >
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : mode === 'ask' ? <HelpCircle className="h-4 w-4 mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
                 {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Quick update'}

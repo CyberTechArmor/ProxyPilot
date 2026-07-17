@@ -859,7 +859,36 @@ what they provide, and do not re-implement their endpoints — a task whose capa
 an installed component already ships needs wiring or nothing at all, never a
 from-scratch reimplementation.
 
-${blocks.join('\n\n')}`;
+${blocks.join('\n\n')}${buildWiredAuthRules(list)}`;
+}
+
+// The BINDING auth rules appended when an installed component provides the
+// forced first-admin bootstrap. The platform wires it deterministically
+// (scaffold-auth.js) — src/app.ts mounts withAuth + bootstrapGate() and serves
+// /login — so the build's only job is to add screens BEHIND it. Spelled out
+// because the historical failure mode was a build rewriting the login page and
+// hiding the bootstrap flow behind guessed field names.
+function buildWiredAuthRules(list) {
+  const wiresAuth = list.some((e) => Array.isArray(e?.contract?.exports) && e.contract.exports.includes('bootstrapGate'));
+  if (!wiresAuth) return '';
+  return `
+
+## Auth is WIRED by the platform — binding rules
+The base app already signs users in end-to-end: src/app.ts mounts withAuth and
+bootstrapGate(), serves the shipped sign-in page at /login (it contains the
+create-administrator form for first run), and redirects unauthenticated visitors
+off /. This wiring is the app's contract with the operator:
+- NEVER remove or reorder withAuth / bootstrapGate() in src/app.ts, and never
+  rebuild a login, signup-for-admin, or first-run flow of your own.
+- NEVER rewrite public/login.html / public/login.js. If the design calls for a
+  different look, restyle via the linked /design.css and small additive edits —
+  keep every element id, form, and API call exactly as shipped.
+- Add screens BEHIND the existing auth: guard routes with requireAuth /
+  requireRole / requirePermission from './auth/index.js', and read the signed-in
+  identity with getAuth(req) — never from headers or your own session code.
+- Drive any auth UI state from the component's real endpoints (e.g.
+  GET /api/auth/bootstrap/status returns { canCreateSuperadmin }) — never guess
+  field names; read the installed source when unsure.`;
 }
 
 // The materialize_component tool result: what landed where, verbatim-verified —

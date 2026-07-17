@@ -515,9 +515,10 @@ export async function retryDeploy({ project, cycle }) {
       // "Retry deploy" the one-click recovery. Dynamic import — the static one
       // would be a cycle (component-install imports runner for exec helpers).
       try {
-        const [{ ensureComponentDeps }, { listProjectComponents }] = await Promise.all([
+        const [{ ensureComponentDeps, ensureScaffoldDeps }, { listProjectComponents }] = await Promise.all([
           import('./component-install.js'), import('./components.js'),
         ]);
+        try { await ensureScaffoldDeps({ containerName }); } catch { /* best effort */ }
         const ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
         if (ensured.repaired.length) {
           insertMessage({

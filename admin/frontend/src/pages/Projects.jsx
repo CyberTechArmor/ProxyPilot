@@ -63,7 +63,7 @@ export default function Projects() {
   const [domains, setDomains] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '', design_preset: 'ai' });
+  const [form, setForm] = useState({ name: '', description: '', parent_domain_id: '', design_preset: 'portal-blue' });
   const [creating, setCreating] = useState(false);
   const [presets, setPresets] = useState([]);
 
@@ -114,7 +114,7 @@ export default function Projects() {
         design_preset: form.design_preset === 'ai' ? undefined : form.design_preset,
       });
       setCreateOpen(false);
-      setForm({ name: '', description: '', parent_domain_id: '', design_preset: 'ai' });
+      setForm({ name: '', description: '', parent_domain_id: '', design_preset: 'portal-blue' });
       toast({ title: 'Project creating', description: 'Provisioning the container and repo — this takes a minute.' });
       if (res.project?.id) navigate(`/projects/${res.project.id}`);
       else load();

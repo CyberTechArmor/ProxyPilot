@@ -21,6 +21,26 @@ export const DESIGN_PRESET_AI = 'ai';
 // extractor path wouldn't accept.
 export const DESIGN_PRESETS = Object.freeze([
   {
+    // Derived from the operator's uploaded portal base project (kept: the
+    // light blue/teal professional SaaS look — white cards on a cool-gray
+    // wash, soft layered shadows, pill badges; dropped: the portal-specific
+    // screens). This is the DEFAULT preset for new projects.
+    key: 'portal-blue',
+    name: 'Portal Blue',
+    description: 'Professional blue/teal SaaS — white cards on a cool-gray wash, soft shadows, pill badges. The recommended base look.',
+    tokens: {
+      colors: {
+        background: '#f5f8fc', surface: '#ffffff', text: '#12263f', muted: '#5a6b81',
+        border: '#e2e8f1', primary: '#1466b8', primaryText: '#ffffff', accent: '#12a3a3',
+        danger: '#d24545', success: '#1f9d57',
+      },
+      typography: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif', headingFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', baseSize: '15px' },
+      radius: { sm: '8px', md: '9px', lg: '12px' },
+      spacing: { unit: '8px' },
+      shadow: { card: '0 1px 2px rgba(16,42,72,0.06), 0 8px 24px rgba(16,42,72,0.07)' },
+    },
+  },
+  {
     key: 'clean-slate',
     name: 'Clean Slate',
     description: 'Light, neutral SaaS look — indigo primary on white, system type. A safe default for tools and admin apps.',

@@ -478,6 +478,134 @@ describe('integration contract (fixture-backed)', () => {
 `;
 }
 
+// public/base.css — the shared APP SHELL stylesheet, generalized from the
+// operator's portal base project (kept: header/nav, cards, buttons, badges,
+// stat tiles, form fields, tables — the professional SaaS chrome; dropped:
+// every portal-specific screen). Colorful values ride the design tokens
+// (var(--app-*, fallback)) so the chosen preset — or an approved mockup's
+// extracted tokens — restyles the whole shell without touching this file.
+function baseCss() {
+  return `/* Shared app shell (generalized from the base portal project). Screens reuse
+   these classes; colors/radii come from /design.css tokens with safe fallbacks. */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:var(--app-font,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif);color:var(--app-text,#12263f);background:var(--app-bg,#f5f8fc);line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--app-primary,#1466b8);text-decoration:none;cursor:pointer}
+button{font-family:inherit;cursor:pointer}
+h1,h2,h3{margin:0;font-weight:700;letter-spacing:-.01em}
+.hidden{display:none !important}
+.muted{color:var(--app-muted,#5a6b81)}
+.small{font-size:12.5px}
+
+/* ---------- Top app header ---------- */
+header.app{background:var(--app-surface,#fff);border-bottom:1px solid var(--app-border,#e2e8f1);min-height:62px;display:flex;align-items:center;padding:0 18px;gap:16px;position:sticky;top:0;z-index:50;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;color:var(--app-primary,#1466b8);letter-spacing:-.02em}
+.brand .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--app-primary,#1466b8),var(--app-accent,#12a3a3));display:flex;align-items:center;justify-content:center;color:#fff}
+header.app nav{display:flex;gap:4px;flex-wrap:wrap}
+header.app nav a,header.app nav button{border:none;background:transparent;color:var(--app-muted,#5a6b81);font-weight:600;font-size:14px;padding:9px 14px;border-radius:8px;min-height:44px;display:inline-flex;align-items:center}
+header.app nav a.active,header.app nav button.active{background:var(--app-bg,#e7f1fb);color:var(--app-primary,#1466b8)}
+.headspace{flex:1}
+.whoami{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--app-muted,#5a6b81)}
+.avatar{width:34px;height:34px;border-radius:50%;background:var(--app-primary,#1466b8);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+
+.wrap{max-width:1080px;margin:0 auto;padding:26px 18px 90px}
+
+/* ---------- Cards ---------- */
+.card{background:var(--app-surface,#fff);border:1px solid var(--app-border,#e2e8f1);border-radius:var(--app-radius-lg,12px);box-shadow:var(--app-shadow-card,0 1px 2px rgba(16,42,72,.06))}
+.card .card-h{padding:15px 20px;border-bottom:1px solid var(--app-border,#e2e8f1);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.card .card-h h3{font-size:15px}
+.card .card-b{padding:18px 20px}
+
+/* ---------- Buttons ---------- */
+.btn{border:1px solid var(--app-primary,#1466b8);background:var(--app-primary,#1466b8);color:var(--app-primary-text,#fff);padding:10px 16px;border-radius:var(--app-radius-md,9px);font-weight:600;font-size:14px;display:inline-flex;align-items:center;gap:7px;white-space:nowrap;min-height:44px}
+.btn:hover{filter:brightness(.94)}
+.btn.ghost{background:var(--app-surface,#fff);color:var(--app-primary,#1466b8)}
+.btn.subtle{background:var(--app-bg,#eef2f7);color:var(--app-text,#12263f);border-color:transparent}
+.btn.danger{background:var(--app-danger,#d24545);border-color:var(--app-danger,#d24545);color:#fff}
+.btn.sm{padding:6px 11px;font-size:12.5px;min-height:36px}
+
+/* ---------- Badges ---------- */
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:20px;white-space:nowrap}
+.badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.85}
+.b-ok{background:color-mix(in srgb,var(--app-success,#1f9d57) 12%,#fff);color:var(--app-success,#1f9d57)}
+.b-info{background:color-mix(in srgb,var(--app-primary,#1466b8) 12%,#fff);color:var(--app-primary,#1466b8)}
+.b-warn{background:color-mix(in srgb,var(--app-danger,#d24545) 12%,#fff);color:var(--app-danger,#d24545)}
+.b-neutral{background:var(--app-bg,#eef2f7);color:var(--app-muted,#5a6b81)}
+
+/* ---------- Stat tiles ---------- */
+.stats{display:grid;grid-template-columns:1fr;gap:16px}
+@media (min-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
+@media (min-width:1024px){.stats{grid-template-columns:repeat(4,1fr)}}
+.stat{background:var(--app-surface,#fff);border:1px solid var(--app-border,#e2e8f1);border-radius:var(--app-radius-lg,12px);padding:18px 20px;box-shadow:var(--app-shadow-card,0 1px 2px rgba(16,42,72,.06))}
+.stat .n{font-size:28px;font-weight:800;letter-spacing:-.02em}
+.stat .l{font-size:12.5px;color:var(--app-muted,#5a6b81);margin-top:2px}
+
+/* ---------- Form fields ---------- */
+.field{margin-bottom:14px}
+.field label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:var(--app-text,#12263f)}
+.field input,.field select,.field textarea{width:100%;border:1px solid var(--app-border,#e2e8f1);border-radius:var(--app-radius-md,9px);padding:10px 12px;font-size:14px;font-family:inherit;color:var(--app-text,#12263f);background:var(--app-surface,#fff);min-height:44px}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--app-primary,#1466b8);box-shadow:0 0 0 3px color-mix(in srgb,var(--app-primary,#1466b8) 15%,#fff)}
+
+/* ---------- Tables ---------- */
+table.list{width:100%;border-collapse:collapse;font-size:14px}
+table.list th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;text-align:left;color:var(--app-muted,#5a6b81);padding:10px 12px;border-bottom:1px solid var(--app-border,#e2e8f1)}
+table.list td{padding:12px;border-bottom:1px solid var(--app-border,#e2e8f1)}
+table.list tr:last-child td{border-bottom:none}
+.table-scroll{overflow-x:auto}
+
+/* ---------- Progress ---------- */
+.prog{height:8px;background:var(--app-bg,#eef2f7);border-radius:20px;overflow:hidden}
+.prog>i{display:block;height:100%;background:linear-gradient(90deg,var(--app-primary,#1466b8),var(--app-accent,#12a3a3));border-radius:20px}
+`;
+}
+
+// public/app-shell.html — the authenticated home the wired app serves at /.
+// A real page in the base style (header, welcome card, stat placeholders) that
+// the build extends with screens; /api/auth/me-ish identity comes later — the
+// shell only needs sign-out to work.
+function appShellHtml(project) {
+  const name = String(project?.name || 'Application').replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>${name}</title>
+<link rel="stylesheet" href="/design.css">
+<link rel="stylesheet" href="/base.css">
+</head>
+<body>
+<header class="app">
+  <span class="brand"><span class="logo">◆</span> <span id="app-name">${name}</span></span>
+  <nav id="app-nav"><!-- screens add their nav entries here --></nav>
+  <span class="headspace"></span>
+  <span class="whoami"><span class="avatar" id="avatar">·</span></span>
+  <button class="btn subtle sm" id="logout">Sign out</button>
+</header>
+<main class="wrap">
+  <div class="card" id="welcome">
+    <div class="card-h"><h3>You're signed in</h3><span class="badge b-ok">base app live</span></div>
+    <div class="card-b">
+      <p>This is the base application shell — sign-in, the first-admin setup, and the design
+      tokens are already working. Describe screens in the ProxyPilot chat and each one lands
+      here, behind this sign-in, in the same style.</p>
+    </div>
+  </div>
+</main>
+<script>
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  window.location.assign('/login');
+});
+</script>
+</body>
+</html>
+`;
+}
+
 // buildScaffoldFiles(project) → the TS/Express/Drizzle project files (everything
 // except mock2.yaml / .env.example / serve.py / public/index.html / state/*,
 // which template.js composes around this). PURE.
@@ -500,5 +628,9 @@ export function buildScaffoldFiles(project) {
     { path: 'tests/contract/example.contract.test.ts', content: contractExampleTestTs() },
     { path: 'migrations/0001_init.sql', content: initMigrationSql() },
     { path: 'scripts/migrate.mjs', content: migrateMjs(), mode: 0o755 },
+    // The shared app shell (generalized from the operator's portal base) —
+    // screens reuse these classes; the chosen design preset restyles them.
+    { path: 'public/base.css', content: baseCss() },
+    { path: 'public/app-shell.html', content: appShellHtml(project) },
   ];
 }

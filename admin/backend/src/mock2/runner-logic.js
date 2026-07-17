@@ -375,6 +375,11 @@ static asset and link it, or import its tokens into the app's CSS) and style eve
 screen with those tokens — the same colors, fonts, radii, and component styling
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
+The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
+.btn, .badge, .stat, .field, table.list — all token-driven) and
+\`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
+THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
+to the shell's header — never hand-roll a parallel layout or restyle the shell.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -810,6 +815,11 @@ static asset and link it, or import its tokens into the app's CSS) and style eve
 screen with those tokens — the same colors, fonts, radii, and component styling
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
+The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
+.btn, .badge, .stat, .field, table.list — all token-driven) and
+\`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
+THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
+to the shell's header — never hand-roll a parallel layout or restyle the shell.
 
 ## Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}

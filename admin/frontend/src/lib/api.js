@@ -1403,6 +1403,9 @@ export const api = {
   // as a scoped background build) | 'none' (approval only).
   mock2ApproveDesign: (id, build) =>
     request(`/mock2/projects/${id}/design/approve`, { method: 'POST', body: JSON.stringify(build ? { build } : {}) }),
+  // Skip the mockup — lock the design stage empty and build on the base app.
+  mock2SkipDesign: (id) =>
+    request(`/mock2/projects/${id}/design/skip`, { method: 'POST' }),
   // Screen plan (per-screen apply): seeded from the approved inventory.
   mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
   mock2DecideScreen: (id, screenId, status) =>

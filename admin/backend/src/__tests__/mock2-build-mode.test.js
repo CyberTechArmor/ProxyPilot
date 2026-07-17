@@ -7,22 +7,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeBuildMode, filterGatesForBuildMode, MVP_SKIPPED_GATES,
-  BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODES,
+  normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode, MVP_SKIPPED_GATES, QUICK_SKIPPED_GATES,
+  BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK, BUILD_MODES,
 } from '../mock2/cycle-logic.js';
 import {
-  fastCodeModel, mvpRoutingDecision, decideRouting, DEFAULT_FAST_MODEL,
+  fastCodeModel, mvpRoutingDecision, quickRoutingDecision, decideRouting, DEFAULT_FAST_MODEL,
 } from '../mock2/routing-logic.js';
 
 // ---- build-mode normalization ----
 
-test('normalizeBuildMode: mvp in any casing, everything else full', () => {
+test('normalizeBuildMode: mvp/quick in any casing, everything else full', () => {
   assert.equal(normalizeBuildMode('mvp'), BUILD_MODE_MVP);
   assert.equal(normalizeBuildMode(' MVP '), BUILD_MODE_MVP);
+  assert.equal(normalizeBuildMode('quick'), BUILD_MODE_QUICK);
+  assert.equal(normalizeBuildMode(' QUICK '), BUILD_MODE_QUICK);
   for (const v of ['full', '', null, undefined, 'fast', 'banana']) {
     assert.equal(normalizeBuildMode(v), BUILD_MODE_FULL, `"${v}" should be full`);
   }
-  assert.deepEqual([...BUILD_MODES], ['full', 'mvp']);
+  assert.deepEqual([...BUILD_MODES], ['full', 'mvp', 'quick']);
+  assert.equal(isFastBuildMode('mvp'), true);
+  assert.equal(isFastBuildMode('quick'), true);
+  assert.equal(isFastBuildMode('full'), false);
+});
+
+// ---- quick mode: gates + routing ----
+
+test('quick mode: skips MVP gates plus the vitest run; keeps the cheap correctness gates', () => {
+  assert.deepEqual([...QUICK_SKIPPED_GATES], [...MVP_SKIPPED_GATES, 'test']);
+  const gates = ['typecheck', 'constitution-lint', 'security-scan', 'test', 'component-reuse', 'rule-coverage', 'ui-interaction', 'acceptance']
+    .map((name, i) => ({ name, script: '#', order: i }));
+  const quick = filterGatesForBuildMode(gates, 'quick').map((g) => g.name);
+  assert.deepEqual(quick, ['typecheck', 'constitution-lint', 'security-scan', 'component-reuse']);
+});
+
+test('quickRoutingDecision: fast model at MEDIUM effort, env-overridable', () => {
+  const d = quickRoutingDecision({}, 'claude-opus-4-8');
+  assert.equal(d.model, DEFAULT_FAST_MODEL);
+  assert.equal(d.effort, 'medium');
+  assert.equal(d.build_mode, 'quick');
+  assert.equal(quickRoutingDecision({ MOCK2_QUICK_EFFORT: 'high' }, '').effort, 'high');
+  assert.equal(quickRoutingDecision({ MOCK2_FAST_MODEL: 'off' }, 'slot-model').model, 'slot-model');
 });
 
 // ---- MVP gate filtering ----

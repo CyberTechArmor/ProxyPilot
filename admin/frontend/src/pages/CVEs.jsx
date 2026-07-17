@@ -21,11 +21,13 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Pin, PinOff,
-  Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, ShieldQuestion, Star,
+  ArrowLeft, Bot, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Pin, PinOff,
+  Play, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, ShieldQuestion, Star,
   Stethoscope, Trash2, X, Zap,
 } from 'lucide-react';
 
@@ -426,6 +428,33 @@ function FactGrid({ items }) {
 // the metadata. The text changes by action_class so the operator
 // reads the right mental model: AUTO_PATCH runs without you,
 // ONE_CLICK waits for your click, ALERT is read-only.
+// Visible, copyable code block for a shell script (patch steps,
+// rollback command, …). The operator running these by hand — e.g.
+// from a terminal outside the dashboard — needs to see exactly what
+// they're about to paste before copying it, not just trigger a blind
+// clipboard write from a toolbar button.
+function CodeBlock({ code, onCopy, emptyMessage }) {
+  if (!code) {
+    return <p className="text-xs text-muted-foreground">{emptyMessage}</p>;
+  }
+  return (
+    <div className="relative rounded border border-border bg-black/20">
+      <button
+        type="button"
+        onClick={onCopy}
+        title="Copy to clipboard"
+        aria-label="Copy code"
+        className="absolute top-2 right-2 h-8 w-8 inline-flex items-center justify-center rounded border border-border/60 bg-background/80 text-muted-foreground hover:text-foreground hover:bg-background"
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </button>
+      <pre className="text-xs font-mono whitespace-pre-wrap break-words p-3 pr-12 overflow-x-auto">
+        {code}
+      </pre>
+    </div>
+  );
+}
+
 function ExplainerBlock({ action, patchSteps, rollbackBody, hasMitigate }) {
   const lane = action === 'AUTO_PATCH' ? (
     <p>
@@ -957,6 +986,32 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                     hasMitigate={/\n\s*mitigate:/.test(yamlBody)}
                   />
 
+                  {/* Visible patch script — same commands "Run on this host" would
+                      execute, plus any restart steps the entry authored (e.g.
+                      `systemctl restart docker`). For operators who'd rather run
+                      it by hand from a terminal than trigger it through the
+                      engine. */}
+                  <div>
+                    <div className="text-xs font-medium text-muted-foreground mb-1">
+                      Patch script {patchSteps.length > 0 ? `(${patchSteps.length} step${patchSteps.length === 1 ? '' : 's'})` : ''}
+                    </div>
+                    <CodeBlock
+                      code={patchSteps.join('\n')}
+                      onCopy={() => copyText(patchSteps.join('\n'), 'Patch')}
+                      emptyMessage="No patch steps authored — this entry is ALERT-only."
+                    />
+                  </div>
+
+                  {rollbackBody && (
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Rollback</div>
+                      <CodeBlock
+                        code={rollbackBody}
+                        onCopy={() => copyText(rollbackBody, 'Rollback')}
+                      />
+                    </div>
+                  )}
+
                   {meta.sources.length > 0 && (
                     <div>
                       <div className="text-xs font-medium text-muted-foreground mb-1">Sources</div>
@@ -1153,6 +1208,19 @@ function CveList({ onOpen, refreshKey }) {
   // parsed branch + subpath alongside the URL.
   const [lastSync, setLastSync] = useState(null);
 
+  // AI research routine — native replacement for a manual external
+  // research session. `research` is the last-fetched settings snapshot
+  // (never carries the plaintext key, only has_api_key); `draft` is the
+  // dialog's editable copy. api_key stays blank in the draft unless the
+  // operator types a new one — saving with it blank keeps whatever key
+  // is already stored server-side.
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [research, setResearch] = useState(null);
+  const [researchDraft, setResearchDraft] = useState(null);
+  const [researchSaving, setResearchSaving] = useState(false);
+  const [researchTesting, setResearchTesting] = useState(false);
+  const [researchRunning, setResearchRunning] = useState(false);
+
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
     try {
@@ -1227,6 +1295,95 @@ function CveList({ onOpen, refreshKey }) {
       });
     } finally {
       setGitSyncing(false);
+    }
+  };
+
+  const onOpenResearch = async () => {
+    setResearchOpen(true);
+    try {
+      const cfg = await api.getCveResearchConfig();
+      setResearch(cfg);
+      setResearchDraft({
+        provider: cfg.provider || 'anthropic',
+        base_url: cfg.base_url || '',
+        model: cfg.model || '',
+        api_key: '',
+        enabled: cfg.enabled || false,
+        interval_hours: cfg.interval_hours || 12,
+      });
+    } catch (err) {
+      toast({
+        title: 'Failed to load research settings',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const onSaveResearchConfig = async () => {
+    if (!researchDraft) return;
+    setResearchSaving(true);
+    try {
+      const body = { ...researchDraft };
+      if (!body.api_key) delete body.api_key; // blank = keep the stored key
+      body.interval_hours = Number(body.interval_hours) || 12;
+      const saved = await api.updateCveResearchConfig(body);
+      setResearch(saved);
+      setResearchDraft((d) => ({ ...d, api_key: '' }));
+      toast({ title: 'Saved', description: saved.enabled ? 'Scheduled research is enabled.' : 'Saved (disabled).' });
+    } catch (err) {
+      toast({
+        title: 'Save failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setResearchSaving(false);
+    }
+  };
+
+  const onTestResearchConnector = async () => {
+    setResearchTesting(true);
+    try {
+      const out = await api.testCveResearchConnector();
+      toast({
+        title: out.ok ? 'Connected' : 'Test failed',
+        description: out.ok ? `Model replied: "${out.reply}"` : out.error,
+        variant: out.ok ? undefined : 'destructive',
+      });
+    } catch (err) {
+      toast({
+        title: 'Test failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setResearchTesting(false);
+    }
+  };
+
+  const onRunResearchNow = async () => {
+    setResearchRunning(true);
+    try {
+      const out = await api.runCveResearchNow();
+      toast({
+        title: out.ok ? 'Research run complete' : 'Research run failed',
+        description: out.ok
+          ? `${out.entries_created ?? 0} created, ${out.entries_updated ?? 0} updated`
+          : out.error,
+        variant: out.ok ? undefined : 'destructive',
+      });
+      const cfg = await api.getCveResearchConfig();
+      setResearch(cfg);
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Run failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setResearchRunning(false);
     }
   };
 
@@ -1455,6 +1612,10 @@ function CveList({ onOpen, refreshKey }) {
           <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
             {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
             Poll now
+          </Button>
+          <Button variant="outline" size="sm" onClick={onOpenResearch}
+                  title="Configure or run the native AI CVE-research routine">
+            <Bot className="h-4 w-4 mr-1.5" /> AI Research
           </Button>
           <Button variant="ghost" size="icon" onClick={refresh} disabled={loading} title="Refresh list">
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -1791,6 +1952,147 @@ function CveList({ onOpen, refreshKey }) {
             <Button onClick={onSaveGitConfig} disabled={gitSaving}>
               {gitSaving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
               Save URL
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={researchOpen} onOpenChange={setResearchOpen}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg flex flex-col">
+          <DialogHeader><DialogTitle>AI CVE research</DialogTitle></DialogHeader>
+          <div className="space-y-4 text-sm overflow-y-auto">
+            <p className="text-muted-foreground text-xs">
+              Runs natively in the backend, on this host's own network — research CVEs against
+              this host's inventory using a connected AI model, and file/update inbox entries the
+              same way "Paste YAML" does. Off by default; nothing runs until you enable it below.
+            </p>
+
+            {!researchDraft ? (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3 p-3 border rounded-lg">
+                  <div className="min-w-0">
+                    <div className="font-medium">Scheduled runs</div>
+                    <div className="text-xs text-muted-foreground">
+                      {researchDraft.enabled ? 'Runs automatically on the interval below.' : 'Disabled — configure and save, or use Run now.'}
+                    </div>
+                  </div>
+                  <Switch
+                    checked={researchDraft.enabled}
+                    onCheckedChange={(v) => setResearchDraft((d) => ({ ...d, enabled: v }))}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Provider</label>
+                    <Select
+                      value={researchDraft.provider}
+                      onValueChange={(v) => setResearchDraft((d) => ({ ...d, provider: v }))}
+                    >
+                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="anthropic">Anthropic</SelectItem>
+                        <SelectItem value="openai">OpenAI</SelectItem>
+                        <SelectItem value="gemini">Gemini</SelectItem>
+                        <SelectItem value="openai_compatible">OpenAI-compatible</SelectItem>
+                        <SelectItem value="ollama">Ollama (local)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Interval</label>
+                    <Select
+                      value={String(researchDraft.interval_hours)}
+                      onValueChange={(v) => setResearchDraft((d) => ({ ...d, interval_hours: Number(v) }))}
+                    >
+                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="6">Every 6 hours</SelectItem>
+                        <SelectItem value="12">Every 12 hours</SelectItem>
+                        <SelectItem value="24">Daily</SelectItem>
+                        <SelectItem value="48">Every 2 days</SelectItem>
+                        <SelectItem value="168">Weekly</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">Model</label>
+                  <Input
+                    value={researchDraft.model}
+                    onChange={(e) => setResearchDraft((d) => ({ ...d, model: e.target.value }))}
+                    placeholder="claude-sonnet-5"
+                  />
+                </div>
+
+                {(researchDraft.provider === 'openai_compatible' || researchDraft.provider === 'ollama') && (
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Base URL</label>
+                    <Input
+                      value={researchDraft.base_url}
+                      onChange={(e) => setResearchDraft((d) => ({ ...d, base_url: e.target.value }))}
+                      placeholder="http://localhost:11434"
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    API key {research?.has_api_key && <span className="text-emerald-500">· configured</span>}
+                  </label>
+                  <Input
+                    type="password"
+                    value={researchDraft.api_key}
+                    onChange={(e) => setResearchDraft((d) => ({ ...d, api_key: e.target.value }))}
+                    placeholder={research?.has_api_key ? 'Leave blank to keep the stored key' : 'sk-…'}
+                    autoComplete="off"
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={onTestResearchConnector} disabled={researchTesting}>
+                    {researchTesting ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Stethoscope className="h-4 w-4 mr-1.5" />}
+                    Test connection
+                  </Button>
+                  <Button
+                    variant="outline" size="sm" onClick={onRunResearchNow}
+                    disabled={researchRunning || !research?.configured}
+                    title={!research?.configured ? 'Save a provider/model/key first' : 'Run one research pass now'}
+                  >
+                    {researchRunning ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Play className="h-4 w-4 mr-1.5" />}
+                    Run now
+                  </Button>
+                </div>
+
+                {research?.last_run_at && (
+                  <div className={`text-xs rounded border p-2 space-y-1 ${
+                    research.last_run_ok
+                      ? 'border-emerald-500/30 bg-emerald-500/10'
+                      : 'border-red-500/30 bg-red-500/10'
+                  }`}>
+                    <div className="font-medium">
+                      Last run: {research.last_run_ok ? 'ok' : 'failed'} · {new Date(research.last_run_at).toLocaleString()}
+                    </div>
+                    {research.last_run_summary && (
+                      <div className="whitespace-pre-wrap break-words text-muted-foreground">
+                        {research.last_run_summary}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setResearchOpen(false)}>Close</Button>
+            <Button onClick={onSaveResearchConfig} disabled={researchSaving || !researchDraft}>
+              {researchSaving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
+              Save
             </Button>
           </DialogFooter>
         </DialogContent>

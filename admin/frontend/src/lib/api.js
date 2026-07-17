@@ -1498,6 +1498,18 @@ export const api = {
     }),
   syncCveGit: () => request('/cves/git-sync', { method: 'POST' }),
 
+  // AI research routine — native replacement for a manual external
+  // research session. GET never returns the plaintext key, only
+  // has_api_key. api_key is optional on the PUT: omit/blank to keep
+  // whatever's already stored.
+  getCveResearchConfig: () => request('/cves/research/config'),
+  updateCveResearchConfig: (body) =>
+    request('/cves/research/config', { method: 'PUT', body: JSON.stringify(body) }),
+  testCveResearchConnector: () =>
+    request('/cves/research/test', { method: 'POST' }),
+  runCveResearchNow: () =>
+    request('/cves/research/run-now', { method: 'POST' }),
+
   // Housekeeping — disk-usage view (docker df + backup dir) plus
   // opt-in prune actions for stale artifacts. Pruning is sudo-gated
   // and per-category — empty body = no-op.

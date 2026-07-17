@@ -56,12 +56,50 @@ def test_build_returns_expected_top_level_shape(monkeypatch):
     monkeypatch.setattr(inv, "collect_services", lambda: [])
     monkeypatch.setattr(inv, "collect_sockets", lambda *, cloudflared: [])
     monkeypatch.setattr(inv, "collect_docker", lambda: {"present": False, "images": [], "containers": []})
+    monkeypatch.setattr(inv, "collect_runc", lambda: {"present": False, "path": None, "version": None})
+    monkeypatch.setattr(inv, "collect_caddy", lambda: {"present": False, "path": None, "version": None})
     monkeypatch.setattr(inv, "collect_incus", lambda: {"present": False, "instances": []})
     monkeypatch.setattr(inv, "collect_vm_guests", lambda parent: [])
     out = inv.build()
     for key in ("generated_at", "generator", "hostname", "kernel", "packages",
-                "services", "sockets", "docker", "incus", "vm_guests"):
+                "services", "sockets", "docker", "runc", "caddy", "incus", "vm_guests"):
         assert key in out
+
+
+def test_collect_runc_finds_binary_on_path(monkeypatch):
+    monkeypatch.setattr(inv.shutil, "which", lambda name: "/usr/bin/runc" if name == "runc" else None)
+    monkeypatch.setattr(inv, "_run", lambda argv, timeout=15: "runc version 1.2.8\ncommit: abc123\n" if argv[0] == "/usr/bin/runc" else "")
+    out = inv.collect_runc()
+    assert out == {"present": True, "path": "/usr/bin/runc", "version": "runc version 1.2.8"}
+
+
+def test_collect_runc_falls_back_to_known_paths(monkeypatch):
+    monkeypatch.setattr(inv.shutil, "which", lambda name: None)
+    monkeypatch.setattr(inv.Path, "is_file", lambda self: str(self) == "/usr/bin/runc")
+    monkeypatch.setattr(inv, "_run", lambda argv, timeout=15: "runc version 1.1.0\n")
+    out = inv.collect_runc()
+    assert out == {"present": True, "path": "/usr/bin/runc", "version": "runc version 1.1.0"}
+
+
+def test_collect_runc_absent(monkeypatch):
+    monkeypatch.setattr(inv.shutil, "which", lambda name: None)
+    monkeypatch.setattr(inv.Path, "is_file", lambda self: False)
+    out = inv.collect_runc()
+    assert out == {"present": False, "path": None, "version": None}
+
+
+def test_collect_caddy_finds_binary_and_reports_version(monkeypatch):
+    monkeypatch.setattr(inv.shutil, "which", lambda name: "/usr/bin/caddy" if name == "caddy" else None)
+    monkeypatch.setattr(inv, "_run", lambda argv, timeout=15: "v2.11.5 h1:abc\n" if argv[0] == "/usr/bin/caddy" else "")
+    out = inv.collect_caddy()
+    assert out == {"present": True, "path": "/usr/bin/caddy", "version": "v2.11.5 h1:abc"}
+
+
+def test_collect_caddy_absent(monkeypatch):
+    monkeypatch.setattr(inv.shutil, "which", lambda name: None)
+    monkeypatch.setattr(inv.Path, "is_file", lambda self: False)
+    out = inv.collect_caddy()
+    assert out == {"present": False, "path": None, "version": None}
 
 
 def test_write_is_atomic_and_emits_valid_json(monkeypatch, tmp_path):

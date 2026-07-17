@@ -19,47 +19,18 @@
 
 import { Router } from 'express';
 import { readdir, readFile, stat, unlink, mkdir, rename, writeFile, chmod } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { logAudit, getSetting, setSetting, getDb } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
+import { getInboxDir, getHostname, CVE_ID_RE, safePath, runEngine } from '../lib/engine-cli.js';
+import {
+  getResearchSettings, saveResearchSettings, testConnectorConnectivity,
+} from '../lib/cve-research.js';
+import * as cveResearchScheduler from '../lib/cve-research-scheduler.js';
 
 export const cvesRouter = Router();
-
-const INBOX_DIR = process.env.PROXYPILOT_INBOX_DIR || '/var/lib/proxypilot/cve-inbox';
-const ENGINE_BIN = process.env.PROXYPILOT_ENGINE_BIN || 'python3';
-const ENGINE_MODULE = process.env.PROXYPILOT_ENGINE_MODULE || 'proxypilot.engine';
-const HOSTNAME = process.env.PROXYPILOT_HOSTNAME || '';
-
-// Engine commands split into two lanes:
-//
-//   In-container — pure YAML manipulation: validate, paste,
-//   mark-seen, dismiss, sync-git, show, list. These read/write the
-//   inbox dir (bind-mounted from the host) but don't shell out to
-//   apt-get / systemctl / etc. The container ships python3 +
-//   ruamel.yaml + the proxypilot package, so they run without any
-//   host setup.
-//
-//   Host-pivot — actually mutates the host: poll, run-one, inventory.
-//   These need apt-get, snapshot tools, the running kernel etc.,
-//   so they pivot through `nsenter -t 1` into the host namespace
-//   (Phase A architecture — same pattern as caddy-driver.js).
-//
-// Outside Docker (tests, dev), every command runs directly.
-const HOST_PIVOT_COMMANDS = new Set(['poll', 'run-one', 'inventory']);
-const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
-
-// CVE filenames are constrained to the canonical CVE-YYYY-NNNN[N..]
-// shape so a malicious id can't traverse out of the inbox dir.
-const CVE_ID_RE = /^CVE-\d{4}-\d{4,7}$/;
-
-function safePath(cveId) {
-  if (!CVE_ID_RE.test(cveId)) return null;
-  return join(INBOX_DIR, `${cveId}.yaml`);
-}
 
 // ── tiny YAML-field extractor ───────────────────────────────────────────────
 // Pulls a single top-level scalar (e.g. `cve:`, `name:`, `status:`)
@@ -269,119 +240,6 @@ function extractHostAction(body, hostname) {
   return null;
 }
 
-// Spawn the Python engine and capture its single-line JSON result.
-// All write actions go through here so the YAML mutation lives in
-// the engine module, not duplicated in Node. Optionally feeds bytes
-// on stdin (used for `validate`, which reads YAML from there).
-function runEngine(args, { timeoutMs = 30 * 60 * 1000, stdinText = null } = {}) {
-  // Build the argv. In Docker we wrap with nsenter so the spawn
-  // pivots into the host namespace where the engine + python3 are
-  // installed. Outside Docker we run the engine directly.
-  //
-  // The engine CLI's --inbox / --host flags come BEFORE the
-  // subcommand, so prepend them here. Tests + alternate deployments
-  // override INBOX_DIR / HOSTNAME via env, and we want those values
-  // to actually reach the subprocess.
-  const globalArgs = ['--inbox', INBOX_DIR];
-  if (HOSTNAME) globalArgs.push('--host', HOSTNAME);
-  // First positional after globalArgs is the subcommand — that's
-  // what we route on for the in-container vs. host-pivot decision.
-  const subcommand = args[0] || '';
-  const needsHostPivot = isInDocker && HOST_PIVOT_COMMANDS.has(subcommand);
-  let bin, fullArgs;
-  if (needsHostPivot) {
-    bin = 'nsenter';
-    // -m mount, -u uts, -n net, -i ipc, -p pid (so signals reach
-    // the right pid tree). We don't need -U because the host runs
-    // as the same root.
-    fullArgs = ['-t', '1', '-m', '-u', '-n', '-i', '-p', '--',
-                ENGINE_BIN, '-m', ENGINE_MODULE, ...globalArgs, ...args];
-  } else {
-    bin = ENGINE_BIN;
-    fullArgs = ['-m', ENGINE_MODULE, ...globalArgs, ...args];
-  }
-  // PYTHONPATH for the engine module. Two cases:
-  //   - In-container path: the Dockerfile copies proxypilot/ to
-  //     /app/proxypilot and sets PYTHONPATH=/app. process.env.PYTHONPATH
-  //     already carries that, so we keep it untouched.
-  //   - Host pivot: the host has the package at PROXYPILOT_INSTALL_DIR
-  //     (default /opt/proxypilot) — install.sh copies it there.
-  //     Prepend that so the host's python3 finds the module.
-  const installDir = process.env.PROXYPILOT_INSTALL_DIR || '/opt/proxypilot';
-  const pythonPath = needsHostPivot
-    ? installDir + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : '')
-    : (process.env.PYTHONPATH || '/app');
-  const childEnv = {
-    ...process.env,
-    PYTHONUNBUFFERED: '1',
-    PYTHONPATH: pythonPath,
-  };
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, fullArgs, { env: childEnv });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`engine timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
-    child.on('error', err => {
-      clearTimeout(timer);
-      if (err.code === 'ENOENT') {
-        if (needsHostPivot) {
-          err = new Error(
-            'engine spawn failed: nsenter not found in container. ' +
-            'Rebuild the dashboard image (apk add util-linux) or set ' +
-            'pid:host in docker-compose.');
-        } else {
-          err = new Error(
-            `engine spawn failed: ${ENGINE_BIN} not found. ` +
-            'In-container engine should be installed via the admin Dockerfile ' +
-            '(python3 + py3-ruamel.yaml). Rebuild the image.');
-        }
-      }
-      reject(err);
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      // The engine writes one JSON line per command. Even on non-zero
-      // exit it's expected to emit a parseable {"ok":false,"error":...}.
-      const lastLine = stdout.trim().split('\n').filter(Boolean).pop() || '';
-      try {
-        const parsed = JSON.parse(lastLine);
-        if (code !== 0 && parsed.ok !== false) parsed.exit_code = code;
-        resolve(parsed);
-      } catch {
-        // Common case: `No module named proxypilot` — the host has
-        // python3 but the engine package isn't on PYTHONPATH. Surface
-        // a remediation hint instead of a raw stderr dump.
-        const errText = stderr.trim();
-        if (/No module named ['\"]?proxypilot/.test(errText)) {
-          reject(new Error(
-            `engine package not found on host PYTHONPATH (${installDir}). ` +
-            `Run install.sh / update.sh, or set PROXYPILOT_INSTALL_DIR to ` +
-            `the directory containing the proxypilot/ package.`));
-          return;
-        }
-        if (/No module named ['\"]?ruamel/.test(errText)) {
-          reject(new Error(
-            'ruamel.yaml not installed on the host. ' +
-            'Install with: apt install python3-ruamel.yaml  (Debian/Ubuntu) ' +
-            'or: pip3 install ruamel.yaml'));
-          return;
-        }
-        reject(new Error(`engine exited ${code}; stderr: ${errText.slice(0, 500)}`));
-      }
-    });
-    if (stdinText !== null) {
-      child.stdin.end(stdinText);
-    } else {
-      child.stdin.end();
-    }
-  });
-}
-
 // Atomic write: tmp-in-same-dir + rename so a crash mid-write can't
 // leave half a YAML for the next poll to choke on. Mirrors the Python
 // engine's writeFileAtomic.
@@ -402,11 +260,13 @@ async function writeYamlAtomic(targetPath, body) {
 // ── routes ──────────────────────────────────────────────────────────────────
 
 cvesRouter.get('/', requireAdmin, async (req, res) => {
+  const inboxDir = getInboxDir();
+  const hostname = getHostname();
   let names;
   try {
-    names = await readdir(INBOX_DIR);
+    names = await readdir(inboxDir);
   } catch (err) {
-    if (err.code === 'ENOENT') return res.json({ host: HOSTNAME, entries: [], unread: 0 });
+    if (err.code === 'ENOENT') return res.json({ host: hostname, entries: [], unread: 0 });
     return res.status(500).json({ error: err.message });
   }
 
@@ -429,11 +289,11 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
     if (!CVE_ID_RE.test(cve)) continue;
     let body;
     try {
-      body = await readFile(join(INBOX_DIR, name), 'utf8');
+      body = await readFile(join(inboxDir, name), 'utf8');
     } catch {
       continue;
     }
-    const action = extractHostAction(body, HOSTNAME) || 'ALERT';
+    const action = extractHostAction(body, hostname) || 'ALERT';
     const status = (extractNested('state', 'status', body) || 'NEW').toUpperCase().replace('_', '-');
     const seenStr = (extractNested('state', 'operator_seen', body) || 'false').toLowerCase();
     const seen = seenStr === 'true' || seenStr === 'yes';
@@ -441,7 +301,7 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
     const opAction = extractNested('state', 'operator_action_required', body);
     const tier = extractScalar(body, 'tier');  // host-level; fallback to top-level
     let st;
-    try { st = await stat(join(INBOX_DIR, name)); } catch { st = null; }
+    try { st = await stat(join(inboxDir, name)); } catch { st = null; }
     if (!seen) unread += 1;
     // "Added": when this entry first started being actionable on
     // THIS host. Prefer the engine's own _proxypilot.imported_at
@@ -492,7 +352,7 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
         : null,
     });
   }
-  res.json({ host: HOSTNAME, entries, unread });
+  res.json({ host: hostname, entries, unread });
 });
 
 // ── literal-path routes ───────────────────────────────────────────────────
@@ -565,6 +425,75 @@ cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
   }
 });
 
+// ── AI research routine (toggleable, native replacement for a manual ──────
+// external research session) — connector config, connectivity test, and
+// on-demand / scheduled runs. The scheduler (lib/cve-research-scheduler.js)
+// calls the same runResearchPass() this route's run-now hits.
+
+const researchConfigSchema = z.object({
+  provider: z.enum(['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible']),
+  base_url: z.string().trim().max(500).optional(),
+  model: z.string().trim().min(1).max(200),
+  // Optional on update — omit/empty to keep the previously stored key.
+  api_key: z.string().trim().max(2000).optional(),
+  enabled: z.boolean(),
+  interval_hours: z.number().int().min(1).max(168),
+}).strict();
+
+cvesRouter.get('/research/config', requireAdmin, async (_req, res) => {
+  res.json(getResearchSettings());
+});
+
+cvesRouter.put('/research/config', requireAdmin, requireSudo, async (req, res) => {
+  let body;
+  try {
+    body = researchConfigSchema.parse(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  let saved;
+  try {
+    saved = saveResearchSettings(body);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (body.enabled) cveResearchScheduler.register({ interval_hours: body.interval_hours });
+  else cveResearchScheduler.unregister();
+  logAudit(req.user.id, 'CVE_RESEARCH_CONFIG', 'cve', null, {
+    provider: body.provider, model: body.model,
+    enabled: body.enabled, interval_hours: body.interval_hours,
+    api_key_changed: !!body.api_key,
+  }, req.ip);
+  res.json(saved);
+});
+
+// Cheap live connectivity check — a single no-tools model turn asking for
+// a fixed reply. Mirrors mock2's connector test pattern (connectors.js
+// testConnector) without pulling in the mock2 module.
+cvesRouter.post('/research/test', requireAdmin, requireSudo, async (_req, res) => {
+  try {
+    const out = await testConnectorConnectivity();
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+cvesRouter.post('/research/run-now', requireAdmin, requireSudo, async (req, res) => {
+  if (cveResearchScheduler.isBusy()) {
+    return res.status(409).json({ error: 'a research run is already in progress' });
+  }
+  try {
+    // runResearchPass() itself writes the CVE_RESEARCH_RUN audit row
+    // (actorUserId flows through so manual runs still attribute to the
+    // operator) — no second logAudit call needed here.
+    const out = await cveResearchScheduler.runNow('manual', { actorUserId: req.user.id });
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── wildcard `:cveId` routes (must register AFTER literal paths above) ────
 
 cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
@@ -579,7 +508,7 @@ cvesRouter.get('/:cveId', requireAdmin, async (req, res) => {
     if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
     return res.status(500).json({ error: err.message });
   }
-  const action = extractHostAction(body, HOSTNAME) || 'ALERT';
+  const action = extractHostAction(body, getHostname()) || 'ALERT';
   const status = (extractNested('state', 'status', body) || 'NEW').toUpperCase().replace('_', '-');
   const importedAt = extractNested('_proxypilot', 'imported_at', body);
   let pin = null;

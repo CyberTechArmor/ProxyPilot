@@ -27,6 +27,7 @@ import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
 import { hydrate as hydrateBackupSchedules } from './lib/backup-scheduler.js';
 import { hydrate as hydrateS3Healthcheck } from './lib/backup-s3-healthcheck.js';
+import { hydrate as hydrateCveResearch } from './lib/cve-research-scheduler.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
 import { decryptSecret } from './lib/secrets.js';
@@ -652,6 +653,13 @@ server.listen(PORT, '0.0.0.0', () => {
       hydrateS3Healthcheck();
     } catch (err) {
       console.error('[s3-healthcheck] hydrate threw:', err.message || err);
+    }
+    try {
+      // CVE research routine — no-op unless the operator has configured
+      // a connector and enabled it (CVEs page → AI Research).
+      hydrateCveResearch();
+    } catch (err) {
+      console.error('[cve-research-scheduler] hydrate threw:', err.message || err);
     }
   });
 });

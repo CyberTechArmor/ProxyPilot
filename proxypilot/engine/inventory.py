@@ -14,6 +14,13 @@ Sections:
                  Cloudflare Tunnel / public reverse proxy; else
                  LAN | LOCAL.
   - docker:    image digests + running container summary
+  - runc:      binary path + version, queried directly — runc ships
+               bundled inside containerd.io on this fleet, not as its
+               own dpkg package, so its version can't be inferred from
+               containerd.io's package version alone
+  - caddy:     binary path + version, queried directly — Caddy ships as
+               a standalone binary from Caddy's own releases, not a
+               Debian package, so `dpkg -W caddy` never finds it
   - incus:     instance list with kind=container|virtual-machine
   - vm_guests: only VMs the agent can reach; same shape, with
                parent_host set
@@ -252,6 +259,39 @@ def collect_docker() -> Dict[str, Any]:
     return {"present": True, "images": images, "containers": containers}
 
 
+def collect_runc() -> Dict[str, Any]:
+    """runc has no standalone Debian package on this fleet — it ships
+    bundled inside containerd.io (Docker's official apt repo), and
+    containerd.io point releases don't track runc point releases 1:1.
+    Query the actual binary rather than inferring from containerd's
+    package version, so CVE specs can stop treating it as unknown."""
+    path = shutil.which("runc")
+    if not path:
+        for candidate in ("/usr/bin/runc", "/usr/sbin/runc", "/usr/local/bin/runc"):
+            if Path(candidate).is_file():
+                path = candidate
+                break
+    if not path:
+        return {"present": False, "path": None, "version": None}
+    out = _run([path, "--version"])
+    version = out.splitlines()[0].strip() if out.strip() else None
+    return {"present": True, "path": path, "version": version}
+
+
+def collect_caddy() -> Dict[str, Any]:
+    """Caddy ships as a standalone binary from Caddy's own releases,
+    not a Debian package — `dpkg-query -W caddy` never finds it even
+    when installed. Query the binary directly."""
+    path = shutil.which("caddy")
+    if not path and Path("/usr/bin/caddy").is_file():
+        path = "/usr/bin/caddy"
+    if not path:
+        return {"present": False, "path": None, "version": None}
+    out = _run([path, "version"])
+    version = out.strip() if out.strip() else None
+    return {"present": True, "path": path, "version": version}
+
+
 def collect_incus() -> Dict[str, Any]:
     if not shutil.which("incus"):
         return {"present": False, "instances": []}
@@ -316,6 +356,8 @@ def build() -> Dict[str, Any]:
         "services": services,
         "sockets": collect_sockets(cloudflared=cf),
         "docker": collect_docker(),
+        "runc": collect_runc(),
+        "caddy": collect_caddy(),
         "incus": collect_incus(),
     }
     inv["vm_guests"] = collect_vm_guests(inv["hostname"])

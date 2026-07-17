@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
-  ChevronDown, ChevronUp, Hammer,
+  ChevronDown, ChevronUp, Rocket,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -503,18 +503,21 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               onPickFiles={attach.addFiles} onRemove={attach.remove}
             />
             <div className="flex items-center justify-between gap-2">
-              {/* Build — lives at the bottom of the design chat: when the mockup
-                  looks right, this (after a confirm) locks the design in and
-                  starts building the working app. */}
+              {/* Build MVP — lives at the bottom of the design chat: when the
+                  mockup looks right, this (after a confirm) locks the design in
+                  and starts the MVP build — the speed path to a testable first
+                  version (rule interview skipped, reduced gate battery, fast
+                  model). The fully audited Build comes later, from the build
+                  chat. */}
               {hasMockup && online ? (
                 <Button
                   variant="outline"
                   className="h-11 sm:h-10 shrink-0"
                   disabled={composerDisabled}
-                  title="Build — lock in the design and start building the working app"
+                  title="Build MVP — lock in the design and build a fast, testable first version"
                   onClick={() => setConfirmBuild(true)}
                 >
-                  <Hammer className="h-4 w-4 mr-1" /> Build
+                  <Rocket className="h-4 w-4 mr-1" /> Build MVP
                 </Button>
               ) : null}
               <span className="text-[11px] text-muted-foreground hidden sm:block ml-auto">⌘/Ctrl+Enter to send</span>
@@ -636,17 +639,20 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
       <Dialog open={confirmBuild} onOpenChange={(o) => !o && setConfirmBuild(false)}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
-            <DialogTitle>Are you ready to build?</DialogTitle>
+            <DialogTitle>Ready to build the MVP?</DialogTitle>
             <DialogDescription>
               This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null} and
-              starts building the working app from it. You can keep chatting to refine the design instead — building
-              is a step you take when the mockup looks right.
+              starts the <span className="font-medium">MVP build</span> — a fast first testable version: standard
+              components are installed automatically and the heavyweight checks are deferred. Once it&apos;s up, iterate
+              with more builds, then run a full <span className="font-medium">Build</span> from the build chat to add
+              the rule questions, tests, and acceptance checks. You can keep chatting to refine the design instead —
+              building is a step you take when the mockup looks right.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex-col sm:flex-row gap-2">
             <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>
             <Button onClick={doBuild} className="h-11 sm:h-10">
-              <Hammer className="h-4 w-4 mr-1" /> Yes, build
+              <Rocket className="h-4 w-4 mr-1" /> Yes, build the MVP
             </Button>
           </DialogFooter>
         </DialogContent>

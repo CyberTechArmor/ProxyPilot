@@ -1312,4 +1312,18 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_projects ADD COLUMN base_app_deployed_at TEXT;`);
     },
   },
+  {
+    // Per-project agent harness ('proxypilot' | 'claude'). NULL (every existing
+    // row, and any project that never touches the toggle) means "no explicit
+    // choice": the runner keeps its pre-existing selection — the hand-rolled
+    // loop, or the SDK loop when the legacy global BUILD_RUNNER=sdk flag is set
+    // — so nothing changes behavior until a person flips the toggle. The value
+    // vocabulary is enforced in code (normalizeHarness), not a CHECK, so a
+    // future harness doesn't need a schema migration.
+    version: 533,
+    name: 'mock2_project_harness',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN harness TEXT;`);
+    },
+  },
 ];

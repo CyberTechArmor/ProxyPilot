@@ -426,6 +426,33 @@ function FactGrid({ items }) {
 // the metadata. The text changes by action_class so the operator
 // reads the right mental model: AUTO_PATCH runs without you,
 // ONE_CLICK waits for your click, ALERT is read-only.
+// Visible, copyable code block for a shell script (patch steps,
+// rollback command, …). The operator running these by hand — e.g.
+// from a terminal outside the dashboard — needs to see exactly what
+// they're about to paste before copying it, not just trigger a blind
+// clipboard write from a toolbar button.
+function CodeBlock({ code, onCopy, emptyMessage }) {
+  if (!code) {
+    return <p className="text-xs text-muted-foreground">{emptyMessage}</p>;
+  }
+  return (
+    <div className="relative rounded border border-border bg-black/20">
+      <button
+        type="button"
+        onClick={onCopy}
+        title="Copy to clipboard"
+        aria-label="Copy code"
+        className="absolute top-2 right-2 h-8 w-8 inline-flex items-center justify-center rounded border border-border/60 bg-background/80 text-muted-foreground hover:text-foreground hover:bg-background"
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </button>
+      <pre className="text-xs font-mono whitespace-pre-wrap break-words p-3 pr-12 overflow-x-auto">
+        {code}
+      </pre>
+    </div>
+  );
+}
+
 function ExplainerBlock({ action, patchSteps, rollbackBody, hasMitigate }) {
   const lane = action === 'AUTO_PATCH' ? (
     <p>
@@ -956,6 +983,32 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                     rollbackBody={rollbackBody}
                     hasMitigate={/\n\s*mitigate:/.test(yamlBody)}
                   />
+
+                  {/* Visible patch script — same commands "Run on this host" would
+                      execute, plus any restart steps the entry authored (e.g.
+                      `systemctl restart docker`). For operators who'd rather run
+                      it by hand from a terminal than trigger it through the
+                      engine. */}
+                  <div>
+                    <div className="text-xs font-medium text-muted-foreground mb-1">
+                      Patch script {patchSteps.length > 0 ? `(${patchSteps.length} step${patchSteps.length === 1 ? '' : 's'})` : ''}
+                    </div>
+                    <CodeBlock
+                      code={patchSteps.join('\n')}
+                      onCopy={() => copyText(patchSteps.join('\n'), 'Patch')}
+                      emptyMessage="No patch steps authored — this entry is ALERT-only."
+                    />
+                  </div>
+
+                  {rollbackBody && (
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Rollback</div>
+                      <CodeBlock
+                        code={rollbackBody}
+                        onCopy={() => copyText(rollbackBody, 'Rollback')}
+                      />
+                    </div>
+                  )}
 
                   {meta.sources.length > 0 && (
                     <div>

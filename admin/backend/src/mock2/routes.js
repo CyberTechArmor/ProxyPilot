@@ -521,9 +521,14 @@ const resumeSchema = z.object({
   // via Continue build.
   abandon: z.boolean().optional(),
   // Enforced rule waivers (ADMIN only — checked in the handler): applied at the
-  // real enforcement layer (acceptanceVerdict) of the resumed cycle and stamped
-  // into its acceptance record; never a narrated claim.
-  waivers: z.array(z.enum(['reproduce_first'])).max(1).optional(),
+  // real enforcement layer of the resumed cycle, never a narrated claim.
+  // 'reproduce_first' → acceptanceVerdict; 'gate:<key>' (e.g.
+  // 'gate:security-scan') → the gate is excluded from that one cycle's battery,
+  // for red gates whose findings are pre-existing and unrelated to the diff.
+  waivers: z.array(z.union([
+    z.literal('reproduce_first'),
+    z.string().regex(/^gate:[a-z0-9_.-]{1,60}$/i),
+  ])).max(4).optional(),
 });
 // Scoped one-time authorization decision (admin): grant (optionally with appended
 // conditions) or deny.

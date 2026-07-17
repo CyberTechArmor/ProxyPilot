@@ -653,6 +653,33 @@ export default function BuildStatus({
                   </div>
                 ) : null}
 
+                {/* Admin gate waiver — the real bypass for a red gate whose
+                    findings are pre-existing/unrelated to this diff (e.g.
+                    npm-audit transitive dev-dep vulns blocking a copy edit).
+                    Resumes with the gate excluded from this ONE cycle's
+                    battery; the next build runs the full battery again. */}
+                {isAdmin && online && (cycle.gates || []).some((g) => g && g.status === 'failed') ? (
+                  <div className="space-y-1.5 rounded-md border border-orange-500/30 bg-background/50 p-2.5">
+                    <p className="text-[11px] font-medium text-orange-600">
+                      Admin bypass — waive a red gate for this resume only (the next build runs it again; findings stay on record):
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {(cycle.gates || []).filter((g) => g && g.status === 'failed').map((g) => (
+                        <Button
+                          key={g.name} variant="outline" size="sm" className="h-11 sm:h-9"
+                          disabled={resuming}
+                          onClick={() => doResume({
+                            waivers: [`gate:${g.name}`],
+                            message: resumeMsg.trim() || `Admin waived the ${g.name} gate for this resume — its findings are pre-existing and tracked separately from this diff.`,
+                          })}
+                        >
+                          <ShieldCheck className="h-4 w-4 mr-1" /> Waive {g.name} + resume
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
                 {/* Legacy path (no proposed options): a standalone request_authorization
                     grant/deny + a plain resume, kept for older halts and breaker stops. */}
                 {!(cycle.halt_options || []).length && auths.length ? (

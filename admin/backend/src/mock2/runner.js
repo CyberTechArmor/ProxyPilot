@@ -366,7 +366,25 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // Fast builds run a REDUCED battery: MVP drops the authoring-discipline
   // gates (rule-coverage / ui-interaction / acceptance); a quick update also
   // defers the vitest run. A later full Build brings everything back.
-  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr);
+  //
+  // Admin gate waivers (resume context, 'gate:<key>'): the waived gate is
+  // REMOVED from this one cycle's battery — the enforcement layer, not a
+  // narrated promise the finish tool then contradicts. One-time by
+  // construction: the waiver lives only on this resume's context, so the next
+  // cycle runs the full battery again.
+  const waivedGates = (resumeContext?.waivers || [])
+    .map((w) => (typeof w?.rule === 'string' && w.rule.startsWith('gate:') ? w.rule.slice(5) : null))
+    .filter(Boolean);
+  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr)
+    .filter((g) => !waivedGates.includes(g.name));
+  if (waivedGates.length) {
+    try {
+      insertMessage({
+        projectId, kind: 'system', cycleId: cycle.id,
+        body: `Admin waiver applied for this resume: gate${waivedGates.length === 1 ? '' : 's'} ${waivedGates.join(', ')} excluded from this cycle's battery (one-time — the next build runs it again). The underlying findings remain tracked and are not hidden.`,
+      });
+    } catch { /* best effort */ }
+  }
 
   setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
 
@@ -440,9 +458,14 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
   const authorizations = granted.map((a) => ({ scope: a.scope, conditions: a.conditions }));
   for (const a of granted) { try { markAuthorizationUsed(a.id); } catch { /* best effort */ } }
   const msg = String(message || '').trim();
+  // Two waiver classes: the reproduce-first rule (acceptanceVerdict layer) and
+  // per-gate waivers ('gate:<key>', e.g. 'gate:security-scan') applied at the
+  // battery itself — for a red gate whose findings are PRE-EXISTING and
+  // unrelated to the diff (the "npm-audit fails on transitive dev-dep vulns"
+  // block). Both are admin-only (enforced in the route).
   const grantedWaivers = (Array.isArray(waivers) ? waivers : [])
     .map((w) => (typeof w === 'string' ? { rule: w } : w))
-    .filter((w) => w && w.rule === 'reproduce_first');
+    .filter((w) => w && (w.rule === 'reproduce_first' || (typeof w.rule === 'string' && /^gate:[a-z0-9_.-]{1,60}$/i.test(w.rule))));
   // Carry the blocked cycle's INTEGRATION-GATE FINDINGS into the resume: the
   // gate is deterministic, so without the exact finding list the resumed build
   // rediscovers them blind and re-halts on the same block (a real 5-cycle loop).

@@ -471,7 +471,7 @@ async function deployBaseAppInner(project, projectId, { reason }) {
     if (!result.ok) {
       setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — base app deploy failed at "${result.step}": ${result.error}` });
       console.warn(`[mock2] base-app deploy failed for ${projectId} (${reason}): ${result.step} — ${result.error}`);
-      await say(`Base app deploy failed at "${result.step}": ${String(result.error || '').slice(0, 400)} — the placeholder keeps serving. Fix the cause (or run any build, which deploys the app) and try again.`);
+      await say(`Base app deploy failed at "${result.step}": ${String(result.error || '').slice(0, 900)} — the placeholder keeps serving. Fix the cause (or run any build, which deploys the app) and try again.`);
       try {
         raiseQueueItem({
           kind: 'flag', project_id: projectId, dedupe_key: `mock2-base-app:${projectId}`,
@@ -502,7 +502,19 @@ async function redeployIfBuilt(project, { containerName, webPort }) {
   let built = false;
   try { built = projectHasBeenDeployed(projectId) || !!project.base_app_deployed_at; }
   catch (e) { console.warn('[mock2] rehydrate deploy check failed:', e?.message); }
-  if (!built) return;
+  if (!built) {
+    // Never-deployed but the Builder already committed to working on the live
+    // app (design approved/skipped): a rehydrate would otherwise park them on
+    // the placeholder waiting for a manual "Deploy base app" press. Run the
+    // base-app deploy instead — it pre-installs components (repairing deps and
+    // upgrading an unwireable auth version) before deploying, so a project
+    // that failed under an older backend heals on its next wake.
+    if (project.design_approved_at) {
+      await deployBaseApp(project, { reason: 'rehydrate' })
+        .catch((e) => console.warn('[mock2] rehydrate base-app deploy failed:', e?.message));
+    }
+    return;
+  }
   setStatus(projectId, { phase: 'deploy', message: 'Restoring the built app (install, migrate, build, start)…' });
   const result = await deployProject({
     containerName, appDir: APP_DIR, webPort,

@@ -167,14 +167,18 @@ async function deployProjectUnqueued({
       // the operator guessing (orphaned placeholder, stray dev server, …).
       + `echo "# port ${webPort} holders:"; ss -ltnp 2>/dev/null | grep ":${webPort} " || echo "(nothing bound)"\n`
       + `echo "# recent app output (this is the crash reason if it exits after starting, or the 5xx cause):"\n`
-      + `journalctl -u mock2-dev.service --no-pager -n 60 2>/dev/null || true\n`,
+      + `journalctl -u mock2-dev.service --no-pager -n 25 2>/dev/null || true\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },
   );
   if (!/MOCK2_SERVING/.test(health.stdout || '')) {
-    // Give the crash log more room than the generic 800-char tail — the reason
-    // the app exits after "listening" (or 5xxes on its shell) is what the operator
-    // needs to see.
-    const detail = `${health?.stdout || ''}${health?.stderr ? `\n${health.stderr}` : ''}`.trim().slice(-2000);
+    // Keep BOTH ends of the output: the head carries the status line, service
+    // state, and the port-holder identification (the EADDRINUSE culprit); the
+    // tail carries the crash reason from the journal. A plain tail-slice let a
+    // long journal push the holder line out of the message entirely.
+    const raw = `${health?.stdout || ''}${health?.stderr ? `\n${health.stderr}` : ''}`.trim();
+    const detail = raw.length > 2600
+      ? `${raw.slice(0, 1200)}\n… (trimmed) …\n${raw.slice(-1200)}`
+      : raw;
     return { ok: false, step: 'health', error: deployFailureMessage('health', detail) };
   }
 

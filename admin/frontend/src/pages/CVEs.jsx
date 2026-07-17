@@ -26,9 +26,9 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, Bot, BugPlay, Copy, FileCode, Loader2, Pencil, Pin, PinOff,
-  Play, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, ShieldQuestion, Star,
-  Stethoscope, Trash2, X, Zap,
+  ArrowLeft, Bot, BugPlay, ChevronDown, ChevronRight, Copy, FileCode, Loader2,
+  Pencil, Pin, PinOff, Play, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck,
+  ShieldQuestion, Star, Stethoscope, Trash2, X,
 } from 'lucide-react';
 
 // A real, working CVE inbox spec — round-trips through the engine's
@@ -1245,6 +1245,44 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   );
 }
 
+// One AI-research run report. Header line carries the at-a-glance
+// facts; the model's own run summary renders underneath in full.
+function ResearchRunReport({ run }) {
+  return (
+    <div className="rounded border border-border/60 bg-muted/10 p-2.5 text-xs space-y-1.5">
+      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
+        <span className={`inline-flex items-center font-medium border px-1.5 py-0.5 rounded ${
+          run.ok
+            ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30'
+            : 'bg-red-500/10 text-red-500 border-red-500/30'
+        }`}>
+          {run.ok ? 'ok' : 'failed'}
+        </span>
+        <span className="font-mono text-muted-foreground" title={run.at}>
+          {run.at ? new Date(run.at).toLocaleString() : '—'}
+        </span>
+        <span className="text-muted-foreground">{run.trigger === 'scheduled' ? 'scheduled' : 'manual'}</span>
+        <span className="text-foreground/90">
+          {run.created ?? 0} created · {run.updated ?? 0} updated
+        </span>
+        <span className="text-muted-foreground/80 font-mono">
+          {run.turns != null ? `${run.turns} turn${run.turns === 1 ? '' : 's'} · ` : ''}
+          {run.fetches ?? 0} fetch(es) · ~{run.tokens ?? 0} tokens
+          {run.duration_s != null ? ` · ${run.duration_s}s` : ''}
+        </span>
+      </div>
+      {run.error && (
+        <div className="text-red-400 break-words">{run.error}</div>
+      )}
+      {run.summary && (
+        <div className="whitespace-pre-wrap break-words text-muted-foreground">
+          {run.summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Pagination threshold — below this we show all rows and skip the
 // pagination controls entirely. 100 keeps single-host installs
 // uncluttered while taming fleets where the inbox grows.
@@ -1287,7 +1325,6 @@ function CveList({ onOpen, refreshKey }) {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteContent, setPasteContent] = useState('');
   const [pasting, setPasting] = useState(false);
-  const [polling, setPolling] = useState(false);
   // Per-row quick-action state. rowBusy maps cve → 'check' | 'run'
   // while that row's action is in flight; runTarget / dismissTarget
   // hold the entry a confirm dialog is open for (null = closed).
@@ -1315,6 +1352,10 @@ function CveList({ onOpen, refreshKey }) {
   const [researchSaving, setResearchSaving] = useState(false);
   const [researchTesting, setResearchTesting] = useState(false);
   const [researchRunning, setResearchRunning] = useState(false);
+  // Run reports shown on the page itself (the dialog only holds
+  // settings). newest-first; reportsOpen expands the history list.
+  const [researchRuns, setResearchRuns] = useState([]);
+  const [reportsOpen, setReportsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
@@ -1329,6 +1370,22 @@ function CveList({ onOpen, refreshKey }) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
+
+  // Research config + run reports load once on mount: the config
+  // drives the toolbar Run button's enabled state, the reports feed
+  // the panel above the table. Both refresh after a run completes.
+  const refreshResearchMeta = useCallback(async () => {
+    try {
+      const [cfg, runs] = await Promise.all([
+        api.getCveResearchConfig(),
+        api.getCveResearchRuns(),
+      ]);
+      setResearch(cfg);
+      setResearchRuns(runs?.runs || []);
+    } catch { /* panel just stays empty */ }
+  }, []);
+
+  useEffect(() => { refreshResearchMeta(); }, [refreshResearchMeta]);
 
   const setBusyFor = (cve, action) => setRowBusy(m => {
     const next = { ...m };
@@ -1513,8 +1570,7 @@ function CveList({ onOpen, refreshKey }) {
           : out.error,
         variant: out.ok ? undefined : 'destructive',
       });
-      const cfg = await api.getCveResearchConfig();
-      setResearch(cfg);
+      await refreshResearchMeta();
       await refresh();
     } catch (err) {
       toast({
@@ -1544,29 +1600,6 @@ function CveList({ onOpen, refreshKey }) {
       });
     } finally {
       setPasting(false);
-    }
-  };
-
-  const onPollNow = async () => {
-    setPolling(true);
-    try {
-      const out = await api.pollCves();
-      const ran = (out?.entries || []).filter(e => e.executed).length;
-      toast({
-        title: 'Poll done',
-        description: ran > 0
-          ? `Engine executed ${ran} AUTO_PATCH ${ran === 1 ? 'entry' : 'entries'}.`
-          : 'Nothing to do — no AUTO_PATCH entries affected this host.',
-      });
-      await refresh();
-    } catch (err) {
-      toast({
-        title: 'Poll failed',
-        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
-        variant: 'destructive',
-      });
-    } finally {
-      setPolling(false);
     }
   };
 
@@ -1719,6 +1752,47 @@ function CveList({ onOpen, refreshKey }) {
 
   return (
     <div className="space-y-4">
+      {/* AI research reports — on the page, not buried in the settings
+          dialog. Collapsed: a one-line latest-run status. Expanded:
+          the recent run history (newest first). Scrolls away under
+          the sticky chrome when browsing rows. */}
+      {researchRuns.length > 0 && (() => {
+        const latest = researchRuns[0];
+        return (
+          <div className="border rounded-lg bg-card">
+            <button
+              type="button"
+              onClick={() => setReportsOpen(v => !v)}
+              aria-expanded={reportsOpen}
+              className="w-full min-h-[44px] flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent/40 rounded-lg"
+            >
+              {reportsOpen
+                ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
+              <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="font-medium shrink-0">Research reports</span>
+              <span className="text-xs text-muted-foreground truncate">
+                latest: <span className={latest.ok ? 'text-emerald-500' : 'text-red-500'}>
+                  {latest.ok ? 'ok' : 'failed'}
+                </span>
+                {' · '}{relTime(latest.at)}
+                {' · '}{latest.created ?? 0} created, {latest.updated ?? 0} updated
+              </span>
+              <span className="ml-auto text-xs text-muted-foreground shrink-0">
+                {researchRuns.length} run{researchRuns.length === 1 ? '' : 's'}
+              </span>
+            </button>
+            {reportsOpen && (
+              <div className="border-t px-3 py-2 space-y-2 max-h-80 overflow-y-auto">
+                {researchRuns.map((run, i) => (
+                  <ResearchRunReport key={run.at || i} run={run} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Sticky chrome: everything from page title down to and
           including the table header stays pinned at the top of the
           scroll container while only the row list scrolls below.
@@ -1742,13 +1816,17 @@ function CveList({ onOpen, refreshKey }) {
           <Button variant="outline" size="sm" onClick={() => setPasteOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" /> Paste YAML
           </Button>
-          <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
-            {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
-            Poll now
-          </Button>
           <Button variant="outline" size="sm" onClick={onOpenResearch}
-                  title="Configure or run the native AI CVE-research routine">
+                  title="Configure the native AI CVE-research routine">
             <Bot className="h-4 w-4 mr-1.5" /> AI Research
+          </Button>
+          <Button size="sm" onClick={onRunResearchNow}
+                  disabled={researchRunning || !research?.configured}
+                  title={research?.configured
+                    ? 'Run one AI research pass now'
+                    : 'Configure AI Research (provider, model, key) first'}>
+            {researchRunning ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Play className="h-4 w-4 mr-1.5" />}
+            {researchRunning ? 'Researching…' : 'Run research'}
           </Button>
           <Button variant="ghost" size="icon" onClick={refresh} disabled={loading} title="Refresh list">
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -2244,32 +2322,12 @@ function CveList({ onOpen, refreshKey }) {
                     {researchTesting ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Stethoscope className="h-4 w-4 mr-1.5" />}
                     Test connection
                   </Button>
-                  <Button
-                    variant="outline" size="sm" onClick={onRunResearchNow}
-                    disabled={researchRunning || !research?.configured}
-                    title={!research?.configured ? 'Save a provider/model/key first' : 'Run one research pass now'}
-                  >
-                    {researchRunning ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Play className="h-4 w-4 mr-1.5" />}
-                    Run now
-                  </Button>
                 </div>
 
-                {research?.last_run_at && (
-                  <div className={`text-xs rounded border p-2 space-y-1 ${
-                    research.last_run_ok
-                      ? 'border-emerald-500/30 bg-emerald-500/10'
-                      : 'border-red-500/30 bg-red-500/10'
-                  }`}>
-                    <div className="font-medium">
-                      Last run: {research.last_run_ok ? 'ok' : 'failed'} · {new Date(research.last_run_at).toLocaleString()}
-                    </div>
-                    {research.last_run_summary && (
-                      <div className="whitespace-pre-wrap break-words text-muted-foreground">
-                        {research.last_run_summary}
-                      </div>
-                    )}
-                  </div>
-                )}
+                <p className="text-xs text-muted-foreground">
+                  Run passes with the <strong className="text-foreground/80">Run research</strong>{' '}
+                  button on the CVEs page; run reports show there too.
+                </p>
               </>
             )}
           </div>

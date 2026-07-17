@@ -27,7 +27,7 @@ import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getInboxDir, getHostname, CVE_ID_RE, safePath, runEngine } from '../lib/engine-cli.js';
 import {
   getResearchSettings, saveResearchSettings, testConnectorConnectivity,
-  listReusableMock2Connectors, resolveConnectorSource,
+  listReusableMock2Connectors, resolveConnectorSource, getResearchRunLog,
 } from '../lib/cve-research.js';
 import * as cveResearchScheduler from '../lib/cve-research-scheduler.js';
 
@@ -401,6 +401,11 @@ const researchConfigSchema = z.object({
 
 cvesRouter.get('/research/config', requireAdmin, async (_req, res) => {
   res.json(getResearchSettings());
+});
+
+// Run history (newest first) for the dashboard's reports panel. Read-only.
+cvesRouter.get('/research/runs', requireAdmin, async (_req, res) => {
+  res.json({ runs: getResearchRunLog() });
 });
 
 // Connectors already configured under Projects (mock2) that could be

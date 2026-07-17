@@ -1484,7 +1484,6 @@ export const api = {
     }),
   deleteCve: (cveId) =>
     request(`/cves/${encodeURIComponent(cveId)}`, { method: 'DELETE' }),
-  pollCves: () => request('/cves/poll', { method: 'POST' }),
 
   // AI research routine — native replacement for a manual external
   // research session. GET never returns the plaintext key, only
@@ -1501,6 +1500,10 @@ export const api = {
     request('/cves/research/test', { method: 'POST' }),
   runCveResearchNow: () =>
     request('/cves/research/run-now', { method: 'POST' }),
+  // Recent research run reports, newest first: { runs: [{at, trigger, ok,
+  // error, created, updated, tool_errors, fetches, tokens, turns,
+  // duration_s, summary}] }.
+  getCveResearchRuns: () => request('/cves/research/runs'),
 
   // Housekeeping — disk-usage view (docker df + backup dir) plus
   // opt-in prune actions for stale artifacts. Pruning is sudo-gated

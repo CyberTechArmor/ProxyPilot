@@ -11,7 +11,7 @@
 import { getMock2Db } from './db.js';
 import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js';
 import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
-import { normalizeLaneTuning, normalizeTuningEntry } from './lane-tuning-logic.js';
+import { normalizeLaneTuning, normalizeTuningEntry, normalizeGlobalThinking } from './lane-tuning-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -114,12 +114,29 @@ export function getComponentAutoApply() {
 // ---- Lane tuning (per-lane model / effort / thinking overrides) ----
 export const LANE_TUNING_KEY = 'lane_tuning';
 
+// ---- Global thinking switch (kill thinking everywhere at once) ----
+export const GLOBAL_THINKING_KEY = 'global_thinking';
+
+// 'off' disables thinking for EVERY lane, overriding per-lane tuning at read
+// time (the stored per-lane doc is untouched, so flipping back restores it).
+// Precedence: stored setting → MOCK2_THINKING env → 'default'.
+export function getGlobalThinking() {
+  return normalizeGlobalThinking(getMock2Setting(GLOBAL_THINKING_KEY, process.env.MOCK2_THINKING || 'default'));
+}
+
+export function setGlobalThinking(mode, updatedBy = null) {
+  setMock2Setting(GLOBAL_THINKING_KEY, normalizeGlobalThinking(mode), updatedBy);
+  return getGlobalThinking();
+}
+
 // The operator's thinking settings for one lane: {model, effort, thinking},
 // fully normalized (see lane-tuning-logic.js). Applied as the LAST word over
-// slots/routing at each lane's model call.
+// slots/routing at each lane's model call. The global thinking switch overlays
+// the per-lane value, so every model call goes thinking-off when it is 'off'.
 export function getLaneTuning(lane) {
   const doc = normalizeLaneTuning(getMock2Setting(LANE_TUNING_KEY, null));
-  return doc[lane] || normalizeTuningEntry(null);
+  const entry = doc[lane] || normalizeTuningEntry(null);
+  return getGlobalThinking() === 'off' ? { ...entry, thinking: 'off' } : entry;
 }
 
 export function getAllLaneTuning() {

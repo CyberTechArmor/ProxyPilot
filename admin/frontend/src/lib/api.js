@@ -1138,10 +1138,12 @@ export const api = {
   // (202 → poll provision-status); delete requires sudo.
   mock2ListProjects: () => request('/mock2/projects'),
   mock2GetProject: (id) => request(`/mock2/projects/${id}`),
-  mock2CreateProject: ({ name, description, parent_domain_id }) =>
+  // Curated base-design presets for the new-project picker.
+  mock2DesignPresets: () => request('/mock2/design-presets'),
+  mock2CreateProject: ({ name, description, parent_domain_id, design_preset }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id }),
+      body: JSON.stringify({ name, description, parent_domain_id, design_preset }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   mock2RotateProjectSlug: (id) => request(`/mock2/projects/${id}/rotate-slug`, { method: 'POST' }),
@@ -1185,6 +1187,9 @@ export const api = {
   mock2GetLaneTuning: () => request('/mock2/settings/lane-tuning'),
   mock2SetLaneTuning: (lane, patch) =>
     request('/mock2/settings/lane-tuning', { method: 'POST', body: JSON.stringify({ lane, ...patch }) }),
+  // Global thinking switch — 'off' disables thinking for every lane at once.
+  mock2SetGlobalThinking: (thinking) =>
+    request('/mock2/settings/global-thinking', { method: 'POST', body: JSON.stringify({ thinking }) }),
 
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid
@@ -1394,8 +1399,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ message, ...(mode ? { mode } : {}), ...(images?.length ? { images } : {}) }),
     }),
-  mock2ApproveDesign: (id) =>
-    request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
+  // build: 'all' (one initial build — default) | 'screens' (queue every screen
+  // as a scoped background build) | 'none' (approval only).
+  mock2ApproveDesign: (id, build) =>
+    request(`/mock2/projects/${id}/design/approve`, { method: 'POST', body: JSON.stringify(build ? { build } : {}) }),
+  // Screen plan (per-screen apply): seeded from the approved inventory.
+  mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
+  mock2DecideScreen: (id, screenId, status) =>
+    request(`/mock2/projects/${id}/screens/${screenId}/decision`, { method: 'POST', body: JSON.stringify({ status }) }),
+  mock2ApplyScreens: (id, ids) =>
+    request(`/mock2/projects/${id}/screens/apply`, { method: 'POST', body: JSON.stringify(ids?.length ? { ids } : {}) }),
+  // Production check — the full-gate readiness pass (no new features).
+  mock2ProductionCheck: (id) =>
+    request(`/mock2/projects/${id}/production-check`, { method: 'POST' }),
   // Design template — the design/mockup only (mockup HTML + original brief +
   // conversation + tokens), never code. Export returns the portable JSON doc
   // (the caller blob-downloads it); import seeds THIS project's Concept stage

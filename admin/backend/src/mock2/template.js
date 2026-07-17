@@ -18,6 +18,7 @@
 // is named "agent".
 
 import { buildScaffoldFiles } from './scaffold.js';
+import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
@@ -238,6 +239,11 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
       path: 'state/mockups/.gitkeep',
       content: '',
     },
+    // Design preset chosen at creation (design-presets.js): seed the token doc
+    // + rendered stylesheet up front, exactly what design approval would
+    // produce — so the base app is styled before any model turn. No preset →
+    // nothing seeded (the mockup model picks the look; approval extracts it).
+    ...buildDesignPresetSeedFiles(project?.design_preset),
   ];
 }
 

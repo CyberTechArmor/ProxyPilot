@@ -115,8 +115,11 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning } from './settings.js';
-import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING } from './lane-tuning-logic.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
+import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
+import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI } from './design-presets.js';
+import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue } from './screen-plan.js';
+import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
@@ -331,6 +334,9 @@ const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(2000).optional(),
   parent_domain_id: z.union([z.number().int(), z.string()]),
+  // Base design preset (design-presets.js); omitted/'ai' → the mockup model
+  // picks the look, exactly as before.
+  design_preset: z.string().trim().max(40).optional(),
 });
 const memberSchema = z.object({
   user_id: z.union([z.number().int(), z.string()]),
@@ -835,9 +841,21 @@ export function createMock2Router() {
       return res.status(500).json({ error: `Could not create project: ${err?.message || 'unknown error'}` });
     }
 
-    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain }, req.ip);
+    // Persist the chosen design preset BEFORE provisioning starts — the seed
+    // files (template.js) read it off the project row to style the base app.
+    const presetKey = normalizeDesignPresetKey(parsed.data.design_preset);
+    if (presetKey !== DESIGN_PRESET_AI) {
+      project = updateProject(project.id, { design_preset: presetKey });
+    }
+
+    logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain, design_preset: presetKey }, req.ip);
     startProvision(project);
     res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
+  });
+
+  // The curated base-design presets a new project can start from (picker UI).
+  router.get('/design-presets', (_req, res) => {
+    res.json({ presets: publicDesignPresets() });
   });
 
   router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {
@@ -1085,8 +1103,20 @@ export function createMock2Router() {
   router.get('/settings/lane-tuning', requireAdmin, (_req, res) => {
     res.json({
       lanes: getAllLaneTuning(),
+      global_thinking: getGlobalThinking(),
       options: { lanes: TUNING_LANES, labels: TUNING_LANE_LABELS, efforts: TUNING_EFFORTS, thinking: TUNING_THINKING },
     });
+  });
+  // Global thinking switch — 'off' disables thinking for every lane at once
+  // (overlays per-lane tuning at read time; the stored per-lane doc is kept).
+  router.post('/settings/global-thinking', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      thinking: z.string().refine((t) => GLOBAL_THINKING_MODES.includes(t), 'unknown thinking mode'),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid thinking mode' });
+    const mode = setGlobalThinking(parsed.data.thinking, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_GLOBAL_THINKING', 'mock2_setting', 0, { thinking: mode }, req.ip);
+    res.json({ global_thinking: mode });
   });
   router.post('/settings/lane-tuning', requireAdmin, (req, res) => {
     const parsed = z.object({
@@ -2741,18 +2771,82 @@ export function createMock2Router() {
   // it couldn't).
   router.post('/projects/:id/design/approve', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
+    // How to build after approval: 'all' (one initial build — the default),
+    // 'screens' (queue every screen as a scoped background build), 'none'.
+    const strat = z.object({ build: z.enum(['all', 'screens', 'none']).optional() }).safeParse(req.body || {});
+    const buildStrategy = (strat.success && strat.data.build) || 'all';
     let result;
     try {
       result = await startDesignApproval({
-        project, user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        project, user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, buildStrategy,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not approve the design: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_DESIGN_APPROVE', 'mock2_project', project.id,
-      { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { acting_as_admin: req.mock2Access.actingAsAdmin, build: buildStrategy }, req.ip);
     return res.status(202).json({ job: getConceptJobStatus(project.id) });
+  });
+
+  // ============================================================
+  // Screen plan (per-screen apply): one row per inventory screen, seeded at
+  // design approval. Members see the plan; editors decide (keep/defer) and
+  // apply — each applied screen becomes a scoped background MVP build, drained
+  // one at a time (screen-plan.js).
+  // ============================================================
+
+  router.get('/projects/:id/screens', requireMock2Role('viewer'), (req, res) => {
+    const rows = listScreenPlan(req.mock2Project.id);
+    res.json({ screens: rows.map(publicScreenShape), counts: screenPlanCounts(rows) });
+  });
+
+  router.post('/projects/:id/screens/:screenId/decision', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const parsed = z.object({ status: z.enum([...SCREEN_DECISIONS]) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'status must be planned or deferred' });
+    const r = decideScreen(req.mock2Project.id, req.params.screenId, parsed.data.status);
+    if (!r.ok) return res.status(409).json({ error: r.error });
+    logAudit(req.user.id, 'MOCK2_SCREEN_DECIDE', 'mock2_project', req.mock2Project.id,
+      { screen_id: Number(req.params.screenId), status: parsed.data.status }, req.ip);
+    res.json({ screen: publicScreenShape(r.row) });
+  });
+
+  // Apply screens: queue the chosen (or all planned) screens and kick the
+  // background drain. 202 — progress lands in the chat as each screen builds.
+  router.post('/projects/:id/screens/apply', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (!project.design_approved_at) return res.status(409).json({ error: 'Approve the design first — screens apply from the approved inventory.' });
+    const parsed = z.object({ ids: z.array(z.union([z.number().int(), z.string()])).optional() }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'ids must be an array of screen ids' });
+    const queued = queueScreens(project.id, { ids: parsed.data.ids ?? null, queuedBy: req.user.id });
+    if (!queued) return res.status(409).json({ error: 'No screens to apply — every screen is deferred, queued, building, or already built.' });
+    drainScreenQueue(project.id).catch((e) => console.warn('[mock2] screen drain failed:', e?.message));
+    logAudit(req.user.id, 'MOCK2_SCREENS_APPLY', 'mock2_project', project.id, { queued }, req.ip);
+    res.status(202).json({ queued });
+  });
+
+  // Production check: a FULL build pass whose only job is readiness — the rule
+  // interview, per-rule tests, acceptance checks, and the complete gate battery
+  // that MVP/screen builds deliberately skip. No new features.
+  router.post('/projects/:id/production-check', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    let result;
+    try {
+      result = await startBuild({
+        project,
+        instruction: PRODUCTION_CHECK_INSTRUCTION,
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        buildMode: 'full',
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not start the production check: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_PRODUCTION_CHECK', 'mock2_cycle', result.cycle?.id || 0,
+      { status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.status(result.status === 'refused' ? 200 : 202).json({
+      cycle: publicCycleShape(result.cycle), refused: result.status === 'refused', reason: result.error || null,
+    });
   });
 
   // Export the project's DESIGN TEMPLATE — the mockup HTML + original design

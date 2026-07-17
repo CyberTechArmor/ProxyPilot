@@ -36,6 +36,7 @@ import {
   COMPONENTS_STATE_PATH,
 } from './component-logic.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
+import { componentWiresBootstrap, planAuthWiring, AUTH_WIRING_TARGETS } from './scaffold-auth.js';
 import { buildCheckpointScript } from './template.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getCurrentFrameworkVersion } from './framework.js';
@@ -99,6 +100,31 @@ async function installOne({ containerName, row }) {
     return { ok: false, error: `${failed.length} file(s) did not land intact: ${failed.slice(0, 5).map((m) => m.path).join(', ')}` };
   }
 
+  // 3.5) Deterministic auth wiring (scaffold-auth.js): when the component
+  //      provides the forced first-admin bootstrap, rewrite the scaffold's
+  //      still-pristine entry files so the gate is MOUNTED and the sign-in
+  //      page served — no model turn involved, so a build can't skip it.
+  //      Adapted files are kept and reported, never clobbered.
+  const wired = [];
+  const wiringKept = [];
+  if (componentWiresBootstrap(contract, files)) {
+    const vs = await containerSh(
+      containerName,
+      buildManifestVerifyScript(AUTH_WIRING_TARGETS, { appDir: APP_DIR }),
+      { timeoutMs: 60000 },
+    );
+    const plan = planAuthWiring({ contract, files, currentShaByPath: parseShaVerifyOutput(vs.stdout) });
+    for (const a of plan.actions) {
+      if (a.action === 'wire') {
+        const w = await writeFileInContainer(containerName, a.path, a.content);
+        if (!w.ok) return { ok: false, error: `auth wiring failed for ${a.path}: ${w.error || 'write failed'}` };
+        wired.push(a.path);
+      } else if (a.action === 'kept-adapted') {
+        wiringKept.push(a.path);
+      }
+    }
+  }
+
   // 4) Declared dependencies (the contract's structured npm installs — no
   //    usage_md parsing). The fence's egress proxy already allows npm.
   const deps = contract?.dependencies;
@@ -143,8 +169,10 @@ async function installOne({ containerName, row }) {
     migrationsSkipped: plan.skipped.length,
     deps: runtime.length + (deps?.dev?.length || 0),
     connections: declared.length,
+    wired: wired.length,
+    wiringKept: wiringKept.length,
   };
-  return { ok: true, component, version, contract, manifest, counts };
+  return { ok: true, component, version, contract, manifest, counts, wired, wiringKept };
 }
 
 // ---- the pre-install pass (all confirmed selections for a project) ----
@@ -256,7 +284,7 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
   // The visible record in the build chat: what landed (and what failed).
   try {
     if (installed.length) {
-      const lines = installed.map((i) => `- ${i.component.key} v${i.version.version} — ${i.counts.written} files written, ${i.counts.kept} kept, ${i.counts.migrations} migration(s) queued${i.counts.connections ? `, ${i.counts.connections} connection(s) declared` : ''}`);
+      const lines = installed.map((i) => `- ${i.component.key} v${i.version.version} — ${i.counts.written} files written, ${i.counts.kept} kept, ${i.counts.migrations} migration(s) queued${i.counts.connections ? `, ${i.counts.connections} connection(s) declared` : ''}${i.counts.wired ? `, auth bootstrap WIRED into ${i.wired.join(' + ')} (sign-in + first-admin flow live)` : ''}${i.counts.wiringKept ? `, wiring kept out of adapted ${i.wiringKept.join(' + ')}` : ''}`);
       insertMessage({
         projectId, kind: 'system', cycleId,
         body: `Standard components installed by the platform (0 build credits):\n${lines.join('\n')}\nThe build will wire the design to their APIs.`,

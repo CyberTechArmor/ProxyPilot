@@ -30,6 +30,16 @@ export const TUNING_LANE_LABELS = Object.freeze({
 export const TUNING_EFFORTS = Object.freeze(['default', ...ROUTING_EFFORTS]);
 export const TUNING_THINKING = Object.freeze(['default', 'off']);
 
+// The GLOBAL thinking switch: 'default' leaves each lane's (possibly tuned)
+// behavior alone; 'off' disables thinking for EVERY lane at once — it overlays
+// the per-lane setting at read time without touching the stored doc, so
+// flipping it back restores whatever each lane had.
+export const GLOBAL_THINKING_MODES = Object.freeze(['default', 'off']);
+
+export function normalizeGlobalThinking(raw) {
+  return String(raw ?? '').trim().toLowerCase() === 'off' ? 'off' : 'default';
+}
+
 const EMPTY_ENTRY = Object.freeze({ model: null, effort: 'default', thinking: 'default' });
 
 export function normalizeTuningEntry(raw) {

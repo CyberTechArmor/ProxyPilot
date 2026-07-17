@@ -31,6 +31,9 @@ import {
 import {
   ArrowLeft, Loader2, Plus, Trash2, CheckCircle2, XCircle, CircleDashed, ShieldCheck, Cpu, GitBranch, Route,
 } from 'lucide-react';
+import {
+  SLOT_SUGGESTED_MODEL, RECOMMENDED_ESCALATE_MODEL, modelLabel, modelOptionsWith,
+} from '@/lib/model-options';
 
 const PROVIDERS = ['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible'];
 const CAPABILITIES = ['chat', 'agentic_build', 'summarize', 'classify'];
@@ -40,28 +43,6 @@ const SLOT_CAP = {
   build_runner: 'agentic_build', summary: 'summarize', remediation: 'agentic_build',
 };
 
-// The Claude models offered per slot. Pick by effort/quality vs. cost — spend
-// Opus only where the work is hard (agentic coding), Sonnet where quality matters
-// at lower cost, Haiku for cheap low-risk stages. Prices are the published base
-// input/output rate per million tokens (used only for the in-menu hint).
-const MODEL_OPTIONS = [
-  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', tier: 'High effort — thinking, coding, agentic', inPerM: 5, outPerM: 25 },
-  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', tier: 'Balanced — quality at lower cost', inPerM: 3, outPerM: 15 },
-  { id: 'claude-haiku-4-6', label: 'Claude Haiku 4.6', tier: 'Fast & cheap — low-risk tasks', inPerM: 1, outPerM: 5 },
-];
-// Suggested model per slot (a recommendation — the dropdown lets you override).
-// Opus for the agentic build/remediation; Sonnet for the quality-sensitive design
-// + audit stages; Haiku for the cheap classify/summarize stages.
-const SLOT_SUGGESTED_MODEL = {
-  concept_chat: 'claude-sonnet-4-6',
-  mockup: 'claude-sonnet-4-6',
-  audit: 'claude-sonnet-4-6',
-  classifier: 'claude-haiku-4-6',
-  build_runner: 'claude-opus-4-8',
-  summary: 'claude-haiku-4-6',
-  remediation: 'claude-opus-4-8',
-};
-const modelLabel = (id) => MODEL_OPTIONS.find((m) => m.id === id)?.label || id;
 const GIT_PROVIDERS = ['github', 'gitea', 'generic_https', 'generic_ssh'];
 
 function TestBadge({ test }) {
@@ -485,17 +466,22 @@ export default function ModelConnectors() {
 }
 
 // One knowledge-base rule: task kind → model / escalation model / effort /
-// notes. Empty model fields mean "the default applies" (slot model / env
-// fallback); the effort select uses a 'default' sentinel for the same reason.
+// notes. The model dropdowns default to the recommendation: 'auto' (no
+// override — routing sends routine tasks to the fast code model and hard ones
+// to the slot model) for Model, and the strongest coding model for Escalate.
+// Sentinels ('auto' / 'none') map to null on save, meaning "the default
+// applies"; the effort select uses a 'default' sentinel for the same reason.
 function RoutingRuleRow({ rule, efforts, onSave }) {
-  const [model, setModel] = useState(rule.model || '');
-  const [escalate, setEscalate] = useState(rule.escalate_model || '');
+  const [model, setModel] = useState(rule.model || 'auto');
+  // Default the escalation dropdown to the recommended model when the rule has
+  // none yet — Save applies it; pick "None" to keep escalation off.
+  const [escalate, setEscalate] = useState(rule.escalate_model || RECOMMENDED_ESCALATE_MODEL);
   const [effort, setEffort] = useState(rule.effort || 'default');
   const [notes, setNotes] = useState(rule.notes || '');
   const [saving, setSaving] = useState(false);
 
-  const dirty = (model.trim() || null) !== (rule.model || null)
-    || (escalate.trim() || null) !== (rule.escalate_model || null)
+  const dirty = (model === 'auto' ? null : model) !== (rule.model || null)
+    || (escalate === 'none' ? null : escalate) !== (rule.escalate_model || null)
     || (effort === 'default' ? null : effort) !== (rule.effort || null)
     || (notes.trim() || null) !== (rule.notes || null);
 
@@ -503,13 +489,24 @@ function RoutingRuleRow({ rule, efforts, onSave }) {
     setSaving(true);
     try {
       await onSave({
-        model: model.trim() || null,
-        escalate_model: escalate.trim() || null,
+        model: model === 'auto' ? null : model,
+        escalate_model: escalate === 'none' ? null : escalate,
         effort: effort === 'default' ? null : effort,
         notes: notes.trim() || null,
       });
     } finally { setSaving(false); }
   };
+
+  const modelItem = (m, suffix = '') => (
+    <SelectItem key={m.id} value={m.id}>
+      <span className="flex flex-col">
+        <span>{m.label}{suffix}</span>
+        <span className="text-[11px] text-muted-foreground">
+          {m.tier}{m.inPerM != null ? ` · $${m.inPerM}/$${m.outPerM} per M tok` : ''}
+        </span>
+      </span>
+    </SelectItem>
+  );
 
   return (
     <Card>
@@ -520,14 +517,34 @@ function RoutingRuleRow({ rule, efforts, onSave }) {
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           <div>
-            <Label htmlFor={`rm-${rule.task_kind}`} className="text-xs">Model</Label>
-            <Input id={`rm-${rule.task_kind}`} value={model} onChange={(e) => setModel(e.target.value)}
-              placeholder="slot model" className="min-h-[44px]" />
+            <Label className="text-xs">Model</Label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger className="min-h-[44px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">
+                  <span className="flex flex-col">
+                    <span>Auto · recommended</span>
+                    <span className="text-[11px] text-muted-foreground">Fast model for routine tasks, slot model for hard ones</span>
+                  </span>
+                </SelectItem>
+                {modelOptionsWith(rule.model).map((m) => modelItem(m))}
+              </SelectContent>
+            </Select>
           </div>
           <div>
-            <Label htmlFor={`re-${rule.task_kind}`} className="text-xs">Escalate to (on failure / difficulty 5)</Label>
-            <Input id={`re-${rule.task_kind}`} value={escalate} onChange={(e) => setEscalate(e.target.value)}
-              placeholder="e.g. claude-opus-4-8" className="min-h-[44px]" />
+            <Label className="text-xs">Escalate to (on failure / difficulty 5)</Label>
+            <Select value={escalate} onValueChange={setEscalate}>
+              <SelectTrigger className="min-h-[44px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {modelOptionsWith(rule.escalate_model).map((m) => modelItem(m, m.id === RECOMMENDED_ESCALATE_MODEL ? ' · recommended' : ''))}
+                <SelectItem value="none">
+                  <span className="flex flex-col">
+                    <span>None</span>
+                    <span className="text-[11px] text-muted-foreground">MOCK2_ESCALATE_MODEL env fallback, else no escalation</span>
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <div>
             <Label className="text-xs">Reasoning effort</Label>
@@ -570,9 +587,7 @@ function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
 
   // Offer the standard models plus, if the slot already runs a custom id, that
   // id too (so the dropdown never silently drops an existing assignment).
-  const options = MODEL_OPTIONS.some((m) => m.id === model) || !model
-    ? MODEL_OPTIONS
-    : [...MODEL_OPTIONS, { id: model, label: model, tier: 'Current assignment', inPerM: null, outPerM: null }];
+  const options = modelOptionsWith(model);
 
   return (
     <Card>

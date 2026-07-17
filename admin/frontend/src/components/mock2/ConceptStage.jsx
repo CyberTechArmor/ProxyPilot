@@ -309,11 +309,16 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
-  const approve = async () => {
+  const approve = async (build = 'all') => {
     setBusy(true);
     try {
-      await api.mock2ApproveDesign(projectId);
-      toast({ title: 'Building…', description: 'Locking in your design and unlocking the build — watch the chat for progress.' });
+      await api.mock2ApproveDesign(projectId, build);
+      toast({
+        title: 'Building…',
+        description: build === 'screens'
+          ? 'Locking in your design — screens will build one at a time in the background; watch the chat.'
+          : 'Locking in your design and unlocking the build — watch the chat for progress.',
+      });
       await load();
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
@@ -326,7 +331,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // the chat opens it; confirming approves the design (sign-off #1), which locks
   // the mockup in and unlocks the build runner.
   const [confirmBuild, setConfirmBuild] = useState(false);
-  const doBuild = () => { setConfirmBuild(false); approve(); };
+  const doBuild = (build = 'all') => { setConfirmBuild(false); approve(build); };
 
   const composerDisabled = busy || jobActive || !online || approved;
 
@@ -639,21 +644,39 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
       <Dialog open={confirmBuild} onOpenChange={(o) => !o && setConfirmBuild(false)}>
         <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
           <DialogHeader>
-            <DialogTitle>Ready to build the MVP?</DialogTitle>
+            <DialogTitle>Ready to build?</DialogTitle>
             <DialogDescription>
-              This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null} and
-              starts the <span className="font-medium">MVP build</span> — a fast first testable version: standard
-              components are installed automatically and the heavyweight checks are deferred. Once it&apos;s up, iterate
-              with more builds, then run a full <span className="font-medium">Build</span> from the build chat to add
-              the rule questions, tests, and acceptance checks. You can keep chatting to refine the design instead —
-              building is a step you take when the mockup looks right.
+              This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null}.
+              The base app (sign-in, first-admin setup, and your chosen look) is already wired — choose how the
+              screens get built. Either way you can keep making changes afterwards, and a{' '}
+              <span className="font-medium">Production check</span> later runs the full rule/test/acceptance battery.
             </DialogDescription>
           </DialogHeader>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => doBuild('screens')}
+              className="w-full min-h-[44px] rounded-md border border-primary bg-primary/10 p-3 text-left"
+            >
+              <span className="flex items-center gap-2 text-sm font-medium"><Rocket className="h-4 w-4" /> Screen by screen (recommended)</span>
+              <span className="block pt-1 text-xs text-muted-foreground">
+                Each screen builds as its own small scoped pass, one at a time in the background — you can watch
+                them land, defer the ones you don&apos;t need, and keep working meanwhile.
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => doBuild('all')}
+              className="w-full min-h-[44px] rounded-md border p-3 text-left"
+            >
+              <span className="text-sm font-medium">Everything at once</span>
+              <span className="block pt-1 text-xs text-muted-foreground">
+                One MVP build implements the whole design in a single pass — fastest to a complete first version.
+              </span>
+            </button>
+          </div>
           <DialogFooter className="flex-col sm:flex-row gap-2">
             <Button variant="outline" onClick={() => setConfirmBuild(false)} className="h-11 sm:h-10">Not yet</Button>
-            <Button onClick={doBuild} className="h-11 sm:h-10">
-              <Rocket className="h-4 w-4 mr-1" /> Yes, build the MVP
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

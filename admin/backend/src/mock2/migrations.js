@@ -1259,4 +1259,45 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_requests ADD COLUMN build_mode TEXT NOT NULL DEFAULT 'full';`);
     },
   },
+  {
+    // Design presets (base look chosen at project creation): the project
+    // remembers which preset seeded its design tokens, so the Concept prompts
+    // stay bound to it. NULL/'ai' = no preset (the mockup model picks the look
+    // — pre-existing behavior, unchanged).
+    version: 530,
+    name: 'mock2_project_design_preset',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN design_preset TEXT;`);
+    },
+  },
+  {
+    // The screen plan (per-screen apply): design approval breaks the extracted
+    // inventory into one row per screen so the Builder can approve/defer
+    // screens individually and apply them as SMALL scoped background builds
+    // (one MVP build request per screen, drained sequentially) instead of one
+    // monolithic initial build. status: planned → queued → building →
+    // built | failed; deferred is parked. request_id ties a screen to the
+    // build request that implemented it.
+    version: 531,
+    name: 'mock2_screen_plan',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_screen_plan (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          purpose TEXT,
+          sort INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'planned',
+          request_id INTEGER,
+          queued_by INTEGER,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (project_id, name)
+        );
+        CREATE INDEX idx_mock2_screen_plan_project ON mock2_screen_plan (project_id, status);
+      `);
+    },
+  },
 ];

@@ -25,6 +25,7 @@ import { Button } from '@/components/ui/button';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import {
   Inbox, Loader2, ArrowLeft, CheckCircle2, XCircle, PlayCircle, RotateCcw, AlertTriangle,
 } from 'lucide-react';
@@ -156,6 +157,8 @@ export default function AdminQueue() {
   const [gateMode, setGateMode] = useState(null);        // 'enforce' | 'pending' | 'monitor' or null while loading
   const [gateModeOptions, setGateModeOptions] = useState([]);
   const [savingGateMode, setSavingGateMode] = useState(false);
+  const [autoApply, setAutoApply] = useState(null);      // boolean or null while loading
+  const [savingAutoApply, setSavingAutoApply] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -237,6 +240,36 @@ export default function AdminQueue() {
     }
   };
 
+  // Component auto-apply (admin-configurable — install every published
+  // standard component into every build automatically).
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetComponentAutoApply()
+      .then((r) => setAutoApply(!!r.enabled))
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load component auto-apply failed:', err); });
+  }, [gate]);
+
+  const onAutoApplyChange = async (checked) => {
+    const prev = autoApply;
+    setAutoApply(checked); // optimistic
+    setSavingAutoApply(true);
+    try {
+      const res = await api.mock2SetComponentAutoApply(checked);
+      setAutoApply(!!res.enabled);
+      toast({
+        title: `Component auto-apply ${res.enabled ? 'enabled' : 'disabled'}`,
+        description: res.enabled
+          ? 'Every published component installs into every build automatically.'
+          : 'Components are suggested on capability match and confirmed per project.',
+      });
+    } catch (err) {
+      setAutoApply(prev); // roll back
+      toast({ variant: 'destructive', title: 'Could not update auto-apply', description: err.message });
+    } finally {
+      setSavingAutoApply(false);
+    }
+  };
+
   const onStatus = async (item, status) => {
     setBusy(true);
     try {
@@ -307,6 +340,39 @@ export default function AdminQueue() {
               </SelectContent>
             </Select>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Component auto-apply — every published standard component, every build. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Auto-apply standard components</CardTitle>
+          <CardDescription>
+            When on, every published component in the library is installed into every build
+            automatically (zero build credits) and the build wires the design to its APIs
+            instead of rebuilding it from scratch. When off, components are only suggested
+            when the design&apos;s capabilities match, and must be confirmed per project.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <label htmlFor="component-auto-apply" className="flex min-h-11 items-center gap-3 cursor-pointer">
+            <Switch
+              id="component-auto-apply"
+              checked={!!autoApply}
+              disabled={autoApply == null || savingAutoApply}
+              onCheckedChange={onAutoApplyChange}
+            />
+            <span className="text-sm">
+              {autoApply == null
+                ? 'Loading…'
+                : autoApply
+                  ? 'On — all published components install on every build'
+                  : 'Off — suggest on capability match, confirm per project'}
+            </span>
+          </label>
+          <p className="pt-2 text-xs text-muted-foreground">
+            Explicitly declined components stay declined, and files a build already adapted are never overwritten.
+          </p>
         </CardContent>
       </Card>
 

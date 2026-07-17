@@ -1207,4 +1207,45 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Component auto-apply: selection rows the PLATFORM confirms (the
+    // component_auto_apply setting — every published component on every build)
+    // carry origin 'auto', distinct from a human confirm. SQLite can't ALTER a
+    // CHECK, so the table is rebuilt (same idiom as 524); data copies verbatim.
+    version: 528,
+    name: 'mock2_project_component_origin_auto',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE mock2_project_components_new (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          component_id INTEGER NOT NULL,
+          version_id INTEGER,
+          status TEXT NOT NULL DEFAULT 'suggested'
+            CHECK (status IN ('suggested','confirmed','declined','installed','install_failed')),
+          origin TEXT NOT NULL DEFAULT 'define'
+            CHECK (origin IN ('concept','define','operator','auto')),
+          options_json TEXT,
+          question_id INTEGER,
+          selected_by INTEGER,
+          decided_at TEXT,
+          installed_at TEXT,
+          install_manifest_json TEXT,
+          install_error TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          UNIQUE (project_id, component_id)
+        );
+        INSERT INTO mock2_project_components_new
+          SELECT id, project_id, component_id, version_id, status, origin, options_json,
+                 question_id, selected_by, decided_at, installed_at, install_manifest_json,
+                 install_error, created_at, updated_at
+            FROM mock2_project_components;
+        DROP TABLE mock2_project_components;
+        ALTER TABLE mock2_project_components_new RENAME TO mock2_project_components;
+        CREATE INDEX idx_mock2_project_components_project
+          ON mock2_project_components (project_id, status);
+      `);
+    },
+  },
 ];

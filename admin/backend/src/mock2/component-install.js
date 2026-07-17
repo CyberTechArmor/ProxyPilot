@@ -23,10 +23,12 @@ import {
 } from './runner.js';
 import { containerNameForProject } from './provision.js';
 import {
-  listProjectComponents, getPublishedComponentWithVersion, markProjectComponentInstall,
+  listProjectComponents, listPublishedComponents, getPublishedComponentWithVersion,
+  markProjectComponentInstall, decideProjectComponent,
 } from './components.js';
+import { getComponentAutoApply } from './settings.js';
 import {
-  parseFilesJson, parseContractJson, safeComponentPath,
+  parseFilesJson, parseContractJson, safeComponentPath, selectAutoApplyComponents,
   buildComponentManifest, buildPathsExistScript, parsePathsExistOutput,
   buildManifestVerifyScript, parseShaVerifyOutput,
   planMigrationRenumber, mergeEnvDefaults, manifestEntryFromConnection,
@@ -155,6 +157,31 @@ async function installOne({ containerName, row }) {
 // selection failed (the caller blocks the build; pressing Build again retries).
 export async function preinstallComponents({ project, initiatedBy = null, actingAsAdmin = 0, cycleId = null }) {
   const projectId = Number(project.id);
+
+  // Auto-apply (operator setting, default on): every published component with
+  // no explicit decision for this project is confirmed here (origin 'auto') so
+  // the deterministic pre-install below lands it. Every build path funnels
+  // through this function, so this is the single choke point. Human decisions
+  // are respected — a declined component stays declined — and keep-existing
+  // install semantics mean already-adapted files are never clobbered.
+  if (getComponentAutoApply()) {
+    try {
+      const picks = selectAutoApplyComponents(listPublishedComponents(), listProjectComponents(projectId));
+      for (const c of picks) {
+        decideProjectComponent({
+          projectId, componentId: c.id, versionId: c.current_version_id,
+          status: 'confirmed', origin: 'auto', decidedBy: initiatedBy,
+        });
+      }
+      if (picks.length) {
+        insertMessage({
+          projectId, kind: 'system', cycleId,
+          body: `Auto-apply is on — ${picks.length} standard component${picks.length === 1 ? '' : 's'} selected for this build: ${picks.map((c) => c.key).join(', ')}.`,
+        });
+      }
+    } catch (e) { console.warn('[mock2] component auto-apply failed:', e?.message); }
+  }
+
   const rows = listProjectComponents(projectId).filter((r) => INSTALLABLE.has(r.status));
   if (!rows.length) return { ok: true, installed: [], failed: [] };
   const containerName = project.container_name || containerNameForProject(projectId);

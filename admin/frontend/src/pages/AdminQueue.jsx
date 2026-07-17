@@ -473,7 +473,13 @@ export default function AdminQueue() {
                         disabled={savingTune}
                         onValueChange={(v) => saveLaneTuning(lane, { model: v === 'default' ? null : v })}
                       >
-                        <SelectTrigger id={`tune-model-${lane}`} className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                        <SelectTrigger id={`tune-model-${lane}`} className="h-11 sm:h-10">
+                          <SelectValue>
+                            <span className="truncate">
+                              {entry.model ? (modelOptionsWith(entry.model).find((m) => m.id === entry.model)?.label || entry.model) : 'Default (recommended)'}
+                            </span>
+                          </SelectValue>
+                        </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="default">Default (recommended) — slot / routing choice</SelectItem>
                           {modelOptionsWith(entry.model).map((m) => (

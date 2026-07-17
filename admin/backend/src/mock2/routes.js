@@ -425,7 +425,7 @@ const cycleStartSchema = z.object({
   images: chatImagesSchema,
   // 'full' (default) runs the audited build with the whole gate battery; 'mvp'
   // is the speed path — rule interview skipped, reduced battery, fast model.
-  mode: z.enum(['full', 'mvp']).optional(),
+  mode: z.enum(['full', 'mvp', 'quick']).optional(),
 });
 const cycleFeedbackSchema = z.object({
   rating: z.enum(['up', 'down']),

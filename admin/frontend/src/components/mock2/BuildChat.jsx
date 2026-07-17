@@ -96,10 +96,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     }
   };
 
-  // buildMode: 'full' runs the audited build (rule questions, whole gate
-  // battery); 'mvp' is the speed path — rule interview skipped, reduced
-  // battery, fast model — for a testable first version.
-  const startBuild = async (buildMode = 'full') => {
+  // buildMode: 'quick' is the default iteration path — one small scoped
+  // change, minimal gates, straight to deploy; 'full' runs the audited build
+  // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
+  const startBuild = async (buildMode = 'quick') => {
     const body = instruction.trim();
     if (!body) return;
     setBusy(true);
@@ -107,6 +107,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode);
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
+      } else if (buildMode === 'quick') {
+        toast({ title: 'Quick update started', description: 'One small scoped change — minimal gates, straight to deploy.' });
+        setInstruction('');
+        attach.clear();
       } else if (buildMode === 'mvp') {
         toast({ title: 'MVP build started', description: 'Skipping the rule interview — building a fast first testable version.' });
         setInstruction('');
@@ -249,22 +253,36 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                   <HelpCircle className="h-3.5 w-3.5" /> Ask
                 </button>
               </div>
-              {/* MVP build — the speed path: rule interview skipped, reduced
-                  gate battery, fast model. A later full Build adds the tests
-                  and acceptance discipline. Only offered for a fresh build. */}
+              {/* Slower paths, still one tap away: MVP (scaffold) and the fully
+                  audited Build. The primary action is the quick update. */}
               {mode === 'build' && !resumeMode ? (
-                <Button
-                  variant="outline" className="h-11 sm:h-10 ml-auto"
-                  disabled={composerDisabled || !instruction.trim()}
-                  onClick={() => startBuild('mvp')}
-                  title="Fast first version: skips the rule interview and the spec/test gates — run a full Build later for those"
-                >
-                  <Rocket className="h-4 w-4 mr-1" /> Build MVP
-                </Button>
+                <>
+                  <Button
+                    variant="outline" className="h-11 sm:h-10 ml-auto"
+                    disabled={composerDisabled || !instruction.trim()}
+                    onClick={() => startBuild('mvp')}
+                    title="Fast first version of a whole design: skips the rule interview and the spec/test gates"
+                  >
+                    <Rocket className="h-4 w-4 mr-1" /> MVP
+                  </Button>
+                  <Button
+                    variant="outline" className="h-11 sm:h-10"
+                    disabled={composerDisabled || !instruction.trim()}
+                    onClick={() => startBuild('full')}
+                    title="The audited build: rule questions, per-rule tests, the whole gate battery"
+                  >
+                    <Hammer className="h-4 w-4 mr-1" /> Full build
+                  </Button>
+                </>
               ) : null}
-              <Button className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`} disabled={composerDisabled || (!resumeMode && !instruction.trim())} onClick={submitComposer}>
+              <Button
+                className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`}
+                disabled={composerDisabled || (!resumeMode && !instruction.trim())}
+                onClick={submitComposer}
+                title={mode === 'build' && !resumeMode ? 'One small scoped change on the fast model — minimal gates, straight to deploy' : undefined}
+              >
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : mode === 'ask' ? <HelpCircle className="h-4 w-4 mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
-                {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Run a cycle'}
+                {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Quick update'}
               </Button>
             </div>
           </div>

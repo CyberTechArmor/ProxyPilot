@@ -45,7 +45,7 @@ export function insertRequest({ projectId, instruction, initiatedBy = null, acti
     )
     .run(Number(projectId), instruction == null ? null : String(instruction), initiatedBy ?? null, actingAsAdmin ? 1 : 0, nowIso(),
       Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null,
-      buildMode === 'mvp' ? 'mvp' : 'full');
+      ['mvp', 'quick'].includes(buildMode) ? buildMode : 'full');
   return getRequest(info.lastInsertRowid);
 }
 

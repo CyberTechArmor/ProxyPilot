@@ -57,7 +57,7 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
-import { normalizeBuildMode, BUILD_MODE_MVP } from './cycle-logic.js';
+import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
 import { callModelTurn } from './model-client.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
@@ -272,7 +272,8 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // request log, then the build starts directly: components still pre-install
   // (zero tokens), the correctness gates still run; the rule questions,
   // per-rule tests, and acceptance discipline come with a later full Build.
-  if (mode === BUILD_MODE_MVP) {
+  if (isFastBuildMode(mode)) {
+    const quick = mode === BUILD_MODE_QUICK;
     const mvpCycle = insertCycle({
       projectId, frameworkVersionId: framework.id, stage: 'define',
       instruction: String(instruction || '').slice(0, getChatMaxChars()),
@@ -284,12 +285,14 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     getOrCreateChat(projectId);
     insertMessage({
       projectId, kind: 'system', cycleId: mvpCycle.id,
-      body: 'MVP build — skipping the rule interview and running a reduced gate battery to get a testable first version up fast. Run a full Build afterwards for the rule questions, per-rule tests, and acceptance checks.',
+      body: quick
+        ? 'Quick update — one small scoped change on the fast model, minimal gate battery (no vitest run), straight to deploy. Run a full Build or the Production check later for the complete battery.'
+        : 'MVP build — skipping the rule interview and running a reduced gate battery to get a testable first version up fast. Run a full Build afterwards for the rule questions, per-rule tests, and acceptance checks.',
     });
-    setJob(projectId, { phase: 'building', message: 'MVP build starting — installing standard components, then building.', cycleId: mvpCycle.id, startedAt: Date.now() });
+    setJob(projectId, { phase: 'building', message: quick ? 'Quick update starting…' : 'MVP build starting — installing standard components, then building.', cycleId: mvpCycle.id, startedAt: Date.now() });
     proceedToBuild({
       project, instruction, initiatedBy: user.id, actingAsAdmin, framework,
-      requestId: request.id, task: { kind: 'feature', difficulty: null }, buildMode: BUILD_MODE_MVP,
+      requestId: request.id, task: { kind: 'feature', difficulty: null }, buildMode: mode,
     })
       .catch((err) => {
         console.error(`[mock2] MVP build start failed for project ${projectId}:`, err?.message || err);

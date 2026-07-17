@@ -1264,12 +1264,11 @@ PYEOF
 
         # CVE engine — host-side requirements for the AUTO_PATCH /
         # ONE_CLICK execution lanes. The dashboard's read-only paths
-        # (paste, validate, sync-git) run inside the container and
-        # don't need any of this. poll / run-one / inventory pivot
-        # to the host via nsenter and need:
+        # (paste, validate) run inside the container and don't need
+        # any of this. poll / run-one / inventory pivot to the host
+        # via nsenter and need:
         #
         #   - python3 + python3-ruamel.yaml: engine runtime.
-        #   - git: source-git sync clones into a staging dir.
         #   - The proxypilot/ Python package on disk at $INSTALL_DIR
         #     (already copied above by `cp -r ${SCRIPT_DIR}/proxypilot`).
         #   - systemd timers (inventory hourly, poll every 5 min) so
@@ -1281,7 +1280,6 @@ PYEOF
             need_deps=()
             command -v python3 >/dev/null 2>&1 || need_deps+=("python3")
             python3 -c "import ruamel.yaml" 2>/dev/null || need_deps+=("python3-ruamel.yaml")
-            command -v git >/dev/null 2>&1 || need_deps+=("git")
             if [ ${#need_deps[@]} -gt 0 ]; then
                 log "${YELLOW}Installing host-side CVE engine deps: ${need_deps[*]}${NC}"
                 DEBIAN_FRONTEND=noninteractive apt-get install -y "${need_deps[@]}" \
@@ -1324,6 +1322,22 @@ PYEOF
         # exist on the host before docker-compose up or Docker auto-
         # creates it as an empty dir owned by root.
         install -d -m 0755 /var/lib/proxypilot/cve-inbox 2>/dev/null || true
+
+        # Retired git CVE feed cleanup. The read-only sync-git source
+        # was replaced by the dashboard's built-in AI research routine;
+        # this drops any inbox entries it imported (stamped
+        # _proxypilot.origin: git) and its staging clone dir. Entries
+        # pasted by an operator or filed by AI research are untouched.
+        # Idempotent — a clean inbox is a no-op.
+        if command -v python3 >/dev/null 2>&1 && [ -d "${INSTALL_DIR}/proxypilot" ]; then
+            purge_out=$(PYTHONPATH="${INSTALL_DIR}" python3 -m proxypilot.engine \
+                purge-git-origin 2>/dev/null) || true
+            if echo "$purge_out" | grep -q '"removed": \[\]'; then
+                log_verbose "No git-origin CVE entries to purge"
+            elif [ -n "$purge_out" ]; then
+                log "${YELLOW}Purged retired git-feed CVE entries: ${purge_out}${NC}"
+            fi
+        fi
 
         # Phase A — patch the deployed docker-compose.yml so the
         # container can reach the host-side agent. Two idempotent

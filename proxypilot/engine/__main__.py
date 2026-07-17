@@ -16,6 +16,12 @@ Subcommands:
   validate           Read YAML from stdin, return {ok, cve, error}. Used
                      by the dashboard to validate a paste before saving
                      it to the inbox.
+  paste              Validate stdin YAML and write it to the inbox with
+                     a `_proxypilot.origin` provenance stamp (`paste` by
+                     default; the AI research routine passes --origin ai).
+  purge-git-origin   One-shot cleanup for the retired git feed: delete
+                     inbox entries stamped origin=git and remove the
+                     staging clone dir. Manual/AI entries are untouched.
 
 Each subcommand writes a one-line JSON result to stdout so a parent
 shell or the Node backend can capture the run summary without having
@@ -30,6 +36,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import INBOX_DIR
 from . import inbox as inbox_mod
@@ -195,9 +202,17 @@ def cmd_validate(_args: argparse.Namespace) -> int:
 
 
 def cmd_paste(args: argparse.Namespace) -> int:
-    """Validate stdin YAML, stamp `_proxypilot.origin: paste`, and
+    """Validate stdin YAML, stamp `_proxypilot.origin` (`paste` by
+    default, `ai` when the backend's research routine writes), and
     write to <inbox>/<cve>.yaml atomically. Replaces the dashboard's
     Node-side write path so origin tracking lives in one place.
+
+    When overwriting an existing entry, the existing file's `state`
+    and `_proxypilot` blocks are carried over if the incoming body
+    omits them — the AI research routine (and any other spec-focused
+    writer) deliberately leaves `state` out on updates, and losing
+    the status/history/provenance on every revision would break the
+    engine's state contract.
 
     Also runs an automatic check_only after the write (unless
     --no-auto-check) so the entry lands with a verdict already in
@@ -209,11 +224,23 @@ def cmd_paste(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": err}))
         return 2
     from . import INBOX_DIR
-    from .source_git import stamp_paste_origin
+    from .inbox import _yaml
+    from .origin import ORIGIN_KEY, stamp_origin
     inbox = Path(args.inbox or INBOX_DIR)
     inbox.mkdir(parents=True, exist_ok=True)
     target = inbox / f"{raw['cve']}.yaml"
-    stamp_paste_origin(raw)
+    if target.is_file():
+        try:
+            with target.open("r", encoding="utf-8") as f:
+                existing = _yaml().load(f)
+            if hasattr(existing, "get"):
+                for key in ("state", ORIGIN_KEY):
+                    if key not in raw and existing.get(key) is not None:
+                        raw[key] = existing[key]
+        except Exception:
+            # Unreadable existing file — treat as a fresh write.
+            pass
+    stamp_origin(raw, args.origin or "paste")
     try:
         from .inbox import _yaml
         tmp = target.with_suffix(target.suffix + ".tmp")
@@ -279,46 +306,51 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sync_git(args: argparse.Namespace) -> int:
-    """Read-only pull from a git source. Imports any new <CVE>.yaml
-    files into the inbox; never overwrites or deletes existing
-    entries. Stamps each import with origin=git + commit SHA.
+# Staging dir the retired git source cloned into. Only referenced by
+# purge-git-origin, which removes it if the old feature left one behind.
+LEGACY_GIT_SOURCE_DIR = "/var/lib/proxypilot/cve-inbox-source"
 
-    After importing, runs check_only against each newly-imported
-    entry (unless --no-auto-check) so the entries land with a
-    verdict already in history. Pre-existing entries are NOT
-    re-checked — they keep whatever verdict they already had."""
-    from . import INBOX_DIR
-    from .source_git import DEFAULT_SOURCE_DIR, sync
-    if not args.git_url:
-        print(json.dumps({"ok": False, "error": "git_url is required"}))
-        return 2
+
+def cmd_purge_git_origin(args: argparse.Namespace) -> int:
+    """One-shot cleanup for the retired git CVE feed. Deletes every
+    inbox entry whose `_proxypilot.origin` is `git` (entries pulled
+    from the old read-only git source) and removes the staging clone
+    dir. Entries with origin paste/ai — and entries with no origin
+    block at all — are never touched."""
+    import shutil
+    from .inbox import _yaml
+    from .origin import ORIGIN_KEY
     inbox = Path(args.inbox or INBOX_DIR)
-    src = Path(args.source_dir or DEFAULT_SOURCE_DIR)
-    result = sync(args.git_url, inbox_dir=inbox, source_dir=src)
-
-    auto_checks = []
-    if not args.no_auto_check and result.imported:
-        for name in result.imported:
-            auto_checks.append({
-                "cve": name[:-len(".yaml")],
-                **_auto_check(inbox / name, args.host),
-            })
-
-    out = {
-        "ok": not result.errors,
-        "git_url": result.git_url,
-        "git_commit": result.git_commit,
-        "branch": result.branch,
-        "subpath": result.subpath,
-        "imported": result.imported,
-        "skipped_existing_count": len(result.skipped_existing),
-        "skipped_invalid": result.skipped_invalid,
-        "errors": result.errors,
-        "auto_checks": auto_checks,
-    }
-    print(json.dumps(out))
-    return 0 if out["ok"] else 2
+    removed: list[str] = []
+    errors: list[str] = []
+    if inbox.is_dir():
+        yaml = _yaml()
+        for path in sorted(inbox.glob("CVE-*.yaml")):
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    raw = yaml.load(f)
+                block = raw.get(ORIGIN_KEY) if hasattr(raw, "get") else None
+                origin = block.get("origin") if hasattr(block, "get") else None
+                if origin == "git":
+                    path.unlink()
+                    removed.append(path.name)
+            except Exception as e:
+                errors.append(f"{path.name}: {e}")
+    staging = Path(args.source_dir or LEGACY_GIT_SOURCE_DIR)
+    staging_removed = False
+    if staging.is_dir():
+        try:
+            shutil.rmtree(staging)
+            staging_removed = True
+        except Exception as e:
+            errors.append(f"staging dir {staging}: {e}")
+    print(json.dumps({
+        "ok": not errors,
+        "removed": removed,
+        "staging_removed": staging_removed,
+        "errors": errors,
+    }))
+    return 0 if not errors else 2
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -376,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     pp = sub.add_parser("paste", help="validate + write a pasted YAML to <inbox>/<cve>.yaml")
     pp.add_argument("--no-auto-check", action="store_true",
                     help="skip the post-import probe (entry lands without a verdict)")
+    pp.add_argument("--origin", choices=["paste", "ai"], default="paste",
+                    help="provenance stamp for a new entry (the AI research routine passes ai)")
 
     pc = sub.add_parser("check", help="run probe only; no patch, no snapshot, no status change")
     pc.add_argument("cve")
@@ -383,11 +417,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="do not append a history entry (silent check)")
     pc.add_argument("--actor", help="history actor (defaults to 'proxypilot-engine')")
 
-    psg = sub.add_parser("sync-git", help="read-only pull of inbox specs from a git URL")
-    psg.add_argument("--git-url", required=True)
-    psg.add_argument("--no-auto-check", action="store_true",
-                     help="skip the post-import probe on each newly imported entry")
-    psg.add_argument("--source-dir", help="staging dir (default /var/lib/proxypilot/cve-inbox-source)")
+    ppg = sub.add_parser("purge-git-origin",
+                         help="delete inbox entries imported by the retired git feed (origin=git)")
+    ppg.add_argument("--source-dir",
+                     help="legacy staging clone dir to remove (default /var/lib/proxypilot/cve-inbox-source)")
 
     args = p.parse_args(argv)
     if args.cmd == "inventory":
@@ -408,8 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_paste(args)
     if args.cmd == "check":
         return cmd_check(args)
-    if args.cmd == "sync-git":
-        return cmd_sync_git(args)
+    if args.cmd == "purge-git-origin":
+        return cmd_purge_git_origin(args)
     p.error(f"unknown command {args.cmd!r}")
     return 2
 

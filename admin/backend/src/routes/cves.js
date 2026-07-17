@@ -22,7 +22,7 @@ import { readdir, readFile, stat, unlink, mkdir, rename, writeFile, chmod } from
 import { join, basename, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { logAudit, getSetting, setSetting, getDb } from '../db.js';
+import { logAudit, getDb } from '../db.js';
 import { requireAdmin, requireSudo } from '../middleware/auth.js';
 import { getInboxDir, getHostname, CVE_ID_RE, safePath, runEngine } from '../lib/engine-cli.js';
 import {
@@ -306,7 +306,7 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
     if (!seen) unread += 1;
     // "Added": when this entry first started being actionable on
     // THIS host. Prefer the engine's own _proxypilot.imported_at
-    // stamp (set by paste/git-sync), fall back to the file's ctime
+    // stamp (set by the paste path), fall back to the file's ctime
     // (covers entries that landed before we added origin tracking).
     const importedAt = extractNested('_proxypilot', 'imported_at', body);
     const added = importedAt
@@ -326,11 +326,11 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
       last_updated: lastUpdated,
       added,
       mtime: st ? st.mtime.toISOString() : null,
-      // _proxypilot block is metadata: origin (paste|git), git_url,
-      // git_commit, imported_at. Lives at top level alongside `cve:`,
-      // so extractNested with parent="_proxypilot" works.
+      // _proxypilot block is metadata: origin (paste = manual,
+      // ai = filed by the research routine) + imported_at. Lives at
+      // top level alongside `cve:`, so extractNested with
+      // parent="_proxypilot" works.
       origin: extractNested('_proxypilot', 'origin', body) || 'unknown',
-      origin_git_url: extractNested('_proxypilot', 'git_url', body),
       // Most recent timeline event so the list view can show
       // applicability ("probe exit=1; host not affected") without
       // an extra detail fetch.
@@ -359,61 +359,11 @@ cvesRouter.get('/', requireAdmin, async (req, res) => {
 // ── literal-path routes ───────────────────────────────────────────────────
 //
 // Express routes match in registration order. The `:cveId` wildcard
-// below would otherwise swallow `/git-config`, `/git-sync`, and
-// `/poll` (they're valid `:cveId` values from the wildcard's POV)
-// — so the specific paths MUST register first. Reordering this file
-// is the test: every `/<literal>` route should sit above any
-// `/<wildcard>` route on the same HTTP verb.
-
-// Read-only git source URL. Stored in app_settings; the engine
-// reads it via the dashboard backend on each sync request.
-const GIT_URL_KEY = 'cve_git_url';
-
-const gitUrlSchema = z.object({
-  url: z.string().trim().min(0).max(1024)
-    .refine(v => v === '' || /^(https?:\/\/|git@|ssh:\/\/|file:\/\/|\/)/.test(v),
-            { message: 'must be empty or start with https://, ssh://, git@, file://, or /' }),
-}).strict();
-
-cvesRouter.get('/git-config', requireAdmin, async (_req, res) => {
-  res.json({ url: getSetting(GIT_URL_KEY) || '' });
-});
-
-cvesRouter.put('/git-config', requireAdmin, requireSudo, async (req, res) => {
-  let body;
-  try {
-    body = gitUrlSchema.parse(req.body || {});
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-  setSetting(GIT_URL_KEY, body.url);
-  logAudit(req.user.id, 'CVE_GIT_CONFIG', 'cve', null,
-           { url_set: !!body.url }, req.ip);
-  res.json({ ok: true, url: body.url });
-});
-
-cvesRouter.post('/git-sync', requireAdmin, requireSudo, async (req, res) => {
-  const url = (getSetting(GIT_URL_KEY) || '').trim();
-  if (!url) {
-    return res.status(400).json({
-      error: 'no git source configured; set one via PUT /api/cves/git-config',
-    });
-  }
-  try {
-    const out = await runEngine(['sync-git', '--git-url', url],
-      { timeoutMs: 5 * 60 * 1000 });
-    logAudit(req.user.id, 'CVE_GIT_SYNC', 'cve', null, {
-      git_commit: out?.git_commit ?? null,
-      branch: out?.branch ?? null,
-      subpath: out?.subpath ?? null,
-      imported: (out?.imported || []).length,
-      errors: (out?.errors || []).length,
-    }, req.ip);
-    res.json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// below would otherwise swallow `/poll` and `/research/*` (they're
+// valid `:cveId` values from the wildcard's POV) — so the specific
+// paths MUST register first. Reordering this file is the test: every
+// `/<literal>` route should sit above any `/<wildcard>` route on the
+// same HTTP verb.
 
 cvesRouter.post('/poll', requireAdmin, requireSudo, async (req, res) => {
   try {

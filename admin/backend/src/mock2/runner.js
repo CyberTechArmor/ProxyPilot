@@ -92,7 +92,7 @@ import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
 import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, recordIntegrationResolution, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
 import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation, applyIntegrationGateMode, applyLiveCheckMode } from './accept-pending-logic.js';
-import { getIntegrationGateMode, getLaneTuning } from './settings.js';
+import { getIntegrationGateMode, getLaneTuning, routingEnv } from './settings.js';
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
@@ -257,7 +257,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
       const attempts = escalationAttempts({ priorCycles, requestId: reqId, instruction });
       routing = decideRouting({
         rule, slotModel: ready.model, difficulty: effTask?.difficulty ?? null,
-        priorAttempts: attempts, env: process.env, laneDefaultEffort: 'high',
+        priorAttempts: attempts, env: routingEnv(), laneDefaultEffort: 'high',
       });
       routing.mode = mode;
       // The model that will ACTUALLY run (shadow mode records the decision but
@@ -274,7 +274,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // it overrides whatever the knowledge base decided (an escalation or a
   // heavyweight rule override would defeat the mode).
   if (fastBuild) {
-    const fast = mvpBuild ? mvpRoutingDecision(process.env, ready.model) : quickRoutingDecision(process.env, ready.model);
+    const fast = mvpBuild ? mvpRoutingDecision(routingEnv(), ready.model) : quickRoutingDecision(routingEnv(), ready.model);
     routing = { ...(routing || {}), ...fast, mode, applied_model: fast.model };
     ready = { ...ready, model: fast.model, effort: fast.effort };
   }

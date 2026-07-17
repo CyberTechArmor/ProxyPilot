@@ -1190,6 +1190,10 @@ export const api = {
   // Global thinking switch — 'off' disables thinking for every lane at once.
   mock2SetGlobalThinking: (thinking) =>
     request('/mock2/settings/global-thinking', { method: 'POST', body: JSON.stringify({ thinking }) }),
+  // Fast code model — '' platform default (sonnet), 'off' = the build_runner
+  // slot model builds everything, or an explicit model id.
+  mock2SetFastModel: (model) =>
+    request('/mock2/settings/fast-model', { method: 'POST', body: JSON.stringify({ model }) }),
 
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid

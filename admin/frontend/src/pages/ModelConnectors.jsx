@@ -33,7 +33,7 @@ import {
   ArrowLeft, Loader2, Plus, Trash2, CheckCircle2, XCircle, CircleDashed, ShieldCheck, Cpu, GitBranch, Route,
 } from 'lucide-react';
 import {
-  SLOT_SUGGESTED_MODEL, RECOMMENDED_ESCALATE_MODEL, modelLabel, modelOptionsWith,
+  SLOT_SUGGESTED_MODEL, RECOMMENDED_ESCALATE_MODEL, MODEL_OPTIONS, modelLabel, modelOptionsWith,
 } from '@/lib/model-options';
 
 const PROVIDERS = ['anthropic', 'openai', 'gemini', 'ollama', 'openai_compatible'];
@@ -69,6 +69,28 @@ export default function ModelConnectors() {
   // Global thinking switch (shared with the admin queue's lane-tuning card).
   const [globalThinking, setGlobalThinking] = useState(null);
   const [savingThinking, setSavingThinking] = useState(false);
+  // Fast code model: '' platform default (sonnet), 'off' = slot model builds
+  // everything, or an explicit model id.
+  const [fastModel, setFastModel] = useState(null);
+  const [savingFastModel, setSavingFastModel] = useState(false);
+
+  const saveFastModel = async (value) => {
+    setSavingFastModel(true);
+    try {
+      const res = await api.mock2SetFastModel(value);
+      setFastModel(res.fast_code_model ?? '');
+      toast({
+        title: 'Fast build model saved',
+        description: res.fast_code_model === 'off'
+          ? 'Quick updates, MVP builds, and routine tasks now run on your build_runner slot model.'
+          : res.fast_code_model
+            ? `Quick/MVP/routine tasks now run on ${res.fast_code_model}.`
+            : 'Back to the platform default (claude-sonnet-5) for quick/MVP/routine tasks.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingFastModel(false); }
+  };
 
   const saveGlobalThinking = async (off) => {
     setSavingThinking(true);
@@ -101,7 +123,10 @@ export default function ModelConnectors() {
       setGitConnectors(g.connectors || []);
       setRouting(r);
       setOutcomes(o);
-      if (t) setGlobalThinking(t.global_thinking || 'default');
+      if (t) {
+        setGlobalThinking(t.global_thinking || 'default');
+        setFastModel(t.fast_code_model ?? '');
+      }
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load connectors failed:', err);
     }
@@ -320,6 +345,41 @@ export default function ModelConnectors() {
                     </span>
                   </span>
                 </label>
+              ) : null}
+              {/* Fast build model: which model quick updates, MVP builds, and
+                  routine (difficulty ≤3) tasks run on. 'off' routes them all to
+                  the build_runner slot model instead of sonnet. */}
+              {fastModel != null ? (
+                <div className="flex min-h-11 flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-center sm:gap-3">
+                  <span className="text-sm flex-1">
+                    <span className="font-medium">Fast build model</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Runs quick updates, MVP builds, and routine (difficulty ≤3) tasks. Pick “build_runner slot model” to never use it.
+                    </span>
+                  </span>
+                  <Select
+                    value={fastModel === '' ? 'default' : fastModel}
+                    disabled={savingFastModel}
+                    onValueChange={(v) => saveFastModel(v === 'default' ? '' : v)}
+                  >
+                    <SelectTrigger className="h-11 w-full sm:h-10 sm:w-80">
+                      <SelectValue>
+                        <span className="truncate">
+                          {fastModel === 'off' ? 'build_runner slot model (no fast model)'
+                            : fastModel === '' ? 'claude-sonnet-5 · platform default'
+                              : fastModel}
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">build_runner slot model (no fast model)</SelectItem>
+                      <SelectItem value="default">claude-sonnet-5 · platform default</SelectItem>
+                      {MODEL_OPTIONS.filter((m) => m.value !== 'claude-sonnet-5').map((m) => (
+                        <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               ) : null}
               {(routing.rules || []).map((r) => (
                 <RoutingRuleRow key={r.task_kind} rule={r} efforts={routing.efforts || []}

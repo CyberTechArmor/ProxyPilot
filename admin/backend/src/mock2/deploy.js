@@ -35,11 +35,19 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
+// Every deploy-step script carries this marker in its command line (a no-op
+// shell comment), so a NEW deploy can reap scripts a DEAD backend left running
+// in the container. The in-process queue serializes deploys within one backend
+// process, but a backend restart (node --watch, an update) mid-deploy orphans
+// the in-container script — it keeps running npm/systemctl and fights the next
+// deploy (the ETXTBSY / EADDRINUSE churn seen after frequent restarts).
+const DEPLOY_MARKER = 'mock2_deploy_marker';
+
 // Run a deploy command in the app dir. Sources /etc/environment (so any
 // operator-set env is present) then runs the command; egress is the bridge NAT.
 // `set -a` makes the `KEY=VALUE` lines exported.
 function runInApp(containerName, appDir, command, timeoutMs) {
-  const script = `set -a\n. /etc/environment 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`;
+  const script = `: ${DEPLOY_MARKER}\nset -a\n. /etc/environment 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`;
   return containerSh(containerName, script, { timeoutMs });
 }
 
@@ -91,6 +99,12 @@ export async function deployProject(args) {
 async function deployProjectUnqueued({
   containerName, appDir = '/srv/app', webPort = 3000, runContract, onStep = null,
 }) {
+  // Reap deploy scripts a dead backend orphaned in this container (see
+  // DEPLOY_MARKER) — they keep running npm/systemctl and corrupt this deploy.
+  // pkill never signals its own process, so carrying the marker string in the
+  // killer's own command line is safe.
+  await containerSh(containerName, `pkill -9 -f ${DEPLOY_MARKER} 2>/dev/null || true`).catch(() => {});
+
   const contract = runContract && runContract.hasContract
     ? runContract
     : await readRunContract(containerName, appDir);
@@ -129,7 +143,8 @@ async function deployProjectUnqueued({
   const unit = buildDevServiceUnit({ appDir, webPort, execStart });
   const swap = await containerSh(
     containerName,
-    `printf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\n`
+    `: ${DEPLOY_MARKER}\n`
+      + `printf '%s' '${b64(unit)}' | base64 -d > ${UNIT_PATH}\n`
       + `systemctl daemon-reload\n`
       + `systemctl enable mock2-dev.service >/dev/null 2>&1 || true\n`
       // Free the web port before starting so a fresh instance never races an
@@ -154,7 +169,7 @@ async function deployProjectUnqueued({
   report('health');
   const health = await containerSh(
     containerName,
-    `last="000"\ni=0\nwhile [ $i -lt 20 ]; do\n`
+    `: ${DEPLOY_MARKER}\nlast="000"\ni=0\nwhile [ $i -lt 20 ]; do\n`
       + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
       + `  [ -n "$code" ] && last="$code"\n`
       + `  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi\n`

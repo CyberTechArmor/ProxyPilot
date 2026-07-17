@@ -680,6 +680,19 @@ async function wakeProjectJob(project) {
   const caddy = await publishDomain(project.parent_domain_id);
   setStatus(projectId, { phase: 'ready', message: 'Container running', caddy });
   console.log(`[mock2] project ${projectId} woken (container ${containerName} @ ${ip})`);
+  // Same self-heal as rehydrate: a design-approved/skipped project whose base
+  // app never successfully deployed (it failed under an older backend) would
+  // otherwise wake straight back onto the placeholder. Fire-and-forget — the
+  // deploy repairs deps / upgrades an unwireable auth component first, posts
+  // its outcome in the chat, and the fast path just stamps an already-serving
+  // app without redeploying.
+  try {
+    const fresh = getProject(projectId);
+    const built = projectHasBeenDeployed(projectId) || !!fresh?.base_app_deployed_at;
+    if (!built && fresh?.design_approved_at) {
+      void deployBaseApp(fresh, { reason: 'wake' });
+    }
+  } catch (e) { console.warn('[mock2] wake base-app heal check failed:', e?.message); }
   scheduleCleanup(projectId);
 }
 

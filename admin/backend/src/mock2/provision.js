@@ -379,6 +379,46 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 // mockup on a project whose provision-time deploy failed). Never throws: any
 // failure leaves the placeholder serving, posts a VISIBLE chat message with
 // the step + error, and raises an admin-queue item.
+// After a health-step failure, the app frequently recovers SECONDS later: the
+// unit keeps restarting (Restart=on-failure) and wins once whatever held the
+// port dies — dev2/Fly both served the sign-in page minutes after being marked
+// "deploy failed". Re-probe a few times and record the recovery, so the status
+// converges to the truth instead of staying a lie until someone presses a
+// button. In-process timers — a backend restart drops them, and the wake/
+// rehydrate self-heal covers that path.
+const baseAppRecheckTimers = new Map();
+function scheduleBaseAppRecheck(projectId, attempt = 1) {
+  if (attempt > 4 || baseAppRecheckTimers.has(projectId)) return;
+  const t = setTimeout(async () => {
+    baseAppRecheckTimers.delete(projectId);
+    try {
+      const fresh = getProject(projectId);
+      if (!fresh || fresh.base_app_deployed_at || fresh.lifecycle !== 'active') return;
+      const containerName = fresh.container_name || containerNameForProject(projectId);
+      const webPort = fresh.web_port || DEFAULT_WEB_PORT;
+      const probe = await sh(
+        `incus exec ${containerName} -- sh -c 'code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null); exec_line=$(grep -h "^ExecStart" /etc/systemd/system/mock2-dev.service 2>/dev/null); echo "$code|$exec_line"'`,
+        { timeoutMs: 20000 },
+      );
+      const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
+      const code = Number(codeStr);
+      if (code >= 200 && code < 500 && /node/.test(execLine)) {
+        updateProject(projectId, { base_app_deployed_at: new Date().toISOString() });
+        setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
+        try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }
+        try {
+          const { insertMessage } = await import('./chats.js');
+          insertMessage({ projectId, kind: 'system', body: 'The base app RECOVERED and is now live on your project URL — the earlier "deploy failed" was its health check giving up while the app was still winning the port back. Open the URL to create the first administrator and sign in.' });
+        } catch { /* best effort */ }
+        console.log(`[mock2] project ${projectId} base app recovered after failed health check (recheck ${attempt})`);
+      } else {
+        scheduleBaseAppRecheck(projectId, attempt + 1);
+      }
+    } catch { /* best effort — next wake self-heals */ }
+  }, 60000);
+  baseAppRecheckTimers.set(projectId, t);
+}
+
 // One base-app deploy per project at a time. Every caller is fire-and-forget
 // (provision, the skip-mockup self-heal, the retry route), so nothing upstream
 // serializes them — and two concurrent `npm install`s in the same tree fail
@@ -479,6 +519,9 @@ async function deployBaseAppInner(project, projectId, { reason }) {
           detail: `${project.name}: base app deploy failed at "${result.step}" — ${String(result.error || '').slice(0, 300)}`,
         });
       } catch { /* best effort */ }
+      // A health failure is often a crash loop the app WINS after the check
+      // gives up — re-probe and record the recovery if it comes.
+      if (result.step === 'health') scheduleBaseAppRecheck(projectId);
       return { ok: false, step: result.step, error: result.error };
     }
     return { ok: true, skipped: true };
@@ -680,6 +723,19 @@ async function wakeProjectJob(project) {
   const caddy = await publishDomain(project.parent_domain_id);
   setStatus(projectId, { phase: 'ready', message: 'Container running', caddy });
   console.log(`[mock2] project ${projectId} woken (container ${containerName} @ ${ip})`);
+  // Same self-heal as rehydrate: a design-approved/skipped project whose base
+  // app never successfully deployed (it failed under an older backend) would
+  // otherwise wake straight back onto the placeholder. Fire-and-forget — the
+  // deploy repairs deps / upgrades an unwireable auth component first, posts
+  // its outcome in the chat, and the fast path just stamps an already-serving
+  // app without redeploying.
+  try {
+    const fresh = getProject(projectId);
+    const built = projectHasBeenDeployed(projectId) || !!fresh?.base_app_deployed_at;
+    if (!built && fresh?.design_approved_at) {
+      void deployBaseApp(fresh, { reason: 'wake' });
+    }
+  } catch (e) { console.warn('[mock2] wake base-app heal check failed:', e?.message); }
   scheduleCleanup(projectId);
 }
 

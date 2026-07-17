@@ -114,6 +114,30 @@ export function getComponentAutoApply() {
 // ---- Lane tuning (per-lane model / effort / thinking overrides) ----
 export const LANE_TUNING_KEY = 'lane_tuning';
 
+// ---- Fast code model (the speed default for quick/MVP + routine tasks) ----
+export const FAST_MODEL_KEY = 'fast_code_model';
+
+// '' → the platform default (routing-logic DEFAULT_FAST_MODEL, claude-sonnet-5);
+// 'off' → NO fast-model override anywhere (quick/MVP/routine tasks run on the
+// build_runner slot model — "I don't want sonnet building"); any other value →
+// an explicit model id. Applied by overlaying MOCK2_FAST_MODEL onto the env the
+// pure routing decisions read, so their logic stays env-driven and testable.
+export function getFastCodeModelSetting() {
+  return String(getMock2Setting(FAST_MODEL_KEY, '') || '').trim();
+}
+
+export function setFastCodeModelSetting(value, updatedBy = null) {
+  setMock2Setting(FAST_MODEL_KEY, String(value || '').trim(), updatedBy);
+  return getFastCodeModelSetting();
+}
+
+// The env the routing decisions should read: process.env with the stored
+// fast-model choice overlaid (stored setting wins over the env var).
+export function routingEnv(env = process.env) {
+  const v = getFastCodeModelSetting();
+  return v ? { ...env, MOCK2_FAST_MODEL: v } : env;
+}
+
 // ---- Global thinking switch (kill thinking everywhere at once) ----
 export const GLOBAL_THINKING_KEY = 'global_thinking';
 

@@ -119,7 +119,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI } from './design-presets.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue } from './screen-plan.js';
@@ -1164,8 +1164,22 @@ export function createMock2Router() {
     res.json({
       lanes: getAllLaneTuning(),
       global_thinking: getGlobalThinking(),
+      fast_code_model: getFastCodeModelSetting(),
       options: { lanes: TUNING_LANES, labels: TUNING_LANE_LABELS, efforts: TUNING_EFFORTS, thinking: TUNING_THINKING },
     });
+  });
+  // Fast code model — the speed default quick/MVP builds and routine
+  // (difficulty ≤3) tasks run on. '' = platform default (claude-sonnet-5),
+  // 'off' = no override anywhere (the build_runner slot model builds
+  // everything), or an explicit model id.
+  router.post('/settings/fast-model', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      model: z.string().trim().max(200).regex(/^$|^off$|^[a-z0-9][a-z0-9.:_-]*$/i, 'invalid model id'),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid model' });
+    const value = setFastCodeModelSetting(parsed.data.model, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_FAST_MODEL', 'mock2_setting', 0, { fast_code_model: value || '(default)' }, req.ip);
+    res.json({ fast_code_model: value });
   });
   // Global thinking switch — 'off' disables thinking for every lane at once
   // (overlays per-lane tuning at read time; the stored per-lane doc is kept).

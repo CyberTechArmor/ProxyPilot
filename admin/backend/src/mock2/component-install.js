@@ -24,7 +24,7 @@ import {
 import { containerNameForProject } from './provision.js';
 import {
   listProjectComponents, listPublishedComponents, getPublishedComponentWithVersion,
-  markProjectComponentInstall, decideProjectComponent,
+  getComponentVersion, markProjectComponentInstall, decideProjectComponent,
 } from './components.js';
 import { getComponentAutoApply } from './settings.js';
 import {
@@ -195,6 +195,15 @@ function npmSpecName(spec) {
 }
 const SAFE_PKG_RE = /^[a-zA-Z0-9@/_.\-]+$/;
 
+// Does a stored component VERSION row provide the wireable auth bootstrap?
+// (Contract + file list run through the same detector installOne uses.)
+function versionWiresBootstrap(versionRow) {
+  if (!versionRow) return false;
+  let files = [];
+  try { files = JSON.parse(versionRow.files_json || '[]') || []; } catch { files = []; }
+  return componentWiresBootstrap(parseContractJson(versionRow.contract_json), files);
+}
+
 // ensureComponentDeps — verify every 'installed' selection's declared runtime
 // deps actually EXIST in node_modules, and npm-install the missing ones.
 // Exists because a past install bug reported success while npm silently failed
@@ -292,6 +301,30 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
       }
     } catch (e) { console.warn('[mock2] component auto-apply failed:', e?.message); }
   }
+
+  // Targeted auth-wiring upgrade: a selection installed from a version that
+  // CANNOT wire the sign-in/first-admin bootstrap, while the component's
+  // current version can (the seeded bundle), is re-confirmed here so this same
+  // run reinstalls it wired. Converges in one pass — after the reinstall the
+  // pinned version wires and the check skips. Keep-existing semantics still
+  // protect files a build already adapted.
+  try {
+    for (const r of listProjectComponents(projectId)) {
+      if (r.status !== 'installed') continue;
+      const pinned = r.version_id ? getComponentVersion(r.version_id) : null;
+      if (versionWiresBootstrap(pinned)) continue;
+      const found = getPublishedComponentWithVersion(r.key);
+      if (!found || found.version.id === r.version_id || !versionWiresBootstrap(found.version)) continue;
+      decideProjectComponent({
+        projectId, componentId: r.component_id, versionId: found.version.id,
+        status: 'confirmed', origin: 'auto', decidedBy: initiatedBy,
+      });
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Component ${r.key} is being upgraded to v${found.version.version} — the installed version could not wire the sign-in/first-admin bootstrap. Reinstalling now (files a build already adapted are kept).`,
+      });
+    }
+  } catch (e) { console.warn('[mock2] component wiring upgrade check failed:', e?.message); }
 
   // NO early return when nothing is freshly installable: the repair passes
   // below must still run for selections already marked 'installed' — healing

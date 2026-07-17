@@ -471,7 +471,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -487,6 +487,12 @@ if (mock2Gate.enabled) {
     // the fix can actually reach projects (they adopt it via drift → update cycle;
     // nothing auto-remediates). Idempotent — a no-op when the seed is unchanged.
     try { upgradeFrameworkFromSeed(null); } catch (err) { console.error('[mock2] framework seed upgrade failed:', err?.message || err); }
+    // Built-in component seed: the bundled auth component (sign-in + forced
+    // first-admin bootstrap) is published on first boot, and an existing stored
+    // copy that cannot wire the bootstrap (an OLD imported document) is
+    // upgraded to the bundled version. Idempotent; never stomps a stored
+    // version that already wires.
+    try { seedBuiltinComponents(null); } catch (err) { console.error('[mock2] component seed failed:', err?.message || err); }
     app.use('/api/mock2', authenticateToken, blockPendingRole, createMock2Router());
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.

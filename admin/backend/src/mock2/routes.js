@@ -222,7 +222,7 @@ import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleF
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
 import { listMessages } from './chats.js';
 import {
-  startConceptTurn, startDesignApproval, getConceptJobStatus, conceptReady,
+  startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
   exportDesignTemplate, importDesignTemplate,
 } from './concept.js';
 import { publicChatMessageShape } from './concept-logic.js';
@@ -425,7 +425,7 @@ const cycleStartSchema = z.object({
   images: chatImagesSchema,
   // 'full' (default) runs the audited build with the whole gate battery; 'mvp'
   // is the speed path — rule interview skipped, reduced battery, fast model.
-  mode: z.enum(['full', 'mvp']).optional(),
+  mode: z.enum(['full', 'mvp', 'quick']).optional(),
 });
 const cycleFeedbackSchema = z.object({
   rating: z.enum(['up', 'down']),
@@ -2787,6 +2787,23 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_DESIGN_APPROVE', 'mock2_project', project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin, build: buildStrategy }, req.ip);
     return res.status(202).json({ job: getConceptJobStatus(project.id) });
+  });
+
+  // Skip the mockup: lock the design stage with an empty inventory (zero
+  // tokens) and unlock builds — the live base app is the starting point.
+  router.post('/projects/:id/design/skip', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    let result;
+    try {
+      result = await skipDesign({
+        project: req.mock2Project, user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: `Could not skip the mockup: ${err?.message || 'unknown error'}` });
+    }
+    if (result.status === 'error') return res.status(409).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_SKIP', 'mock2_project', req.mock2Project.id,
+      { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    return res.json({ ok: true });
   });
 
   // ============================================================

@@ -149,10 +149,27 @@ export function parseGateScripts(gatesJson) {
 
 export const BUILD_MODE_FULL = 'full';
 export const BUILD_MODE_MVP = 'mvp';
-export const BUILD_MODES = Object.freeze([BUILD_MODE_FULL, BUILD_MODE_MVP]);
+// 'quick' is the ITERATION path — the VS-Code-like "small guided change,
+// seconds-to-minutes" loop on an app that already exists: rule interview
+// skipped (like MVP), the smallest gate battery that still proves the change
+// compiles and leaks nothing (typecheck, constitution-lint, security-scan,
+// component-reuse — the vitest run is deferred to the next full Build), and a
+// tight minimal-diff prompt. Deploy + health-check still run: quick means a
+// live update, not an unverified one.
+export const BUILD_MODE_QUICK = 'quick';
+export const BUILD_MODES = Object.freeze([BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK]);
 
 export function normalizeBuildMode(raw) {
-  return String(raw || '').trim().toLowerCase() === BUILD_MODE_MVP ? BUILD_MODE_MVP : BUILD_MODE_FULL;
+  const v = String(raw || '').trim().toLowerCase();
+  if (v === BUILD_MODE_MVP) return BUILD_MODE_MVP;
+  if (v === BUILD_MODE_QUICK) return BUILD_MODE_QUICK;
+  return BUILD_MODE_FULL;
+}
+
+// The fast modes share the skip-the-interview / relaxed-acceptance path.
+export function isFastBuildMode(mode) {
+  const m = normalizeBuildMode(mode);
+  return m === BUILD_MODE_MVP || m === BUILD_MODE_QUICK;
 }
 
 // The gates an MVP build SKIPS: the ones whose job is to force authored
@@ -160,9 +177,17 @@ export function normalizeBuildMode(raw) {
 // to verify the code itself.
 export const MVP_SKIPPED_GATES = Object.freeze(['rule-coverage', 'ui-interaction', 'acceptance']);
 
+// A quick update additionally skips the vitest run — the slowest gate — on the
+// grounds that the change is small, typechecked, linted, secret-scanned, and
+// immediately visible on the live URL; the next full Build (or the production
+// check) runs the whole battery.
+export const QUICK_SKIPPED_GATES = Object.freeze([...MVP_SKIPPED_GATES, 'test']);
+
 export function filterGatesForBuildMode(gates = [], mode = BUILD_MODE_FULL) {
-  if (normalizeBuildMode(mode) !== BUILD_MODE_MVP) return gates;
-  return (gates || []).filter((g) => g && !MVP_SKIPPED_GATES.includes(g.name));
+  const m = normalizeBuildMode(mode);
+  if (m === BUILD_MODE_FULL) return gates;
+  const skipped = m === BUILD_MODE_QUICK ? QUICK_SKIPPED_GATES : MVP_SKIPPED_GATES;
+  return (gates || []).filter((g) => g && !skipped.includes(g.name));
 }
 
 // The initial gates_json the runner stamps on a cycle from the pinned gate

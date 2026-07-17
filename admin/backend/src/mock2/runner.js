@@ -37,7 +37,7 @@ import {
   parseGateScripts, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
-  normalizeBuildMode, filterGatesForBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP,
+  normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
@@ -45,7 +45,7 @@ import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
-import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision } from './routing-logic.js';
+import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision, quickRoutingDecision } from './routing-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -215,14 +215,17 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   const reqId = requestId != null ? requestId : latestOpenRequestId(projectId);
   const seg = segment || (resumeContext ? 'resumed' : 'build');
 
-  // Build mode (full vs MVP): explicit from the caller, else remembered on the
-  // umbrella request — so a RESUME of an MVP build stays an MVP build (same
-  // reduced gate battery, same fast routing) instead of silently tightening.
-  let mvpBuild = buildMode != null ? normalizeBuildMode(buildMode) === BUILD_MODE_MVP : null;
-  if (mvpBuild == null) {
-    try { mvpBuild = normalizeBuildMode(reqId != null ? getRequest(reqId)?.build_mode : BUILD_MODE_FULL) === BUILD_MODE_MVP; }
-    catch { mvpBuild = false; }
+  // Build mode (full / mvp / quick): explicit from the caller, else remembered
+  // on the umbrella request — so a RESUME of a fast build stays in its mode
+  // (same reduced gate battery, same routing) instead of silently tightening.
+  let modeStr = buildMode != null ? normalizeBuildMode(buildMode) : null;
+  if (modeStr == null) {
+    try { modeStr = normalizeBuildMode(reqId != null ? getRequest(reqId)?.build_mode : BUILD_MODE_FULL); }
+    catch { modeStr = BUILD_MODE_FULL; }
   }
+  const mvpBuild = modeStr === BUILD_MODE_MVP;
+  const quickBuild = modeStr === BUILD_MODE_QUICK;
+  const fastBuild = mvpBuild || quickBuild;
 
   let ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
@@ -266,13 +269,14 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     } catch (e) { console.warn('[mock2] routing decision failed (slot defaults apply):', e?.message); }
   }
 
-  // MVP build routing: a fixed fast model + lighter effort. This is an explicit
-  // operator speed choice, so it overrides whatever the knowledge base decided
-  // (an escalation or a heavyweight rule override would defeat the mode).
-  if (mvpBuild) {
-    const mvp = mvpRoutingDecision(process.env, ready.model);
-    routing = { ...(routing || {}), ...mvp, mode, applied_model: mvp.model };
-    ready = { ...ready, model: mvp.model, effort: mvp.effort };
+  // Fast-mode routing: a fixed fast model + calibrated effort (MVP scaffold →
+  // low, quick update → medium). This is an explicit operator speed choice, so
+  // it overrides whatever the knowledge base decided (an escalation or a
+  // heavyweight rule override would defeat the mode).
+  if (fastBuild) {
+    const fast = mvpBuild ? mvpRoutingDecision(process.env, ready.model) : quickRoutingDecision(process.env, ready.model);
+    routing = { ...(routing || {}), ...fast, mode, applied_model: fast.model };
+    ready = { ...ready, model: fast.model, effort: fast.effort };
   }
 
   // Operator lane tuning (admin settings → Model thinking & effort) — the LAST
@@ -281,7 +285,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   {
     const tuned = applyLaneTuning(
       { model: ready.model, effort: ready.effort || null, thinking: null },
-      getLaneTuning(mvpBuild ? 'mvp' : 'build'),
+      getLaneTuning(fastBuild ? 'mvp' : 'build'),
     );
     ready = { ...ready, model: tuned.model, effort: tuned.effort, thinking: tuned.thinking };
     if (routing) routing.applied_model = ready.model;
@@ -359,10 +363,10 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   }
 
   const containerName = project.container_name || containerNameForProject(projectId);
-  // MVP builds run a REDUCED battery: the correctness gates stay, the
-  // authoring-discipline gates (rule-coverage / ui-interaction / acceptance)
-  // are dropped — a later full Build brings them back.
-  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL);
+  // Fast builds run a REDUCED battery: MVP drops the authoring-discipline
+  // gates (rule-coverage / ui-interaction / acceptance); a quick update also
+  // defers the vitest run. A later full Build brings everything back.
+  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr);
 
   setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
 
@@ -371,7 +375,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // (Phase 1, docs/agent-sdk-migration.md), imported dynamically so a flag-off
   // install never needs @anthropic-ai/claude-agent-sdk present. Both share the same
   // args, the same terminal-error handling, and the same gate/checkpoint/deploy tail.
-  const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL };
+  const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: modeStr };
   const driveCycle = buildRunnerMode(process.env) === 'sdk'
     ? () => import('./runner-sdk.js').then((m) => m.runCycleSdk(args))
     : () => runCycle(args);
@@ -630,7 +634,8 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
 // ---- the agentic loop ----
 
 async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL }) {
-  const mvpBuild = normalizeBuildMode(buildMode) === BUILD_MODE_MVP;
+  const cycleMode = normalizeBuildMode(buildMode);
+  const mvpBuild = isFastBuildMode(cycleMode); // fast modes share the relaxed acceptance path
   const projectId = Number(project.id);
   const holder = { type: 'cycle', id: cycle.id };
   const price = effectivePrice(ready.connector.id, ready.model);
@@ -693,7 +698,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     webPort: project.web_port || 3000,
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
     installedComponents,
-    buildMode: mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL,
+    buildMode: cycleMode,
   });
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a

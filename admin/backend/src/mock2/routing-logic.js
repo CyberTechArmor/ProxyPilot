@@ -149,6 +149,23 @@ export function mvpRoutingDecision(env = {}, slotModel = '') {
   };
 }
 
+// ---- Quick-update routing (the iteration path) ----
+
+// The fixed routing a QUICK update runs with: the fast code model at MEDIUM
+// effort. Quick changes are small and scoped, so the diff is cheap either way —
+// medium buys noticeably better judgment than the MVP scaffold's 'low' (the
+// observed quality complaint) while the tiny scope keeps wall-clock short.
+// MOCK2_QUICK_EFFORT overrides.
+export function quickRoutingDecision(env = {}, slotModel = '') {
+  const model = fastCodeModel(env) || String(slotModel || '');
+  const rawEffort = String(env?.MOCK2_QUICK_EFFORT ?? '').trim().toLowerCase();
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'medium';
+  return {
+    model, effort, rung: 0, task_kind: 'feature', difficulty: null,
+    reason: 'quick update', build_mode: 'quick',
+  };
+}
+
 // ---- the routing decision ----
 
 export const ROUTING_MODES = Object.freeze(['on', 'shadow', 'off']);

@@ -333,6 +333,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const [confirmBuild, setConfirmBuild] = useState(false);
   const doBuild = (build = 'all') => { setConfirmBuild(false); approve(build); };
 
+  // Skip the mockup entirely: the base app is already live — lock the design
+  // stage empty (zero tokens) and go straight to quick updates.
+  const skipMockup = async () => {
+    setBusy(true);
+    try {
+      await api.mock2SkipDesign(projectId);
+      toast({ title: 'Mockup skipped', description: 'Build unlocked — describe changes to the running base app as Quick updates.' });
+      await load();
+      if (onApproved) onApproved();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not skip the mockup', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const composerDisabled = busy || jobActive || !online || approved;
 
   return (
@@ -519,10 +535,21 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                   variant="outline"
                   className="h-11 sm:h-10 shrink-0"
                   disabled={composerDisabled}
-                  title="Build MVP — lock in the design and build a fast, testable first version"
+                  title="Build — lock in the design and build it (screen by screen, or all at once)"
                   onClick={() => setConfirmBuild(true)}
                 >
-                  <Rocket className="h-4 w-4 mr-1" /> Build MVP
+                  <Rocket className="h-4 w-4 mr-1" /> Build
+                </Button>
+              ) : null}
+              {!hasMockup && online ? (
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  disabled={busy}
+                  title="The base app is already live — skip the mockup and start making quick updates to it"
+                  onClick={skipMockup}
+                >
+                  <Rocket className="h-4 w-4 mr-1" /> Skip mockup
                 </Button>
               ) : null}
               <span className="text-[11px] text-muted-foreground hidden sm:block ml-auto">⌘/Ctrl+Enter to send</span>

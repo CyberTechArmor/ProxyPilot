@@ -30,7 +30,7 @@
 // provisions a container + repo and is named accordingly. Nothing is "agent."
 
 import { runHost, sh, b64 } from './host.js';
-import { updateProject } from './projects.js';
+import { updateProject, getProject } from './projects.js';
 import { publishDomain } from './publish.js';
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { buildSeedFiles, buildContainerSetupScript, buildCheckpointScript, parseManifestWebPort, DEFAULT_WEB_PORT } from './template.js';
@@ -360,6 +360,47 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   }
 
   console.log(`[mock2] project ${projectId} ${rehydrate ? 'rehydrated' : 'provisioned'}: ${containerName} @ ${ip}:${declaredPort}`);
+
+  // ---- Base-app activation (fresh provision only) ----
+  // A NEW project should be a WORKING app the moment it exists — open the URL,
+  // create the first administrator, sign in — before any mockup or build.
+  // Pre-install the standard components (wires the auth bootstrap into the
+  // scaffold, zero tokens), then deploy the scaffold through the now-active
+  // fence (npm install → migrate → tsc build → unit swap → health-check).
+  // Best-effort: any failure leaves the placeholder serving and says so — the
+  // first build deploys the app exactly as before.
+  if (!rehydrate) {
+    try {
+      setStatus(projectId, { phase: 'base-app', message: 'Setting up the base app (sign-in + first-admin bootstrap)…' });
+      const fresh = getProject(projectId);
+      // Dynamic import: component-install imports this module (container
+      // naming), so a static import would be a cycle.
+      const { preinstallComponents } = await import('./component-install.js');
+      const pre = await preinstallComponents({ project: fresh, initiatedBy: fresh?.created_by ?? null });
+      if (!pre.ok) console.warn(`[mock2] base-app component pre-install incomplete for ${projectId}:`, pre.failed?.map((f) => f.error).join('; '));
+      setStatus(projectId, { phase: 'base-app', message: 'Deploying the base app (install, migrate, build, start)…' });
+      const result = await deployProject({
+        containerName, appDir: APP_DIR, webPort: declaredPort,
+        onStep: (_key, label) => setStatus(projectId, { phase: 'base-app', message: label }),
+      });
+      if (result.ok && !result.skipped) {
+        setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
+        try {
+          const { insertMessage } = await import('./chats.js');
+          insertMessage({
+            projectId, kind: 'system',
+            body: 'The base app is live on your project URL — open it to create the first administrator and sign in. From here you can mock up a design and apply it, or skip the mockup and start making quick updates to the running app.',
+          });
+        } catch { /* best effort */ }
+        console.log(`[mock2] project ${projectId} base app deployed at provision`);
+      } else if (!result.ok) {
+        setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — base app deploy failed at "${result.step}": ${result.error}` });
+        console.warn(`[mock2] base-app deploy failed for ${projectId}: ${result.step} — ${result.error}`);
+      }
+    } catch (e) {
+      console.warn(`[mock2] base-app activation failed for ${projectId} (placeholder keeps serving):`, e?.message || e);
+    }
+  }
   scheduleCleanup(projectId);
 }
 

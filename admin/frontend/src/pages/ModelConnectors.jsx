@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
@@ -65,21 +66,42 @@ export default function ModelConnectors() {
   const [routing, setRouting] = useState(null);   // { mode, rules, env_escalate_model, efforts }
   const [outcomes, setOutcomes] = useState(null); // { stats, recent }
   const [busyId, setBusyId] = useState(null);
+  // Global thinking switch (shared with the admin queue's lane-tuning card).
+  const [globalThinking, setGlobalThinking] = useState(null);
+  const [savingThinking, setSavingThinking] = useState(false);
+
+  const saveGlobalThinking = async (off) => {
+    setSavingThinking(true);
+    try {
+      const res = await api.mock2SetGlobalThinking(off ? 'off' : 'default');
+      setGlobalThinking(res.global_thinking);
+      toast({
+        title: res.global_thinking === 'off' ? 'Thinking disabled everywhere' : 'Thinking re-enabled',
+        description: res.global_thinking === 'off'
+          ? 'Every model call now runs without thinking, regardless of per-lane settings.'
+          : 'Per-lane thinking settings apply again.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingThinking(false); }
+  };
 
   const load = useCallback(async () => {
     try {
-      const [c, s, g, r, o] = await Promise.all([
+      const [c, s, g, r, o, t] = await Promise.all([
         api.mock2ListConnectors(),
         api.mock2ListModelSlots(),
         api.mock2ListGitConnectors().catch(() => ({ connectors: [] })),
         api.mock2RoutingRules().catch(() => null),
         api.mock2RoutingOutcomes().catch(() => null),
+        api.mock2GetLaneTuning().catch(() => null),
       ]);
       setConnectors(c.connectors || []);
       setSlots(s.slots || []);
       setGitConnectors(g.connectors || []);
       setRouting(r);
       setOutcomes(o);
+      if (t) setGlobalThinking(t.global_thinking || 'default');
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load connectors failed:', err);
     }
@@ -279,6 +301,26 @@ export default function ModelConnectors() {
                   Fallback escalation model (MOCK2_ESCALATE_MODEL): {routing.env_escalate_model ? <code>{routing.env_escalate_model}</code> : 'not set'}
                 </span>
               </div>
+              {/* The global thinking kill switch, mirrored from the admin queue's
+                  "Model thinking & effort" card — same setting, same effect. */}
+              {globalThinking != null ? (
+                <label htmlFor="routing-thinking-off" className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border p-3">
+                  <Switch
+                    id="routing-thinking-off"
+                    checked={globalThinking === 'off'}
+                    disabled={savingThinking}
+                    onCheckedChange={saveGlobalThinking}
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium">Turn off thinking everywhere</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {globalThinking === 'off'
+                        ? 'On — every model call (build, MVP, quick, audit, chat, mockup, ask) runs without thinking.'
+                        : 'Off — each lane uses its own thinking setting (admin queue → Model thinking & effort).'}
+                    </span>
+                  </span>
+                </label>
+              ) : null}
               {(routing.rules || []).map((r) => (
                 <RoutingRuleRow key={r.task_kind} rule={r} efforts={routing.efforts || []}
                   onSave={async (patch) => {
@@ -519,7 +561,13 @@ function RoutingRuleRow({ rule, efforts, onSave }) {
           <div>
             <Label className="text-xs">Model</Label>
             <Select value={model} onValueChange={setModel}>
-              <SelectTrigger className="min-h-[44px]"><SelectValue /></SelectTrigger>
+              {/* Explicit SelectValue children: the closed trigger shows ONLY a
+                  short one-line label — the two-line content stays in the menu. */}
+              <SelectTrigger className="min-h-[44px]">
+                <SelectValue>
+                  <span className="truncate">{model === 'auto' ? 'Auto · recommended' : modelLabel(model)}</span>
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="auto">
                   <span className="flex flex-col">
@@ -534,7 +582,13 @@ function RoutingRuleRow({ rule, efforts, onSave }) {
           <div>
             <Label className="text-xs">Escalate to (on failure / difficulty 5)</Label>
             <Select value={escalate} onValueChange={setEscalate}>
-              <SelectTrigger className="min-h-[44px]"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="min-h-[44px]">
+                <SelectValue>
+                  <span className="truncate">
+                    {escalate === 'none' ? 'None' : `${modelLabel(escalate)}${escalate === RECOMMENDED_ESCALATE_MODEL ? ' · recommended' : ''}`}
+                  </span>
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 {modelOptionsWith(rule.escalate_model).map((m) => modelItem(m, m.id === RECOMMENDED_ESCALATE_MODEL ? ' · recommended' : ''))}
                 <SelectItem value="none">
@@ -613,7 +667,11 @@ function SlotRow({ slot, cur, eligible, onAssign, onClear }) {
             <SelectContent>{eligible.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}</SelectContent>
           </Select>
           <Select value={model} onValueChange={setModel}>
-            <SelectTrigger className="min-h-[44px]"><SelectValue placeholder="Model" /></SelectTrigger>
+            <SelectTrigger className="min-h-[44px]">
+              <SelectValue placeholder="Model">
+                {model ? <span className="truncate">{modelLabel(model)}{model === suggested ? ' · suggested' : ''}</span> : null}
+              </SelectValue>
+            </SelectTrigger>
             <SelectContent>
               {options.map((m) => (
                 <SelectItem key={m.id} value={m.id}>

@@ -101,11 +101,17 @@ export function createApp(): express.Express {
   // placeholder dev server: /_preview serves state/mockups, default current.html.
   app.use('/_preview', express.static(MOCKUPS_DIR, { index: 'current.html' }));
 
-  // The authenticated app shell. The build replaces the placeholder content
-  // with the real screens; unauthenticated visitors always land on /login.
+  // The authenticated app shell (public/app-shell.html — the base-style page
+  // the build extends with screens); unauthenticated visitors always land on
+  // /login. Inline fallback if a build removed the shell file.
   app.get('/', (req, res) => {
     if (!isAuthenticated(req)) {
       res.redirect('/login');
+      return;
+    }
+    const shell = path.join(PUBLIC_DIR, 'app-shell.html');
+    if (fs.existsSync(shell)) {
+      res.sendFile(shell);
       return;
     }
     res

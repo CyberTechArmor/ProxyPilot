@@ -648,6 +648,70 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   scheduleJobCleanup(projectId);
 }
 
+// ---- skip the mockup (straight to adjusting the running base app) ----
+
+// skipDesign — the Builder chose to work WITHOUT a mockup: the base app is
+// already live (auth + shell + preset styling), so lock the design stage with
+// an EMPTY inventory and unlock builds. Zero model calls, zero tokens. The
+// screen plan stays empty; quick updates / builds describe screens directly.
+export async function skipDesign({ project, user, actingAsAdmin = 0 }) {
+  const projectId = Number(project.id);
+  if (project.lifecycle !== 'active') return { status: 'error', error: `The project must be online to skip the mockup (it is "${project.lifecycle}").` };
+  if (project.design_approved_at) return { status: 'error', error: 'The design is already approved.' };
+
+  const framework = getCurrentFrameworkVersion();
+  if (!framework) return { status: 'error', error: 'No framework version exists to pin. Publish one first.' };
+  const holder = { type: 'user', id: user.id };
+  const lock = acquireLock({ projectId, requester: holder, role: actingAsAdmin ? 'admin' : (user.role === 'admin' ? 'admin' : 'editor') });
+  if (!lock.ok) return { status: 'error', error: lock.reason || 'This project is checked out by another writer.' };
+
+  try {
+    const containerName = project.container_name || containerNameForProject(projectId);
+    const cycle = insertCycle({ projectId, frameworkVersionId: framework.id, stage: 'concept', instruction: 'design skipped', initiatedBy: user.id, actingAsAdmin, estCostCents: 0, status: 'running' });
+    updateCycle(cycle.id, { started_at: nowIso() });
+
+    const inv = {
+      screens: [], fields: [], actions: [],
+      skipped: true, approved_at: nowIso(), approved_by: user.id,
+      note: 'Design stage skipped — building directly on the base app; screens are described per build request.',
+    };
+    const wInv = await writeWorkingFile(containerName, INVENTORY_PATH, JSON.stringify(inv, null, 2));
+    if (!wInv.ok) {
+      finishCycle(cycle.id, { status: 'failed', error: `could not write inventory: ${wInv.error}` });
+      return { status: 'error', error: `Could not record the skip: ${wInv.error}` };
+    }
+    const summary = 'Design stage skipped — building directly on the live base app (auth, shell, and preset styling already in place).';
+    const sha = await checkpoint(containerName, `mock2: ${summary}`);
+    let record = null;
+    try {
+      record = insertChangeRecord({
+        projectId, cycleId: cycle.id, initiatedBy: user.id, actingAsAdmin,
+        frameworkVersion: framework.version, frameworkVersionId: framework.id,
+        rulesTouched: null, gatesRun: null, commitSha: sha, summary,
+      });
+      if (record) {
+        await writeWorkingFile(containerName, `state/changes/${record.seq}.json`, JSON.stringify(changeRecordMirror(record), null, 2));
+        await checkpoint(containerName, `mock2: change record ${record.seq}`);
+      }
+    } catch (e) { console.warn('[mock2] skip-design change record failed:', e?.message); }
+    await maybePushRemote(projectId);
+
+    updateProject(projectId, {
+      design_approved_at: nowIso(),
+      design_inventory_seq: record ? record.seq : null,
+      last_activity_at: nowIso(),
+    });
+    finishCycle(cycle.id, { status: 'succeeded' });
+    insertMessage({
+      projectId, kind: 'system', cycleId: cycle.id,
+      body: 'Mockup skipped — Build is unlocked. The base app is live (sign-in + first-admin setup + your chosen look); describe changes in the build chat and land them as Quick updates.',
+    });
+    return { status: 'ok', cycle: getCycle(cycle.id) };
+  } finally {
+    releaseLock(projectId, holder);
+  }
+}
+
 // ---- the design-approval gesture (Stage 1's ONLY exit — sign-off #1) ----
 
 // startDesignApproval — the Builder approved the design. Synchronous guards, then

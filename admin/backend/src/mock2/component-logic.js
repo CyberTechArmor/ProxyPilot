@@ -754,6 +754,10 @@ export const COMPONENTS_STATE_PATH = 'state/components.json';
 // buildComponentsStateDoc — the committed artifact recording WHICH components
 // this project uses, at what version, and why. Entries ride the hash-chained
 // history like integrations.json; the build runner and the gates read it.
+// `api` (the contract's endpoints) and `files` (the installed file paths from the
+// install manifest) are what the component-reuse gate matches the working-tree
+// diff against — an endpoint or file re-implemented OUTSIDE these paths is a
+// duplication, an edit INSIDE them is adaptation.
 export function buildComponentsStateDoc(entries = []) {
   return `${JSON.stringify({
     schema_version: 1,
@@ -764,6 +768,7 @@ export function buildComponentsStateDoc(entries = []) {
       origin: e.origin || null,
       options: e.options ?? null,
       api: Array.isArray(e.api) ? e.api : undefined,
+      files: Array.isArray(e.files) ? e.files : undefined,
       installed_at: e.installed_at || null,
     })),
   }, null, 2)}\n`;

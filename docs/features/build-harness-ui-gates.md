@@ -19,6 +19,7 @@ live app). The new layer is split accordingly:
 | DB smoke connector | orchestrator → container, post-deploy | diff touches `migrations/`, `**/*.sql`, `**/schema/**`, `**/drizzle/**`, seed/bootstrap paths |
 | Cross-layer lint (in `constitution-lint`) | container, every gate run | always (checks tracked + untracked `public/*.js`) |
 | Acceptance criteria on `finish` | orchestrator, every cycle | always |
+| `component-reuse` gate (battery order 8) | container, every gate run | `state/components.json` lists installed components and the diff exists |
 
 ## 1–2. Smoke connectors: enabled by default, off = ship for live testing
 
@@ -218,3 +219,41 @@ committed key, allowlist-waivable); and the live "Test connection turns all
 three checks green" acceptance check fails against a fixture reproducing the
 defect and passes once fixed (`mock2-acceptance.test.js`,
 `mock2-ui-checks.e2e.test.js`).
+
+---
+
+# Addendum: component-reuse detection (the request-36 hardening)
+
+A third failure shape: asked to "build the first-visit bootstrap super admin
+creation", a build re-implemented capability the pre-installed auth component
+already shipped, then fought unrelated gates for five attempts on a feature that
+was effectively done. Reuse guidance existed but was advisory prose only.
+
+Two-sided fix:
+
+- **Process (build skill)**: a mandatory "Reuse before you rebuild — ALWAYS check
+  first" step precedes the work loop — installed components, then the component
+  library, then the existing tree; a capability already fully present finishes as
+  a verified finding (chore), never a manufactured diff.
+- **Detector (`component-reuse` gate, battery order 8, deterministic, no AI)**:
+  `state/components.json` now mirrors each installed component's **API contract**
+  and **installed file paths** (from the verified install manifest). The gate
+  fails the cycle when the working-tree diff:
+  1. **re-registers a component endpoint** outside the component's own files —
+     an express-looking receiver (`app`/`router`/`xRouter`/`r`) registering a
+     path that exactly matches a contract endpoint, or suffix-matches it with
+     ≥2 segments (mounted routers); method must match. Client code *calling* an
+     endpoint (`api.post`, `axios.post`, `fetch`) is wiring and never flags;
+  2. **adds a parallel copy of a component file** — same basename (generic names
+     like `index.ts`/`routes.ts` and numbered migrations exempt) while the
+     component's original is still on disk. A move/rename does not flag.
+
+  Edits *inside* a component's installed files are adaptation and always pass.
+  Waivers follow the standard gate-waiver protocol: the exact path goes in
+  `state/component-reuse-allowlist.txt` as a distinct reviewed act with a
+  halt/deviation explaining why — never a restructure to dodge the detector.
+
+Tests execute the gate's real embedded script from the seed against fixtures
+(`mock2-component-reuse-gate.test.js`): the request-36 shape (re-registering
+`POST /api/auth/bootstrap/superadmin`, a parallel `bootstrap-superadmin.mjs`)
+fails; wiring calls, own-file adaptation, moves, and waivers pass.

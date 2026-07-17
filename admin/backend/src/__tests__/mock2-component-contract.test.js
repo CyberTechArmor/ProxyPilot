@@ -225,11 +225,14 @@ test('deriveComponentSubsystem: first src/* wins, fallback otherwise', () => {
 test('buildComponentsStateDoc: stable committed artifact', () => {
   assert.equal(COMPONENTS_STATE_PATH, 'state/components.json');
   const doc = JSON.parse(buildComponentsStateDoc([
-    { key: 'proxypilot-auth', version: 3, status: 'installed', origin: 'define', options: { answer: 'Use the standard component' }, api: [{ method: 'GET', path: '/api/auth/bootstrap/status' }], installed_at: 't' },
+    { key: 'proxypilot-auth', version: 3, status: 'installed', origin: 'define', options: { answer: 'Use the standard component' }, api: [{ method: 'GET', path: '/api/auth/bootstrap/status' }], files: ['src/auth/routes.ts'], installed_at: 't' },
   ]));
   assert.equal(doc.schema_version, 1);
   assert.equal(doc.entries[0].key, 'proxypilot-auth');
   assert.equal(doc.entries[0].api.length, 1);
+  // `files` (the install-manifest paths) is what the component-reuse gate uses to
+  // tell adaptation (inside) from reimplementation (outside) — it must round-trip.
+  assert.deepEqual(doc.entries[0].files, ['src/auth/routes.ts']);
 });
 
 test('buildInstalledComponentsSection: wiring contract in, empty out', () => {

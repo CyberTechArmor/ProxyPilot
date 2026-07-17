@@ -26,7 +26,7 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
-  ArrowLeft, Bot, BugPlay, Copy, FileCode, GitBranch, Loader2, Pencil, Pin, PinOff,
+  ArrowLeft, Bot, BugPlay, Copy, FileCode, Loader2, Pencil, Pin, PinOff,
   Play, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, ShieldQuestion, Star,
   Stethoscope, Trash2, X, Zap,
 } from 'lucide-react';
@@ -271,19 +271,32 @@ function extractHistory(body) {
   return items;
 }
 
-function OriginPill({ origin, gitUrl }) {
-  if (origin === 'git') {
+// Provenance badge: `ai` = filed by the built-in research routine,
+// `paste` = an operator pasted/edited it by hand ("manual"). Legacy
+// `git` entries (from the retired git feed, pending purge) render as
+// plain text so old inboxes still display sanely.
+function OriginPill({ origin }) {
+  if (origin === 'ai') {
     return (
-      <span title={gitUrl || ''}
+      <span title="Filed by the AI research routine"
             className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
-        <GitBranch className="h-3 w-3" /> git
+        <Bot className="h-3 w-3" /> ai
       </span>
     );
   }
   if (origin === 'paste') {
     return (
-      <span className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
-        paste
+      <span title="Pasted or edited by an operator"
+            className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
+        manual
+      </span>
+    );
+  }
+  if (origin === 'git') {
+    return (
+      <span title="Imported by the retired git feed"
+            className="inline-flex items-center gap-1 text-[10px] font-mono text-muted-foreground border border-border rounded px-1.5 py-0.5">
+        git
       </span>
     );
   }
@@ -369,8 +382,37 @@ function FormattedName({ name }) {
   );
 }
 
-function CveListRow({ entry, onOpen, onTogglePin }) {
-  // Layout (12 cols, all aligned to the column header below):
+// Width of the per-row quick-action cluster (3 × 36px buttons + gaps +
+// padding). The table header renders a spacer of the same width so the
+// data columns stay aligned with their labels.
+const ROW_ACTIONS_W = 'w-[8.5rem]';
+
+// Compact per-row icon button. h-9 w-9 (36px) is the MOBILE_FIRST
+// "dense-list secondary action" size. Stops propagation so a tap acts
+// without also opening the row's detail view.
+function RowActionButton({ title, onClick, disabled, busy, danger = false, Icon }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled || busy}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className={`h-9 w-9 inline-flex items-center justify-center rounded border border-transparent transition-colors
+        ${danger ? 'text-muted-foreground hover:text-red-500 hover:border-red-500/40'
+                 : 'text-muted-foreground hover:text-foreground hover:border-border'}
+        hover:bg-accent disabled:opacity-40 disabled:pointer-events-none`}
+    >
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
+    </button>
+  );
+}
+
+function CveListRow({ entry, onOpen, onTogglePin, onQuickCheck, onQuickRun, onQuickDismiss, busy }) {
+  // Layout: a keyboard-accessible clickable area (12-col grid, aligned
+  // to the column header) + a trailing quick-action cluster. The outer
+  // element is a div (not a button) so the nested pin/action buttons
+  // are valid HTML.
   //   3   CVE
   //   3   Name
   //   1   Tier
@@ -378,45 +420,83 @@ function CveListRow({ entry, onOpen, onTogglePin }) {
   //   2   Status
   //   1   Added
   //   1   Updated
+  const runnable = entry.action_class !== 'ALERT' && entry.status !== 'DISMISSED';
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(entry.cve)}
-      className="w-full text-left grid grid-cols-12 gap-3 items-center px-3 py-2 border-b border-border/50 hover:bg-accent/40"
-    >
-      <div className="col-span-12 sm:col-span-3 font-mono text-sm flex items-center gap-2">
-        <PinButton
-          pinned={!!entry.pin}
-          stopPropagation
-          onToggle={() => onTogglePin?.(entry)}
+    <div className="flex items-center border-b border-border/50 hover:bg-accent/40">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onOpen(entry.cve)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(entry.cve); }
+        }}
+        className="flex-1 min-w-0 cursor-pointer text-left grid grid-cols-12 gap-3 items-center px-3 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50"
+      >
+        <div className="col-span-12 sm:col-span-3 font-mono text-sm flex items-center gap-2">
+          <PinButton
+            pinned={!!entry.pin}
+            stopPropagation
+            onToggle={() => onTogglePin?.(entry)}
+          />
+          <VerdictShield
+            verdict={entry.latest_verdict?.verdict}
+            ts={entry.latest_verdict?.ts}
+          />
+          {!entry.operator_seen && (
+            <span className="h-2 w-2 rounded-full bg-orange-500 shrink-0" aria-label="unread" />
+          )}
+          <span className="truncate">{entry.cve}</span>
+          <OriginPill origin={entry.origin} />
+        </div>
+        <div className="col-span-12 sm:col-span-3 text-sm truncate">
+          <FormattedName name={entry.name} />
+        </div>
+        <div className="col-span-2 sm:col-span-1 text-xs">
+          {entry.tier ? `T${entry.tier}` : ''}
+        </div>
+        <div className="col-span-3 sm:col-span-1"><ActionPill action={entry.action_class} /></div>
+        <div className="col-span-3 sm:col-span-2"><StatusPill status={entry.status} /></div>
+        <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
+             title={entry.added ? new Date(entry.added).toLocaleString() : ''}>
+          {relTime(entry.added)}
+        </div>
+        <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
+             title={entry.last_updated ? new Date(entry.last_updated).toLocaleString() : ''}>
+          {relTime(entry.last_updated)}
+        </div>
+      </div>
+      {/* Quick actions — the reflex moves an operator makes from the
+          list without opening the detail view. Check is read-only;
+          Run and Dismiss go through the same confirm/reason dialogs
+          the detail view uses. */}
+      <div className={`${ROW_ACTIONS_W} shrink-0 flex items-center justify-end gap-1 px-2`}>
+        <RowActionButton
+          title="Check applicability (probe only — no changes)"
+          Icon={Stethoscope}
+          busy={busy === 'check'}
+          disabled={!!busy}
+          onClick={() => onQuickCheck?.(entry)}
         />
-        <VerdictShield
-          verdict={entry.latest_verdict?.verdict}
-          ts={entry.latest_verdict?.ts}
+        <RowActionButton
+          title={entry.action_class === 'ALERT'
+            ? 'ALERT entries are read-only — open the row for the playbook'
+            : entry.status === 'DISMISSED'
+              ? 'Entry is dismissed'
+              : 'Run on this host'}
+          Icon={Play}
+          busy={busy === 'run'}
+          disabled={!!busy || !runnable}
+          onClick={() => onQuickRun?.(entry)}
         />
-        {!entry.operator_seen && (
-          <span className="h-2 w-2 rounded-full bg-orange-500 shrink-0" aria-label="unread" />
-        )}
-        <span className="truncate">{entry.cve}</span>
-        <OriginPill origin={entry.origin} gitUrl={entry.origin_git_url} />
+        <RowActionButton
+          title={entry.status === 'DISMISSED' ? 'Already dismissed' : 'Dismiss with a reason'}
+          Icon={X}
+          danger
+          disabled={!!busy || entry.status === 'DISMISSED'}
+          onClick={() => onQuickDismiss?.(entry)}
+        />
       </div>
-      <div className="col-span-12 sm:col-span-3 text-sm truncate">
-        <FormattedName name={entry.name} />
-      </div>
-      <div className="col-span-2 sm:col-span-1 text-xs">
-        {entry.tier ? `T${entry.tier}` : ''}
-      </div>
-      <div className="col-span-3 sm:col-span-1"><ActionPill action={entry.action_class} /></div>
-      <div className="col-span-3 sm:col-span-2"><StatusPill status={entry.status} /></div>
-      <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
-           title={entry.added ? new Date(entry.added).toLocaleString() : ''}>
-        {relTime(entry.added)}
-      </div>
-      <div className="col-span-2 sm:col-span-1 text-xs text-muted-foreground"
-           title={entry.last_updated ? new Date(entry.last_updated).toLocaleString() : ''}>
-        {relTime(entry.last_updated)}
-      </div>
-    </button>
+    </div>
   );
 }
 
@@ -851,8 +931,6 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
     blast_radius: yamlScalar(yamlBody, 'blast_radius'),
     sources: extractListItems(yamlBody, 'sources'),
     origin: extractNestedScalar(yamlBody, '_proxypilot', 'origin'),
-    git_url: extractNestedScalar(yamlBody, '_proxypilot', 'git_url'),
-    git_commit: extractNestedScalar(yamlBody, '_proxypilot', 'git_commit'),
     imported_at: extractNestedScalar(yamlBody, '_proxypilot', 'imported_at'),
   }), [yamlBody]);
 
@@ -1041,14 +1119,12 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
                     </div>
                   )}
 
-                  {(meta.origin || meta.git_url) && (
+                  {meta.origin && (
                     <div>
                       <div className="text-xs font-medium text-muted-foreground mb-1">Provenance</div>
                       <FactGrid items={[
-                        ['Origin',       meta.origin && <OriginPill origin={meta.origin} gitUrl={meta.git_url} />],
-                        ['Git URL',      meta.git_url && <span className="font-mono text-xs break-all">{meta.git_url}</span>],
-                        ['Git commit',   meta.git_commit && <span className="font-mono text-xs">{String(meta.git_commit).slice(0, 12)}</span>],
-                        ['Imported',     meta.imported_at && <span className="font-mono text-xs">{meta.imported_at}</span>],
+                        ['Origin',   <OriginPill origin={meta.origin} />],
+                        ['Imported', meta.imported_at && <span className="font-mono text-xs">{meta.imported_at}</span>],
                       ]} />
                     </div>
                   )}
@@ -1212,14 +1288,13 @@ function CveList({ onOpen, refreshKey }) {
   const [pasteContent, setPasteContent] = useState('');
   const [pasting, setPasting] = useState(false);
   const [polling, setPolling] = useState(false);
-  const [gitConfigOpen, setGitConfigOpen] = useState(false);
-  const [gitUrl, setGitUrl] = useState('');
-  const [gitDraft, setGitDraft] = useState('');
-  const [gitSaving, setGitSaving] = useState(false);
-  const [gitSyncing, setGitSyncing] = useState(false);
-  // The most recent sync result so the source caption can show the
-  // parsed branch + subpath alongside the URL.
-  const [lastSync, setLastSync] = useState(null);
+  // Per-row quick-action state. rowBusy maps cve → 'check' | 'run'
+  // while that row's action is in flight; runTarget / dismissTarget
+  // hold the entry a confirm dialog is open for (null = closed).
+  const [rowBusy, setRowBusy] = useState({});
+  const [runTarget, setRunTarget] = useState(null);
+  const [dismissTarget, setDismissTarget] = useState(null);
+  const [dismissReason, setDismissReason] = useState('');
 
   // AI research routine — native replacement for a manual external
   // research session. `research` is the last-fetched settings snapshot
@@ -1255,66 +1330,90 @@ function CveList({ onOpen, refreshKey }) {
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
 
-  // Pull the saved git source URL once on mount; cheap settings read.
-  useEffect(() => {
-    api.getCveGitConfig()
-      .then(c => setGitUrl(c.url || ''))
-      .catch(() => {});
-  }, []);
+  const setBusyFor = (cve, action) => setRowBusy(m => {
+    const next = { ...m };
+    if (action) next[cve] = action;
+    else delete next[cve];
+    return next;
+  });
 
-  const onSaveGitConfig = async () => {
-    setGitSaving(true);
+  // Quick Check — read-only probe straight from the list. Same
+  // endpoint the detail view's "Check applicability" uses; the row's
+  // verdict shield updates on the refresh that follows.
+  const onQuickCheck = async (entry) => {
+    setBusyFor(entry.cve, 'check');
     try {
-      await api.setCveGitConfig(gitDraft);
-      setGitUrl(gitDraft);
-      toast({ title: 'Git source saved',
-              description: gitDraft ? 'Click Sync now to pull.' : 'Cleared.' });
-      setGitConfigOpen(false);
-    } catch (err) {
+      const out = await api.checkCve(entry.cve);
+      const titleByVerdict = {
+        affected: `${entry.cve}: host IS affected`,
+        not_affected: `${entry.cve}: host is NOT affected`,
+        no_probe: `${entry.cve}: no probe in spec`,
+      };
       toast({
-        title: 'Save failed',
-        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
-        variant: 'destructive',
+        title: titleByVerdict[out?.verdict] || `${entry.cve}: check finished`,
+        description: out?.verdict === 'no_probe'
+          ? 'The spec is missing playbook.detect.probe.'
+          : `probe exit=${out?.exit_code} · ${out?.duration_s?.toFixed?.(2) || '?'}s`,
+        variant: out?.verdict === 'affected' || out?.verdict === 'no_probe'
+          ? 'destructive' : undefined,
       });
-    } finally {
-      setGitSaving(false);
-    }
-  };
-
-  const onSyncGit = async () => {
-    if (!gitUrl) {
-      setGitDraft('');
-      setGitConfigOpen(true);
-      return;
-    }
-    setGitSyncing(true);
-    try {
-      const out = await api.syncCveGit();
-      const imported = (out?.imported || []).length;
-      const skipped = out?.skipped_existing_count || 0;
-      const errors = (out?.errors || []).length;
-      const branchPart = out?.branch ? ` · branch ${out.branch}` : '';
-      const subPart = out?.subpath ? ` · ${out.subpath}/` : '';
-      const commitPart = out?.git_commit ? ` · ${out.git_commit.slice(0, 7)}` : '';
-      const errorTail = errors && (out?.errors || []).length
-        ? '\n' + (out.errors || []).slice(0, 3).join('\n') : '';
-      toast({
-        title: errors ? `Synced with ${errors} error(s)` : 'Synced',
-        description: `Imported ${imported}, kept ${skipped} existing${branchPart}${subPart}${commitPart}${errorTail}`,
-        variant: errors ? 'destructive' : undefined,
-      });
-      // Cache the parsed branch/subpath so the source caption can
-      // show what the engine actually walked, not just the URL.
-      setLastSync(out || null);
       await refresh();
     } catch (err) {
       toast({
-        title: 'Sync failed',
+        title: 'Check failed',
         description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
         variant: 'destructive',
       });
     } finally {
-      setGitSyncing(false);
+      setBusyFor(entry.cve, null);
+    }
+  };
+
+  // Quick Run — confirmed via the runTarget dialog first; this fires
+  // after the operator clicks through. Same full state machine as the
+  // detail view's "Run on this host".
+  const onConfirmQuickRun = async () => {
+    const entry = runTarget;
+    if (!entry) return;
+    setRunTarget(null);
+    setBusyFor(entry.cve, 'run');
+    try {
+      const out = await api.runCve(entry.cve, { force_action: 'ONE_CLICK' });
+      const r = out?.result || {};
+      toast({
+        title: `${entry.cve} run finished: ${r.final_status || 'unknown'}`,
+        description: r.skipped_reason
+          || (r.operator_action_required && r.operator_action_required !== 'none'
+              ? `Operator action: ${r.operator_action_required}`
+              : 'No further operator action required.'),
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Run failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
+    } finally {
+      setBusyFor(entry.cve, null);
+    }
+  };
+
+  const onConfirmQuickDismiss = async () => {
+    const entry = dismissTarget;
+    if (!entry || !dismissReason.trim()) return;
+    try {
+      await api.dismissCve(entry.cve, dismissReason.trim());
+      toast({ title: 'Dismissed', description: `${entry.cve} set to DISMISSED.` });
+      setDismissTarget(null);
+      setDismissReason('');
+      await refresh();
+    } catch (err) {
+      toast({
+        title: 'Dismiss failed',
+        description: err instanceof ApiError ? err.message : (err?.message || 'unknown error'),
+        variant: 'destructive',
+      });
     }
   };
 
@@ -1498,7 +1597,6 @@ function CveList({ onOpen, refreshKey }) {
       rows = rows.filter(r =>
         r.cve.toLowerCase().includes(q)
         || (r.name || '').toLowerCase().includes(q)
-        || (r.origin_git_url || '').toLowerCase().includes(q)
       );
     }
     if (filterAction !== 'all') rows = rows.filter(r => r.action_class === filterAction);
@@ -1644,12 +1742,6 @@ function CveList({ onOpen, refreshKey }) {
           <Button variant="outline" size="sm" onClick={() => setPasteOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" /> Paste YAML
           </Button>
-          <Button variant="outline" size="sm"
-                  onClick={onSyncGit} disabled={gitSyncing}
-                  title={gitUrl ? `Pull from ${gitUrl}` : 'Click to configure a git source'}>
-            {gitSyncing ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <GitBranch className="h-4 w-4 mr-1.5" />}
-            {gitUrl ? 'Sync git' : 'Add git source'}
-          </Button>
           <Button variant="outline" size="sm" onClick={onPollNow} disabled={polling}>
             {polling ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Zap className="h-4 w-4 mr-1.5" />}
             Poll now
@@ -1665,8 +1757,8 @@ function CveList({ onOpen, refreshKey }) {
       </div>
       <p className="text-xs text-muted-foreground max-w-2xl">
         Each row is one entry from <code className="font-mono">/var/lib/proxypilot/cve-inbox/</code>.
-        Claude writes specs into the inbox; the engine acts on AUTO_PATCH entries automatically and
-        surfaces ONE_CLICK + ALERT here for operator review.
+        The AI research routine (and Paste YAML) writes specs into the inbox; the engine acts on
+        AUTO_PATCH entries automatically and surfaces ONE_CLICK + ALERT here for operator review.
       </p>
 
       {/* Top-level tabs. Entries auto-route by their latest verdict
@@ -1697,33 +1789,6 @@ function CveList({ onOpen, refreshKey }) {
         ))}
       </div>
 
-      {gitUrl && (
-        <div className="text-xs text-muted-foreground space-y-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <GitBranch className="h-3.5 w-3.5" />
-            <span>Source:</span>
-            <button
-              type="button"
-              onClick={() => { setGitDraft(gitUrl); setGitConfigOpen(true); }}
-              className="font-mono break-all underline-offset-2 hover:underline hover:text-foreground"
-              title="Click to change or clear"
-            >
-              {gitUrl}
-            </button>
-          </div>
-          {(lastSync?.branch || lastSync?.subpath || lastSync?.git_commit) && (
-            <div className="flex items-center gap-3 flex-wrap pl-5 text-[11px] font-mono opacity-80">
-              {lastSync?.branch && <span>branch: <span className="text-foreground/80">{lastSync.branch}</span></span>}
-              {lastSync?.subpath && <span>path: <span className="text-foreground/80">{lastSync.subpath}/</span></span>}
-              {lastSync?.git_commit && <span>commit: <span className="text-foreground/80">{lastSync.git_commit.slice(0, 7)}</span></span>}
-            </div>
-          )}
-          <div className="pl-5 text-[10px] opacity-70">
-            read-only · sync is additive · changing URL never deletes existing entries
-          </div>
-        </div>
-      )}
-
       {error && (
         <div className="text-sm text-red-500 border border-red-500/30 bg-red-500/10 rounded px-3 py-2">
           {error}
@@ -1731,7 +1796,7 @@ function CveList({ onOpen, refreshKey }) {
       )}
 
       {/* Search bar — full-width, instant client-side filter across
-          CVE id + name + origin_git_url. Pinned-only toggle sits
+          CVE id + name. Pinned-only toggle sits
           next to it so the two main filters share a row. */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
@@ -1739,7 +1804,7 @@ function CveList({ onOpen, refreshKey }) {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search CVE id, name, or git URL…"
+            placeholder="Search CVE id or name…"
             className="w-full text-sm bg-muted/30 border border-border rounded px-3 py-2 pr-9 placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/50"
           />
           {search && (
@@ -1779,54 +1844,62 @@ function CveList({ onOpen, refreshKey }) {
           {/* Row 1 — column labels with sort indicators. Tier is
               sort-only per operator request; Action + Status got
               dropdown filters in the row below. */}
-          <div className="grid grid-cols-12 gap-3 px-3 py-2 text-xs text-muted-foreground bg-muted/30">
-            <SortHeader k="cve"     className="col-span-12 sm:col-span-3">CVE</SortHeader>
-            <SortHeader k="name"    className="col-span-12 sm:col-span-3">Name</SortHeader>
-            <SortHeader k="tier"    className="col-span-2 sm:col-span-1">Tier</SortHeader>
-            <SortHeader k="action"  className="col-span-3 sm:col-span-1">Action</SortHeader>
-            <SortHeader k="status"  className="col-span-3 sm:col-span-2">Status</SortHeader>
-            <SortHeader k="added"   className="col-span-2 sm:col-span-1">Added</SortHeader>
-            <SortHeader k="updated" className="col-span-2 sm:col-span-1">Updated</SortHeader>
+          <div className="flex items-center bg-muted/30 text-xs text-muted-foreground">
+            <div className="flex-1 min-w-0 grid grid-cols-12 gap-3 px-3 py-2">
+              <SortHeader k="cve"     className="col-span-12 sm:col-span-3">CVE</SortHeader>
+              <SortHeader k="name"    className="col-span-12 sm:col-span-3">Name</SortHeader>
+              <SortHeader k="tier"    className="col-span-2 sm:col-span-1">Tier</SortHeader>
+              <SortHeader k="action"  className="col-span-3 sm:col-span-1">Action</SortHeader>
+              <SortHeader k="status"  className="col-span-3 sm:col-span-2">Status</SortHeader>
+              <SortHeader k="added"   className="col-span-2 sm:col-span-1">Added</SortHeader>
+              <SortHeader k="updated" className="col-span-2 sm:col-span-1">Updated</SortHeader>
+            </div>
+            {/* Spacer matching each row's quick-action cluster so the
+                data columns line up under their labels. */}
+            <div className={`${ROW_ACTIONS_W} shrink-0 px-2 py-2 text-right`} aria-hidden="true" />
           </div>
           {/* Row 2 — filter dropdowns under Action + Status. Tier no
               longer has chips (sort-only); CVE / Name / Added /
               Updated have no filters (search handles them). */}
-          <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-card border-t border-border/40">
-            <div className="col-span-12 sm:col-span-3" />
-            <div className="col-span-12 sm:col-span-3" />
-            <div className="col-span-2 sm:col-span-1" />
-            <div className="col-span-3 sm:col-span-1">
-              <select
-                value={filterAction}
-                onChange={(e) => setFilterAction(e.target.value)}
-                aria-label="Filter by action"
-                className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
-              >
-                <option value="all">All</option>
-                <option value="AUTO_PATCH">AUTO_PATCH</option>
-                <option value="ONE_CLICK">ONE_CLICK</option>
-                <option value="ALERT">ALERT</option>
-              </select>
+          <div className="flex items-center bg-card border-t border-border/40">
+            <div className="flex-1 min-w-0 grid grid-cols-12 gap-3 px-3 py-1.5">
+              <div className="col-span-12 sm:col-span-3" />
+              <div className="col-span-12 sm:col-span-3" />
+              <div className="col-span-2 sm:col-span-1" />
+              <div className="col-span-3 sm:col-span-1">
+                <select
+                  value={filterAction}
+                  onChange={(e) => setFilterAction(e.target.value)}
+                  aria-label="Filter by action"
+                  className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                >
+                  <option value="all">All</option>
+                  <option value="AUTO_PATCH">AUTO_PATCH</option>
+                  <option value="ONE_CLICK">ONE_CLICK</option>
+                  <option value="ALERT">ALERT</option>
+                </select>
+              </div>
+              <div className="col-span-3 sm:col-span-2">
+                <select
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                  aria-label="Filter by status"
+                  className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                >
+                  <option value="all">All</option>
+                  <option value="NEW">NEW</option>
+                  <option value="QUEUED">QUEUED</option>
+                  <option value="IN-PROGRESS">IN-PROGRESS</option>
+                  <option value="RESOLVED">RESOLVED</option>
+                  <option value="BLOCKED">BLOCKED</option>
+                  <option value="DISMISSED">DISMISSED</option>
+                  <option value="ALERT-AUTO-ROLLBACK">ALERT-AUTO-ROLLBACK</option>
+                </select>
+              </div>
+              <div className="col-span-2 sm:col-span-1" />
+              <div className="col-span-2 sm:col-span-1" />
             </div>
-            <div className="col-span-3 sm:col-span-2">
-              <select
-                value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
-                aria-label="Filter by status"
-                className="w-full text-[11px] bg-muted/40 border border-border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-primary/50"
-              >
-                <option value="all">All</option>
-                <option value="NEW">NEW</option>
-                <option value="QUEUED">QUEUED</option>
-                <option value="IN-PROGRESS">IN-PROGRESS</option>
-                <option value="RESOLVED">RESOLVED</option>
-                <option value="BLOCKED">BLOCKED</option>
-                <option value="DISMISSED">DISMISSED</option>
-                <option value="ALERT-AUTO-ROLLBACK">ALERT-AUTO-ROLLBACK</option>
-              </select>
-            </div>
-            <div className="col-span-2 sm:col-span-1" />
-            <div className="col-span-2 sm:col-span-1" />
+            <div className={`${ROW_ACTIONS_W} shrink-0 px-2`} aria-hidden="true" />
           </div>
         </div>
       </div>
@@ -1842,7 +1915,7 @@ function CveList({ onOpen, refreshKey }) {
                 ? 'No entries match the current filters.'
                 : tab === 'active'
                   ? data.entries.length === 0
-                    ? 'Inbox is empty. Paste a CVE YAML or sync from a git source.'
+                    ? 'Inbox is empty. Run AI Research or paste a CVE YAML to get started.'
                     : 'Nothing active — every entry is either Not affected or Dismissed.'
                   : tab === 'not_affected'
                     ? 'No entries with a "not affected" verdict yet. Run Check applicability on a row to verify.'
@@ -1855,6 +1928,10 @@ function CveList({ onOpen, refreshKey }) {
               entry={entry}
               onOpen={onOpen}
               onTogglePin={togglePin}
+              onQuickCheck={onQuickCheck}
+              onQuickRun={setRunTarget}
+              onQuickDismiss={setDismissTarget}
+              busy={rowBusy[entry.cve] || null}
             />
           ))
         )}
@@ -1935,65 +2012,53 @@ function CveList({ onOpen, refreshKey }) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={gitConfigOpen} onOpenChange={setGitConfigOpen}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader><DialogTitle>Git source for CVE specs</DialogTitle></DialogHeader>
-          <div className="space-y-3 text-sm">
-            <p className="text-muted-foreground">
-              Read-only pull. The engine clones / pulls into a staging dir on the host and
-              copies any new <code className="font-mono">CVE-*.yaml</code> files into the
-              inbox. Existing entries — including those from a previous URL or from paste —
-              are never overwritten or deleted. Each git-imported entry is stamped with its
-              source URL and commit SHA.
-            </p>
-            <Input
-              value={gitDraft}
-              onChange={(e) => setGitDraft(e.target.value)}
-              placeholder="https://github.com/your-org/cve-specs.git"
-              autoFocus
-            />
-            <div className="text-xs text-muted-foreground space-y-2 border-l-2 border-border pl-3">
-              <p className="font-medium text-foreground/80">Accepted URL shapes</p>
-              <ul className="space-y-2 list-disc list-inside">
-                <li>
-                  <span className="font-medium">Plain git URL</span> — clones the default
-                  branch, walks the whole repo for <code className="font-mono">CVE-*.yaml</code>.
-                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
-                    https://github.com/owner/repo.git
-                  </div>
-                </li>
-                <li>
-                  <span className="font-medium">Fragment syntax</span> — explicit branch
-                  (and optional sub-directory). Works on any git host.
-                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
-                    https://github.com/owner/repo.git<span className="text-amber-400">#branch</span>
-                    <br />
-                    https://github.com/owner/repo.git<span className="text-amber-400">#branch:path/to/cves</span>
-                  </div>
-                </li>
-                <li>
-                  <span className="font-medium">GitHub /tree/ URL</span> — the address bar
-                  URL when you're browsing a branch on GitHub. The engine parses the branch
-                  + path automatically (resolves slash-containing branches like{' '}
-                  <code className="font-mono">claude/great-mendel-zXSGE</code> via
-                  ls-remote).
-                  <div className="mt-1 ml-5 font-mono text-[11px] text-foreground/80 break-all">
-                    https://github.com/owner/repo/tree/branch/path/to/cves
-                  </div>
-                </li>
-              </ul>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Leave empty to disable. Changes apply on next "Sync git". Both paste and git
-              sources can coexist.
+      {/* Quick-run confirm — the list-row Play button lands here so a
+          stray tap can't start patching the host. Same engine machine
+          as the detail view's "Run on this host". */}
+      <Dialog open={!!runTarget} onOpenChange={(open) => { if (!open) setRunTarget(null); }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader><DialogTitle>Run {runTarget?.cve} on this host?</DialogTitle></DialogHeader>
+          <div className="text-sm text-muted-foreground space-y-2">
+            {runTarget?.name && <p className="text-foreground">{runTarget.name}</p>}
+            <p>
+              The engine probes the host, snapshots first if a backend is available, runs the
+              patch steps, re-runs the probe to verify, and rolls back if verify still says
+              affected.
             </p>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setGitConfigOpen(false)}>Cancel</Button>
-            <Button onClick={onSaveGitConfig} disabled={gitSaving}>
-              {gitSaving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Save className="h-4 w-4 mr-1.5" />}
-              Save URL
+            <Button variant="ghost" onClick={() => setRunTarget(null)}>Cancel</Button>
+            <Button onClick={onConfirmQuickRun}>
+              <Play className="h-4 w-4 mr-1.5" /> Run now
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Quick-dismiss — same required-reason contract as the detail
+          view's Mark dismissed. */}
+      <Dialog open={!!dismissTarget}
+              onOpenChange={(open) => { if (!open) { setDismissTarget(null); setDismissReason(''); } }}>
+        <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader><DialogTitle>Dismiss {dismissTarget?.cve}</DialogTitle></DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">
+              Status will be set to <code className="font-mono">DISMISSED</code> with this reason
+              recorded in history.
+            </p>
+            <Input
+              value={dismissReason}
+              onChange={(e) => setDismissReason(e.target.value)}
+              placeholder="Reason (required)"
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost"
+                    onClick={() => { setDismissTarget(null); setDismissReason(''); }}>
+              Cancel
+            </Button>
+            <Button onClick={onConfirmQuickDismiss} disabled={!dismissReason.trim()}>Dismiss</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -308,63 +308,31 @@ test('DELETE rejects path traversal in id', async () => {
   }
 });
 
-// Regression: literal-path routes (/git-config, /git-sync, /poll)
-// must register before the `:cveId` wildcard, or Express matches the
-// wildcard first and the handler 400s the request as "invalid CVE id".
-// The user hit this when clicking Save URL on the git source dialog —
-// the PUT was being matched as PUT /:cveId with cveId='git-config'.
+// Regression: literal-path routes (/poll, /research/*) must register
+// before the `:cveId` wildcard, or Express matches the wildcard first
+// and the handler 400s the request as "invalid CVE id". (Originally
+// hit on the retired /git-config route — the PUT was being matched as
+// PUT /:cveId with cveId='git-config'.)
 
-test('GET /git-config does not collide with /:cveId', async () => {
+test('GET /research/config does not collide with /:cveId', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
+  try {
+    const router = await loadRouter(dir, 'vm');
+    const r = await callRouter(router, '/research/config');
+    assert.equal(r.status, 200);
+    assert.ok('configured' in r.body,
+      'returns the research-settings shape, not a CVE detail');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the retired git-sync routes are gone (wildcard 400s them as invalid ids)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
   try {
     const router = await loadRouter(dir, 'vm');
     const r = await callRouter(router, '/git-config');
-    assert.equal(r.status, 200);
-    assert.ok('url' in r.body, 'returns the git-config shape, not a CVE detail');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('PUT /git-config does not collide with /:cveId', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
-  try {
-    const router = await loadRouter(dir, 'vm');
-    const r = await callRouter(router, '/git-config', {
-      method: 'PUT',
-      body: { url: 'https://example.com/x.git#main' },
-    });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.ok, true);
-    assert.equal(r.body.url, 'https://example.com/x.git#main');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('PUT /git-config with empty URL clears the setting', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
-  try {
-    const router = await loadRouter(dir, 'vm');
-    const r = await callRouter(router, '/git-config', {
-      method: 'PUT',
-      body: { url: '' },
-    });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.url, '');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('PUT /git-config rejects bare strings (no scheme)', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cve-test-'));
-  try {
-    const router = await loadRouter(dir, 'vm');
-    const r = await callRouter(router, '/git-config', {
-      method: 'PUT',
-      body: { url: 'just a string' },
-    });
+    // Falls through to GET /:cveId, which rejects the id shape.
     assert.equal(r.status, 400);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -382,8 +350,7 @@ test('list surfaces _proxypilot.imported_at as `added`', async () => {
       'cve: CVE-2026-0010',
       'name: imported',
       '_proxypilot:',
-      '  origin: git',
-      '  git_url: https://example.com/x.git',
+      '  origin: ai',
       '  imported_at: "2026-04-15T10:00:00Z"',
       'hosts: {vm: {action_class: ALERT, tier: 4}}',
       'state: {status: NEW, operator_seen: false}',

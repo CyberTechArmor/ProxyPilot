@@ -7,7 +7,7 @@
 // Engine commands split into two lanes:
 //
 //   In-container — pure YAML manipulation: validate, paste, mark-seen,
-//   dismiss, sync-git, show, list. These read/write the inbox dir
+//   dismiss, show, list. These read/write the inbox dir
 //   (bind-mounted from the host) but don't shell out to apt-get /
 //   systemctl / etc.
 //

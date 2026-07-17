@@ -44,6 +44,7 @@ import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
+import { applyLaneTuning } from './lane-tuning-logic.js';
 import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision } from './routing-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
@@ -91,7 +92,7 @@ import { listApprovedEgressGrants } from './egress-grants.js';
 import { stubContextForCycle } from './stub-logic.js';
 import { listOpenStubs, recordIntegrationGate, recordIntegrationFindings, openVerificationChecklist, recordIntegrationResolution, STUB_REGISTRY_PATH, priorBlockedSignatures, projectChecklistItems, listActiveVerifications } from './integration-state.js';
 import { acceptPendingEligibility, buildAcceptPendingChecklist, normalizeAttestation, applyIntegrationGateMode, applyLiveCheckMode } from './accept-pending-logic.js';
-import { getIntegrationGateMode } from './settings.js';
+import { getIntegrationGateMode, getLaneTuning } from './settings.js';
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
@@ -272,6 +273,18 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     const mvp = mvpRoutingDecision(process.env, ready.model);
     routing = { ...(routing || {}), ...mvp, mode, applied_model: mvp.model };
     ready = { ...ready, model: mvp.model, effort: mvp.effort };
+  }
+
+  // Operator lane tuning (admin settings → Model thinking & effort) — the LAST
+  // word over slots, routing, fast-model, and the MVP override: per-lane model
+  // override, effort override, and a thinking-off switch.
+  {
+    const tuned = applyLaneTuning(
+      { model: ready.model, effort: ready.effort || null, thinking: null },
+      getLaneTuning(mvpBuild ? 'mvp' : 'build'),
+    );
+    ready = { ...ready, model: tuned.model, effort: tuned.effort, thinking: tuned.thinking };
+    if (routing) routing.applied_model = ready.model;
   }
 
   // No-work-remaining backstop: when the last NOOP_CYCLE_LIMIT cycles for this
@@ -847,6 +860,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: RUNNER_MAX_TOKENS,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
+      thinking: ready.thinking || null,
     });
     if (!result.ok) {
       // Transient model failure — retry up to MAX_CYCLE_RETRIES, then escalate.

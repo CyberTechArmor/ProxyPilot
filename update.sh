@@ -1339,6 +1339,31 @@ PYEOF
             fi
         fi
 
+        # One-time verdict refresh (2026-07). Probe verdicts recorded
+        # before the check/paste host-pivot fix ran inside the Alpine
+        # dashboard container, where Debian probes (dpkg-query …) find
+        # no packages and report a false "not affected" for every
+        # entry. Re-run each entry's detection probe here — on the
+        # host, where update.sh runs — so stored verdicts reflect
+        # reality. Marker-gated: later updates skip this entirely.
+        recheck_marker="/var/lib/proxypilot/.cve-host-recheck-done"
+        if [ ! -f "$recheck_marker" ] && command -v python3 >/dev/null 2>&1 \
+            && [ -d "${INSTALL_DIR}/proxypilot" ]; then
+            rechecked=0
+            for spec in /var/lib/proxypilot/cve-inbox/CVE-*.yaml; do
+                [ -f "$spec" ] || continue   # unexpanded glob when inbox is empty
+                cve_id="$(basename "$spec" .yaml)"
+                PYTHONPATH="${INSTALL_DIR}" python3 -m proxypilot.engine \
+                    check "$cve_id" --actor "update-host-recheck" \
+                    >/dev/null 2>&1 || true
+                rechecked=$((rechecked + 1))
+            done
+            touch "$recheck_marker" 2>/dev/null || true
+            if [ "$rechecked" -gt 0 ]; then
+                log "${GREEN}Re-checked ${rechecked} CVE inbox entr$( [ "$rechecked" = 1 ] && echo y || echo ies ) against the host (verdicts recorded pre-fix were probed inside the dashboard container)${NC}"
+            fi
+        fi
+
         # Phase A — patch the deployed docker-compose.yml so the
         # container can reach the host-side agent. Two idempotent
         # passes:

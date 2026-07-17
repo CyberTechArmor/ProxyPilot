@@ -60,6 +60,7 @@ import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset } from './design-presets.js';
+import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -651,7 +652,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
 
 // startDesignApproval — the Builder approved the design. Synchronous guards, then
 // fire the background extraction/commit. Returns { status:'started'|'error', cycle, error }.
-export async function startDesignApproval({ project, user, actingAsAdmin = 0 }) {
+export async function startDesignApproval({ project, user, actingAsAdmin = 0, buildStrategy = 'all' }) {
   const projectId = Number(project.id);
 
   if (project.lifecycle !== 'active') return { status: 'error', error: `The project must be online to approve the design (it is "${project.lifecycle}").` };
@@ -678,7 +679,7 @@ export async function startDesignApproval({ project, user, actingAsAdmin = 0 }) 
   updateCycle(cycle.id, { started_at: nowIso() });
   setJob(projectId, { phase: 'approving', message: 'Extracting the design inventory…', kind: 'approval', cycleId: cycle.id, startedAt: Date.now() });
 
-  runDesignApproval({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin }).catch((err) => {
+  runDesignApproval({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, buildStrategy }).catch((err) => {
     console.error(`[mock2] design approval crashed for project ${projectId}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `approval crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approval failed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -689,7 +690,7 @@ export async function startDesignApproval({ project, user, actingAsAdmin = 0 }) 
   return { status: 'started', cycle: getCycle(cycle.id) };
 }
 
-async function runDesignApproval({ project, cycle, ready, framework, user, actingAsAdmin }) {
+async function runDesignApproval({ project, cycle, ready, framework, user, actingAsAdmin, buildStrategy = 'all' }) {
   const projectId = Number(project.id);
   const containerName = project.container_name || containerNameForProject(projectId);
   const holder = { type: 'user', id: user.id };
@@ -829,19 +830,49 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   finishCycle(cycle.id, { status: 'succeeded' });
   releaseLock(projectId, holder);
 
+  // Seed the per-screen plan from the inventory (screen-plan.js): one row per
+  // screen so the Builder can approve/defer screens individually and apply
+  // them as scoped background builds. Never blocks approval.
+  try { replaceScreenPlan(projectId, parsed.inventory); } catch (e) { console.warn('[mock2] screen plan seed failed:', e?.message); }
+
   insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approved — the design inventory (${counts.screens} screen${counts.screens === 1 ? '' : 's'}) is saved to the repository and Build is now unlocked. The original mockup is archived at the design preview so you can always see where the design started.` });
   setJob(projectId, { phase: 'approved', message: 'Design approved — Build unlocked.', kind: 'approval', cycleId: cycle.id, changeSeq: record?.seq || null });
   console.log(`[mock2] project ${projectId} design approved (inventory ${counts.screens} screens, change record ${record?.seq ?? '—'})`);
   scheduleJobCleanup(projectId);
 
-  // 7) Auto-start the initial build. Approval both locks the design AND begins
-  //    building the working app (the "Are you ready to build?" dialog promises
-  //    exactly this), so the Builder doesn't have to describe a change to get the
-  //    real app. The lock was just released, so startBuild can take it as the
-  //    cycle holder. The audit runs first: if it raises rule questions they show
-  //    in the chat to confirm and the build resumes once answered; if the build
-  //    can't start (no runner model, quota, …) we say so and leave Build unlocked
-  //    for a manual press.
+  // 7) Auto-start building, per the Builder's chosen strategy:
+  //    'screens' — queue every planned screen and drain them one at a time as
+  //       scoped background MVP builds (the wired base app is already live, so
+  //       screens land incrementally behind the existing sign-in);
+  //    'none'    — approval only; the Builder applies screens / presses Build
+  //       when ready;
+  //    'all'     — the pre-existing behavior: one initial build of everything.
+  if (buildStrategy === 'screens') {
+    try {
+      const queued = queueScreens(projectId, { queuedBy: user.id });
+      insertMessage({
+        projectId, kind: 'system',
+        body: `Building screen by screen — ${queued} screen${queued === 1 ? '' : 's'} queued. Each screen is a small scoped build; they run one at a time in the background and the chat reports each one as it goes live. Defer or re-queue screens from the Screens panel.`,
+      });
+      drainScreenQueue(projectId).catch((e) => console.warn('[mock2] screen drain failed:', e?.message));
+    } catch (e) {
+      console.warn(`[mock2] screen-by-screen apply failed for project ${projectId}:`, e?.message || e);
+      insertMessage({ projectId, kind: 'system', body: `Screen-by-screen build could not start: ${e?.message || e}. Apply screens from the Screens panel, or press Build.` });
+    }
+    return;
+  }
+  if (buildStrategy === 'none') {
+    insertMessage({ projectId, kind: 'system', body: 'Design locked in — no build started, as requested. Apply screens from the Screens panel or press Build when ready.' });
+    return;
+  }
+  //    ('all') Auto-start the initial build. Approval both locks the design AND
+  //    begins building the working app (the "Are you ready to build?" dialog
+  //    promises exactly this), so the Builder doesn't have to describe a change
+  //    to get the real app. The lock was just released, so startBuild can take
+  //    it as the cycle holder. The audit runs first: if it raises rule questions
+  //    they show in the chat to confirm and the build resumes once answered; if
+  //    the build can't start (no runner model, quota, …) we say so and leave
+  //    Build unlocked for a manual press.
   try {
     // An imported design carries its original brief + the Builder's import
     // notes into the initial build (design-template-logic.js) — for a

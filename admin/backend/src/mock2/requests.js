@@ -57,7 +57,15 @@ export function closeRequest(id, status) {
   getMock2Db()
     .prepare(`UPDATE mock2_requests SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?`)
     .run(String(status), nowIso(), Number(id));
-  return getRequest(id);
+  const closed = getRequest(id);
+  // Screen-plan hook: a finished request settles the screen it implemented and
+  // drains the next queued screen (background per-screen apply). Dynamic
+  // import — screen-plan sits above this module in the import graph — and
+  // fire-and-forget: closing a request must never fail on plan bookkeeping.
+  import('./screen-plan.js')
+    .then((m) => m.onRequestClosed(closed))
+    .catch((e) => console.warn('[mock2] screen-plan request hook failed:', e?.message));
+  return closed;
 }
 
 export function publicRequestShape(row) {

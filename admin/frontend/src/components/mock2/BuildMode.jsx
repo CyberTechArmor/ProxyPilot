@@ -17,6 +17,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { LiveAppBar, PreviewPlaceholder } from './ProjectPreview';
 import BuildStatus from './BuildStatus';
+import ScreenPlan from './ScreenPlan';
 import BuildChat from './BuildChat';
 import { deriveBuildTasks } from '@/lib/build-tasks';
 import { ensureNotifyPermission, notifyBrowser } from '@/lib/browser-notify';
@@ -196,6 +197,8 @@ export default function BuildMode({
           needsFeedback={needsFeedback}
           onFeedback={submitFeedback}
         />
+        {/* Per-screen apply + the production check (screen-plan endpoints). */}
+        <ScreenPlan projectId={projectId} canEdit={canEdit} online={online} onChanged={refresh} />
       </div>
 
       {/* RIGHT — the build/run/maintenance chat. */}

@@ -1399,8 +1399,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ message, ...(mode ? { mode } : {}), ...(images?.length ? { images } : {}) }),
     }),
-  mock2ApproveDesign: (id) =>
-    request(`/mock2/projects/${id}/design/approve`, { method: 'POST' }),
+  // build: 'all' (one initial build — default) | 'screens' (queue every screen
+  // as a scoped background build) | 'none' (approval only).
+  mock2ApproveDesign: (id, build) =>
+    request(`/mock2/projects/${id}/design/approve`, { method: 'POST', body: JSON.stringify(build ? { build } : {}) }),
+  // Screen plan (per-screen apply): seeded from the approved inventory.
+  mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
+  mock2DecideScreen: (id, screenId, status) =>
+    request(`/mock2/projects/${id}/screens/${screenId}/decision`, { method: 'POST', body: JSON.stringify({ status }) }),
+  mock2ApplyScreens: (id, ids) =>
+    request(`/mock2/projects/${id}/screens/apply`, { method: 'POST', body: JSON.stringify(ids?.length ? { ids } : {}) }),
+  // Production check — the full-gate readiness pass (no new features).
+  mock2ProductionCheck: (id) =>
+    request(`/mock2/projects/${id}/production-check`, { method: 'POST' }),
   // Design template — the design/mockup only (mockup HTML + original brief +
   // conversation + tokens), never code. Export returns the portable JSON doc
   // (the caller blob-downloads it); import seeds THIS project's Concept stage

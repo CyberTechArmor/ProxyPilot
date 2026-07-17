@@ -113,6 +113,7 @@ import {
   teardownProject,
   repoPathForProject,
   containerNameForProject,
+  deployBaseApp,
 } from './provision.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
@@ -2804,6 +2805,25 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_DESIGN_SKIP', 'mock2_project', req.mock2Project.id,
       { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.json({ ok: true });
+  });
+
+  // Retry the base-app deploy (provision-time deploy that failed — e.g. a
+  // component dependency that never landed). No cycle exists for that failure,
+  // so the cycle-bound /retry-deploy can't reach it; this re-runs the same
+  // pre-install (which now repairs missing deps) + deploy pipeline. 202 —
+  // progress lands in the provision status line and the chat.
+  router.post('/projects/:id/base-app/deploy', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online first.' });
+    const active = listCyclesForProject(project.id, { limit: 20 })
+      .some((c) => ['queued', 'estimating', 'running'].includes(c.status));
+    if (active) return res.status(409).json({ error: 'A build is running — wait for it to finish first.' });
+    logAudit(req.user.id, 'MOCK2_BASE_APP_DEPLOY', 'mock2_project', project.id,
+      { acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    // Fire-and-forget like provisioning; deployBaseApp never throws and posts
+    // its own visible chat message either way.
+    void deployBaseApp(project, { reason: 'manual-retry' });
+    return res.status(202).json({ ok: true });
   });
 
   // ============================================================

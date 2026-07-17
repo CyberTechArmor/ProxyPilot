@@ -237,6 +237,9 @@ export function publicProjectShape(project, extra = {}) {
     // a mockup exists / the project has a live URL.
     stage: conceptStageInfo(project),
     design_approved_at: project.design_approved_at || null,
+    // Set once the provision-time (or self-heal) base-app deploy succeeds — the
+    // UI offers "Deploy base app" retry while this is null and nothing serves.
+    base_app_deployed_at: project.base_app_deployed_at || null,
     current_mockup_id: project.current_mockup_id || null,
     preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
     // The archived design mockup — the record of where the design started. Set

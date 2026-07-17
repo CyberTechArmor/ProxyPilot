@@ -1406,6 +1406,11 @@ export const api = {
   // Skip the mockup — lock the design stage empty and build on the base app.
   mock2SkipDesign: (id) =>
     request(`/mock2/projects/${id}/design/skip`, { method: 'POST' }),
+  // Retry the provision-time base-app deploy (repairs missing component deps
+  // first). Used when the base app failed to deploy and no build cycle exists
+  // to retry-deploy from.
+  mock2DeployBaseApp: (id) =>
+    request(`/mock2/projects/${id}/base-app/deploy`, { method: 'POST' }),
   // Screen plan (per-screen apply): seeded from the approved inventory.
   mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
   mock2DecideScreen: (id, screenId, status) =>

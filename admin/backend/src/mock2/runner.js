@@ -509,6 +509,29 @@ export async function retryDeploy({ project, cycle }) {
   // Fire-and-forget; always lands terminal + releases the lock.
   (async () => {
     try {
+      // Repair pass first: components marked 'installed' under the old
+      // silent-npm-failure bug can be missing their node_modules, which fails
+      // the deploy at tsc ("Cannot find module …"). Fixing that here makes
+      // "Retry deploy" the one-click recovery. Dynamic import — the static one
+      // would be a cycle (component-install imports runner for exec helpers).
+      try {
+        const [{ ensureComponentDeps }, { listProjectComponents }] = await Promise.all([
+          import('./component-install.js'), import('./components.js'),
+        ]);
+        const ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
+        if (ensured.repaired.length) {
+          insertMessage({
+            projectId, kind: 'system', cycleId: cycle.id,
+            body: `Repaired missing component dependencies before redeploying: ${ensured.repaired.map((r) => `${r.key} (${r.missing.join(', ')})`).join('; ')}.`,
+          });
+        }
+        if (!ensured.ok) {
+          const detail = ensured.failed.map((f) => f.error).join('; ');
+          finishCycle(cycle.id, { status: 'failed', error: detail });
+          setJob(cycle.id, { phase: 'deploy_failed', message: detail });
+          return;
+        }
+      } catch (e) { console.warn('[mock2] retry-deploy dep repair failed:', e?.message); }
       const deployed = await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });

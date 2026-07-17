@@ -181,6 +181,58 @@ async function installOne({ containerName, row }) {
   return { ok: true, component, version, contract, manifest, counts, wired, wiringKept };
 }
 
+// ---- dependency ensure (repair installed-but-broken selections) ----
+
+// 'name' from an npm install spec: 'cookie@^0.7.2' → 'cookie',
+// '@types/node@^20' → '@types/node'.
+function npmSpecName(spec) {
+  const s = String(spec || '').trim();
+  if (!s) return '';
+  if (s.startsWith('@')) { const i = s.indexOf('@', 1); return i === -1 ? s : s.slice(0, i); }
+  const i = s.indexOf('@');
+  return i === -1 ? s : s.slice(0, i);
+}
+const SAFE_PKG_RE = /^[a-zA-Z0-9@/_.\-]+$/;
+
+// ensureComponentDeps — verify every 'installed' selection's declared runtime
+// deps actually EXIST in node_modules, and npm-install the missing ones.
+// Exists because a past install bug reported success while npm silently failed
+// (`npm install | tail` returned tail's exit code), leaving components marked
+// 'installed' whose modules never landed — every later deploy then failed at
+// tsc with "Cannot find module". Idempotent and cheap when nothing is missing.
+export async function ensureComponentDeps({ containerName, rows }) {
+  const repaired = [];
+  const failed = [];
+  for (const row of rows || []) {
+    if (row?.status !== 'installed') continue;
+    const contract = parseContractJson(row.contract_json);
+    const deps = contract?.dependencies;
+    const specs = [...(deps?.runtime || []), ...(deps?.peers || [])].filter((s) => SAFE_PKG_RE.test(npmSpecName(s)));
+    if (!specs.length) continue;
+    const names = specs.map(npmSpecName);
+    const check = await execInContainer(
+      containerName,
+      names.map((n) => `[ -d "node_modules/${n}" ] || echo "MISSING ${n}"`).join('\n'),
+    );
+    const missing = String(check.stdout || '').split('\n')
+      .filter((l) => l.startsWith('MISSING ')).map((l) => l.slice(8).trim());
+    if (!missing.length) continue;
+    const toInstall = specs.filter((s) => missing.includes(npmSpecName(s)));
+    const r = await execInContainer(
+      containerName,
+      `npm install --no-audit --no-fund ${toInstall.join(' ')} > /tmp/mock2-npm-ensure.log 2>&1; c=$?; tail -5 /tmp/mock2-npm-ensure.log; exit $c`,
+    );
+    if (r.code === 0) {
+      repaired.push({ key: row.key, missing });
+    } else {
+      const error = `dependency repair failed for ${row.key} (${missing.join(', ')}): ${(r.stdout || r.stderr || '').trim().slice(-300)}`;
+      try { markProjectComponentInstall({ id: row.id, ok: false, error }); } catch { /* keep going */ }
+      failed.push({ row, error });
+    }
+  }
+  return { ok: failed.length === 0, repaired, failed };
+}
+
 // ---- the pre-install pass (all confirmed selections for a project) ----
 
 // preinstallComponents — install every confirmed (or previously failed)
@@ -244,6 +296,16 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     } catch (e) { console.warn('[mock2] preinstall audit log failed:', e?.message); }
   }
 
+  // Repair pass over selections already marked 'installed' (they were filtered
+  // out of INSTALLABLE above and never re-run installOne): verify their declared
+  // deps exist in node_modules and reinstall the missing ones. Heals projects
+  // provisioned under the old silent-npm-failure bug without a manual step.
+  let ensured = { ok: true, repaired: [], failed: [] };
+  try {
+    ensured = await ensureComponentDeps({ containerName, rows: listProjectComponents(projectId) });
+  } catch (e) { console.warn('[mock2] component dep repair failed:', e?.message); }
+  for (const f of ensured.failed) failedRows.push(f);
+
   // Mirror the full selection to state/components.json (rides the hash-chained
   // history like integrations.json), checkpoint, and record the change.
   try {
@@ -294,6 +356,13 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
       insertMessage({
         projectId, kind: 'system', cycleId,
         body: `Standard components installed by the platform (0 build credits):\n${lines.join('\n')}\nThe build will wire the design to their APIs.`,
+      });
+    }
+    if (ensured.repaired.length) {
+      const lines = ensured.repaired.map((r) => `- ${r.key}: reinstalled ${r.missing.join(', ')}`);
+      insertMessage({
+        projectId, kind: 'system', cycleId,
+        body: `Repaired missing component dependencies (a past install reported success but npm had failed):\n${lines.join('\n')}`,
       });
     }
     for (const f of failedRows) {

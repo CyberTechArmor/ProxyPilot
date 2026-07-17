@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, Rocket } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, Rocket, RefreshCw } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -28,6 +28,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [mode, setMode] = useState('build'); // 'build' (run a cycle) | 'ask' (question / read-and-run task, no build)
+  const [deployingBase, setDeployingBase] = useState(false);
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
   const approvedAt = project?.design_approved_at || null;
@@ -93,6 +94,27 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ variant: 'destructive', title: 'Could not confirm', description: err.message });
     } finally {
       setAnswering(false);
+    }
+  };
+
+  // The base app never made it live (provision-time deploy failed — e.g. a
+  // component dependency that never installed) and no build cycle exists to
+  // retry from. One tap re-runs the pre-install (which repairs missing deps)
+  // and the deploy. Hidden once anything serves or a build is deploying.
+  const baseAppMissing = canEdit && online && !active
+    && !project?.base_app_deployed_at
+    && !['serving', 'deploying'].includes(project?.deploy_state);
+  const deployBaseApp = async () => {
+    setDeployingBase(true);
+    try {
+      await api.mock2DeployBaseApp(projectId);
+      toast({ title: 'Deploying the base app…', description: 'Missing component dependencies are repaired first. Progress lands in this chat.' });
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the deploy', description: err.message });
+    } finally {
+      setDeployingBase(false);
     }
   };
 
@@ -198,6 +220,23 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
             ? 'Describe a change below to run a build cycle, or switch to Ask to question the codebase / run a test. Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
         />
+
+        {baseAppMissing ? (
+          <div className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 flex flex-col sm:flex-row sm:items-center gap-2">
+            <p className="text-xs text-amber-600 dark:text-amber-400 flex-1">
+              The base app isn&apos;t live yet — the project URL is still serving the placeholder.
+              Deploy it to get the sign-in and first-administrator pages.
+            </p>
+            <Button
+              variant="outline" className="h-11 sm:h-10 shrink-0"
+              disabled={deployingBase}
+              onClick={deployBaseApp}
+            >
+              {deployingBase ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+              Deploy base app
+            </Button>
+          </div>
+        ) : null}
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">

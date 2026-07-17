@@ -6,15 +6,19 @@
 //
 // Engine commands split into two lanes:
 //
-//   In-container — pure YAML manipulation: validate, paste, mark-seen,
+//   In-container — pure YAML manipulation: validate, mark-seen,
 //   dismiss, show, list. These read/write the inbox dir
 //   (bind-mounted from the host) but don't shell out to apt-get /
 //   systemctl / etc.
 //
-//   Host-pivot — actually mutates the host: poll, run-one, inventory.
-//   These need apt-get, snapshot tools, the running kernel etc., so they
-//   pivot through `nsenter -t 1` into the host namespace (Phase A
-//   architecture — same pattern as caddy-driver.js).
+//   Host-pivot — anything that runs host commands: poll, run-one,
+//   inventory, check, and paste (its post-import auto-check runs the
+//   detection probe). These need apt-get / dpkg-query, snapshot tools,
+//   the running kernel etc., so they pivot through `nsenter -t 1` into
+//   the host namespace (Phase A architecture — same pattern as
+//   caddy-driver.js). Probes MUST run on the host: the dashboard image
+//   is Alpine, where a Debian probe (dpkg-query …) can't find the
+//   package and reports a false "not affected" for every entry.
 //
 // Outside Docker (tests, dev), every command runs directly.
 
@@ -36,7 +40,7 @@ export function getEngineBin() { return process.env.PROXYPILOT_ENGINE_BIN || 'py
 export function getEngineModule() { return process.env.PROXYPILOT_ENGINE_MODULE || 'proxypilot.engine'; }
 export function getHostname() { return process.env.PROXYPILOT_HOSTNAME || ''; }
 
-export const HOST_PIVOT_COMMANDS = new Set(['poll', 'run-one', 'inventory']);
+export const HOST_PIVOT_COMMANDS = new Set(['poll', 'run-one', 'inventory', 'check', 'paste']);
 export const isInDocker = existsSync('/.dockerenv') || process.env.DOCKER_CONTAINER === 'true';
 
 // CVE filenames are constrained to the canonical CVE-YYYY-NNNN[N..] shape

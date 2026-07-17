@@ -25,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
+import Markdown from '@/components/mock2/Markdown';
 import {
   ArrowLeft, Bot, BugPlay, ChevronDown, ChevronRight, Copy, FileCode, Loader2,
   Pencil, Pin, PinOff, Play, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck,
@@ -1245,12 +1246,15 @@ function CveDetail({ cveId, onBack, onChanged, onDeleted }) {
   );
 }
 
-// One AI-research run report. Header line carries the at-a-glance
-// facts; the model's own run summary renders underneath in full.
-function ResearchRunReport({ run }) {
+// One AI-research run report. The summary row carries the at-a-glance
+// facts and toggles the body; the model's own run summary renders as
+// markdown (the routine writes headers/bold/lists). The newest run
+// starts expanded, older ones collapsed.
+function ResearchRunReport({ run, defaultOpen = false }) {
   return (
-    <div className="rounded border border-border/60 bg-muted/10 p-2.5 text-xs space-y-1.5">
-      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
+    <details open={defaultOpen} className="group rounded border border-border/60 bg-muted/10">
+      <summary className="cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex items-center gap-x-3 gap-y-1 flex-wrap px-3 py-2 text-xs hover:bg-accent/30 rounded">
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
         <span className={`inline-flex items-center font-medium border px-1.5 py-0.5 rounded ${
           run.ok
             ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30'
@@ -1262,24 +1266,22 @@ function ResearchRunReport({ run }) {
           {run.at ? new Date(run.at).toLocaleString() : '—'}
         </span>
         <span className="text-muted-foreground">{run.trigger === 'scheduled' ? 'scheduled' : 'manual'}</span>
-        <span className="text-foreground/90">
+        <span className="text-foreground/90 font-medium">
           {run.created ?? 0} created · {run.updated ?? 0} updated
         </span>
-        <span className="text-muted-foreground/80 font-mono">
+        <span className="hidden sm:inline text-muted-foreground/80 font-mono ml-auto">
           {run.turns != null ? `${run.turns} turn${run.turns === 1 ? '' : 's'} · ` : ''}
           {run.fetches ?? 0} fetch(es) · ~{run.tokens ?? 0} tokens
           {run.duration_s != null ? ` · ${run.duration_s}s` : ''}
         </span>
+      </summary>
+      <div className="px-4 pb-3 pt-2 border-t border-border/40 space-y-2">
+        {run.error && (
+          <div className="text-sm text-red-400 break-words">{run.error}</div>
+        )}
+        {run.summary && <Markdown>{run.summary}</Markdown>}
       </div>
-      {run.error && (
-        <div className="text-red-400 break-words">{run.error}</div>
-      )}
-      {run.summary && (
-        <div className="whitespace-pre-wrap break-words text-muted-foreground">
-          {run.summary}
-        </div>
-      )}
-    </div>
+    </details>
   );
 }
 
@@ -1329,6 +1331,7 @@ function CveList({ onOpen, refreshKey }) {
   // while that row's action is in flight; runTarget / dismissTarget
   // hold the entry a confirm dialog is open for (null = closed).
   const [rowBusy, setRowBusy] = useState({});
+  const [checkingAll, setCheckingAll] = useState(false);
   const [runTarget, setRunTarget] = useState(null);
   const [dismissTarget, setDismissTarget] = useState(null);
   const [dismissReason, setDismissReason] = useState('');
@@ -1465,6 +1468,42 @@ function CveList({ onOpen, refreshKey }) {
       });
     } finally {
       setBusyFor(entry.cve, null);
+    }
+  };
+
+  // Check all — re-run every entry's detection probe sequentially
+  // (probes are cheap host commands; sequential keeps host load and
+  // history writes orderly). Useful after a research pass lands a
+  // batch of entries, or to refresh verdicts wholesale.
+  const onCheckAll = async () => {
+    const targets = data.entries.filter(e => e.status !== 'DISMISSED');
+    if (!targets.length || checkingAll) return;
+    setCheckingAll(true);
+    const tally = { affected: 0, not_affected: 0, other: 0 };
+    try {
+      for (const entry of targets) {
+        setBusyFor(entry.cve, 'check');
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const out = await api.checkCve(entry.cve);
+          if (out?.verdict === 'affected') tally.affected += 1;
+          else if (out?.verdict === 'not_affected') tally.not_affected += 1;
+          else tally.other += 1;
+        } catch {
+          tally.other += 1;
+        } finally {
+          setBusyFor(entry.cve, null);
+        }
+      }
+      toast({
+        title: `Checked ${targets.length} entr${targets.length === 1 ? 'y' : 'ies'}`,
+        description: `${tally.affected} affected · ${tally.not_affected} not affected`
+          + (tally.other ? ` · ${tally.other} inconclusive/error` : ''),
+        variant: tally.affected > 0 ? 'destructive' : undefined,
+      });
+      await refresh();
+    } finally {
+      setCheckingAll(false);
     }
   };
 
@@ -1838,7 +1877,7 @@ function CveList({ onOpen, refreshKey }) {
                   </div>
                 )}
                 {researchRuns.map((run, i) => (
-                  <ResearchRunReport key={run.at || i} run={run} />
+                  <ResearchRunReport key={run.at || i} run={run} defaultOpen={i === 0} />
                 ))}
               </div>
             )}
@@ -1868,6 +1907,12 @@ function CveList({ onOpen, refreshKey }) {
           </span>
           <Button variant="outline" size="sm" onClick={() => setPasteOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" /> Paste YAML
+          </Button>
+          <Button variant="outline" size="sm" onClick={onCheckAll}
+                  disabled={checkingAll || loading || data.entries.length === 0}
+                  title="Run every entry's detection probe on this host (read-only)">
+            {checkingAll ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Stethoscope className="h-4 w-4 mr-1.5" />}
+            Check all
           </Button>
           <Button variant="outline" size="sm" onClick={onOpenResearch}
                   title="Configure the native AI CVE-research routine">

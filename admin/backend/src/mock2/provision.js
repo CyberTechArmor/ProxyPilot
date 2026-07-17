@@ -379,9 +379,31 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 // mockup on a project whose provision-time deploy failed). Never throws: any
 // failure leaves the placeholder serving, posts a VISIBLE chat message with
 // the step + error, and raises an admin-queue item.
+// One base-app deploy per project at a time. Every caller is fire-and-forget
+// (provision, the skip-mockup self-heal, the retry route), so nothing upstream
+// serializes them — and two concurrent `npm install`s in the same tree fail
+// each other with ETXTBSY on esbuild's binary (a double-pressed retry button
+// produced exactly that).
+const baseAppDeployInFlight = new Set();
+export function isBaseAppDeploying(projectId) {
+  return baseAppDeployInFlight.has(Number(projectId));
+}
+
 export async function deployBaseApp(project, { reason = 'provision' } = {}) {
   const projectId = Number(project?.id);
   if (!Number.isFinite(projectId)) return { ok: false, error: 'no project' };
+  if (baseAppDeployInFlight.has(projectId)) {
+    return { ok: false, inFlight: true, error: 'a base-app deploy is already running for this project' };
+  }
+  baseAppDeployInFlight.add(projectId);
+  try {
+    return await deployBaseAppInner(project, projectId, { reason });
+  } finally {
+    baseAppDeployInFlight.delete(projectId);
+  }
+}
+
+async function deployBaseAppInner(project, projectId, { reason }) {
   const containerName = project.container_name || containerNameForProject(projectId);
   const webPort = project.web_port || DEFAULT_WEB_PORT;
   const say = async (body) => {

@@ -114,6 +114,7 @@ import {
   repoPathForProject,
   containerNameForProject,
   deployBaseApp,
+  isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking } from './settings.js';
@@ -2815,6 +2816,9 @@ export function createMock2Router() {
   router.post('/projects/:id/base-app/deploy', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const project = req.mock2Project;
     if (project.lifecycle !== 'active') return res.status(409).json({ error: 'Bring the project online first.' });
+    if (isBaseAppDeploying(project.id)) {
+      return res.status(409).json({ error: 'The base app is already deploying — watch the chat for the result.' });
+    }
     const active = listCyclesForProject(project.id, { limit: 20 })
       .some((c) => ['queued', 'estimating', 'running'].includes(c.status));
     if (active) return res.status(409).json({ error: 'A build is running — wait for it to finish first.' });

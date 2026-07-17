@@ -111,9 +111,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ title: 'Deploying the base app…', description: 'Missing component dependencies are repaired first. Progress lands in this chat.' });
       if (onStarted) onStarted();
       await load();
+      // Keep the button disabled while the deploy runs (it takes a few
+      // minutes; the banner disappears once the app serves). Re-enable after a
+      // minute so a failed deploy can be retried — the server refuses a
+      // duplicate while one is still in flight, so an early press is harmless.
+      setTimeout(() => setDeployingBase(false), 60000);
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not start the deploy', description: err.message });
-    } finally {
       setDeployingBase(false);
     }
   };

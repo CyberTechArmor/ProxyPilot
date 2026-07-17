@@ -115,7 +115,7 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY } from './settings.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
@@ -1056,6 +1056,22 @@ export function createMock2Router() {
     setMock2Setting(INTEGRATION_GATE_MODE_KEY, parsed.data.mode, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_INTEGRATION_GATE_MODE', 'mock2_setting', 0, { mode: parsed.data.mode }, req.ip);
     res.json({ mode: getIntegrationGateMode(), options: INTEGRATION_GATE_MODES });
+  });
+
+  // Component auto-apply — when enabled (the default), EVERY published standard
+  // component is confirmed for every build automatically (origin 'auto') and
+  // installed by the deterministic zero-token pre-install; when disabled,
+  // components are only suggested on a capability match and must be confirmed
+  // per project. Admin-gated read/write of mock2_settings.component_auto_apply.
+  router.get('/settings/component-auto-apply', requireAdmin, (_req, res) => {
+    res.json({ enabled: getComponentAutoApply() });
+  });
+  router.post('/settings/component-auto-apply', requireAdmin, (req, res) => {
+    const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'enabled must be true or false' });
+    setMock2Setting(COMPONENT_AUTO_APPLY_KEY, parsed.data.enabled ? 'on' : 'off', req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_COMPONENT_AUTO_APPLY', 'mock2_setting', 0, { enabled: parsed.data.enabled }, req.ip);
+    res.json({ enabled: getComponentAutoApply() });
   });
 
   // Egress traffic log — what this project's container actually reached, as the

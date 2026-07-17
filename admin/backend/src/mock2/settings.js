@@ -10,6 +10,7 @@
 
 import { getMock2Db } from './db.js';
 import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js';
+import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -92,4 +93,18 @@ export const INTEGRATION_GATE_MODE_KEY = 'integration_gate_mode';
 export function getIntegrationGateMode() {
   const raw = getMock2Setting(INTEGRATION_GATE_MODE_KEY, process.env.MOCK2_INTEGRATION_GATE_MODE || GATE_MODE_ENFORCE);
   return normalizeGateMode(raw);
+}
+
+// ---- Component auto-apply (every published component, every build) ----
+export const COMPONENT_AUTO_APPLY_KEY = 'component_auto_apply';
+
+// Whether the platform confirms EVERY published standard component for every
+// build (origin 'auto', installed by the deterministic zero-token pre-install)
+// instead of only suggesting on a capability match and waiting for a per-project
+// confirm. Returns a boolean. Precedence: stored setting →
+// MOCK2_COMPONENT_AUTO_APPLY env → 'on' (reuse is the default — the component
+// library exists to be used, not rebuilt from scratch).
+export function getComponentAutoApply() {
+  const raw = getMock2Setting(COMPONENT_AUTO_APPLY_KEY, process.env.MOCK2_COMPONENT_AUTO_APPLY || COMPONENT_AUTO_APPLY_ON);
+  return normalizeComponentAutoApply(raw) === COMPONENT_AUTO_APPLY_ON;
 }

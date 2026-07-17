@@ -45,7 +45,7 @@ import {
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
-import { getChatMaxChars } from './settings.js';
+import { getChatMaxChars, getComponentAutoApply } from './settings.js';
 import {
   listPublishedComponents, listProjectComponents, insertProjectComponentSuggestion,
   getProjectComponentByQuestion, decideProjectComponent,
@@ -309,8 +309,12 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   //     component_suggestion question that gates the build exactly like a rule
   //     question. Already-decided components (confirmed OR declined) never
   //     re-suggest. Best-effort — a failure here must not break the audit.
+  // With auto-apply on (component_auto_apply setting), the WHOLE published
+  // catalog is confirmed at pre-install time (proceedToBuild →
+  // preinstallComponents), so a suggestion question would only block the build
+  // to ask about a component that installs regardless — skip the interview.
   let suggestionCount = 0;
-  try {
+  if (!getComponentAutoApply()) try {
     let inventoryDoc = null;
     try { inventoryDoc = JSON.parse(inv.content); } catch { inventoryDoc = null; }
     const capabilities = extractCapabilities(inventoryDoc);

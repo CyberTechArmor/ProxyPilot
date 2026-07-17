@@ -1173,6 +1173,13 @@ export const api = {
   mock2SetIntegrationGateMode: (mode) =>
     request('/mock2/settings/integration-gate-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
 
+  // Mock2 component auto-apply (admin-only) — when enabled, every published
+  // standard component is installed into every build automatically instead of
+  // waiting on a capability-match suggestion + per-project confirm.
+  mock2GetComponentAutoApply: () => request('/mock2/settings/component-auto-apply'),
+  mock2SetComponentAutoApply: (enabled) =>
+    request('/mock2/settings/component-auto-apply', { method: 'POST', body: JSON.stringify({ enabled }) }),
+
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid
   // was removed). Read-only, member-visible. Entries are destination IP:port.

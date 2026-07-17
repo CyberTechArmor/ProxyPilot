@@ -628,6 +628,46 @@ export function parseComponentSuggestionAnswer(answer) {
   return { decision: 'declined' };
 }
 
+// ---- auto-apply (operator policy — every published component, every build) ----
+//
+// The suggest-on-capability-match flow above only offers a component when the
+// inventory's capabilities happen to match its contract, and only installs it
+// after an editor taps confirm — so a library of known-good components mostly
+// sat unused while builds re-implemented them from scratch. Auto-apply is the
+// operator switch that flips the default: every PUBLISHED component is
+// confirmed for every build (origin 'auto') and lands via the same
+// deterministic zero-token pre-install. Explicit human decisions are never
+// overridden: a declined component stays declined.
+
+export const COMPONENT_AUTO_APPLY_ON = 'on';
+export const COMPONENT_AUTO_APPLY_OFF = 'off';
+
+// normalizeComponentAutoApply — 'on'/'off' (case/space tolerant, common
+// boolean spellings accepted). Unknown/empty falls back to ON: the whole point
+// of the policy is that reuse is the default.
+export function normalizeComponentAutoApply(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (['off', 'false', '0', 'no', 'disabled'].includes(v)) return COMPONENT_AUTO_APPLY_OFF;
+  return COMPONENT_AUTO_APPLY_ON;
+}
+
+// selectAutoApplyComponents — the catalog rows auto-apply should confirm for a
+// project: published components with no selection row yet, or still sitting at
+// 'suggested' (an unanswered suggestion question). Anything a human decided
+// (confirmed/declined) or that already ran an install (installed/
+// install_failed — retried by the pre-installer itself) is left alone.
+// Order-stable by key.
+export function selectAutoApplyComponents(catalog = [], existingRows = []) {
+  const statusByKey = new Map((existingRows || []).map((r) => [r.key, r.status]));
+  return (catalog || [])
+    .filter((c) => {
+      if (!c || !c.key) return false;
+      const status = statusByKey.get(c.key);
+      return status === undefined || status === 'suggested';
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
 // ---- deterministic install plans (pure halves of component-install.js) ----
 
 // planMigrationRenumber — slot a component's SQL migrations AFTER the project's

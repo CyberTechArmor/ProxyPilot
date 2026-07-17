@@ -364,44 +364,84 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // ---- Base-app activation (fresh provision only) ----
   // A NEW project should be a WORKING app the moment it exists — open the URL,
   // create the first administrator, sign in — before any mockup or build.
-  // Pre-install the standard components (wires the auth bootstrap into the
-  // scaffold, zero tokens), then deploy the scaffold through the now-active
-  // fence (npm install → migrate → tsc build → unit swap → health-check).
-  // Best-effort: any failure leaves the placeholder serving and says so — the
-  // first build deploys the app exactly as before.
   if (!rehydrate) {
-    try {
-      setStatus(projectId, { phase: 'base-app', message: 'Setting up the base app (sign-in + first-admin bootstrap)…' });
-      const fresh = getProject(projectId);
-      // Dynamic import: component-install imports this module (container
-      // naming), so a static import would be a cycle.
-      const { preinstallComponents } = await import('./component-install.js');
-      const pre = await preinstallComponents({ project: fresh, initiatedBy: fresh?.created_by ?? null });
-      if (!pre.ok) console.warn(`[mock2] base-app component pre-install incomplete for ${projectId}:`, pre.failed?.map((f) => f.error).join('; '));
-      setStatus(projectId, { phase: 'base-app', message: 'Deploying the base app (install, migrate, build, start)…' });
-      const result = await deployProject({
-        containerName, appDir: APP_DIR, webPort: declaredPort,
-        onStep: (_key, label) => setStatus(projectId, { phase: 'base-app', message: label }),
-      });
-      if (result.ok && !result.skipped) {
-        setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
-        try {
-          const { insertMessage } = await import('./chats.js');
-          insertMessage({
-            projectId, kind: 'system',
-            body: 'The base app is live on your project URL — open it to create the first administrator and sign in. From here you can mock up a design and apply it, or skip the mockup and start making quick updates to the running app.',
-          });
-        } catch { /* best effort */ }
-        console.log(`[mock2] project ${projectId} base app deployed at provision`);
-      } else if (!result.ok) {
-        setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — base app deploy failed at "${result.step}": ${result.error}` });
-        console.warn(`[mock2] base-app deploy failed for ${projectId}: ${result.step} — ${result.error}`);
-      }
-    } catch (e) {
-      console.warn(`[mock2] base-app activation failed for ${projectId} (placeholder keeps serving):`, e?.message || e);
-    }
+    await deployBaseApp(getProject(projectId), { reason: 'provision' });
   }
   scheduleCleanup(projectId);
+}
+
+// deployBaseApp — pre-install the standard components (wires the auth
+// bootstrap into the scaffold, zero tokens) and deploy the scaffold through
+// the active fence (npm install → migrate → tsc build → unit swap →
+// health-check), so the project URL serves the real sign-in-able base app
+// instead of the placeholder. Used at fresh provision AND as the self-heal
+// when the Builder reaches for the app and it isn't deployed yet (e.g. Skip
+// mockup on a project whose provision-time deploy failed). Never throws: any
+// failure leaves the placeholder serving, posts a VISIBLE chat message with
+// the step + error, and raises an admin-queue item.
+export async function deployBaseApp(project, { reason = 'provision' } = {}) {
+  const projectId = Number(project?.id);
+  if (!Number.isFinite(projectId)) return { ok: false, error: 'no project' };
+  const containerName = project.container_name || containerNameForProject(projectId);
+  const webPort = project.web_port || DEFAULT_WEB_PORT;
+  const say = async (body) => {
+    try { const { insertMessage } = await import('./chats.js'); insertMessage({ projectId, kind: 'system', body }); }
+    catch { /* best effort */ }
+  };
+  try {
+    setStatus(projectId, { phase: 'base-app', message: 'Setting up the base app (sign-in + first-admin bootstrap)…' });
+    // Dynamic import: component-install imports this module (container
+    // naming), so a static import would be a cycle.
+    const { preinstallComponents } = await import('./component-install.js');
+    const pre = await preinstallComponents({ project, initiatedBy: project?.created_by ?? null });
+    if (!pre.ok) {
+      // Deploying with missing components would fail at tsc against absent
+      // modules (the "Cannot find module 'ldapts'" failure) — stop here with
+      // the real cause instead. Any later build retries the install first.
+      const detail = pre.failed?.map((f) => `${f.row?.key}: ${f.error}`).join('; ') || 'unknown';
+      console.warn(`[mock2] base-app component pre-install failed for ${projectId}:`, detail);
+      setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — component install failed: ${detail.slice(0, 200)}` });
+      await say(`Base app setup stopped — component install failed (${detail.slice(0, 400)}). The placeholder keeps serving; fix the cause (component install retries on the next build) or run any build/Quick update.`);
+      try {
+        raiseQueueItem({
+          kind: 'flag', project_id: projectId, dedupe_key: `mock2-base-app:${projectId}`,
+          ref_table: 'mock2_projects', ref_id: projectId,
+          detail: `${project.name}: base app component pre-install failed — ${detail.slice(0, 300)}`,
+        });
+      } catch { /* best effort */ }
+      return { ok: false, error: `component pre-install failed: ${detail}` };
+    }
+    setStatus(projectId, { phase: 'base-app', message: 'Deploying the base app (install, migrate, build, start)…' });
+    const result = await deployProject({
+      containerName, appDir: APP_DIR, webPort,
+      onStep: (_key, label) => setStatus(projectId, { phase: 'base-app', message: label }),
+    });
+    if (result.ok && !result.skipped) {
+      setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
+      try { updateProject(projectId, { base_app_deployed_at: new Date().toISOString() }); } catch { /* best effort */ }
+      await say('The base app is live on your project URL — open it to create the first administrator and sign in. From here you can mock up a design and apply it, or skip the mockup and start making quick updates to the running app.');
+      console.log(`[mock2] project ${projectId} base app deployed (${reason})`);
+      return { ok: true };
+    }
+    if (!result.ok) {
+      setStatus(projectId, { phase: 'ready', message: `Project online on the placeholder — base app deploy failed at "${result.step}": ${result.error}` });
+      console.warn(`[mock2] base-app deploy failed for ${projectId} (${reason}): ${result.step} — ${result.error}`);
+      await say(`Base app deploy failed at "${result.step}": ${String(result.error || '').slice(0, 400)} — the placeholder keeps serving. Fix the cause (or run any build, which deploys the app) and try again.`);
+      try {
+        raiseQueueItem({
+          kind: 'flag', project_id: projectId, dedupe_key: `mock2-base-app:${projectId}`,
+          ref_table: 'mock2_projects', ref_id: projectId,
+          detail: `${project.name}: base app deploy failed at "${result.step}" — ${String(result.error || '').slice(0, 300)}`,
+        });
+      } catch { /* best effort */ }
+      return { ok: false, step: result.step, error: result.error };
+    }
+    return { ok: true, skipped: true };
+  } catch (e) {
+    console.warn(`[mock2] base-app activation failed for ${projectId} (${reason}; placeholder keeps serving):`, e?.message || e);
+    await say(`Base app setup crashed: ${String(e?.message || e).slice(0, 400)} — the placeholder keeps serving. Any successful build will deploy the app.`);
+    return { ok: false, error: e?.message || String(e) };
+  }
 }
 
 // redeployIfBuilt — restore a previously-built app after a rehydrate rebuilds
@@ -415,7 +455,8 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
 async function redeployIfBuilt(project, { containerName, webPort }) {
   const projectId = Number(project.id);
   let built = false;
-  try { built = projectHasBeenDeployed(projectId); } catch (e) { console.warn('[mock2] rehydrate deploy check failed:', e?.message); }
+  try { built = projectHasBeenDeployed(projectId) || !!project.base_app_deployed_at; }
+  catch (e) { console.warn('[mock2] rehydrate deploy check failed:', e?.message); }
   if (!built) return;
   setStatus(projectId, { phase: 'deploy', message: 'Restoring the built app (install, migrate, build, start)…' });
   const result = await deployProject({

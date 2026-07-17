@@ -127,14 +127,20 @@ async function installOne({ containerName, row }) {
 
   // 4) Declared dependencies (the contract's structured npm installs — no
   //    usage_md parsing). The fence's egress proxy already allows npm.
+  //    NPM'S OWN exit code must be checked: `npm install | tail` reports
+  //    tail's exit (always 0), which silently shipped projects whose deps
+  //    never landed — the deploy then failed at tsc with "Cannot find module".
+  //    Log to a file, propagate npm's code, show the tail.
+  const npmInstall = (args) =>
+    `npm install --no-audit --no-fund ${args} > /tmp/mock2-npm-install.log 2>&1; c=$?; tail -5 /tmp/mock2-npm-install.log; exit $c`;
   const deps = contract?.dependencies;
   const runtime = [...(deps?.runtime || []), ...(deps?.peers || [])];
   if (runtime.length) {
-    const r = await execInContainer(containerName, `npm install --no-audit --no-fund ${runtime.join(' ')} 2>&1 | tail -5`);
+    const r = await execInContainer(containerName, npmInstall(runtime.join(' ')));
     if (r.code !== 0) return { ok: false, error: `npm install failed for ${row.key}: ${(r.stdout || r.stderr || '').trim().slice(-300)}` };
   }
   if (deps?.dev?.length) {
-    const r = await execInContainer(containerName, `npm install -D --no-audit --no-fund ${deps.dev.join(' ')} 2>&1 | tail -5`);
+    const r = await execInContainer(containerName, npmInstall(`-D ${deps.dev.join(' ')}`));
     if (r.code !== 0) return { ok: false, error: `npm install -D failed for ${row.key}: ${(r.stdout || r.stderr || '').trim().slice(-300)}` };
   }
 

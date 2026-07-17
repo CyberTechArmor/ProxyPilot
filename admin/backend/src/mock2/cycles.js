@@ -37,6 +37,17 @@ export function latestCycle(projectId) {
   return getMock2Db().prepare(`SELECT * FROM mock2_cycles WHERE project_id = ? ORDER BY id DESC LIMIT 1`).get(Number(projectId));
 }
 
+// The latest cycle that actually carries a deploy signal (deploy_status set).
+// The project's derived deploy_state must come from THIS row, not latestCycle:
+// a zero-token record cycle with no deploy (e.g. the design-skip marker) would
+// otherwise mask a real 'serving' status — the UI then wrongly reported the
+// app as not deployed and offered "Deploy base app" over a live app.
+export function latestDeployCycle(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_cycles WHERE project_id = ? AND deploy_status IS NOT NULL ORDER BY id DESC LIMIT 1`)
+    .get(Number(projectId));
+}
+
 // Has this project ever been deployed (a build cycle reached deploy_status
 // 'serving')? The rehydrate path uses this to decide whether to re-run the
 // deploy step and restore the built app rather than the placeholder (Run-phase

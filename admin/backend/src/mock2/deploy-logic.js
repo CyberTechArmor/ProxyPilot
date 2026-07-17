@@ -129,12 +129,26 @@ export function freeWebPortScript(webPort = 3000) {
   const p = Number(webPort) || 3000;
   return [
     `systemctl stop mock2-dev.service 2>/dev/null || true`,
-    `if command -v fuser >/dev/null 2>&1; then fuser -k ${p}/tcp 2>/dev/null || true;`,
-    `elif command -v lsof >/dev/null 2>&1; then kill $(lsof -t -i:${p} 2>/dev/null) 2>/dev/null || true;`,
-    `elif command -v ss >/dev/null 2>&1; then`,
+    // The provision fallback can leave a nohup'd serve.py OUTSIDE the unit's
+    // cgroup — `systemctl stop` never reaps it and it holds the port forever.
+    `pkill -f '[s]erve\\.py' 2>/dev/null || true`,
+    // Reap any remaining holder with EVERY tool available (not first-match —
+    // fuser can be absent while lsof isn't, and vice versa).
+    `if command -v fuser >/dev/null 2>&1; then fuser -k ${p}/tcp 2>/dev/null || true; fi`,
+    `if command -v lsof >/dev/null 2>&1; then kill $(lsof -t -i:${p} 2>/dev/null) 2>/dev/null || true; fi`,
+    `if command -v ss >/dev/null 2>&1; then`,
     `  pid=$(ss -ltnpH "sport = :${p}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2);`,
     `  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true;`,
     `fi`,
+    // Wait (bounded) until the kernel actually releases the socket — a TERM'd
+    // holder can linger past a fixed 1s pause and the fresh instance then
+    // crash-loops on EADDRINUSE. Escalate to SIGKILL halfway through.
+    `i=0; while [ $i -lt 6 ]; do`,
+    `  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${p} "; then`,
+    `    if [ $i -eq 3 ]; then fuser -k -KILL ${p}/tcp 2>/dev/null || true; pkill -9 -f '[s]erve\\.py' 2>/dev/null || true; fi`,
+    `    i=$((i+1)); sleep 1;`,
+    `  else break; fi`,
+    `done`,
     `systemctl reset-failed mock2-dev.service 2>/dev/null || true`,
     `sleep 1`,
   ].join('\n');

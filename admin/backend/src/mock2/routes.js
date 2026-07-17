@@ -101,7 +101,9 @@ import {
   addTypingSeconds,
 } from './projects.js';
 import { computeTimeSummary, computeUsageSummary } from './time-logic.js';
-import { publicProjectShape, isProjectReadOnly } from './project-logic.js';
+import { publicProjectShape, isProjectReadOnly, normalizeHarness } from './project-logic.js';
+import { resolveHarness } from './runner-logic.js';
+import { claudeHarnessStatus } from './harness.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
 import {
@@ -191,7 +193,7 @@ import {
   publicRoutingRuleShape, aggregateRoutingOutcomes,
 } from './routing-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
@@ -349,6 +351,8 @@ const flagSchema = z.object({
   flagged: z.boolean(),
   reason: z.string().trim().max(500).optional(),
 });
+// Per-project agent harness toggle (values mirror project-logic HARNESSES).
+const harnessSchema = z.object({ harness: z.enum(['proxypilot', 'claude']) });
 const idleDaysSchema = z.object({
   days: z.union([z.number().int(), z.string()]).transform((v) => Number(v))
     .refine((n) => Number.isInteger(n) && n >= 0 && n <= 3650, 'out of range'),
@@ -674,6 +678,9 @@ function shapeProject(project, { isAdmin }) {
     frameworkCurrentVersion: current?.version ?? null,
     frameworkLastBuiltVersion: lastBuilt?.version ?? null,
     deployState,
+    // What a project with no explicit harness choice runs on this install
+    // (the legacy BUILD_RUNNER flag resolution; 'proxypilot' when unset).
+    defaultHarness: resolveHarness({}, process.env),
   });
 }
 
@@ -958,6 +965,48 @@ export function createMock2Router() {
     }
     logAudit(req.user.id, 'MOCK2_PROJECT_FLAG', 'mock2_project', project.id, { flagged: parsed.data.flagged }, req.ip);
     res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
+  });
+
+  // ---- per-project agent harness (ProxyPilot | Claude) ----
+
+  // Read the project's harness + whether the Claude harness is usable on this
+  // install. `claude` carries ONLY booleans/labels (configured, key source,
+  // reason) — never key material — so the UI can render the toggle's
+  // disabled/warning state without the server ever exposing a secret.
+  router.get('/projects/:id/harness', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    let ready = null;
+    try { ready = buildRunnerReady(); } catch { ready = null; }
+    res.json({
+      harness: resolveHarness(project, process.env),
+      harness_choice: normalizeHarness(project.harness),
+      harnesses: ['proxypilot', 'claude'],
+      claude: claudeHarnessStatus({ ready, env: process.env }),
+    });
+  });
+
+  // Switch the project's harness. Persists immediately; the next build cycle
+  // picks it up (a running cycle finishes on the harness it started with).
+  // Selecting Claude without a usable Anthropic API key is refused here with
+  // the same clear error a run-time attempt would produce.
+  router.put('/projects/:id/harness', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const parsed = harnessSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'harness ("proxypilot" | "claude") is required' });
+    let ready = null;
+    try { ready = buildRunnerReady(); } catch { ready = null; }
+    const claude = claudeHarnessStatus({ ready, env: process.env });
+    if (parsed.data.harness === 'claude' && !claude.configured) {
+      return res.status(409).json({ error: claude.reason });
+    }
+    const updated = updateProject(project.id, { harness: parsed.data.harness });
+    logAudit(req.user.id, 'MOCK2_PROJECT_HARNESS', 'mock2_project', project.id,
+      { harness: parsed.data.harness, previous: normalizeHarness(project.harness), acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+    res.json({
+      project: shapeProject(updated, { isAdmin: isReqAdmin(req) }),
+      harness: resolveHarness(updated, process.env),
+      claude,
+    });
   });
 
   // Attach a custom domain (admin-gated): validate, best-effort A-record check

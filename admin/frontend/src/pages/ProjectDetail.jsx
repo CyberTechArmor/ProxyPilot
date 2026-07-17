@@ -519,6 +519,9 @@ export default function ProjectDetail() {
         </CardContent>
       </Card>
 
+      {/* Build harness — ProxyPilot's runner or the Claude Agent SDK, per project. */}
+      <HarnessCard projectId={id} canEdit={canEdit && !isArchived} />
+
       {/* Time tracking — project start + where the time went (live). */}
       <ProjectTimeCard projectId={id} />
 
@@ -817,6 +820,83 @@ export default function ProjectDetail() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// Which agent harness drives this project's builds — ProxyPilot's built-in
+// runner, or the Claude Agent SDK (with its `search` and `pull-website`
+// subagents). Exactly one harness per project; the choice persists immediately
+// and applies from the next build cycle. The Claude option stays disabled, with
+// the server's reason shown, until an Anthropic API key is configured
+// server-side — the key itself never reaches the browser (the API returns only
+// a configured boolean + source label). Self-contained loader, like the other
+// detail cards. MOBILE_FIRST: the segmented pair collapses to one column on
+// mobile and both targets are ≥44px tall.
+function HarnessCard({ projectId, canEdit }) {
+  const { toast } = useToast();
+  const [info, setInfo] = useState(null); // { harness, claude: { configured, source, reason } }
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try { setInfo(await api.mock2GetProjectHarness(projectId)); }
+    catch (err) { if (!(err instanceof ApiError)) console.error('load harness failed:', err); }
+  }, [projectId]);
+  useEffect(() => { load(); }, [load]);
+
+  const choose = async (harness) => {
+    if (!info || busy || harness === info.harness) return;
+    setBusy(true);
+    try {
+      const r = await api.mock2SetProjectHarness(projectId, harness);
+      setInfo((cur) => ({ ...cur, harness: r.harness, claude: r.claude ?? cur?.claude }));
+      toast({ title: `Build harness: ${harness === 'claude' ? 'Claude' : 'ProxyPilot'}`, description: 'Saved. Applies from the next build cycle.' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not switch harness', description: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const active = info?.harness || 'proxypilot';
+  const claudeReady = !!info?.claude?.configured;
+  const seg = (value, label, caption, disabled) => (
+    <Button
+      type="button"
+      role="radio"
+      aria-checked={active === value}
+      variant={active === value ? 'default' : 'outline'}
+      disabled={disabled}
+      onClick={() => choose(value)}
+      className="min-h-[44px] h-auto w-full flex-col items-start gap-0.5 py-2"
+    >
+      <span className="font-medium">{label}{active === value ? ' · active' : ''}</span>
+      <span className="text-xs font-normal opacity-80">{caption}</span>
+    </Button>
+  );
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2"><Hammer className="h-4 w-4" /> Build harness</CardTitle>
+        <CardDescription>
+          Which engine drives this project&apos;s builds. Exactly one at a time; switching applies from the next build cycle.
+          Gates, checkpoints, and change records are identical on both.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Build harness">
+          {seg('proxypilot', 'ProxyPilot', 'Built-in runner (default)', !info || busy || !canEdit)}
+          {seg('claude', 'Claude', 'Claude Agent SDK + web search/fetch subagents', !info || busy || !canEdit || !claudeReady)}
+        </div>
+        {info && !claudeReady ? (
+          <div className="flex items-start gap-2 p-3 rounded-lg text-sm bg-amber-500/10 text-amber-600">
+            <ShieldAlert className="h-4 w-4 mt-0.5 shrink-0" />
+            <span className="min-w-0">{info.claude?.reason || 'The Claude harness is not configured on this server.'}</span>
+          </div>
+        ) : null}
+        {!canEdit ? (
+          <p className="text-xs text-muted-foreground">Only editors can change the harness.</p>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 

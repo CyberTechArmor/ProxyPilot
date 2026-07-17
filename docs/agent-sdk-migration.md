@@ -349,6 +349,39 @@ first-user cycle (grant the row-delete authorization, resume, complete) needs a 
 Incus/connector environment — the mechanisms + audit artifacts are proven here; the
 live journey is validated on a real install.
 
+## Per-project harness selection (landed)
+
+The runner selection is no longer only the global `BUILD_RUNNER` flag: each project
+now carries a **harness** setting (`mock2_projects.harness`, migration 533) toggled in
+the UI (Project → Details → **Build harness**: "ProxyPilot" | "Claude") and via
+`GET`/`PUT /api/mock2/projects/:id/harness`. Exactly one harness drives a project at a
+time; switching persists immediately and applies from the next build cycle.
+
+- **The abstraction.** `harness.js` defines the common Harness contract
+  (`{ name, runTask(input) }`), with `ProxyPilotHarness` as a thin **adapter** over the
+  unchanged hand-rolled `runCycle` and `ClaudeHarness` over `runCycleSdk`. Both stream
+  through the app's existing event model — the durable `mock2_cycle_events` transcript +
+  the live job phase — so the frontend needs no harness-specific rendering.
+  `startCycle` picks the implementation via the `harnessForProject` factory
+  (`resolveHarness` in `runner-logic.js`: explicit project choice → legacy
+  `BUILD_RUNNER` flag → ProxyPilot). A project that never touches the toggle behaves
+  **exactly** as before.
+- **Claude harness auth.** A pay-as-you-go Anthropic **API key**, resolved
+  orchestrator-side only (`resolveClaudeAuth`): the build_runner slot's Anthropic
+  connector secret first, else the server env's `ANTHROPIC_API_KEY` (`.env`). Never a
+  claude.ai subscription login; the key is never logged, never sent to the browser
+  (the harness API returns only a `configured` boolean + source label), and never
+  enters a project container. Selecting Claude with no usable key is refused with an
+  actionable error, both at toggle time (409) and at run time (failed cycle, clear
+  message).
+- **Subagents.** The Claude harness configures two SDK subagents (`agents` option,
+  pinned in `SDK_SUBAGENTS`): **`search`** (WebSearch only — finds and returns relevant
+  sources) and **`pull-website`** (WebFetch only — retrieves and extracts a given URL).
+  The main loop's tool set stays the read/edit/run set plus the delegation tool; web
+  access exists *only* through those scoped subagents, and the PreToolUse guardrails
+  still deny protected paths and destructive shell. More subagents / custom MCP tools
+  slot into `SDK_SUBAGENTS` later without touching the runner.
+
 ## Phased roadmap
 
 - [ ] **Phase 1 — Tool + context swap (IN PROGRESS).** SDK build runner behind a

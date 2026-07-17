@@ -14,6 +14,7 @@
 
 import { parseHaltOptions, HALT_OPTION_KINDS } from './unblock-logic.js';
 import { buildComponentCatalogSection, buildInstalledComponentsSection } from './component-logic.js';
+import { normalizeHarness } from './project-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -767,12 +768,125 @@ export function buildRunnerMode(env = {}) {
   return String(env.BUILD_RUNNER || '').trim().toLowerCase() === 'sdk' ? 'sdk' : 'handrolled';
 }
 
+// resolveHarness(project, env) — the ONE per-project harness decision. An
+// explicit project choice (mock2_projects.harness, migration 533) always wins:
+// 'claude' selects the Claude Agent SDK runner, 'proxypilot' pins the
+// hand-rolled runner even when the legacy global flag is set. No explicit
+// choice (NULL / unknown value) falls back to the legacy BUILD_RUNNER=sdk
+// reading above — so an install that never touches the toggle behaves exactly
+// as it did before the per-project setting existed, and existing projects
+// default to the ProxyPilot harness.
+export function resolveHarness(project = {}, env = {}) {
+  const choice = normalizeHarness(project?.harness);
+  if (choice) return choice;
+  return buildRunnerMode(env) === 'sdk' ? 'claude' : 'proxypilot';
+}
+
 // The built-in Claude Agent SDK tools the build runner is allowed to use. These
 // replace the hand-rolled RUNNER_TOOLS: the SDK executes them itself against its
 // working directory (the local checkout), so we don't implement tool execution.
-// Deliberately the read/inspect/edit/run set — no network tools (the constitution
-// and gate battery, not an allowlist here, govern what the change may contain).
+// Deliberately the read/inspect/edit/run set — the MAIN loop gets no network
+// tools (the constitution and gate battery, not an allowlist here, govern what
+// the change may contain). Web access exists only through the two scoped
+// subagents below, each restricted to its single network tool.
 export const SDK_ALLOWED_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob']);
+
+// The subagent-delegation tool. The current SDK docs name it 'Agent'; earlier
+// releases called it 'Task'. Both are allowlisted so the pinned option shape
+// keeps working across the SDK versions operators may have installed
+// (the package is installed out-of-band — see runner-sdk.js).
+export const SDK_SUBAGENT_TOOLS = Object.freeze(['Agent', 'Task']);
+
+// The Claude harness's subagents (SDK `agents` option). Two are required by the
+// harness contract — a web-search agent and a URL-fetch agent — and each is
+// deliberately restricted to its ONE network tool (no Bash, no file writes), so
+// delegating never widens what the build itself may do. More subagents (or
+// custom MCP tools) can be added here later without touching the runner.
+export const SDK_SUBAGENTS = Object.freeze({
+  search: Object.freeze({
+    description: 'Web search specialist. Use when the task needs information that is not in the '
+      + 'working tree or the constitution — current library/API documentation, error messages, '
+      + 'version compatibility, best practices. Returns relevant sources with a short summary of each.',
+    prompt: 'You are a web research subagent for a build runner. Given a query, use WebSearch to find '
+      + 'the most relevant, authoritative sources. Return a concise list of findings: for each source, '
+      + 'the URL, and one or two sentences on what it says that answers the query. Prefer official '
+      + 'documentation and primary sources. Do not speculate beyond what the results say.',
+    tools: Object.freeze(['WebSearch']),
+  }),
+  'pull-website': Object.freeze({
+    description: 'Web page fetcher. Use when a SPECIFIC URL is already known (from the task, the '
+      + 'search subagent, or the code) and its content is needed — documentation pages, changelogs, '
+      + 'API references. Retrieves the page and returns the relevant extracted content.',
+    prompt: 'You are a web-fetch subagent for a build runner. Given a URL (and optionally what to look '
+      + 'for), use WebFetch to retrieve the page and return the content relevant to the request — '
+      + 'quote the pertinent sections rather than summarizing them away. If the page cannot be '
+      + 'fetched, say so plainly and return nothing else.',
+    tools: Object.freeze(['WebFetch']),
+  }),
+});
+
+// sdkSubagents() — a fresh, mutable copy of SDK_SUBAGENTS for handing to the SDK
+// (query() options must not receive our frozen constants).
+export function sdkSubagents() {
+  return Object.fromEntries(
+    Object.entries(SDK_SUBAGENTS).map(([name, a]) => [name, { ...a, tools: [...a.tools] }]),
+  );
+}
+
+// resolveClaudeAuth — where the Claude harness's Anthropic API key comes from.
+// Order: the build_runner slot's Anthropic connector (the existing encrypted
+// secrets store), else the server environment's ANTHROPIC_API_KEY. Pure and
+// key-material-free: it returns only the SOURCE decision, never the key itself,
+// so callers (and tests, and logs) can handle the verdict without ever holding
+// a secret. This is a pay-as-you-go API key — never a claude.ai subscription
+// login — and it stays server-side: nothing derived from it is sent to the
+// browser beyond the boolean "configured".
+export function resolveClaudeAuth({ provider = null, hasConnectorKey = false, hasEnvKey = false } = {}) {
+  if (String(provider || '').trim().toLowerCase() === 'anthropic' && hasConnectorKey) {
+    return { ok: true, source: 'connector' };
+  }
+  if (hasEnvKey) return { ok: true, source: 'env' };
+  return {
+    ok: false,
+    source: null,
+    reason: 'The Claude harness needs an Anthropic API key: point the build_runner model slot at an '
+      + 'Anthropic connector with a decryptable key, or set ANTHROPIC_API_KEY in the server '
+      + 'environment (.env). Or switch this project back to the ProxyPilot harness.',
+  };
+}
+
+// Which model a Claude-harness cycle runs. The build_runner slot's model when
+// the slot points at Anthropic (existing behavior, unchanged); otherwise —
+// running on the server-env ANTHROPIC_API_KEY with a non-Anthropic slot — the
+// slot's model belongs to another provider and can't be sent to the SDK, so
+// fall back to CLAUDE_HARNESS_MODEL (env) or the pinned default.
+export const CLAUDE_HARNESS_FALLBACK_MODEL = 'claude-opus-4-8';
+export function claudeHarnessModel({ provider = null, slotModel = null, env = {} } = {}) {
+  if (String(provider || '').trim().toLowerCase() === 'anthropic' && slotModel) return slotModel;
+  return String(env.CLAUDE_HARNESS_MODEL || '').trim() || CLAUDE_HARNESS_FALLBACK_MODEL;
+}
+
+// sdkQueryOptions — the pinned option shape for a Claude-harness query() round.
+// Pure so the harness contract is unit-testable without the SDK installed:
+// main-loop tools + the delegation tool allowlisted, the two scoped subagents
+// attached, permissionMode 'bypassPermissions' (no interactive prompts — safe
+// because the PreToolUse hook DENIES protected paths and destructive shell even
+// under bypass, deny > allow), and CLAUDE.md auto-loading from the checkout.
+// `env` is the SDK subprocess environment the caller builds (the API key rides
+// there, orchestrator-side only); `hooks` fragments are spread in by the caller.
+export function sdkQueryOptions({ cwd, model, maxTurns, env, resumeSessionId = null } = {}) {
+  return {
+    cwd,
+    model,
+    allowedTools: [...SDK_ALLOWED_TOOLS, ...SDK_SUBAGENT_TOOLS],
+    permissionMode: 'bypassPermissions',
+    settingSources: ['project'], // auto-load .claude/CLAUDE.md from cwd
+    maxTurns,
+    env,
+    agents: sdkSubagents(),
+    ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+  };
+}
 
 // buildRunnerClaudeMd — render the SAME governance content the hand-rolled system
 // prompt injects (buildRunnerSystemPrompt), but as a CLAUDE.md document that the

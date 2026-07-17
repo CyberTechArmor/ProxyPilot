@@ -63,9 +63,10 @@ import {
   RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
-  softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
+  softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
+import { harnessForProject } from './harness.js';
 import { callModelTurn } from './model-client.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
@@ -370,15 +371,15 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
 
   setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
 
-  // Which runner drives this cycle. Default (unset) is the hand-rolled loop below —
-  // BYTE-FOR-BYTE unchanged. BUILD_RUNNER=sdk selects the Claude Agent SDK runner
-  // (Phase 1, docs/agent-sdk-migration.md), imported dynamically so a flag-off
-  // install never needs @anthropic-ai/claude-agent-sdk present. Both share the same
-  // args, the same terminal-error handling, and the same gate/checkpoint/deploy tail.
+  // Which harness drives this cycle: the project's own choice, else the legacy
+  // BUILD_RUNNER flag, else the ProxyPilot harness (hand-rolled loop below,
+  // BYTE-FOR-BYTE unchanged). harness.js dynamic-imports the chosen runner so a
+  // ProxyPilot-only install never needs @anthropic-ai/claude-agent-sdk present.
+  // Both harnesses share the same args, the same terminal-error handling, and
+  // the same gate/checkpoint/deploy tail.
   const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: modeStr };
-  const driveCycle = buildRunnerMode(process.env) === 'sdk'
-    ? () => import('./runner-sdk.js').then((m) => m.runCycleSdk(args))
-    : () => runCycle(args);
+  const harness = harnessForProject(project, process.env);
+  const driveCycle = () => harness.runTask(args);
 
   // Fire-and-forget; the runner owns its own error handling and always lands the
   // cycle terminal + releases the lock.
@@ -657,7 +658,10 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
 
 // ---- the agentic loop ----
 
-async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL }) {
+// Exported ONLY for the ProxyPilotHarness adapter (harness.js), which wraps this
+// loop unchanged — nothing else calls it directly; startCycle goes through the
+// harness factory.
+export async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL }) {
   const cycleMode = normalizeBuildMode(buildMode);
   const mvpBuild = isFastBuildMode(cycleMode); // fast modes share the relaxed acceptance path
   const projectId = Number(project.id);

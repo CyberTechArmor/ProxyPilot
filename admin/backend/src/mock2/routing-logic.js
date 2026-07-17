@@ -131,13 +131,18 @@ export function fastCodeModel(env = {}) {
 
 // ---- MVP build routing (speed path — see cycle-logic BUILD_MODE_MVP) ----
 
-// The fixed routing an MVP build runs with: the fast code model at a lighter
-// effort. Deliberately not knowledge-base driven — MVP is an explicit operator
-// choice ("give me a testable first version fast"), not a classification.
+// The fixed routing an MVP build runs with: the fast code model at LOW effort.
+// Deliberately not knowledge-base driven — MVP is an explicit operator choice
+// ("give me a testable first version fast"), not a classification. Low effort
+// is the speed lever that matters most here: observed MVP builds spent ~95% of
+// wall-clock on model generation across ~90 small turns, and lower effort
+// means fewer, more-consolidated tool calls with far less per-turn thinking —
+// scaffold-quality code doesn't need deep reasoning. MOCK2_MVP_EFFORT raises
+// it back if an install's MVPs come out too shallow.
 export function mvpRoutingDecision(env = {}, slotModel = '') {
   const model = fastCodeModel(env) || String(slotModel || '');
   const rawEffort = String(env?.MOCK2_MVP_EFFORT ?? '').trim().toLowerCase();
-  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'medium';
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'low';
   return {
     model, effort, rung: 0, task_kind: 'feature', difficulty: null,
     reason: 'mvp build', build_mode: 'mvp',

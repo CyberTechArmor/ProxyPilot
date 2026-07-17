@@ -98,10 +98,10 @@ test('decideRouting: escalation still wins over the fast model', () => {
 
 // ---- MVP routing decision ----
 
-test('mvpRoutingDecision: fast model at medium effort, stamped as mvp', () => {
+test('mvpRoutingDecision: fast model at low effort, stamped as mvp', () => {
   const d = mvpRoutingDecision({}, 'claude-opus-4-8');
   assert.equal(d.model, DEFAULT_FAST_MODEL);
-  assert.equal(d.effort, 'medium');
+  assert.equal(d.effort, 'low');
   assert.equal(d.rung, 0);
   assert.equal(d.build_mode, 'mvp');
 });
@@ -113,5 +113,5 @@ test('mvpRoutingDecision: env overrides for model + effort; off falls back to th
   const off = mvpRoutingDecision({ MOCK2_FAST_MODEL: 'off' }, 'claude-opus-4-8');
   assert.equal(off.model, 'claude-opus-4-8');
   const bad = mvpRoutingDecision({ MOCK2_MVP_EFFORT: 'ultra' }, 'slot');
-  assert.equal(bad.effort, 'medium');
+  assert.equal(bad.effort, 'low');
 });

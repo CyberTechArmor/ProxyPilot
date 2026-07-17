@@ -45,7 +45,8 @@ import {
 } from './questions.js';
 import { raiseQueueItem, resolveQueueItem, countAwaitingAdminItems } from './queue.js';
 import { INVENTORY_PATH } from './concept-logic.js';
-import { getChatMaxChars, getComponentAutoApply } from './settings.js';
+import { getChatMaxChars, getComponentAutoApply, getLaneTuning } from './settings.js';
+import { applyLaneTuning } from './lane-tuning-logic.js';
 import {
   listPublishedComponents, listProjectComponents, insertProjectComponentSuggestion,
   getProjectComponentByQuestion, decideProjectComponent,
@@ -379,13 +380,17 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   //    The instruction's image attachments ride along — a screenshot of the bug
   //    or a design reference is context the audit legitimately classifies on.
   const auditImages = hydrateAttachments(projectId, attachments);
+  // Operator lane tuning (admin settings) over the lane default: a bounded
+  // classification/reasoning task — medium effort unless tuned otherwise.
+  const auditTuned = applyLaneTuning({ model: ready.model, effort: 'medium', thinking: null }, getLaneTuning('audit'));
   const auditRes = await callModelTurn({
-    connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+    connector: ready.connector, apiKey: ready.apiKey, model: auditTuned.model,
     system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
     tools: [],
     transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }), ...(auditImages.length ? { images: auditImages } : {}) }],
     maxTokens: 16000,
-    effort: 'medium', // a bounded classification/reasoning task — high depth buys nothing here
+    effort: auditTuned.effort,
+    thinking: auditTuned.thinking,
   });
   if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: ready.model, usage: auditRes.usage });
   const parsed = auditRes.ok ? parseAuditQuestions(auditRes.text) : { ok: false, error: auditRes.error, questions: [] };

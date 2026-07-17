@@ -26,6 +26,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { Input } from '@/components/ui/input';
 import {
   Inbox, Loader2, ArrowLeft, CheckCircle2, XCircle, PlayCircle, RotateCcw, AlertTriangle,
 } from 'lucide-react';
@@ -159,6 +160,8 @@ export default function AdminQueue() {
   const [savingGateMode, setSavingGateMode] = useState(false);
   const [autoApply, setAutoApply] = useState(null);      // boolean or null while loading
   const [savingAutoApply, setSavingAutoApply] = useState(false);
+  const [laneTuning, setLaneTuning] = useState(null);    // { lanes, options } or null while loading
+  const [savingTune, setSavingTune] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -270,6 +273,30 @@ export default function AdminQueue() {
     }
   };
 
+  // Lane tuning (admin-configurable — per-lane model / effort / thinking).
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetLaneTuning()
+      .then((r) => setLaneTuning(r))
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load lane tuning failed:', err); });
+  }, [gate]);
+
+  // Save one lane's patch; on failure re-fetch to resync (edits are per-field).
+  const saveLaneTuning = async (lane, patch) => {
+    setLaneTuning((cur) => cur && ({ ...cur, lanes: { ...cur.lanes, [lane]: { ...cur.lanes[lane], ...patch } } }));
+    setSavingTune(true);
+    try {
+      const res = await api.mock2SetLaneTuning(lane, patch);
+      setLaneTuning((cur) => cur && ({ ...cur, lanes: res.lanes }));
+      toast({ title: 'Thinking settings updated', description: `${laneTuning?.options?.labels?.[lane] || lane} lane saved.` });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+      api.mock2GetLaneTuning().then(setLaneTuning).catch(() => {});
+    } finally {
+      setSavingTune(false);
+    }
+  };
+
   const onStatus = async (item, status) => {
     setBusy(true);
     try {
@@ -372,6 +399,86 @@ export default function AdminQueue() {
           </label>
           <p className="pt-2 text-xs text-muted-foreground">
             Explicitly declined components stay declined, and files a build already adapted are never overwritten.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Lane tuning — per-lane model / effort / thinking-off overrides. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Model thinking &amp; effort</CardTitle>
+          <CardDescription>
+            Per-lane overrides for how the harness thinks: pin a specific model, raise or lower the
+            reasoning effort, or turn thinking off entirely for a lane. Blank/default keeps each
+            lane&apos;s built-in choice (slots, routing, and the MVP fast model).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {laneTuning == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            laneTuning.options.lanes.map((lane) => {
+              const entry = laneTuning.lanes[lane] || { model: null, effort: 'default', thinking: 'default' };
+              return (
+                <div key={lane} className="space-y-1.5">
+                  <p className="text-sm font-medium">{laneTuning.options.labels?.[lane] || lane}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground" htmlFor={`tune-model-${lane}`}>Model override</label>
+                      <Input
+                        id={`tune-model-${lane}`}
+                        key={`${lane}-${entry.model || ''}`}
+                        className="h-11 sm:h-10"
+                        placeholder="slot / routing default"
+                        defaultValue={entry.model || ''}
+                        disabled={savingTune}
+                        onBlur={(e) => {
+                          const v = e.target.value.trim();
+                          if (v !== (entry.model || '')) saveLaneTuning(lane, { model: v || null });
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground" htmlFor={`tune-effort-${lane}`}>Effort</label>
+                      <Select
+                        value={entry.effort}
+                        disabled={savingTune}
+                        onValueChange={(v) => saveLaneTuning(lane, { effort: v })}
+                      >
+                        <SelectTrigger id={`tune-effort-${lane}`} className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {laneTuning.options.efforts.map((ef) => (
+                            <SelectItem key={ef} value={ef}>{ef === 'default' ? 'Lane default' : ef}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground" htmlFor={`tune-think-${lane}`}>Thinking</label>
+                      <Select
+                        value={entry.thinking}
+                        disabled={savingTune}
+                        onValueChange={(v) => saveLaneTuning(lane, { thinking: v })}
+                      >
+                        <SelectTrigger id={`tune-think-${lane}`} className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">Adaptive (default)</SelectItem>
+                          <SelectItem value="off">Off — no thinking</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+          <p className="text-xs text-muted-foreground">
+            A pinned model must be one the lane&apos;s connector can serve; effort levels above a model&apos;s
+            support are clamped automatically. Turning thinking off speeds a lane up at the cost of
+            reasoning depth (the mockup lane is off by default on purpose).
           </p>
         </CardContent>
       </Card>

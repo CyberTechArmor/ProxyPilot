@@ -57,6 +57,8 @@ import {
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
+import { getLaneTuning } from './settings.js';
+import { applyLaneTuning } from './lane-tuning-logic.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -467,9 +469,11 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // maxTokens covers the reply + the generate_mockup tool call AND, on capable
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
+  const chatTuned = applyLaneTuning({ model: ready.chat.model, effort: null, thinking: null }, getLaneTuning('chat'));
   const chatRes = await callModelTurn({
-    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 16000,
+    effort: chatTuned.effort, thinking: chatTuned.thinking,
     onDelta,
   });
   if (!chatRes.ok) {
@@ -537,18 +541,19 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     };
     const mockupCall = (budget) => {
       streamedChars = 0;
+      // A render is transcription of the brief onto the design system — pure
+      // output. The lane default turns thinking OFF so the WHOLE budget goes
+      // to the HTML (adaptive thinking otherwise eats into max_tokens and
+      // truncates the document mid-page). Operator lane tuning may override.
+      const mockupTuned = applyLaneTuning({ model: ready.mockup.model, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
       return callModelTurn({
-        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: ready.mockup.model,
+        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupTuned.model,
         system: buildMockupSystemPrompt({ designSystem: framework.design_system_md }),
         tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
         maxTokens: budget,
         timeoutMs: 900000,
-        // A render is transcription of the brief onto the design system — pure
-        // output. Turn thinking OFF so the WHOLE budget goes to the HTML:
-        // adaptive thinking otherwise eats into max_tokens and truncates the
-        // document mid-page (which renders as a black screen).
-        effort: 'low',
-        thinking: 'off',
+        effort: mockupTuned.effort,
+        thinking: mockupTuned.thinking,
         onDelta: onMockupDelta,
       });
     };

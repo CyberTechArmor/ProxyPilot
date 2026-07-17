@@ -11,6 +11,7 @@
 import { getMock2Db } from './db.js';
 import { GATE_MODE_ENFORCE, normalizeGateMode } from './accept-pending-logic.js';
 import { COMPONENT_AUTO_APPLY_ON, normalizeComponentAutoApply } from './component-logic.js';
+import { normalizeLaneTuning, normalizeTuningEntry } from './lane-tuning-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -108,4 +109,26 @@ export const COMPONENT_AUTO_APPLY_KEY = 'component_auto_apply';
 export function getComponentAutoApply() {
   const raw = getMock2Setting(COMPONENT_AUTO_APPLY_KEY, process.env.MOCK2_COMPONENT_AUTO_APPLY || COMPONENT_AUTO_APPLY_ON);
   return normalizeComponentAutoApply(raw) === COMPONENT_AUTO_APPLY_ON;
+}
+
+// ---- Lane tuning (per-lane model / effort / thinking overrides) ----
+export const LANE_TUNING_KEY = 'lane_tuning';
+
+// The operator's thinking settings for one lane: {model, effort, thinking},
+// fully normalized (see lane-tuning-logic.js). Applied as the LAST word over
+// slots/routing at each lane's model call.
+export function getLaneTuning(lane) {
+  const doc = normalizeLaneTuning(getMock2Setting(LANE_TUNING_KEY, null));
+  return doc[lane] || normalizeTuningEntry(null);
+}
+
+export function getAllLaneTuning() {
+  return normalizeLaneTuning(getMock2Setting(LANE_TUNING_KEY, null));
+}
+
+export function setLaneTuning(lane, patch, updatedBy = null) {
+  const doc = getAllLaneTuning();
+  doc[lane] = normalizeTuningEntry({ ...doc[lane], ...patch });
+  setMock2Setting(LANE_TUNING_KEY, JSON.stringify(doc), updatedBy);
+  return doc;
 }

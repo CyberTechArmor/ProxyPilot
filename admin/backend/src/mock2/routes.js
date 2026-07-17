@@ -115,7 +115,8 @@ import {
   containerNameForProject,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning } from './settings.js';
+import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING } from './lane-tuning-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
 import { bridgeCidrForProject } from './network-logic.js';
@@ -1075,6 +1076,30 @@ export function createMock2Router() {
     setMock2Setting(COMPONENT_AUTO_APPLY_KEY, parsed.data.enabled ? 'on' : 'off', req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_COMPONENT_AUTO_APPLY', 'mock2_setting', 0, { enabled: parsed.data.enabled }, req.ip);
     res.json({ enabled: getComponentAutoApply() });
+  });
+
+  // Lane tuning — the operator's per-lane thinking settings: model override,
+  // effort override, and a thinking-off switch, applied as the LAST word over
+  // slots/routing at each lane's model call. Admin-gated read/write of the
+  // mock2_settings.lane_tuning JSON doc.
+  router.get('/settings/lane-tuning', requireAdmin, (_req, res) => {
+    res.json({
+      lanes: getAllLaneTuning(),
+      options: { lanes: TUNING_LANES, labels: TUNING_LANE_LABELS, efforts: TUNING_EFFORTS, thinking: TUNING_THINKING },
+    });
+  });
+  router.post('/settings/lane-tuning', requireAdmin, (req, res) => {
+    const parsed = z.object({
+      lane: z.string().refine((l) => TUNING_LANES.includes(l), 'unknown lane'),
+      model: z.string().trim().max(200).nullable().optional(),
+      effort: z.string().refine((e) => TUNING_EFFORTS.includes(e), 'unknown effort').optional(),
+      thinking: z.string().refine((t) => TUNING_THINKING.includes(t), 'unknown thinking mode').optional(),
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid lane tuning' });
+    const { lane, ...patch } = parsed.data;
+    const lanes = setLaneTuning(lane, patch, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_LANE_TUNING', 'mock2_setting', 0, { lane, ...patch }, req.ip);
+    res.json({ lanes });
   });
 
   // Egress traffic log — what this project's container actually reached, as the

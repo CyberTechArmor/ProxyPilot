@@ -1180,6 +1180,12 @@ export const api = {
   mock2SetComponentAutoApply: (enabled) =>
     request('/mock2/settings/component-auto-apply', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
+  // Mock2 lane tuning (admin-only) — per-lane model override, effort override,
+  // and thinking on/off, applied over slots/routing at each lane's model call.
+  mock2GetLaneTuning: () => request('/mock2/settings/lane-tuning'),
+  mock2SetLaneTuning: (lane, patch) =>
+    request('/mock2/settings/lane-tuning', { method: 'POST', body: JSON.stringify({ lane, ...patch }) }),
+
   // Mock2 per-project egress traffic log — where the container's traffic went, as
   // the FIREWALL recorded it (nftables logs each new outbound connection; squid
   // was removed). Read-only, member-visible. Entries are destination IP:port.

@@ -23,6 +23,8 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { logAudit } from '../db.js';
+import { getLaneTuning } from './settings.js';
+import { applyLaneTuning } from './lane-tuning-logic.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { acquireLock, releaseLock, touchLock } from './locks.js';
@@ -184,9 +186,11 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   for (let turn = 0; turn < ASK_MAX_TURNS; turn += 1) {
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
     turnStreamed = false;
+    const askTuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('ask'));
     const res = await callModelTurn({
-      connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
+      connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
       system, tools: ASK_TOOLS, serverTools, transcript, maxTokens: ASK_MAX_TOKENS,
+      effort: askTuned.effort, thinking: askTuned.thinking,
       onDelta,
     });
     if (!res.ok) {

@@ -842,9 +842,21 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       base: INITIAL_BUILD_INSTRUCTION,
       designImport: parseDesignImport(fresh?.design_import_json),
     });
-    const res = await startBuild({ project: fresh, instruction, user, actingAsAdmin });
+    // The initial build runs as an MVP build (speed path): rule interview
+    // skipped, reduced gate battery, fast model — from approved mockup to a
+    // TESTABLE first version as directly as possible. A later full Build (the
+    // normal Build button) adds the rule questions, per-rule tests, and
+    // acceptance discipline. MOCK2_INITIAL_BUILD_MODE=full restores the old
+    // fully-audited initial build.
+    const initialMode = String(process.env.MOCK2_INITIAL_BUILD_MODE || 'mvp').trim().toLowerCase() === 'full' ? 'full' : 'mvp';
+    const res = await startBuild({ project: fresh, instruction, user, actingAsAdmin, buildMode: initialMode });
     if (res.status === 'started') {
-      insertMessage({ projectId, kind: 'system', body: 'Starting the initial build from the approved design — auditing it against the rules and framework first.' });
+      insertMessage({
+        projectId, kind: 'system',
+        body: initialMode === 'mvp'
+          ? 'Starting the MVP build from the approved design — a fast first testable version. Use Build afterwards for the fully audited build (rule questions, per-rule tests, acceptance checks).'
+          : 'Starting the initial build from the approved design — auditing it against the rules and framework first.',
+      });
     } else if (res.status !== 'refused') {
       // 'refused' already posts its own "Build not started — …" message.
       insertMessage({ projectId, kind: 'system', body: `Design is locked in, but the initial build didn't start automatically — ${res.error} Start it from the Build cycle panel below.` });

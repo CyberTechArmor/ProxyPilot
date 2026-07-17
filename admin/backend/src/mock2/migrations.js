@@ -1248,4 +1248,15 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Build modes (full vs MVP): the request — the umbrella one-ask record —
+    // remembers which mode it was started in, so every segment (the build and
+    // any resume) runs with the same mode. Additive; every pre-existing request
+    // defaults to 'full' (unchanged behavior).
+    version: 529,
+    name: 'mock2_request_build_mode',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_requests ADD COLUMN build_mode TEXT NOT NULL DEFAULT 'full';`);
+    },
+  },
 ];

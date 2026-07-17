@@ -416,6 +416,9 @@ const chatImagesSchema = z.array(z.object({
 const cycleStartSchema = z.object({
   instruction: z.string().trim().min(1),
   images: chatImagesSchema,
+  // 'full' (default) runs the audited build with the whole gate battery; 'mvp'
+  // is the speed path — rule interview skipped, reduced battery, fast model.
+  mode: z.enum(['full', 'mvp']).optional(),
 });
 const cycleFeedbackSchema = z.object({
   rating: z.enum(['up', 'down']),
@@ -2009,13 +2012,14 @@ export function createMock2Router() {
         project, instruction: parsed.data.instruction,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
+        buildMode: parsed.data.mode || 'full',
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_BUILD_AUDIT_START', 'mock2_cycle', result.cycle?.id || 0,
-      { instruction: parsed.data.instruction, status: result.status, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { instruction: parsed.data.instruction, status: result.status, mode: parsed.data.mode || 'full', acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused',
       audit: result.status === 'started', reason: result.error || null,

@@ -37,13 +37,14 @@ import {
   parseGateScripts, initialGateReports, gateBatteryVerdict, allGatesGreen,
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
+  normalizeBuildMode, filterGatesForBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { insertMessage } from './chats.js';
 import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
-import { decideRouting, escalationAttempts, routingMode, parseRoutingJson } from './routing-logic.js';
+import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision } from './routing-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -105,6 +106,19 @@ import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 export const APP_DIR = '/srv/app';
 export const GATES_DIR = '/srv/gates';
 const nowIso = () => new Date().toISOString();
+
+// Per-turn output ceiling for build-runner model calls. 8k proved to be the
+// dominant wall-clock sink on large builds: a big file hit the cap turn after
+// turn (15 consecutive truncated 8k turns on one SPA file ≈ 20 minutes), each
+// truncation costing a full re-prompt round-trip. 32k lets a large file land in
+// one turn; model-client streams automatically above its 12k threshold and
+// scales the HTTP timeout with the budget, so a bigger cap is safe. Clamped to
+// [8k, 64k]; override via MOCK2_RUNNER_MAX_TOKENS.
+const RUNNER_MAX_TOKENS = (() => {
+  const n = Number(process.env.MOCK2_RUNNER_MAX_TOKENS);
+  if (!Number.isFinite(n) || n <= 0) return 32000;
+  return Math.min(64000, Math.max(8000, Math.round(n)));
+})();
 
 // Live cycle-job progress, keyed by cycle id (house 202+poll pattern). The poll
 // endpoint reads this alongside the cycle row; entries drop a couple minutes
@@ -188,7 +202,7 @@ function quotaVerdict(projectId, estCostCents) {
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
   // Cost-truth: attach this cycle to its umbrella request as a SEGMENT. When the caller
@@ -196,6 +210,15 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // (opened by startBuild). Additive + nullable — a null request_id is legacy/harmless.
   const reqId = requestId != null ? requestId : latestOpenRequestId(projectId);
   const seg = segment || (resumeContext ? 'resumed' : 'build');
+
+  // Build mode (full vs MVP): explicit from the caller, else remembered on the
+  // umbrella request — so a RESUME of an MVP build stays an MVP build (same
+  // reduced gate battery, same fast routing) instead of silently tightening.
+  let mvpBuild = buildMode != null ? normalizeBuildMode(buildMode) === BUILD_MODE_MVP : null;
+  if (mvpBuild == null) {
+    try { mvpBuild = normalizeBuildMode(reqId != null ? getRequest(reqId)?.build_mode : BUILD_MODE_FULL) === BUILD_MODE_MVP; }
+    catch { mvpBuild = false; }
+  }
 
   let ready = buildRunnerReady();
   if (!ready.ok) return { status: 'error', error: ready.reason };
@@ -237,6 +260,15 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
         ready = { ...ready, model: routing.model || ready.model, effort: routing.effort };
       }
     } catch (e) { console.warn('[mock2] routing decision failed (slot defaults apply):', e?.message); }
+  }
+
+  // MVP build routing: a fixed fast model + lighter effort. This is an explicit
+  // operator speed choice, so it overrides whatever the knowledge base decided
+  // (an escalation or a heavyweight rule override would defeat the mode).
+  if (mvpBuild) {
+    const mvp = mvpRoutingDecision(process.env, ready.model);
+    routing = { ...(routing || {}), ...mvp, mode, applied_model: mvp.model };
+    ready = { ...ready, model: mvp.model, effort: mvp.effort };
   }
 
   // No-work-remaining backstop: when the last NOOP_CYCLE_LIMIT cycles for this
@@ -311,7 +343,10 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   }
 
   const containerName = project.container_name || containerNameForProject(projectId);
-  const gateScripts = parseGateScripts(framework.gates_json);
+  // MVP builds run a REDUCED battery: the correctness gates stay, the
+  // authoring-discipline gates (rule-coverage / ui-interaction / acceptance)
+  // are dropped — a later full Build brings them back.
+  const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL);
 
   setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
 
@@ -320,7 +355,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // (Phase 1, docs/agent-sdk-migration.md), imported dynamically so a flag-off
   // install never needs @anthropic-ai/claude-agent-sdk present. Both share the same
   // args, the same terminal-error handling, and the same gate/checkpoint/deploy tail.
-  const args = { cycle, project, containerName, framework, gateScripts, ready };
+  const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL };
   const driveCycle = buildRunnerMode(process.env) === 'sdk'
     ? () => import('./runner-sdk.js').then((m) => m.runCycleSdk(args))
     : () => runCycle(args);
@@ -578,7 +613,8 @@ export async function acceptPendingVerification({ project, cycle, initiatedBy, a
 
 // ---- the agentic loop ----
 
-async function runCycle({ cycle, project, containerName, framework, gateScripts, ready }) {
+async function runCycle({ cycle, project, containerName, framework, gateScripts, ready, buildMode = BUILD_MODE_FULL }) {
+  const mvpBuild = normalizeBuildMode(buildMode) === BUILD_MODE_MVP;
   const projectId = Number(project.id);
   const holder = { type: 'cycle', id: cycle.id };
   const price = effectivePrice(ready.connector.id, ready.model);
@@ -641,6 +677,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     webPort: project.web_port || 3000,
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
     installedComponents,
+    buildMode: mvpBuild ? BUILD_MODE_MVP : BUILD_MODE_FULL,
   });
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a
@@ -804,7 +841,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
     const result = await callModelTurn({
-      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: 8000,
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: RUNNER_MAX_TOKENS,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
     });
@@ -1008,7 +1045,14 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       // rejection reason is actionable feedback; the breaker backstops refusal.
       const accFile = await readFileInContainer(containerName, ACCEPTANCE_PATH);
       const accParsed = accFile.ok ? parseAcceptance(accFile.content) : { ok: false, error: 'state/acceptance.json not found' };
-      const verdict = acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved, changedFiles: changedThisCycle, reproduceFirstWaiver });
+      // MVP builds skip the acceptance-spec discipline (the acceptance gate is
+      // not in their battery either): the finish call's own human-runnable
+      // checks + assumptions are still required above, but no
+      // state/acceptance.json or red→green demonstration is demanded. The full
+      // Build restores the strict verdict.
+      const verdict = mvpBuild
+        ? { ok: true, reasons: [], reproduce_first: 'mvp_not_required' }
+        : acceptanceVerdict({ parsed: accParsed, instructionKind: taskKind, redTestObserved, changedFiles: changedThisCycle, reproduceFirstWaiver });
       if (!verdict.ok) {
         transcript.push({
           role: 'tool', toolCallId: termId, name: termName,

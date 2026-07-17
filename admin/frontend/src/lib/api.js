@@ -1320,10 +1320,16 @@ export const api = {
     request(`/mock2/routing/outcomes${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
 
   // ---- Mock2 M6: cycle runner + checkout lock ----
-  mock2StartCycle: (id, instruction, images = null) =>
+  // mode: 'full' (default — audited build, whole gate battery) or 'mvp' (speed
+  // path — rule interview skipped, reduced battery, fast model).
+  mock2StartCycle: (id, instruction, images = null, mode = null) =>
     request(`/mock2/projects/${id}/cycles`, {
       method: 'POST',
-      body: JSON.stringify(images?.length ? { instruction, images } : { instruction }),
+      body: JSON.stringify({
+        instruction,
+        ...(images?.length ? { images } : {}),
+        ...(mode ? { mode } : {}),
+      }),
     }),
   mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
   mock2GetCycle: (id, cycleId) => request(`/mock2/projects/${id}/cycles/${cycleId}`),

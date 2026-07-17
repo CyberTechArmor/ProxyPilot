@@ -278,10 +278,28 @@ export function parseFrameworkSkills(skillsJson) {
 // fresh from a pinned version, never travels through chat, cannot be talked out
 // of). constitution is the pinned constitution_md; skills the parsed skill list;
 // task the canned instruction; appDir/webPort orient the model in the container.
-export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [] } = {}) {
+export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [], buildMode = 'full' } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
+  // MVP builds trade the authoring-discipline artifacts for speed; the section
+  // below OVERRIDES the "How to work" spec-first steps for this cycle only.
+  const mvpSection = String(buildMode) === 'mvp' ? `
+
+# MVP BUILD (this cycle only — overrides the spec-first steps below)
+This is an MVP build: deliver a WORKING, testable end-to-end version fast.
+- Do NOT write state/acceptance.json, state/ui-checks.json, or per-rule test
+  suites this cycle — their gates are not in this battery and finish does not
+  require them. Skipping them is sanctioned here and only here.
+- Everything else still binds: type-clean code, the constitution, honest
+  integrations, and the remaining gates (typecheck, constitution-lint,
+  security-scan, test, component-reuse) must be green before finish.
+- Wire the installed standard components instead of re-implementing them.
+- Prefer fewer, larger file writes over many small ones; avoid detours.
+- finish still requires the one-line summary, at least one human-runnable
+  acceptance check, and the verified-vs-assumed assumption split.
+A later FULL build adds the rule interview, per-rule tests, ui-checks, and the
+acceptance spec — do not attempt them now.` : '';
   return `You are the Mock2 build runner. You make one small, targeted change to a project's
 code, verify it against a fixed gate battery, and stop. You never approve your own
 work and you never release to production — a human reviewer gates production.
@@ -324,7 +342,7 @@ constitution, the approved exception WINS. Do not refuse or silently skip an
 approved exception; implementing it is the required work for this build.
 
 # Available skills
-${skillLines}${buildInstalledComponentsSection(installedComponents)}${buildComponentCatalogSection(components, { access: 'tool' })}
+${skillLines}${buildInstalledComponentsSection(installedComponents)}${buildComponentCatalogSection(components, { access: 'tool' })}${mvpSection}
 
 # Integration manifest (state/integrations.json — the EXACT shape is enforced)
 Any external capability (a third-party API, a directory bind, an external DB)

@@ -37,14 +37,15 @@ export function latestOpenRequestId(projectId) {
   return row ? Number(row.id) : null;
 }
 
-export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0, attachments = null }) {
+export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0, attachments = null, buildMode = 'full' }) {
   const info = getMock2Db()
     .prepare(
-      `INSERT INTO mock2_requests (project_id, instruction, status, initiated_by, acting_as_admin, created_at, attachments_json)
-       VALUES (?, ?, 'open', ?, ?, ?, ?)`,
+      `INSERT INTO mock2_requests (project_id, instruction, status, initiated_by, acting_as_admin, created_at, attachments_json, build_mode)
+       VALUES (?, ?, 'open', ?, ?, ?, ?, ?)`,
     )
     .run(Number(projectId), instruction == null ? null : String(instruction), initiatedBy ?? null, actingAsAdmin ? 1 : 0, nowIso(),
-      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null);
+      Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null,
+      buildMode === 'mvp' ? 'mvp' : 'full');
   return getRequest(info.lastInsertRowid);
 }
 
@@ -68,6 +69,7 @@ export function publicRequestShape(row) {
     status: row.status,
     initiated_by: row.initiated_by ?? null,
     acting_as_admin: Number(row.acting_as_admin) === 1,
+    build_mode: row.build_mode || 'full',
     created_at: row.created_at || null,
     finished_at: row.finished_at || null,
   };

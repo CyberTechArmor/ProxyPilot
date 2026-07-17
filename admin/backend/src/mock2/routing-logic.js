@@ -110,6 +110,40 @@ export function escalationAttempts({ priorCycles = [], requestId = null, instruc
   return n;
 }
 
+// ---- the fast code model (bulk code-writing off the escalation-tier model) ----
+
+// Observed on real builds: nearly all wall-clock is model generation, and
+// routine code-writing does not need the top-tier model — the deep-reasoning
+// spend belongs to the audit, hard tasks, and escalations. When a routing rule
+// carries NO explicit model override, tasks the audit scored routine
+// (difficulty <= FAST_MODEL_MAX_DIFFICULTY) run on the fast code model instead
+// of the slot model. Hard tasks (difficulty 4–5), unclassified tasks, explicit
+// rule overrides, and escalations are untouched. MOCK2_FAST_MODEL=off disables;
+// MOCK2_FAST_MODEL=<id> overrides the default id.
+export const DEFAULT_FAST_MODEL = 'claude-sonnet-5';
+export const FAST_MODEL_MAX_DIFFICULTY = 3;
+
+export function fastCodeModel(env = {}) {
+  const raw = String(env?.MOCK2_FAST_MODEL ?? '').trim();
+  if (raw.toLowerCase() === 'off') return null;
+  return raw || DEFAULT_FAST_MODEL;
+}
+
+// ---- MVP build routing (speed path — see cycle-logic BUILD_MODE_MVP) ----
+
+// The fixed routing an MVP build runs with: the fast code model at a lighter
+// effort. Deliberately not knowledge-base driven — MVP is an explicit operator
+// choice ("give me a testable first version fast"), not a classification.
+export function mvpRoutingDecision(env = {}, slotModel = '') {
+  const model = fastCodeModel(env) || String(slotModel || '');
+  const rawEffort = String(env?.MOCK2_MVP_EFFORT ?? '').trim().toLowerCase();
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'medium';
+  return {
+    model, effort, rung: 0, task_kind: 'feature', difficulty: null,
+    reason: 'mvp build', build_mode: 'mvp',
+  };
+}
+
 // ---- the routing decision ----
 
 export const ROUTING_MODES = Object.freeze(['on', 'shadow', 'off']);
@@ -136,7 +170,12 @@ export function decideRouting({
   env = {}, laneDefaultEffort = 'high',
 } = {}) {
   const escalateModel = String(rule?.escalate_model || env?.MOCK2_ESCALATE_MODEL || '').trim() || null;
-  const baseModel = String(rule?.model || '').trim() || String(slotModel || '');
+  const ruleModel = String(rule?.model || '').trim() || null;
+  // Fast code model: a rule WITHOUT an explicit model override sends routine
+  // tasks (audit difficulty <= 3) to the fast model instead of the slot model.
+  const fast = fastCodeModel(env);
+  const fastApplies = !ruleModel && fast && difficulty != null && difficulty <= FAST_MODEL_MAX_DIFFICULTY;
+  const baseModel = ruleModel || (fastApplies ? fast : String(slotModel || ''));
   const wantsEscalation = priorAttempts >= 1 || difficulty === 5;
   const escalated = wantsEscalation && !!escalateModel && escalateModel !== baseModel;
 
@@ -149,6 +188,7 @@ export function decideRouting({
   const reasonBits = [];
   if (rule?.task_kind) reasonBits.push(`rule:${rule.task_kind}`);
   if (difficulty != null) reasonBits.push(`difficulty:${difficulty}`);
+  if (fastApplies && !escalated) reasonBits.push('fast-model');
   if (priorAttempts >= 1) reasonBits.push(`prior_failed_attempts:${priorAttempts}`);
   if (escalated) reasonBits.push('escalated');
 

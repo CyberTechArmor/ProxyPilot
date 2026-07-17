@@ -56,6 +56,7 @@ import {
 } from './component-logic.js';
 import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
+import { normalizeBuildMode, BUILD_MODE_MVP } from './cycle-logic.js';
 import { callModelTurn } from './model-client.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
@@ -211,8 +212,9 @@ function detectDrift(project, framework) {
 // so they ride every segment: the audit call here, and the build's first task
 // turn (runner.js hydrates them from the request row), surviving the
 // rule-question gate and resumes.
-export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [] }) {
+export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full' }) {
   const projectId = Number(project.id);
+  const mode = normalizeBuildMode(buildMode);
 
   if (project.lifecycle !== 'active') {
     return { status: 'error', error: `Project must be online to build (it is "${project.lifecycle}").` };
@@ -245,7 +247,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // never changes runner behavior).
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] build image save failed:', e?.message); }
-  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin, attachments });
+  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin, attachments, buildMode: mode });
 
   // Quota (R5 — the audit step spends). refused_quota is a real terminal status.
   const estCostCents = estimateAuditCostCents(ready);
@@ -259,6 +261,39 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     finishCycle(refused.id, { status: 'refused_quota', error: verdict.reason });
     insertMessage({ projectId, kind: 'system', cycleId: refused.id, body: `Build not started — ${verdict.reason}` });
     return { status: 'refused', cycle: getCycle(refused.id), error: verdict.reason };
+  }
+
+  // MVP build (speed path): SKIP the rule interview — the point is a testable
+  // first version, fast. A zero-cost define segment records the skip on the
+  // request log, then the build starts directly: components still pre-install
+  // (zero tokens), the correctness gates still run; the rule questions,
+  // per-rule tests, and acceptance discipline come with a later full Build.
+  if (mode === BUILD_MODE_MVP) {
+    const mvpCycle = insertCycle({
+      projectId, frameworkVersionId: framework.id, stage: 'define',
+      instruction: String(instruction || '').slice(0, getChatMaxChars()),
+      initiatedBy: user.id, actingAsAdmin, estCostCents: 0, status: 'running',
+      requestId: request.id, segment: 'define',
+    });
+    updateCycle(mvpCycle.id, { started_at: nowIso() });
+    finishCycle(mvpCycle.id, { status: 'succeeded' });
+    getOrCreateChat(projectId);
+    insertMessage({
+      projectId, kind: 'system', cycleId: mvpCycle.id,
+      body: 'MVP build — skipping the rule interview and running a reduced gate battery to get a testable first version up fast. Run a full Build afterwards for the rule questions, per-rule tests, and acceptance checks.',
+    });
+    setJob(projectId, { phase: 'building', message: 'MVP build starting — installing standard components, then building.', cycleId: mvpCycle.id, startedAt: Date.now() });
+    proceedToBuild({
+      project, instruction, initiatedBy: user.id, actingAsAdmin, framework,
+      requestId: request.id, task: { kind: 'feature', difficulty: null }, buildMode: BUILD_MODE_MVP,
+    })
+      .catch((err) => {
+        console.error(`[mock2] MVP build start failed for project ${projectId}:`, err?.message || err);
+        try { insertMessage({ projectId, kind: 'system', body: `MVP build did not start: ${err?.message || err}` }); } catch { /* ignore */ }
+        setJob(projectId, { phase: 'failed', message: `MVP build did not start: ${err?.message || err}` });
+      })
+      .finally(() => scheduleJobCleanup(projectId));
+    return { status: 'started', cycle: getCycle(mvpCycle.id) };
   }
 
   // The audit cycle (stage 'define' — the rules-confirmation gate before Build).
@@ -420,7 +455,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
 // (the drift comparison input) + resolves the drift item (the app is now being
 // built against current), then startCycle (which takes the lock as the cycle
 // holder and drives the M6 runner). Non-fatal if startCycle refuses.
-async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null, task = null }) {
+async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin, framework, adminDecisions = '', requestId = null, task = null, buildMode = null }) {
   const projectId = Number(project.id);
   updateProject(projectId, { last_built_framework_version_id: framework.id, last_activity_at: nowIso() });
   try { resolveQueueItem(driftDedupeKey(projectId), { resolution: 'built against current framework' }); } catch { /* best effort */ }
@@ -460,7 +495,7 @@ async function proceedToBuild({ project, instruction, initiatedBy, actingAsAdmin
     // Thread the umbrella request EXPLICITLY (one build request = one log): the
     // build cycle joins the audit cycle's request instead of relying on the
     // latest-open-request fallback inside startCycle.
-    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build', task });
+    result = await startCycle({ project: getProject(projectId), instruction: fullInstruction, initiatedBy, actingAsAdmin, requestId, segment: 'build', task, buildMode });
   } catch (err) {
     insertMessage({ projectId, kind: 'system', body: `Could not start the build: ${err?.message || err}` });
     return { ok: false, error: err?.message || String(err) };

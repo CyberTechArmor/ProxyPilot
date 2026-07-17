@@ -1503,6 +1503,10 @@ export const api = {
   // has_api_key. api_key is optional on the PUT: omit/blank to keep
   // whatever's already stored.
   getCveResearchConfig: () => request('/cves/research/config'),
+  // { mock2_enabled, connectors: [{id, name, provider, base_url}] } —
+  // connectors already configured under Projects that could be reused
+  // here instead of pasting a key twice. Empty when Projects is off.
+  getCveResearchConnectors: () => request('/cves/research/connectors'),
   updateCveResearchConfig: (body) =>
     request('/cves/research/config', { method: 'PUT', body: JSON.stringify(body) }),
   testCveResearchConnector: () =>

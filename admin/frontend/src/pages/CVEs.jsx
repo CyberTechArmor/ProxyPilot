@@ -91,6 +91,19 @@ state:
   operator_seen: false
 `;
 
+// Model dropdown presets — Anthropic only, mirroring ModelConnectors.jsx's
+// own MODEL_OPTIONS precedent (that page leaves every other provider as
+// free text too, since OpenAI/Gemini/Ollama model ids vary too much to
+// pin a reliable short list). "Custom…" drops to a free-text input so an
+// operator can still type any id — including a newer Anthropic model this
+// list hasn't been updated for yet.
+const ANTHROPIC_MODEL_PRESETS = [
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8 — highest quality' },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5 — balanced (recommended)' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — fast & cheap' },
+];
+const MODEL_CUSTOM = '__custom__';
+
 const STATUS_TONE = {
   NEW: 'bg-orange-500/15 text-orange-500 border-orange-500/30',
   QUEUED: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
@@ -1214,9 +1227,16 @@ function CveList({ onOpen, refreshKey }) {
   // dialog's editable copy. api_key stays blank in the draft unless the
   // operator types a new one — saving with it blank keeps whatever key
   // is already stored server-side.
+  //
+  // `draft.connectorSource` is either 'new' (provider/base_url/api_key
+  // fields drive the save) or an existing mock2 connector's id as a
+  // string (the save instead sends import_connector_id and the backend
+  // resolves provider/base_url/key server-side from that connector's
+  // own stored key — never round-tripped through the browser).
   const [researchOpen, setResearchOpen] = useState(false);
   const [research, setResearch] = useState(null);
   const [researchDraft, setResearchDraft] = useState(null);
+  const [researchConnectors, setResearchConnectors] = useState({ mock2_enabled: false, connectors: [] });
   const [researchSaving, setResearchSaving] = useState(false);
   const [researchTesting, setResearchTesting] = useState(false);
   const [researchRunning, setResearchRunning] = useState(false);
@@ -1301,12 +1321,23 @@ function CveList({ onOpen, refreshKey }) {
   const onOpenResearch = async () => {
     setResearchOpen(true);
     try {
-      const cfg = await api.getCveResearchConfig();
+      const [cfg, connectors] = await Promise.all([
+        api.getCveResearchConfig(),
+        api.getCveResearchConnectors(),
+      ]);
       setResearch(cfg);
+      setResearchConnectors(connectors || { mock2_enabled: false, connectors: [] });
+      // If this config was previously imported from a still-listed
+      // connector, default back to that selection rather than 'new' —
+      // saves re-picking it just to change the model or interval.
+      const stillListed = cfg.source_connector_name
+        && (connectors?.connectors || []).find((c) => c.name === cfg.source_connector_name);
       setResearchDraft({
+        connectorSource: stillListed ? String(stillListed.id) : 'new',
         provider: cfg.provider || 'anthropic',
         base_url: cfg.base_url || '',
         model: cfg.model || '',
+        modelCustom: false,
         api_key: '',
         enabled: cfg.enabled || false,
         interval_hours: cfg.interval_hours || 12,
@@ -1324,9 +1355,19 @@ function CveList({ onOpen, refreshKey }) {
     if (!researchDraft) return;
     setResearchSaving(true);
     try {
-      const body = { ...researchDraft };
-      if (!body.api_key) delete body.api_key; // blank = keep the stored key
-      body.interval_hours = Number(body.interval_hours) || 12;
+      const usingExisting = researchDraft.connectorSource !== 'new';
+      const body = {
+        model: researchDraft.model,
+        enabled: researchDraft.enabled,
+        interval_hours: Number(researchDraft.interval_hours) || 12,
+      };
+      if (usingExisting) {
+        body.import_connector_id = Number(researchDraft.connectorSource);
+      } else {
+        body.provider = researchDraft.provider;
+        body.base_url = researchDraft.base_url;
+        if (researchDraft.api_key) body.api_key = researchDraft.api_key; // blank = keep the stored key
+      }
       const saved = await api.updateCveResearchConfig(body);
       setResearch(saved);
       setResearchDraft((d) => ({ ...d, api_key: '' }));
@@ -1986,73 +2027,152 @@ function CveList({ onOpen, refreshKey }) {
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-muted-foreground">Provider</label>
-                    <Select
-                      value={researchDraft.provider}
-                      onValueChange={(v) => setResearchDraft((d) => ({ ...d, provider: v }))}
-                    >
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="anthropic">Anthropic</SelectItem>
-                        <SelectItem value="openai">OpenAI</SelectItem>
-                        <SelectItem value="gemini">Gemini</SelectItem>
-                        <SelectItem value="openai_compatible">OpenAI-compatible</SelectItem>
-                        <SelectItem value="ollama">Ollama (local)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-muted-foreground">Interval</label>
-                    <Select
-                      value={String(researchDraft.interval_hours)}
-                      onValueChange={(v) => setResearchDraft((d) => ({ ...d, interval_hours: Number(v) }))}
-                    >
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="6">Every 6 hours</SelectItem>
-                        <SelectItem value="12">Every 12 hours</SelectItem>
-                        <SelectItem value="24">Daily</SelectItem>
-                        <SelectItem value="48">Every 2 days</SelectItem>
-                        <SelectItem value="168">Weekly</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
+                {(() => {
+                  const hasReusableConnectors = researchConnectors.mock2_enabled && researchConnectors.connectors.length > 0;
+                  const usingExisting = researchDraft.connectorSource !== 'new';
+                  const selectedConnector = usingExisting
+                    ? researchConnectors.connectors.find((c) => String(c.id) === researchDraft.connectorSource)
+                    : null;
+                  // The provider that actually drives the model-preset list:
+                  // the draft's own choice when configuring a new connector,
+                  // or the picked existing connector's provider otherwise.
+                  const effectiveProvider = usingExisting ? (selectedConnector?.provider || '') : researchDraft.provider;
+                  const modelPresets = effectiveProvider === 'anthropic' ? ANTHROPIC_MODEL_PRESETS : [];
+                  const modelIsPreset = modelPresets.some((p) => p.id === researchDraft.model);
+                  const showCustomModelInput = modelPresets.length === 0
+                    || researchDraft.modelCustom || (researchDraft.model && !modelIsPreset);
 
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground">Model</label>
-                  <Input
-                    value={researchDraft.model}
-                    onChange={(e) => setResearchDraft((d) => ({ ...d, model: e.target.value }))}
-                    placeholder="claude-sonnet-5"
-                  />
-                </div>
+                  return (
+                    <>
+                      {hasReusableConnectors && (
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-muted-foreground">Connector</label>
+                          <Select
+                            value={researchDraft.connectorSource}
+                            onValueChange={(v) => setResearchDraft((d) => ({ ...d, connectorSource: v }))}
+                          >
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="new">New connector…</SelectItem>
+                              {researchConnectors.connectors.map((c) => (
+                                <SelectItem key={c.id} value={String(c.id)}>
+                                  {c.name} ({c.provider})
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
 
-                {(researchDraft.provider === 'openai_compatible' || researchDraft.provider === 'ollama') && (
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-muted-foreground">Base URL</label>
-                    <Input
-                      value={researchDraft.base_url}
-                      onChange={(e) => setResearchDraft((d) => ({ ...d, base_url: e.target.value }))}
-                      placeholder="http://localhost:11434"
-                    />
-                  </div>
-                )}
+                      {usingExisting ? (
+                        <div className="text-xs rounded border border-border bg-muted/20 p-2 text-muted-foreground">
+                          Using <span className="text-foreground font-medium">{selectedConnector?.name || '(connector)'}</span>{' '}
+                          ({selectedConnector?.provider}) from <span className="text-foreground">Projects</span> — its
+                          stored key is copied in on save, not re-entered here.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">Provider</label>
+                            <Select
+                              value={researchDraft.provider}
+                              onValueChange={(v) => setResearchDraft((d) => ({ ...d, provider: v, model: '', modelCustom: false }))}
+                            >
+                              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="anthropic">Anthropic</SelectItem>
+                                <SelectItem value="openai">OpenAI</SelectItem>
+                                <SelectItem value="gemini">Gemini</SelectItem>
+                                <SelectItem value="openai_compatible">OpenAI-compatible</SelectItem>
+                                <SelectItem value="ollama">Ollama (local)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">
+                              API key {research?.has_api_key && !usingExisting && <span className="text-emerald-500">· configured</span>}
+                            </label>
+                            <Input
+                              type="password"
+                              value={researchDraft.api_key}
+                              onChange={(e) => setResearchDraft((d) => ({ ...d, api_key: e.target.value }))}
+                              placeholder={research?.has_api_key ? 'Leave blank to keep the stored key' : 'sk-…'}
+                              autoComplete="off"
+                            />
+                          </div>
+                        </div>
+                      )}
 
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground">
-                    API key {research?.has_api_key && <span className="text-emerald-500">· configured</span>}
-                  </label>
-                  <Input
-                    type="password"
-                    value={researchDraft.api_key}
-                    onChange={(e) => setResearchDraft((d) => ({ ...d, api_key: e.target.value }))}
-                    placeholder={research?.has_api_key ? 'Leave blank to keep the stored key' : 'sk-…'}
-                    autoComplete="off"
-                  />
-                </div>
+                      {!usingExisting && (researchDraft.provider === 'openai_compatible' || researchDraft.provider === 'ollama') && (
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-muted-foreground">Base URL</label>
+                          <Input
+                            value={researchDraft.base_url}
+                            onChange={(e) => setResearchDraft((d) => ({ ...d, base_url: e.target.value }))}
+                            placeholder="http://localhost:11434"
+                          />
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-muted-foreground">Model</label>
+                          {modelPresets.length > 0 ? (
+                            <Select
+                              value={showCustomModelInput ? MODEL_CUSTOM : researchDraft.model}
+                              onValueChange={(v) => {
+                                if (v === MODEL_CUSTOM) setResearchDraft((d) => ({ ...d, modelCustom: true, model: '' }));
+                                else setResearchDraft((d) => ({ ...d, modelCustom: false, model: v }));
+                              }}
+                            >
+                              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {modelPresets.map((p) => (
+                                  <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                                ))}
+                                <SelectItem value={MODEL_CUSTOM}>Custom…</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <Input
+                              value={researchDraft.model}
+                              onChange={(e) => setResearchDraft((d) => ({ ...d, model: e.target.value }))}
+                              placeholder="e.g. gpt-5"
+                            />
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-muted-foreground">Interval</label>
+                          <Select
+                            value={String(researchDraft.interval_hours)}
+                            onValueChange={(v) => setResearchDraft((d) => ({ ...d, interval_hours: Number(v) }))}
+                          >
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="6">Every 6 hours</SelectItem>
+                              <SelectItem value="12">Every 12 hours</SelectItem>
+                              <SelectItem value="24">Daily</SelectItem>
+                              <SelectItem value="48">Every 2 days</SelectItem>
+                              <SelectItem value="168">Weekly</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+
+                      {modelPresets.length > 0 && showCustomModelInput && (
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-muted-foreground">Custom model id</label>
+                          <Input
+                            value={researchDraft.model}
+                            onChange={(e) => setResearchDraft((d) => ({ ...d, model: e.target.value }))}
+                            placeholder="claude-sonnet-5"
+                            autoFocus
+                          />
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" onClick={onTestResearchConnector} disabled={researchTesting}>

@@ -23,13 +23,18 @@ export const DEFAULT_SMOKE_CONFIG = Object.freeze({
   // Connectors are ON by default (the change-69 lesson: a UI regression shipped
   // through five green gates because nothing exercised the rendered DOM). A
   // trigger still gates WHEN they run — a backend-only diff invokes neither.
-  // Operators can opt out per install (SMOKE_BROWSER_ENABLED=0 / SMOKE_DB_ENABLED=0).
+  // The toggle to turn one OFF is per install: SMOKE_BROWSER_ENABLED=0 /
+  // SMOKE_DB_ENABLED=0. Turning a connector off is an explicit choice to test the
+  // deployed build live by hand — it SHIPS (a 'disabled' disposition the gate
+  // accepts), it does NOT fail the cycle. That is the whole point of the toggle.
   browserEnabled: true,
   dbEnabled: true,
-  // A triggered-but-disabled/unavailable connector FAILS the smoke gate
-  // (constitution "fail-visibly when dependencies are missing"): a warranted
-  // rendered-DOM or data-state check that cannot run must never let the cycle
-  // report success. Opt out with SMOKE_REQUIRE_TRIGGERED=0.
+  // requireTriggered governs the OTHER case: a connector left ENABLED that a diff
+  // warrants but that then cannot RUN (playwright missing, no DSN). That is a
+  // warranted-but-unrunnable check and FAILS the smoke gate ("fail-visibly when
+  // dependencies are missing") — it must never read as success. It does NOT apply
+  // to a connector the operator deliberately turned off (that ships for live
+  // testing, above). Opt out with SMOKE_REQUIRE_TRIGGERED=0.
   requireTriggered: true,
   // If true, a failing ALWAYS-ON http layer fails the cycle. Default false so adding
   // the smoke gate does not change outcomes for apps whose conventional admin-path
@@ -176,14 +181,19 @@ export function applyEscalations(decision, escalations = []) {
 
 // resolveConnectorRun — turn a per-connector fire decision + the enable flag into a
 // terminal disposition for the run log:
-//   'ran'         — fired AND enabled: the connector is invoked.
-//   'skipped'     — did not fire: intentionally bypassed (with its reason).
-//   'unavailable' — fired but the connector is disabled/not configured: a VISIBLE
-//                   non-pass (never a silent skip), so "covered everything" is never
-//                   implied when a warranted layer was bypassed for lack of infra.
+//   'ran'      — fired AND enabled: the connector is invoked.
+//   'skipped'  — did not fire: intentionally bypassed (with its reason).
+//   'disabled' — fired but the operator TURNED THE CONNECTOR OFF (the build toggle):
+//                a deliberate hand-off to live human testing. It is logged loudly
+//                (never a silent skip) but does NOT fail the gate — shipping the
+//                build so a person can test it is the whole point of the toggle.
+//                (A connector left ENABLED that fires but then cannot run —
+//                playwright missing, no DSN — is a DIFFERENT thing: it reports
+//                unavailable at RUN time and still fails under requireTriggered.
+//                See smoke.js.)
 export function resolveConnectorRun(connDecision, enabled) {
   if (!connDecision.fire) return { disposition: 'skipped', reason: connDecision.reason, escalated: false };
-  if (!enabled) return { disposition: 'unavailable', reason: `${connDecision.reason} — but connector is disabled (enable it to run)`, escalated: !!connDecision.escalated };
+  if (!enabled) return { disposition: 'disabled', reason: `${connDecision.reason} — connector turned off; the build ships for live human testing`, escalated: !!connDecision.escalated };
   return { disposition: 'ran', reason: connDecision.reason, escalated: !!connDecision.escalated };
 }
 
@@ -201,4 +211,25 @@ export function smokeLogLines(resolved) {
     `browser: ${resolved.browser.disposition} — ${resolved.browser.reason}`,
     `db: ${resolved.db.disposition} — ${resolved.db.reason}`,
   ];
+}
+
+// smokeGateOk — the smoke-gate pass/fail decision, kept in the pure layer so it is
+// unit-testable without a container. Inputs: the always-on `http` result, the per-
+// connector run `report` (browser/db each null | { ok, unavailable? }) for the
+// connectors that actually ran, and the effective config. Rules:
+//   * enforceHttp && the http layer failed                              → fail
+//   * an INVOKED connector's assertion failed (ok===false, not unavailable) → fail
+//   * requireTriggered && an ENABLED connector fired but could not RUN
+//     (report.*.unavailable — playwright missing / no DSN)              → fail
+//   * a connector the operator TURNED OFF is 'disabled' upstream and is never
+//     started, so it never reaches `report` — it can only ship the build for live
+//     human testing, never fail the gate. That is the point of the toggle.
+export function smokeGateOk({ http, report = {}, config = DEFAULT_SMOKE_CONFIG }) {
+  const invokedFail = (report.browser && report.browser.ok === false && !report.browser.unavailable)
+    || (report.db && report.db.ok === false && !report.db.unavailable);
+  const unavailableWarranted = (report.browser && report.browser.unavailable)
+    || (report.db && report.db.unavailable);
+  return !(config.enforceHttp && !(http && http.ok))
+    && !invokedFail
+    && !(config.requireTriggered && unavailableWarranted);
 }

@@ -20,14 +20,26 @@ live app). The new layer is split accordingly:
 | Cross-layer lint (in `constitution-lint`) | container, every gate run | always (checks tracked + untracked `public/*.js`) |
 | Acceptance criteria on `finish` | orchestrator, every cycle | always |
 
-## 1–2. Smoke connectors: enabled, and never a silent skip
+## 1–2. Smoke connectors: enabled by default, off = ship for live testing
 
-`SMOKE_BROWSER_ENABLED`, `SMOKE_DB_ENABLED`, and `SMOKE_REQUIRE_TRIGGERED` now
+`SMOKE_BROWSER_ENABLED`, `SMOKE_DB_ENABLED`, and `SMOKE_REQUIRE_TRIGGERED`
 **default to true** (`smoke-triggers.js`). A connector still only *runs* on a
-relevance hit — a backend-only diff invokes neither — but a diff that warrants a
-connector which cannot run (playwright missing, no DSN) now **fails the cycle**
-with the reason in the cycle log, instead of logging and passing. Operators can
-opt out per install; `SMOKE_BROWSER_EXECUTABLE` points at a system Chromium.
+relevance hit — a backend-only diff invokes neither.
+
+Two outcomes are deliberately distinct (`smokeGateOk`):
+
+- **Operator turned the connector OFF** (`SMOKE_BROWSER_ENABLED=0` /
+  `SMOKE_DB_ENABLED=0`) — this is the per-install toggle. The connector resolves to
+  the **`disabled`** disposition, is never started, and the cycle **ships** (logged
+  loudly, never a silent skip). Turning it off is an explicit decision to test the
+  deployed build live by hand, so the gate accepts it — getting the build out for a
+  person to test is the priority. This holds even under `requireTriggered`.
+- **Connector left ON but it cannot run** (playwright missing, no DSN) on a diff
+  that warrants it — this is the change-69 fail-visibly case. It reports
+  `unavailable` at run time and **fails the cycle** under `requireTriggered`, with
+  the reason in the cycle log, instead of logging and passing.
+
+`SMOKE_BROWSER_EXECUTABLE` points the browser connector at a system Chromium.
 
 The **browser connector** executes the project's `state/ui-checks.json`
 interaction checks matched by the diff (below); with no matching checks it falls

@@ -14,8 +14,11 @@
 // nothing here is a standing gate step (a backend-only change invokes zero
 // connectors); playwright is imported lazily so a disabled install never loads it.
 // Since change-69 (a disabled-admin-inputs UI regression shipped through five green
-// gates) the connectors default ON and a warranted-but-unrunnable connector FAILS
-// the cycle (SMOKE_REQUIRE_TRIGGERED) — never a silent skip that reads as success.
+// gates) the connectors default ON. A connector left ENABLED that a diff warrants
+// but that cannot RUN (playwright missing / no DSN) FAILS the cycle
+// (SMOKE_REQUIRE_TRIGGERED) — never a silent skip that reads as success. Turning a
+// connector OFF is the opposite, deliberate choice: the build ships (a 'disabled'
+// disposition the gate accepts) so a person tests it live.
 // The browser connector executes the project's declarative state/ui-checks.json
 // interaction checks (ui-checks.js); the DB connector dry-runs the FULL migration
 // chain on a scratch database and boots the app against it — the app's own
@@ -26,7 +29,7 @@
 import { sh, b64 } from './host.js';
 import {
   smokeConfigFromEnv, evaluateSmokeTriggers, applyEscalations,
-  resolveSmokeConnectors, smokeLogLines,
+  resolveSmokeConnectors, smokeLogLines, smokeGateOk,
 } from './smoke-triggers.js';
 import { readRunContract } from './deploy.js';
 import {
@@ -257,7 +260,8 @@ function shSingleQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 // runSmokeGate — the whole gate for one cycle. Returns
 //   { ok, report, logLines } where report = { http, browser, db, decision, rejected }.
 // ok is false only when the ALWAYS-ON http layer fails, OR an INVOKED connector's
-// assertion fails, OR (config.requireTriggered) a warranted connector was unavailable.
+// assertion fails, OR (config.requireTriggered) a warranted, still-ENABLED connector
+// could not run. A connector the operator turned OFF ships the build (never fails).
 // A backend-only change invokes zero connectors and costs one curl round-trip.
 export async function runSmokeGate({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
@@ -291,7 +295,8 @@ export async function runSmokeGate({
   const resolved = resolveSmokeConnectors({ decision, config });
 
   // 3) Invoke ONLY the connectors resolved to 'ran' (fired AND enabled). Lazy: a
-  //    'skipped' or 'unavailable' connector is never started.
+  //    'skipped' (didn't fire) or 'disabled' (operator toggled off) connector is
+  //    never started.
   const report = { http, decision: resolved, rejected, browser: null, db: null };
 
   if (resolved.browser.disposition === 'ran') {
@@ -302,18 +307,13 @@ export async function runSmokeGate({
     report.db = { ...(await driveDbConnector({ containerName, appDir })), reason: resolved.db.reason };
   }
 
-  // 4) Verdict. The always-on http layer is load-bearing. An invoked connector that
-  //    FAILS its assertion fails the gate (a real journey/data-state break). A
-  //    connector that was warranted but unavailable is a VISIBLE non-pass only when
-  //    the operator opted into requireTriggered; otherwise it's logged loudly and
-  //    advisory (connectors are opt-in infra).
-  const invokedFail = (report.browser && report.browser.ok === false && !report.browser.unavailable)
-    || (report.db && report.db.ok === false && !report.db.unavailable);
-  const unavailableWarranted = resolved.browser.disposition === 'unavailable' || resolved.db.disposition === 'unavailable'
-    || (report.browser && report.browser.unavailable) || (report.db && report.db.unavailable);
-  const ok = !(config.enforceHttp && !http.ok)
-    && !invokedFail
-    && !(config.requireTriggered && unavailableWarranted);
+  // 4) Verdict (pure, in smoke-triggers.js so it is unit-testable). The always-on
+  //    http layer is load-bearing; an invoked connector that FAILS its assertion
+  //    fails the gate. A connector the operator TURNED OFF ('disabled') is never
+  //    started, so it ships the build for live human testing — it never fails the
+  //    gate. Only a still-ENABLED connector that fired and could NOT run (playwright
+  //    missing / no DSN) is a warranted-but-unrunnable non-pass, under requireTriggered.
+  const ok = smokeGateOk({ http, report, config });
 
   const logLines = [
     ...smokeLogLines(resolved),

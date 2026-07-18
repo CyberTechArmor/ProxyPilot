@@ -60,7 +60,7 @@ import { consultAutoEnabled, consultTrigger, consultAllowed } from './consult-lo
 import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
-  RUNNER_TOOLS, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
+  RUNNER_TOOLS, runnerToolsForCycle, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
   buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS, buildRunnerMode,
@@ -386,7 +386,11 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     } catch { /* best effort */ }
   }
 
-  setJob(cycle.id, { phase: 'starting', message: 'Copying pinned gates into the container…', startedAt: Date.now() });
+  setJob(cycle.id, {
+    phase: 'starting',
+    message: gateScripts.length ? 'Copying pinned gates into the container…' : 'Preparing the build…',
+    startedAt: Date.now(),
+  });
 
   // Which runner drives this cycle. Default (unset) is the hand-rolled loop below —
   // BYTE-FOR-BYTE unchanged. BUILD_RUNNER=sdk selects the Claude Agent SDK runner
@@ -909,7 +913,7 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
     const result = await callModelTurn({
-      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: RUNNER_TOOLS, transcript, maxTokens: RUNNER_MAX_TOKENS,
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: runnerToolsForCycle({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
       thinking: ready.thinking || null,
@@ -1162,9 +1166,13 @@ async function runCycle({ cycle, project, containerName, framework, gateScripts,
       });
       try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
       logEvent('note', { role: 'system', content: `Model requested finish: ${decision.finishSummary || ''}`, meta: { acceptance: accState } });
-      const battery = await runGateBattery(cycle.id, containerName, gateScripts);
+      // No battery in fast modes — skip both the run and the "Gate battery
+      // (pending)" event noise; the deploy tail below is the verification.
+      const battery = gateScripts.length ? await runGateBattery(cycle.id, containerName, gateScripts) : [];
       lastGateReports = battery;
-      logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: !gateScripts.length || allGatesGreen(battery) } });
+      if (gateScripts.length) {
+        logEvent('gate', { role: 'system', content: formatGateReports(battery), meta: { gates: battery, green: allGatesGreen(battery) } });
+      }
       // A framework with zero gates (placeholder content, risk R8 — parseGateScripts
       // returns []) is vacuously green: there is nothing to fail, so finish is
       // accepted. Only reject finish when there ARE gates and one isn't green.
@@ -1597,6 +1605,12 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts }) 
       return { content: formatMaterializeResult({ component: found.component, version: found.version, manifest, statuses }) };
     }
     case 'run_gates': {
+      // Fast modes have no battery and no run_gates tool — but belt-and-braces
+      // for a model that calls it anyway (or an SDK path): answer plainly
+      // instead of returning an empty "pending" battery it can loop on.
+      if (!gateScripts.length) {
+        return { content: 'This build mode runs NO gate battery — there is nothing to run. Verify your change yourself and call finish when it is complete and working; the deploy build + health check are the platform backstop.' };
+      }
       const battery = await runGateBattery(cycle.id, containerName, gateScripts);
       return { content: `Gate battery (${gateBatteryVerdict(battery)}):\n${formatGateReports(battery)}`, gateReports: battery };
     }

@@ -215,6 +215,24 @@ export const RUNNER_TOOLS = Object.freeze([
 
 export const RUNNER_TOOL_NAMES = Object.freeze(RUNNER_TOOLS.map((t) => t.name));
 
+// The tool list for ONE cycle. Fast modes (quick/MVP) run NO gate battery, so
+// the run_gates tool is REMOVED — not stubbed: a present-but-empty battery
+// returns "pending" with no entries, and a discipline-following model loops on
+// it forever ("I cannot honestly call finish"), which is exactly the Test5
+// block. finish's contract likewise drops the every-gate-green precondition.
+export function runnerToolsForCycle({ hasGates = true } = {}) {
+  if (hasGates) return RUNNER_TOOLS;
+  return RUNNER_TOOLS
+    .filter((t) => t.name !== 'run_gates')
+    .map((t) => (t.name === 'finish'
+      ? {
+        ...t,
+        description:
+          'Declare the targeted change complete AND WORKING. This build mode runs NO gate battery — verify the change yourself as you work, then call finish; ProxyPilot\'s deploy (tsc build + health check) is the platform backstop. finish records the cycle and deploys it — never call it for blocked, partial, or not-actually-working work. Provide a one-line, plain-language summary, the human-runnable acceptance check(s), and your verified-vs-assumed cross-layer assumption list — all three land in the change record.',
+      }
+      : t));
+}
+
 // Soft budget ceilings — the PRIMARY stop for a long build. A real build (every
 // screen + field + action, then the whole gate battery) legitimately needs many
 // model turns, so we don't fail on a turn count; instead the runner checkpoints
@@ -304,11 +322,15 @@ export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir
 # MVP BUILD (this cycle only — overrides the spec-first steps below)
 This is an MVP build: deliver a WORKING, testable end-to-end version fast.
 - Do NOT write state/acceptance.json, state/ui-checks.json, or per-rule test
-  suites this cycle — their gates are not in this battery and finish does not
-  require them. Skipping them is sanctioned here and only here.
+  suites this cycle — finish does not require them. Skipping them is
+  sanctioned here and only here.
+- There is NO gate battery this cycle and NO run_gates tool. Verify the change
+  yourself as you work (keep the code type-clean) and call finish when it is
+  complete and working — ProxyPilot's deploy (tsc build + health check on the
+  live URL) is the verification backstop. A later FULL build runs the whole
+  battery.
 - Everything else still binds: type-clean code, the constitution, honest
-  integrations, and the remaining gates (typecheck, constitution-lint,
-  security-scan, test, component-reuse) must be green before finish.
+  integrations.
 - Wire the installed standard components instead of re-implementing them.
 - SPEED IS THE POINT — minimize turn count, not just token count:
   - BATCH tool calls: emit MULTIPLE independent tool calls in ONE turn (write
@@ -338,9 +360,10 @@ minutes. Think "editor session", not "project build".
   keep the approved design tokens (/design.css), and keep every existing
   behavior working.
 - Do NOT write state/acceptance.json, ui-checks, per-rule tests, or new test
-  suites; the vitest gate is not in this battery. Typecheck, constitution-lint,
-  security-scan, and component-reuse still must be green, and the deploy
-  health-check still runs — quick means live, not unverified.
+  suites. There is NO gate battery this cycle and NO run_gates tool — verify
+  the change yourself (keep it type-clean) and call finish when it is complete
+  and working; ProxyPilot's deploy (tsc build + health check on the live URL)
+  is the verification backstop. Quick means live, not unverified.
 - Never touch the auth wiring (src/auth/*, withAuth/bootstrapGate in
   src/app.ts) or the login/bootstrap flow.
 - SPEED: batch independent tool calls in one turn, write files complete in one

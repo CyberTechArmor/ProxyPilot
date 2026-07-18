@@ -862,8 +862,12 @@ export default function BuildStatus({
               <p className="text-xs text-green-600 flex items-start gap-1">
                 <ShieldCheck className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                 {cycle.deploy_status === 'serving'
-                  ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
-                  : 'Gates green — change checkpointed into the repo.'}
+                  ? ((cycle.gates || []).length
+                    ? 'Gates green and deployed — the app is live on its URL. The preview reloads automatically.'
+                    : 'Deployed — the app is live on its URL. The preview reloads automatically.')
+                  : ((cycle.gates || []).length
+                    ? 'Gates green — change checkpointed into the repo.'
+                    : 'Change checkpointed into the repo.')}
               </p>
             ) : null}
 

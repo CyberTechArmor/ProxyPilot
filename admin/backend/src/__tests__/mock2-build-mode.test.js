@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode, MVP_SKIPPED_GATES, QUICK_SKIPPED_GATES,
+  normalizeBuildMode, filterGatesForBuildMode, isFastBuildMode,
   BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK, BUILD_MODES,
 } from '../mock2/cycle-logic.js';
 import {
@@ -32,12 +32,10 @@ test('normalizeBuildMode: mvp/quick in any casing, everything else full', () => 
 
 // ---- quick mode: gates + routing ----
 
-test('quick mode: skips MVP gates plus the vitest run; keeps the cheap correctness gates', () => {
-  assert.deepEqual([...QUICK_SKIPPED_GATES], [...MVP_SKIPPED_GATES, 'test']);
+test('quick mode: runs NO gate battery (the deploy pipeline is the backstop)', () => {
   const gates = ['typecheck', 'constitution-lint', 'security-scan', 'test', 'component-reuse', 'rule-coverage', 'ui-interaction', 'acceptance']
     .map((name, i) => ({ name, script: '#', order: i }));
-  const quick = filterGatesForBuildMode(gates, 'quick').map((g) => g.name);
-  assert.deepEqual(quick, ['typecheck', 'constitution-lint', 'security-scan', 'component-reuse']);
+  assert.deepEqual(filterGatesForBuildMode(gates, 'quick'), []);
 });
 
 test('quickRoutingDecision: fast model at MEDIUM effort, env-overridable', () => {
@@ -66,12 +64,8 @@ test('filterGatesForBuildMode: full mode returns the battery untouched (same ref
   assert.equal(filterGatesForBuildMode(battery, 'full'), battery);
 });
 
-test('filterGatesForBuildMode: mvp drops exactly the authoring-discipline gates', () => {
-  const out = filterGatesForBuildMode(battery, 'mvp');
-  assert.deepEqual(out.map((g) => g.name), ['typecheck', 'constitution-lint', 'security-scan', 'test', 'component-reuse']);
-  for (const skipped of MVP_SKIPPED_GATES) {
-    assert.ok(!out.some((g) => g.name === skipped), `${skipped} must be skipped in mvp`);
-  }
+test('filterGatesForBuildMode: mvp runs NO gate battery', () => {
+  assert.deepEqual(filterGatesForBuildMode(battery, 'mvp'), []);
 });
 
 test('filterGatesForBuildMode: tolerant of empty/absent batteries', () => {

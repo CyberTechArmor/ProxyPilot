@@ -527,7 +527,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               {/* Build MVP — lives at the bottom of the design chat: when the
                   mockup looks right, this (after a confirm) locks the design in
                   and starts the MVP build — the speed path to a testable first
-                  version (rule interview skipped, reduced gate battery, fast
+                  version (rule interview skipped, no gate battery, fast
                   model). The fully audited Build comes later, from the build
                   chat. */}
               {hasMockup && online ? (

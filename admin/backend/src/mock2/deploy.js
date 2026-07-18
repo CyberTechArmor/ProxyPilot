@@ -43,6 +43,12 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
 // deploy (the ETXTBSY / EADDRINUSE churn seen after frequent restarts).
 const DEPLOY_MARKER = 'mock2_deploy_marker';
 
+// See the install-skip note in deployProjectUnqueued. The stamp lives INSIDE
+// node_modules on purpose: any install path that wipes the tree (npm ci)
+// wipes the stamp with it, so a half-installed tree can never read as fresh.
+const INSTALL_STAMP_PATH = 'node_modules/.mock2-install-stamp';
+const MANIFEST_HASH_CMD = `cat package.json package-lock.json 2>/dev/null | sha256sum | cut -d' ' -f1`;
+
 // Run a deploy command in the app dir. Sources /etc/environment (so any
 // operator-set env is present) then runs the command; egress is the bridge NAT.
 // `set -a` makes the `KEY=VALUE` lines exported.
@@ -120,6 +126,26 @@ async function deployProjectUnqueued({
   // 1) install → migrate → build (each bounded, proxy env sourced).
   for (const step of deployPlan(contract)) {
     report(step.key);
+    // Install skip: sha256 of package.json + package-lock.json, stamped into
+    // node_modules after a successful install. Unchanged manifests + an
+    // existing node_modules ⇒ nothing to install — a quick edit that touched
+    // one HTML file otherwise paid a full `npm ci` (often the longest
+    // non-model step) on every deploy. `npm ci` deletes node_modules, so a
+    // real install clears the stamp until it succeeds again; the dependency
+    // repair passes rewrite the manifests, which changes the hash and forces
+    // the install back on. Only for npm-based contracts — a custom install
+    // command may do more than the manifests describe.
+    if (step.key === 'install' && /npm/.test(step.command)) {
+      const fresh = await runInApp(
+        containerName, appDir,
+        `hash=$(${MANIFEST_HASH_CMD})\n[ -d node_modules ] && [ -f '${INSTALL_STAMP_PATH}' ] && [ "$(cat '${INSTALL_STAMP_PATH}' 2>/dev/null)" = "$hash" ] && echo MOCK2_INSTALL_FRESH || true`,
+        30000,
+      );
+      if (/MOCK2_INSTALL_FRESH/.test(fresh.stdout || '')) {
+        if (onStep) onStep('install', 'Dependencies unchanged — install skipped.');
+        continue;
+      }
+    }
     let r = await runInApp(containerName, appDir, step.command, step.timeoutMs);
     // ETXTBSY on install is a transient race on a native binary (esbuild's
     // postinstall re-executes the file npm just wrote — a known npm flake on
@@ -132,6 +158,9 @@ async function deployProjectUnqueued({
     }
     if (r.code !== 0) {
       return { ok: false, step: step.key, error: deployFailureMessage(step.key, tail(r)) };
+    }
+    if (step.key === 'install') {
+      await runInApp(containerName, appDir, `hash=$(${MANIFEST_HASH_CMD}); printf '%s' "$hash" > '${INSTALL_STAMP_PATH}'`, 15000).catch(() => {});
     }
   }
 

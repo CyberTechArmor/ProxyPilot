@@ -117,10 +117,14 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   const model = claudeHarnessModel({ provider: ready.connector.provider, slotModel: ready.model, env: process.env });
   const price = effectivePrice(ready.connector.id, model);
 
-  // Load the SDK lazily so a flag-off install never needs the package present. It
-  // is deliberately NOT a package.json dependency: its `zod@^4` peer conflicts with
-  // the backend's `zod@^3` and would break the default `npm install` (ERESOLVE).
-  // Operators opting into the SDK runner install it out-of-band (see below).
+  // Load the SDK lazily so an install that only ever uses the ProxyPilot
+  // harness never pays the import. The package is a standard dependency
+  // (admin/backend/package.json) — its zod@^4 PEER vs the backend's zod@^3
+  // would ERESOLVE under default npm resolution, so the committed
+  // admin/backend/.npmrc sets legacy-peer-deps (safe: the SDK bundles its own
+  // runtime and never loads the app's zod for the query() surface we use).
+  // A missing package now means deps were installed before this version —
+  // still a clean, actionable failure.
   let query;
   try {
     ({ query } = await import('@anthropic-ai/claude-agent-sdk'));
@@ -128,9 +132,8 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     finishCycle(cycle.id, {
       status: 'failed',
       error: `The Claude harness needs @anthropic-ai/claude-agent-sdk, which is not installed: ${err?.message || err}. `
-        + 'Install it in admin/backend with `npm install @anthropic-ai/claude-agent-sdk --no-save --legacy-peer-deps` '
-        + '(the --legacy-peer-deps is required: the SDK peers zod@^4 while the backend pins zod@^3), '
-        + 'or switch this project back to the ProxyPilot harness.',
+        + 'It is a standard backend dependency now — run `npm install` in admin/backend '
+        + '(or re-run update.sh) to pick it up, or switch this project back to the ProxyPilot harness.',
     });
     releaseLock(projectId, holder);
     setJob(cycle.id, { phase: 'failed', message: 'Claude Agent SDK is not installed (see cycle error for the install command).' });
@@ -301,11 +304,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });
 
-      // Pinned option shape (runner-logic sdkQueryOptions): main-loop tools +
-      // subagent delegation allowlisted, the `search` / `pull-website` subagents
-      // attached (each restricted to its one network tool), CLAUDE.md
-      // auto-loading, no interactive prompts. The PreToolUse hook still denies
-      // protected paths + destructive shell (deny > allow under bypass).
+      // Pinned option shape (runner-logic sdkQueryOptions): the allowlisted
+      // tool set + the `search` / `pull-website` subagents (each restricted to
+      // its one network tool), CLAUDE.md auto-loading, permissionMode 'dontAsk'
+      // (allowlisted tools run unprompted, everything else is denied — and it
+      // works as root, where 'bypassPermissions' is refused by the CLI). The
+      // PreToolUse hook still denies protected paths + destructive shell.
       const options = {
         ...sdkQueryOptions({ cwd: checkoutDir, model, maxTurns: SDK_MAX_TURNS_PER_ROUND, env, resumeSessionId: sessionId }),
         ...hookOptions, // PreToolUse guardrails + PostToolUse audit

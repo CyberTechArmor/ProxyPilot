@@ -4,7 +4,8 @@
 // for v0.3.x): a PreToolUse block is
 //   { hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason } }
 // — NOT the older { decision:'block', reason } shape the skeleton warned about. A
-// hook `deny` wins even under permissionMode:'bypassPermissions' (deny > allow).
+// hook `deny` wins over ANY permission mode's allow (deny > allow) — including
+// the allowlist auto-approvals under the runner's 'dontAsk' mode.
 //
 // These hooks plug into query()'s `hooks` option WITHOUT touching the loop:
 //   PreToolUse  -> block edits to protected/governed paths + destructive shell.

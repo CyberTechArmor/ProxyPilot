@@ -219,5 +219,10 @@ export function deployFailureMessage(step, detail = '') {
   const egressHint = looksLikeEgress && (step === 'install')
     ? ' — the container could not reach the npm registry. Egress is the bridge\'s Incus NAT: confirm the host has working internet and the m2br* bridge has ipv4.nat=true (the firewall logs egress but never blocks the internet path).'
     : '';
-  return `${base}${egressHint}${d ? `: ${d.slice(-600)}` : '.'}`;
+  // Keep BOTH ends of a long detail. A plain tail-slice here silently destroyed
+  // the health check's diagnostic HEAD (MOCK2_NOT_SERVING, service state, the
+  // port-holders line naming the EADDRINUSE culprit) that deploy.js carefully
+  // put first — the operator only ever saw journal fragments.
+  const trimmed = d.length > 1600 ? `${d.slice(0, 900)}\n… (trimmed) …\n${d.slice(-600)}` : d;
+  return `${base}${egressHint}${d ? `: ${trimmed}` : '.'}`;
 }

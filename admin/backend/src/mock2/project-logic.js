@@ -258,6 +258,9 @@ export function publicProjectShape(project, extra = {}) {
     // URL (project URL + the dev-server preview path). preview_url is null until
     // a mockup exists / the project has a live URL.
     stage: conceptStageInfo(project),
+    // The design preset the project was created with ('' / 'ai' = AI-derived) —
+    // the Design specs page highlights it.
+    design_preset: project.design_preset || null,
     design_approved_at: project.design_approved_at || null,
     // Set once the provision-time (or self-heal) base-app deploy succeeds — the
     // UI offers "Deploy base app" retry while this is null and nothing serves.

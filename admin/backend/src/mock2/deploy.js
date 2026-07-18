@@ -23,7 +23,7 @@ import { sh, b64 } from './host.js';
 import {
   parseRunContract, deployPlan, deployStepLabel, buildDevServiceUnit,
   execStartForStartCommand, deployFailureMessage, DEPLOY_STEP_TIMEOUTS_MS,
-  freeWebPortScript,
+  freeWebPortScript, portHoldersReportScript,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
 
@@ -207,9 +207,11 @@ async function deployProjectUnqueued({
       + `echo "MOCK2_NOT_SERVING (last http_code: $last)"\n`
       + `echo "# service state:"; systemctl is-active mock2-dev.service 2>&1 || true\n`
       // Who holds the web port RIGHT NOW — when the crash reason is
-      // EADDRINUSE this line names the offending process instead of leaving
-      // the operator guessing (orphaned placeholder, stray dev server, …).
-      + `echo "# port ${webPort} holders:"; ss -ltnp 2>/dev/null | grep ":${webPort} " || echo "(nothing bound)"\n`
+      // EADDRINUSE this names the offending process instead of leaving the
+      // operator guessing. Tool-independent: falls back to /proc when ss is
+      // not installed (the old ss-only line printed "(nothing bound)" over a
+      // held port on minimal images).
+      + `echo "# port ${webPort} holders:"\n${portHoldersReportScript(webPort)}\n`
       + `echo "# recent app output (this is the crash reason if it exits after starting, or the 5xx cause):"\n`
       + `journalctl -u mock2-dev.service --no-pager -n 25 2>/dev/null || true\n`,
     { timeoutMs: DEPLOY_STEP_TIMEOUTS_MS.health },

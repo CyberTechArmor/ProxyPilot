@@ -321,6 +321,12 @@ apt-get install -y --no-install-recommends python3 || true
 # Installing here keeps a container self-contained without depending on runtime
 # apt reachability.
 apt-get install -y --no-install-recommends git curl nano sudo ca-certificates || echo "[mock2] toolbox install skipped/failed (non-fatal)"
+# iproute2 (ss) + psmisc (fuser) + lsof: the deploy's port-freeing and the
+# health check's port-holder diagnostics use them. Without them every reaper
+# silently no-ops and the holders line reports "(nothing bound)" over a held
+# port — the EADDRINUSE loop that was undebuggable until a /proc fallback
+# existed. Best-effort like the rest of the toolbox.
+apt-get install -y --no-install-recommends iproute2 psmisc lsof || echo "[mock2] port-tools install skipped/failed (non-fatal; /proc fallback applies)"
 apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"
 # Node.js + npm for the runtime scaffold (R8). Installed at BOOTSTRAP so the Node
 # RUNTIME is present before first use. The npm PACKAGES the app needs (npm

@@ -549,19 +549,28 @@ export default function ProjectDetail() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {project.mockup_archive_url ? (
-              <a
-                href={project.mockup_archive_url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
-              >
-                Open the original design mockup
-                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-              </a>
-            ) : (
-              <p className="text-sm text-muted-foreground">The archived mockup preview is available once the project is online.</p>
-            )}
+            <div className="flex flex-wrap items-center gap-3">
+              {project.mockup_archive_url ? (
+                <a
+                  href={project.mockup_archive_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
+                >
+                  Open the original design mockup
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                </a>
+              ) : (
+                <p className="text-sm text-muted-foreground">The archived mockup preview is available once the project is online.</p>
+              )}
+              {/* The visual reference for the design standards this project is
+                  built on — its preset is highlighted on the page. */}
+              <Button asChild variant="outline" size="sm" className="h-11 sm:h-9">
+                <Link to={`/projects/design${project.design_preset ? `?preset=${encodeURIComponent(project.design_preset)}` : ''}`}>
+                  Design specs
+                </Link>
+              </Button>
+            </div>
             {/* The archived ConceptStage self-bounds its conversation (fixed
                 scroll height + collapse/expand), so it stays inside this card. */}
             <ConceptStage projectId={id} project={project} canEdit={false} archived />

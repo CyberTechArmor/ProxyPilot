@@ -20,6 +20,7 @@ import Quotas from '@/pages/Quotas';
 import FrameworkVersions from '@/pages/FrameworkVersions';
 import ComponentLibrary from '@/pages/ComponentLibrary';
 import AdminQueue from '@/pages/AdminQueue';
+import DesignSpecs from '@/pages/DesignSpecs';
 import Notifications from '@/pages/Notifications';
 import Layout from '@/components/Layout';
 
@@ -99,6 +100,7 @@ function App() {
         <Route path="projects/quotas" element={<Quotas />} />
         <Route path="projects/framework" element={<FrameworkVersions />} />
         <Route path="projects/components" element={<ComponentLibrary />} />
+        <Route path="projects/design" element={<DesignSpecs />} />
         <Route path="projects/queue" element={<AdminQueue />} />
         <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>

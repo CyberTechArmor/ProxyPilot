@@ -125,32 +125,82 @@ WantedBy=multi-user.target
 // `lsof`, else an `ss`-parsed PID), clears any tripped restart-rate limiter, and
 // pauses briefly so the kernel releases the socket. All steps are `|| true`: a
 // clean deploy has nothing extra to kill and passes straight through.
+// Shared POSIX-sh helpers, tool-INDEPENDENT: minimal container images ship
+// without iproute2/psmisc/lsof, and every `command -v`-guarded reaper then
+// silently no-ops while the wait-loop breaks instantly — the port stays held,
+// the app crash-loops on EADDRINUSE, and the diagnostics report "(nothing
+// bound)" over a held port. /proc/net/tcp{,6} (hex port, state 0A = LISTEN)
+// plus a /proc/*/fd socket-inode scan work everywhere.
+function portShellHelpers(p) {
+  const hex = Number(p).toString(16).toUpperCase().padStart(4, '0');
+  return [
+    `mock2_port_inodes() { awk '$4 == "0A" && $2 ~ /:${hex}$/ {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; }`,
+    `mock2_port_busy() {`,
+    `  if command -v ss >/dev/null 2>&1; then ss -ltn 2>/dev/null | grep -q ":${p} "; return $?; fi`,
+    `  [ -n "$(mock2_port_inodes)" ]`,
+    `}`,
+    `mock2_port_pids() {`,
+    `  for ino in $(mock2_port_inodes); do`,
+    `    for fd in /proc/[0-9]*/fd/*; do`,
+    `      [ "$(readlink "$fd" 2>/dev/null)" = "socket:[$ino]" ] && echo "$fd" | cut -d/ -f3`,
+    `    done`,
+    `  done | sort -u`,
+    `}`,
+  ].join('\n');
+}
+
 export function freeWebPortScript(webPort = 3000) {
   const p = Number(webPort) || 3000;
   return [
+    portShellHelpers(p),
     `systemctl stop mock2-dev.service 2>/dev/null || true`,
     // The provision fallback can leave a nohup'd serve.py OUTSIDE the unit's
     // cgroup — `systemctl stop` never reaps it and it holds the port forever.
     `pkill -f '[s]erve\\.py' 2>/dev/null || true`,
-    // Reap any remaining holder with EVERY tool available (not first-match —
-    // fuser can be absent while lsof isn't, and vice versa).
+    // Reap any remaining holder with EVERY tool available, then the /proc
+    // fallback that needs no tools at all.
     `if command -v fuser >/dev/null 2>&1; then fuser -k ${p}/tcp 2>/dev/null || true; fi`,
     `if command -v lsof >/dev/null 2>&1; then kill $(lsof -t -i:${p} 2>/dev/null) 2>/dev/null || true; fi`,
     `if command -v ss >/dev/null 2>&1; then`,
     `  pid=$(ss -ltnpH "sport = :${p}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2);`,
     `  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true;`,
     `fi`,
+    `for hp in $(mock2_port_pids); do kill "$hp" 2>/dev/null || true; done`,
     // Wait (bounded) until the kernel actually releases the socket — a TERM'd
     // holder can linger past a fixed 1s pause and the fresh instance then
     // crash-loops on EADDRINUSE. Escalate to SIGKILL halfway through.
     `i=0; while [ $i -lt 6 ]; do`,
-    `  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${p} "; then`,
-    `    if [ $i -eq 3 ]; then fuser -k -KILL ${p}/tcp 2>/dev/null || true; pkill -9 -f '[s]erve\\.py' 2>/dev/null || true; fi`,
+    `  if mock2_port_busy; then`,
+    `    if [ $i -eq 3 ]; then`,
+    `      fuser -k -KILL ${p}/tcp 2>/dev/null || true`,
+    `      pkill -9 -f '[s]erve\\.py' 2>/dev/null || true`,
+    `      for hp in $(mock2_port_pids); do kill -9 "$hp" 2>/dev/null || true; done`,
+    `    fi`,
     `    i=$((i+1)); sleep 1;`,
     `  else break; fi`,
     `done`,
     `systemctl reset-failed mock2-dev.service 2>/dev/null || true`,
     `sleep 1`,
+  ].join('\n');
+}
+
+// portHoldersReportScript(port) → prints WHO listens on the port, for the
+// health-failure diagnostics. ss when present; /proc fallback (with pid +
+// command name) otherwise — never a false "(nothing bound)".
+export function portHoldersReportScript(webPort = 3000) {
+  const p = Number(webPort) || 3000;
+  return [
+    portShellHelpers(p),
+    `if command -v ss >/dev/null 2>&1; then`,
+    `  ss -ltnp 2>/dev/null | grep ":${p} " || echo "(no listener on :${p})"`,
+    `else`,
+    `  pids=$(mock2_port_pids)`,
+    `  if [ -z "$pids" ]; then`,
+    `    [ -n "$(mock2_port_inodes)" ] && echo "listener exists on :${p} but no owning pid found (via /proc)" || echo "(no listener on :${p} — via /proc; ss not installed)"`,
+    `  else`,
+    `    for hp in $pids; do echo "pid $hp ($(cat /proc/$hp/comm 2>/dev/null)): $(tr '\\0' ' ' < /proc/$hp/cmdline 2>/dev/null | cut -c1-140)"; done`,
+    `  fi`,
+    `fi`,
   ].join('\n');
 }
 

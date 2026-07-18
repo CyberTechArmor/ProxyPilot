@@ -31,7 +31,7 @@ import {
 } from '@/components/ui/select';
 import {
   FolderGit2, Loader2, Globe, Plus, ExternalLink, Cpu, Wallet, BookText, Inbox, Blocks,
-  Sparkles, Hammer,
+  Sparkles, Hammer, Palette,
 } from 'lucide-react';
 import { statusChip } from '@/lib/mock2-status.jsx';
 
@@ -208,6 +208,12 @@ export default function Projects() {
             <Link to="/projects/components">
               <Blocks className="h-5 w-5 shrink-0 text-primary" />
               <span className="flex flex-col items-start text-left"><span className="font-medium">Components</span><span className="text-xs text-muted-foreground">Reusable blocks · versions · submissions</span></span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
+            <Link to="/projects/design">
+              <Palette className="h-5 w-5 shrink-0 text-primary" />
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Design specs</span><span className="text-xs text-muted-foreground">Presets · tokens · how styles bind</span></span>
             </Link>
           </Button>
         </div>

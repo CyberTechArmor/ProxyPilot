@@ -40,7 +40,7 @@ const FORMAT_TEMPLATE = `{
       "primaryText": "#ffffff", "accent": "#12a3a3",
       "danger": "#d24545", "success": "#1f9d57"
     },
-    "typography": { "fontFamily": "system-ui, sans-serif", "headingFamily": "system-ui, sans-serif", "baseSize": "15px" },
+    "typography": { "fontFamily": "system-ui, sans-serif", "headingFamily": "system-ui, sans-serif", "baseSize": "15px", "monoFamily": "ui-monospace, Menlo, monospace" },
     "radius": { "sm": "8px", "md": "9px", "lg": "12px" },
     "spacing": { "unit": "8px" },
     "shadow": { "card": "0 1px 2px rgba(16,42,72,0.06)" }
@@ -93,6 +93,111 @@ function Preview({ tokens }) {
             </span>
             <span className="text-xs" style={{ color: c.success }}>success</span>
             <span className="text-xs" style={{ color: c.danger }}>danger</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// Font specimens: heading, body, and mono rendered in the preset's actual
+// stacks, with the resolved family names spelled out.
+function FontSpecimen({ tokens }) {
+  const t = tokens?.typography || {};
+  const c = tokens?.colors || {};
+  const fam = (f) => String(f || '').split(',')[0].replace(/["']/g, '').trim() || 'system';
+  return (
+    <div className="rounded-md border p-3 space-y-2" style={{ background: c.background, borderColor: c.border }}>
+      <p style={{ color: c.text, fontFamily: t.headingFamily, fontSize: '1.4em', fontWeight: 700, margin: 0 }}>
+        Aa — {fam(t.headingFamily)} <span style={{ color: c.muted, fontSize: '0.55em', fontWeight: 400 }}>headings</span>
+      </p>
+      <p style={{ color: c.text, fontFamily: t.fontFamily, fontSize: t.baseSize, margin: 0 }}>
+        The quick brown fox jumps over the lazy dog — {fam(t.fontFamily)} at {t.baseSize} <span style={{ color: c.muted }}>(body)</span>
+      </p>
+      <p style={{ color: c.text, fontFamily: t.monoFamily || 'ui-monospace, monospace', fontSize: '0.85em', margin: 0 }}>
+        const total = 1_024; // {fam(t.monoFamily || 'ui-monospace')} (code)
+      </p>
+    </div>
+  );
+}
+
+// The full component gallery — every UI-library piece the scaffold shell
+// (public/base.css) ships, rendered live from the preset's tokens: nav header,
+// buttons, badges, form field, stat tiles, list table, progress. These are the
+// components builds are ORDERED to reuse (.card .btn .badge .stat .field
+// table.list), so this is what generated screens actually look like.
+function ComponentGallery({ tokens }) {
+  const c = tokens?.colors || {};
+  const t = tokens?.typography || {};
+  const r = tokens?.radius || {};
+  const shadow = tokens?.shadow?.card || 'none';
+  const card = { background: c.surface, border: `1px solid ${c.border}`, borderRadius: r.lg, boxShadow: shadow };
+  const label = { display: 'block', color: c.muted, fontSize: '0.72em', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em' };
+  return (
+    <div className="w-full overflow-hidden rounded-md border" style={{ background: c.background, fontFamily: t.fontFamily, fontSize: t.baseSize, borderColor: c.border }}>
+      {/* header.app + .brand + nav */}
+      <div className="flex flex-wrap items-center gap-3 px-3 py-2" style={{ background: c.surface, borderBottom: `1px solid ${c.border}` }}>
+        <span style={{ color: c.text, fontFamily: t.headingFamily, fontWeight: 700 }}>Brand</span>
+        <span style={{ color: c.primary, fontSize: '0.85em' }}>Home</span>
+        <span style={{ color: c.muted, fontSize: '0.85em' }}>History</span>
+        <span style={{ color: c.muted, fontSize: '0.85em' }}>Profile</span>
+        <span className="ml-auto px-2 py-0.5 text-[11px]" style={{ background: c.accent, color: c.primaryText || '#fff', borderRadius: '999px' }}>admin</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2">
+        <div className="p-3 space-y-2" style={card}>
+          <span style={label}>Buttons (.btn)</span>
+          <div className="flex flex-wrap gap-2">
+            <span className="px-3 py-1.5 text-xs" style={{ background: c.primary, color: c.primaryText || '#fff', borderRadius: r.md }}>Primary</span>
+            <span className="px-3 py-1.5 text-xs" style={{ background: 'transparent', color: c.text, border: `1px solid ${c.border}`, borderRadius: r.md }}>Secondary</span>
+            <span className="px-3 py-1.5 text-xs" style={{ background: c.danger, color: '#fff', borderRadius: r.md }}>Danger</span>
+          </div>
+          <span style={label}>Badges (.badge)</span>
+          <div className="flex flex-wrap gap-2">
+            <span className="px-2 py-0.5 text-[11px]" style={{ background: c.success, color: '#fff', borderRadius: '999px' }}>ok</span>
+            <span className="px-2 py-0.5 text-[11px]" style={{ background: c.accent, color: c.primaryText || '#fff', borderRadius: '999px' }}>info</span>
+            <span className="px-2 py-0.5 text-[11px]" style={{ background: c.danger, color: '#fff', borderRadius: '999px' }}>warn</span>
+            <span className="px-2 py-0.5 text-[11px]" style={{ background: c.background, color: c.muted, border: `1px solid ${c.border}`, borderRadius: '999px' }}>neutral</span>
+          </div>
+        </div>
+        <div className="p-3 space-y-2" style={card}>
+          <span style={label}>Form field (.field)</span>
+          <span style={{ display: 'block', color: c.text, fontSize: '0.8em', marginBottom: 2 }}>Email</span>
+          <div className="px-2 py-1.5 text-xs" style={{ background: c.background, color: c.muted, border: `1px solid ${c.border}`, borderRadius: r.sm }}>you@example.com</div>
+          <span style={{ display: 'block', color: c.text, fontSize: '0.8em', margin: '6px 0 2px' }}>Role</span>
+          <div className="px-2 py-1.5 text-xs flex items-center justify-between" style={{ background: c.background, color: c.text, border: `1px solid ${c.border}`, borderRadius: r.sm }}>
+            <span>Member</span><span style={{ color: c.muted }}>▾</span>
+          </div>
+        </div>
+        <div className="p-3" style={card}>
+          <span style={label}>Stat tiles (.stat)</span>
+          <div className="grid grid-cols-2 gap-2">
+            {[['Active', '128'], ['Errors', '2']].map(([k, v]) => (
+              <div key={k} className="p-2" style={{ background: c.background, border: `1px solid ${c.border}`, borderRadius: r.md }}>
+                <span style={{ display: 'block', color: c.muted, fontSize: '0.72em' }}>{k}</span>
+                <span style={{ color: k === 'Errors' ? c.danger : c.text, fontFamily: t.headingFamily, fontWeight: 700, fontSize: '1.2em' }}>{v}</span>
+              </div>
+            ))}
+          </div>
+          <span style={{ ...label, marginTop: 8 }}>Progress (.prog)</span>
+          <div style={{ background: c.border, borderRadius: '999px', height: 6 }}>
+            <div style={{ background: c.primary, borderRadius: '999px', height: 6, width: '62%' }} />
+          </div>
+        </div>
+        <div className="p-3" style={card}>
+          <span style={label}>List table (table.list)</span>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs" style={{ color: c.text, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>{['Name', 'Status'].map((h) => (
+                  <th key={h} className="text-left py-1 pr-3" style={{ color: c.muted, borderBottom: `1px solid ${c.border}`, fontWeight: 500 }}>{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody>
+                <tr><td className="py-1 pr-3" style={{ borderBottom: `1px solid ${c.border}` }}>Invoice #1042</td><td className="py-1" style={{ borderBottom: `1px solid ${c.border}` }}><span className="px-2 py-0.5 text-[10px]" style={{ background: c.success, color: '#fff', borderRadius: '999px' }}>paid</span></td></tr>
+                <tr><td className="py-1 pr-3">Invoice #1043</td><td className="py-1"><span className="px-2 py-0.5 text-[10px]" style={{ background: c.background, color: c.muted, border: `1px solid ${c.border}`, borderRadius: '999px' }}>draft</span></td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -222,6 +327,15 @@ export default function DesignSpecs() {
               tokens, and build screens on the shell — never invent a different look. Approving a mockup re-extracts
               tokens from the approved design, so the app follows what you approved.
             </span>
+            <span className="block">
+              <span className="font-medium text-foreground">The UI component library</span> every build reuses is the
+              shell&apos;s class set — <code className="text-xs">.card</code>, <code className="text-xs">.btn</code>,{' '}
+              <code className="text-xs">.badge</code>, <code className="text-xs">.stat</code>, <code className="text-xs">.field</code>,{' '}
+              <code className="text-xs">table.list</code>, <code className="text-xs">.prog</code> and the app header/nav — all
+              token-driven, shown per preset under “Fonts &amp; full component library”. The auth component adds the
+              ready-made sign-in, first-administrator, and app-shell pages. Larger reusable blocks (whole feature
+              modules) live in <span className="font-medium text-foreground">Projects → Components</span>.
+            </span>
           </CardDescription>
         </CardHeader>
         {isAdmin ? (
@@ -269,6 +383,15 @@ export default function DesignSpecs() {
                   <p className="text-[11px] text-muted-foreground break-words">
                     Type: {t.baseSize} · {String(t.fontFamily || '').split(',')[0].replace(/["']/g, '') || 'system'} — Radii: {[r.sm, r.md, r.lg].filter(Boolean).join(' / ')} — Shadow: {p.tokens?.shadow?.card ? 'soft layered card shadow' : 'none'}
                   </p>
+                  <details className="rounded-md border">
+                    <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium min-h-[44px] flex items-center">
+                      Fonts &amp; full component library
+                    </summary>
+                    <div className="space-y-3 border-t p-3">
+                      <FontSpecimen tokens={p.tokens} />
+                      <ComponentGallery tokens={p.tokens} />
+                    </div>
+                  </details>
                   {isAdmin ? (
                     <div className="flex flex-wrap gap-2 pt-1">
                       <Button
@@ -317,6 +440,7 @@ export default function DesignSpecs() {
             {proposal ? (
               <div className="space-y-3 rounded-md border p-3">
                 <Preview tokens={proposal.tokens} />
+                <FontSpecimen tokens={proposal.tokens} />
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <label className="text-xs space-y-1">
                     <span className="font-medium">Name</span>

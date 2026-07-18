@@ -378,6 +378,20 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     .filter(Boolean);
   const gateScripts = filterGatesForBuildMode(parseGateScripts(framework.gates_json), modeStr)
     .filter((g) => !waivedGates.includes(g.name));
+  // A FULL build with zero gates is almost certainly a broken framework
+  // version (empty/unparseable gates_json) — fast modes drop the battery on
+  // purpose, but the full Build / Production check existing to run it is the
+  // whole point. Say so loudly instead of running a silently-empty battery
+  // (this is what made a full build's run_gates return "pending" with no gate
+  // names — the model then honestly refused to finish).
+  if (!gateScripts.length && modeStr === BUILD_MODE_FULL) {
+    try {
+      insertMessage({
+        projectId, kind: 'system', cycleId: cycle.id,
+        body: 'Warning: the pinned framework version defines NO gates, so this full build (and any Production check) runs with an EMPTY battery. Check Framework → Versions (gates.json) and republish/re-import a version with gates to restore the production battery.',
+      });
+    } catch { /* best effort */ }
+  }
   if (waivedGates.length) {
     try {
       insertMessage({

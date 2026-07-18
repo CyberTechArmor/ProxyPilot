@@ -535,10 +535,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                   variant="outline"
                   className="h-11 sm:h-10 shrink-0"
                   disabled={composerDisabled}
-                  title="Build — lock in the design and build it (screen by screen, or all at once)"
+                  title="Build the MVP — lock in the design and build it as fast MVP passes (screen by screen, or all at once); no rule interview, no gate battery"
                   onClick={() => setConfirmBuild(true)}
                 >
-                  <Rocket className="h-4 w-4 mr-1" /> Build
+                  <Rocket className="h-4 w-4 mr-1" /> Build MVP
                 </Button>
               ) : null}
               {!hasMockup && online ? (
@@ -675,8 +675,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             <DialogDescription>
               This locks in your current design{project?.name ? <> for <span className="font-medium">{project.name}</span></> : null}.
               The base app (sign-in, first-admin setup, and your chosen look) is already wired — choose how the
-              screens get built. Either way you can keep making changes afterwards, and a{' '}
-              <span className="font-medium">Production check</span> later runs the full rule/test/acceptance battery.
+              screens get built. <span className="font-medium">Both options run as fast MVP builds</span> (no rule
+              interview, no gate battery — validate features first). You can keep making changes afterwards, and a{' '}
+              <span className="font-medium">Production check</span> later runs the full rule/test/acceptance battery
+              on what proved worth keeping.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">

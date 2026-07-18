@@ -13,7 +13,7 @@ import { getProject } from './projects.js';
 import { insertMessage } from './chats.js';
 import {
   screenPlanFromInventory, buildScreenBuildInstruction, nextQueuedScreen,
-  isTransientStartError, SCREEN_DECISIONS,
+  isTransientStartError, SCREEN_DECISIONS, INITIAL_BUILD_INSTRUCTION_PREFIX,
 } from './screen-plan-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -163,6 +163,25 @@ export async function onRequestClosed(requestRow) {
         insertMessage({
           projectId: row.project_id, kind: 'system',
           body: `Screen "${row.name}" is built and live.${left ? ` ${left} queued screen${left === 1 ? '' : 's'} remaining — continuing in the background.` : ' The screen queue is empty.'}`,
+        });
+      } catch { /* best effort */ }
+    }
+  } else if (
+    requestRow.status === 'succeeded'
+    && String(requestRow.instruction || '').startsWith(INITIAL_BUILD_INSTRUCTION_PREFIX)
+    && Number.isFinite(pid)
+  ) {
+    // The initial "everything at once" build implements EVERY inventory screen
+    // in one pass — settle all still-open rows as built, or the Screens panel
+    // shows "0/N built" over a fully working app and invites a redundant
+    // screen-by-screen rebuild of things that already exist.
+    const open = listScreenPlan(pid).filter((r) => ['planned', 'queued', 'building'].includes(r.status));
+    for (const r of open) updateScreenRow(r.id, { status: 'built', error: null });
+    if (open.length) {
+      try {
+        insertMessage({
+          projectId: pid, kind: 'system',
+          body: `The initial build implemented all ${open.length} screen${open.length === 1 ? '' : 's'} from the approved design — the Screens panel now shows them as built. Use Quick updates to refine them, and the Production check when you're ready to harden what stays.`,
         });
       } catch { /* best effort */ }
     }

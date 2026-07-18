@@ -62,6 +62,7 @@ import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { applyDesignPreset } from './design-presets.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
+import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -71,7 +72,10 @@ const nowIso = () => new Date().toISOString();
 // first build — so the working app replaces the placeholder without the Builder
 // having to describe a change. The Build-cycle panel is for adjustments AFTER
 // this initial build. The audit still runs first (it may raise rule questions).
-const INITIAL_BUILD_INSTRUCTION = 'Build the working application from the approved design inventory: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder. Reproduce the approved design\'s look — load state/design.css and match the tokens in state/design-tokens.json (colors, fonts, spacing, radii, component styling); do not fall back to a generic style.';
+// Starts with screen-plan-logic's INITIAL_BUILD_INSTRUCTION_PREFIX — the
+// request hook keys off that prefix to settle the whole screen plan as built
+// when this one-pass build succeeds. Keep them composed, never divergent.
+const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder. Reproduce the approved design's look — load state/design.css and match the tokens in state/design-tokens.json (colors, fonts, spacing, radii, component styling); do not fall back to a generic style.`;
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.

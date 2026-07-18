@@ -271,7 +271,15 @@ export function createApp(): express.Express {
 
   // Concept-stage mockup preview (coexists with the app) — same contract as the
   // placeholder dev server: /_preview serves state/mockups, default current.html.
-  app.use('/_preview', express.static(MOCKUPS_DIR, { index: 'current.html' }));
+  app.use('/_preview', (_req, res, next) => {
+    // The ProxyPilot dashboard embeds this mockup preview in an iframe from its
+    // own (different) origin. The app-wide security headers pin frame-ancestors
+    // to 'self', which blanks that iframe — relax framing for the preview ONLY
+    // (it is non-functional, static mockup HTML; the app itself stays framed-off).
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors *");
+    res.removeHeader('X-Frame-Options');
+    next();
+  }, express.static(MOCKUPS_DIR, { index: 'current.html' }));
 
   app.use('/api', healthRoutes);
 
@@ -303,10 +311,26 @@ import { config } from './config.js';
 
 const app = createApp();
 
-app.listen(config.PORT, '0.0.0.0', () => {
-  // eslint-disable-next-line no-console
-  console.log(\`app listening on 0.0.0.0:\${config.PORT}\`);
-});
+// Retry EADDRINUSE instead of crashing: right after a deploy the port can stay
+// held for a few seconds while the previous server unwinds. A crash here puts
+// systemd into a restart loop that fails the platform health check even though
+// the app is fine — retrying simply wins the port the moment it frees.
+function listen(attempt = 0) {
+  const server = app.listen(config.PORT, '0.0.0.0', () => {
+    // eslint-disable-next-line no-console
+    console.log(\`app listening on 0.0.0.0:\${config.PORT}\`);
+  });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && attempt < 60) {
+      // eslint-disable-next-line no-console
+      console.warn(\`port \${config.PORT} in use — retrying in 2s (attempt \${attempt + 1}/60)\`);
+      setTimeout(() => listen(attempt + 1), 2000);
+    } else {
+      throw err;
+    }
+  });
+}
+listen();
 `;
 }
 

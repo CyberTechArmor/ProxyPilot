@@ -393,7 +393,7 @@ const DEFAULT_TOKENS = Object.freeze({
     border: '#e2e8f0', primary: '#4f46e5', primaryText: '#ffffff', accent: '#6366f1',
     danger: '#dc2626', success: '#16a34a',
   },
-  typography: { fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', headingFamily: 'system-ui, sans-serif', baseSize: '16px' },
+  typography: { fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', headingFamily: 'system-ui, sans-serif', baseSize: '16px', monoFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
   radius: { sm: '6px', md: '10px', lg: '16px' },
   spacing: { unit: '8px' },
   shadow: { card: '0 1px 3px rgba(0,0,0,0.1)' },
@@ -432,6 +432,7 @@ export function parseDesignTokens(text) {
       fontFamily: safeFont(t.fontFamily, d.typography.fontFamily),
       headingFamily: safeFont(t.headingFamily, d.typography.headingFamily),
       baseSize: safeSize(t.baseSize, d.typography.baseSize),
+      monoFamily: safeFont(t.monoFamily, d.typography.monoFamily),
     },
     radius: { sm: safeSize(r.sm, d.radius.sm), md: safeSize(r.md, d.radius.md), lg: safeSize(r.lg, d.radius.lg) },
     spacing: { unit: safeSize(sp.unit, d.spacing.unit) },
@@ -460,6 +461,7 @@ export function renderDesignTokensCss(tokens = DEFAULT_TOKENS) {
   --app-success: ${c.success};
   --app-font: ${t.fontFamily};
   --app-heading-font: ${t.headingFamily};
+  --app-mono-font: ${t.monoFamily || "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"};
   --app-base-size: ${t.baseSize};
   --app-radius-sm: ${r.sm};
   --app-radius-md: ${r.md};
@@ -468,6 +470,7 @@ export function renderDesignTokensCss(tokens = DEFAULT_TOKENS) {
 }
 body { background: var(--app-bg); color: var(--app-text); font-family: var(--app-font); font-size: var(--app-base-size); }
 h1, h2, h3, h4 { font-family: var(--app-heading-font); color: var(--app-text); }
+code, pre, kbd, .mono { font-family: var(--app-mono-font); }
 a { color: var(--app-primary); }
 button, .btn, [type="submit"] { background: var(--app-primary); color: var(--app-primary-text); border: 0; border-radius: var(--app-radius-md); padding: 0.6em 1em; cursor: pointer; }
 button.secondary, .btn-secondary { background: var(--app-surface); color: var(--app-text); border: 1px solid var(--app-border); }

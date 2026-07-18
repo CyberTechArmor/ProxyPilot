@@ -28,16 +28,16 @@ function gateState(status) {
   return 'pending';
 }
 
-// How far along are we? Returns the ordinal (index into BUILD_PHASES) of the
-// phase currently in flight, derived from the strongest available signal.
-function currentOrdinal({ status, phase, gates, deploy }) {
-  if (deploy === 'deploying' || deploy === 'serving' || deploy === 'deploy_failed') return 4;
-  if (phase === 'checkpoint') return 3;
-  const gateStarted = gates.some((g) => g && g.status && g.status !== 'pending');
-  if (phase === 'deploying') return 4;
-  if (gateStarted) return 2;
-  if (status === 'running' || ['starting', 'running', 'retrying'].includes(phase)) return 1;
-  return 0; // queued / estimating / awaiting_* → still in the audit/plan phase
+// How far along are we? Returns the KEY of the phase currently in flight,
+// derived from the strongest available signal. A key (not an index) because
+// fast modes drop the verify phase from the skeleton entirely.
+function currentPhaseKey({ status, phase, gates, deploy }) {
+  if (deploy === 'deploying' || deploy === 'serving' || deploy === 'deploy_failed') return 'deploy';
+  if (phase === 'checkpoint') return 'checkpoint';
+  if (phase === 'deploying') return 'deploy';
+  if (gates.some((g) => g && g.status && g.status !== 'pending')) return 'verify';
+  if (status === 'running' || ['starting', 'running', 'retrying'].includes(phase)) return 'build';
+  return 'audit'; // queued / estimating / awaiting_* → still in the audit/plan phase
 }
 
 // deriveBuildTasks(cycle, job) → { tasks, done, total, remaining, terminal, headline }
@@ -66,9 +66,14 @@ export function deriveBuildTasks(cycle, job) {
       : paused ? 'paused'
         : failed ? 'failed' : null;
 
-  const cur = currentOrdinal({ status, phase, gates, deploy });
+  // Fast modes (quick / MVP) run NO gate battery — the verify phase is not
+  // part of the process at all, so it never appears in the step list. A full
+  // build stamps its gates on the cycle at start, so gates.length > 0 there.
+  const phases = gates.length ? BUILD_PHASES : BUILD_PHASES.filter((p) => p.key !== 'verify');
+  const curKey = currentPhaseKey({ status, phase, gates, deploy });
+  const cur = Math.max(0, phases.findIndex((p) => p.key === curKey));
 
-  const tasks = BUILD_PHASES.map((p, i) => {
+  const tasks = phases.map((p, i) => {
     let state;
     if (succeeded) {
       // Everything ran; a skipped deploy (placeholder project) still reads "done".

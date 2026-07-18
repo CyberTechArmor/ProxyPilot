@@ -23,8 +23,11 @@ RUN for i in 1 2 3 4 5; do \
         }; \
     done && command -v g++ >/dev/null
 
-# Copy backend package files
-COPY admin/backend/package*.json ./
+# Copy backend package files. The .npmrc must ride along: it sets
+# legacy-peer-deps so @anthropic-ai/claude-agent-sdk (the Claude build
+# harness; peers zod@^4 while the backend pins zod@^3) resolves — without
+# it this stage's npm install fails with an ERESOLVE peer conflict.
+COPY admin/backend/package*.json admin/backend/.npmrc ./
 
 # `npm install` regularly hits transient DNS / mirror flakes too —
 # `node-pty` ships glibc-only prebuilds, so on alpine (musl) it has

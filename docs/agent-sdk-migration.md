@@ -349,6 +349,41 @@ first-user cycle (grant the row-delete authorization, resume, complete) needs a 
 Incus/connector environment — the mechanisms + audit artifacts are proven here; the
 live journey is validated on a real install.
 
+## Per-project harness selection (landed)
+
+The runner selection is no longer only the global `BUILD_RUNNER` flag: each project
+now carries a **harness** setting (`mock2_projects.harness`, migration 533) toggled in
+the UI (Project → Details → **Build harness**: "ProxyPilot" | "Claude") and via
+`GET`/`PUT /api/mock2/projects/:id/harness`. Exactly one harness drives a project at a
+time; switching persists immediately and applies from the next build cycle.
+
+- **The abstraction.** `harness.js` defines the common Harness contract
+  (`{ name, runTask(input) }`), with `ProxyPilotHarness` as a thin **adapter** over the
+  unchanged hand-rolled `runCycle` and `ClaudeHarness` over `runCycleSdk`. Both stream
+  through the app's existing event model — the durable `mock2_cycle_events` transcript +
+  the live job phase — so the frontend needs no harness-specific rendering.
+  `startCycle` picks the implementation via the `harnessForProject` factory
+  (`resolveHarness` in `runner-logic.js`: explicit project choice → legacy
+  `BUILD_RUNNER` flag → ProxyPilot). A project that never touches the toggle behaves
+  **exactly** as before.
+- **Claude harness auth.** A pay-as-you-go Anthropic **API key**, resolved
+  orchestrator-side only (`resolveClaudeAuth`): the build_runner slot's Anthropic
+  connector secret first, else the server env's `ANTHROPIC_API_KEY` (`.env`). Never a
+  claude.ai subscription login; the key is never logged, never sent to the browser
+  (the harness API returns only a `configured` boolean + source label), and never
+  enters a project container. Selecting Claude with no usable key is refused with an
+  actionable error, both at toggle time (409) and at run time (failed cycle, clear
+  message).
+- **Subagents.** The Claude harness configures two SDK subagents (`agents` option,
+  pinned in `SDK_SUBAGENTS`): **`search`** (WebSearch only — finds and returns relevant
+  sources) and **`pull-website`** (WebFetch only — retrieves and extracts a given URL).
+  The main loop's working set stays the read/edit/run tools plus delegation; web access
+  is designed to flow through those scoped subagents (their two web tools are the only
+  network entries on the allowlist, and anything off the allowlist is denied under
+  `permissionMode:'dontAsk'`), and the PreToolUse guardrails still deny protected paths
+  and destructive shell. More subagents / custom MCP tools
+  slot into `SDK_SUBAGENTS` later without touching the runner.
+
 ## Phased roadmap
 
 - [ ] **Phase 1 — Tool + context swap (IN PROGRESS).** SDK build runner behind a
@@ -411,22 +446,22 @@ prior `constitution.md`); pinned projects are unaffected until they choose to up
 hand-rolled runner uses — so the commit, hash-chained change record, and gate battery are
 produced the same way regardless of which runner drove the edits.
 
-**Dependency.** `@anthropic-ai/claude-agent-sdk` is **not** a `package.json` dependency
-and is imported **dynamically only when the flag is on**, so the default (flag-off)
-install and run never require it. It is kept out of `package.json` on purpose: the SDK
-peers `zod@^4` while the backend pins `zod@^3`, so listing it (even under
-`optionalDependencies`) makes `npm install` fail with an `ERESOLVE` peer conflict and
-breaks the production Docker build. Operators who opt into `BUILD_RUNNER=sdk` install it
-out-of-band:
-
-```bash
-cd admin/backend
-npm install @anthropic-ai/claude-agent-sdk --no-save --legacy-peer-deps
-```
-
-`--legacy-peer-deps` is required for the zod peer mismatch; `--no-save` keeps it out of
-`package.json` so the default build stays clean. If the package is absent when the flag
-is on, the cycle fails with an actionable message (it never crashes the process).
+**Dependency.** `@anthropic-ai/claude-agent-sdk` is a **standard `package.json`
+dependency** (still imported dynamically, so a ProxyPilot-harness-only install never
+pays the import). It was originally kept out of `package.json` because the SDK peers
+`zod@^4` while the backend pins `zod@^3` (`ERESOLVE` under default npm resolution), with
+a documented out-of-band `npm install --no-save --legacy-peer-deps` — but that proved
+fragile in production: `update.sh` runs a plain `npm install` in `admin/backend`, which
+**prunes** any `--no-save` package, so every update silently removed the SDK and the
+next Claude-harness build failed with "Cannot find package", and the Docker builder
+never installed it at all. The fix: the SDK is listed in `dependencies`, and the
+committed `admin/backend/.npmrc` sets `legacy-peer-deps=true` so every install path
+(install.sh, update.sh, the Dockerfile builder, plain `npm install`) resolves
+identically. Skipping peer enforcement is safe here: the SDK **bundles** its own
+runtime — its only external imports are Node built-ins; it never loads the app's zod
+for the `query()` surface we use (the `zod@^4` peer is types-only, for user-supplied
+schema helpers we don't call). If the package is somehow absent, the cycle still fails
+with an actionable message (it never crashes the process).
 
 **Sync channel.** The local checkout is synced in/out of the fenced container through
 the same channel `containerSh` already uses — a tarball piped through
@@ -443,7 +478,12 @@ into the `query()` options:
   The deny shape is pinned to the installed SDK version:
   `{ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason } }`
   (verified against the hooks docs — **not** the `{ decision:'block' }` shape older
-  skeletons use), and a hook `deny` wins even under `permissionMode:'bypassPermissions'`.
+  skeletons use), and a hook `deny` wins over any permission mode's allow — including
+  the allowlist auto-approvals under the runner's `permissionMode:'dontAsk'`.
+  (The runner uses `'dontAsk'`, not `'bypassPermissions'`: bypass maps to the CLI's
+  `--dangerously-skip-permissions`, which the bundled binary refuses under root/sudo —
+  and the backend runs as root on standard installs — while `'dontAsk'` runs the
+  allowlisted tools unprompted and denies everything else.)
 - `PostToolUse` audit — every `Edit`/`Write`/`Bash` is recorded into the durable
   cycle-events transcript (migration 512), **not** a file in the checkout, so nothing
   is synced back into the project. This is the Phase-3 audit seed.

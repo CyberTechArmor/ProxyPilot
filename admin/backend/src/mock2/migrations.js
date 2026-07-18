@@ -1313,10 +1313,25 @@ export const MOCK2_MIGRATIONS = [
     },
   },
   {
+    // Per-project agent harness ('proxypilot' | 'claude'). NULL (every existing
+    // row, and any project that never touches the toggle) means "no explicit
+    // choice": the runner keeps its pre-existing selection — the hand-rolled
+    // loop, or the SDK loop when the legacy global BUILD_RUNNER=sdk flag is set
+    // — so nothing changes behavior until a person flips the toggle. The value
+    // vocabulary is enforced in code (normalizeHarness), not a CHECK, so a
+    // future harness doesn't need a schema migration.
+    version: 533,
+    name: 'mock2_project_harness',
+    up: (d) => {
+      d.exec(`ALTER TABLE mock2_projects ADD COLUMN harness TEXT;`);
+    },
+  },
+  {
     // Custom design presets: operator-uploaded (proxypilot-design@1 documents)
     // or AI-adjusted variants, merged with the built-in presets at read time
-    // (design-presets.js setCustomPresets overlay).
-    version: 533,
+    // (design-presets.js setCustomPresets overlay). 534 — 533 was taken by the
+    // harness column on main while this shipped on the feature branch.
+    version: 534,
     name: 'mock2_custom_design_presets',
     up: (d) => {
       d.exec(`

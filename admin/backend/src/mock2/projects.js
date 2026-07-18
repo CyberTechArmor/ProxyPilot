@@ -132,6 +132,9 @@ const WRITABLE = new Set([
   'base_app_deployed_at',
   // M8 drift comparison input — the framework a build last pinned (ADR-003).
   'last_built_framework_version_id',
+  // Per-project agent harness choice (migration 533): 'proxypilot' | 'claude' |
+  // NULL. Validated at the route (normalizeHarness) before it reaches here.
+  'harness',
 ]);
 export function updateProject(id, patch = {}) {
   const cols = Object.keys(patch).filter((k) => WRITABLE.has(k));

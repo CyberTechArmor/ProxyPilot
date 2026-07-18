@@ -1161,6 +1161,12 @@ export const api = {
     request(`/mock2/projects/${id}/members/${userId}`, { method: 'DELETE' }),
   mock2FlagProject: (id, { flagged, reason }) =>
     request(`/mock2/projects/${id}/flag`, { method: 'POST', body: JSON.stringify({ flagged, reason }) }),
+  // Per-project agent harness: which engine drives builds ('proxypilot' |
+  // 'claude'). GET also reports whether the Claude harness is usable on this
+  // server (configured boolean + key source — never the key itself).
+  mock2GetProjectHarness: (id) => request(`/mock2/projects/${id}/harness`),
+  mock2SetProjectHarness: (id, harness) =>
+    request(`/mock2/projects/${id}/harness`, { method: 'PUT', body: JSON.stringify({ harness }) }),
   mock2SetProjectCustomDomain: (id, domain) =>
     request(`/mock2/projects/${id}/custom-domain`, { method: 'POST', body: JSON.stringify({ domain }) }),
   mock2DeleteProject: (id) => request(`/mock2/projects/${id}`, { method: 'DELETE' }),

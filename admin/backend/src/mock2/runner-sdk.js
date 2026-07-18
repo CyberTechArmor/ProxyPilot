@@ -41,9 +41,10 @@ import { releaseLock, touchLock } from './locks.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   parseFrameworkSkills, buildRunnerClaudeMd, buildRunnerTask, buildCompletionSummaryBody,
-  SDK_ALLOWED_TOOLS, MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
+  MAX_TURNS, softPauseReason, SOFT_PAUSE_TOKENS,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
   isRefusalStop, REFUSAL_HALT_REASON,
+  resolveClaudeAuth, claudeHarnessModel, sdkQueryOptions,
 } from './runner-logic.js';
 import { buildResumeContextBlock } from './unblock-logic.js';
 import { closeRequest } from './requests.js';
@@ -91,38 +92,48 @@ const SDK_MAX_TURNS_PER_ROUND = Math.min(MAX_TURNS, 200);
 export async function runCycleSdk({ cycle, project, containerName, framework, gateScripts, ready }) {
   const projectId = Number(project.id);
   const holder = { type: 'cycle', id: cycle.id };
-  const price = effectivePrice(ready.connector.id, ready.model);
   const logEvent = (kind, { role = null, content = null, meta = null } = {}) =>
     insertCycleEvent({ projectId, cycleId: cycle.id, kind, role, content, meta });
 
-  // The SDK speaks the Anthropic model family. Phase 1 supports a direct Anthropic
-  // connector (key via env). A non-Anthropic build_runner slot is a clean,
-  // actionable failure, not a crash — the operator can point the slot at Anthropic
-  // or leave BUILD_RUNNER unset to use the hand-rolled (provider-agnostic) runner.
-  if (ready.connector.provider !== 'anthropic' || !ready.apiKey) {
-    finishCycle(cycle.id, {
-      status: 'failed',
-      error: 'BUILD_RUNNER=sdk needs an Anthropic build_runner connector with a decryptable key. '
-        + 'Point the slot at Anthropic, or unset BUILD_RUNNER to use the hand-rolled runner.',
-    });
+  // The Claude harness authenticates with a pay-as-you-go Anthropic API key,
+  // resolved ORCHESTRATOR-SIDE (never in the container, never to the browser):
+  // the build_runner slot's Anthropic connector secret first, else the server
+  // environment's ANTHROPIC_API_KEY. No usable key is a clean, actionable
+  // failure, not a crash — and the key itself is never logged.
+  const auth = resolveClaudeAuth({
+    provider: ready.connector.provider,
+    hasConnectorKey: !!(ready.connector.provider === 'anthropic' && ready.apiKey),
+    hasEnvKey: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
+  });
+  if (!auth.ok) {
+    finishCycle(cycle.id, { status: 'failed', error: auth.reason });
     releaseLock(projectId, holder);
-    setJob(cycle.id, { phase: 'failed', message: 'SDK runner requires an Anthropic build_runner connector.' });
+    setJob(cycle.id, { phase: 'failed', message: 'The Claude harness has no Anthropic API key configured (see cycle error).' });
     return scheduleJobCleanup(cycle.id);
   }
+  const apiKey = auth.source === 'connector' ? ready.apiKey : String(process.env.ANTHROPIC_API_KEY).trim();
+  // The model: the slot's model when the slot is Anthropic; otherwise the
+  // Claude-harness fallback (the slot model belongs to another provider).
+  const model = claudeHarnessModel({ provider: ready.connector.provider, slotModel: ready.model, env: process.env });
+  const price = effectivePrice(ready.connector.id, model);
 
-  // Load the SDK lazily so a flag-off install never needs the package present. It
-  // is deliberately NOT a package.json dependency: its `zod@^4` peer conflicts with
-  // the backend's `zod@^3` and would break the default `npm install` (ERESOLVE).
-  // Operators opting into the SDK runner install it out-of-band (see below).
+  // Load the SDK lazily so an install that only ever uses the ProxyPilot
+  // harness never pays the import. The package is a standard dependency
+  // (admin/backend/package.json) — its zod@^4 PEER vs the backend's zod@^3
+  // would ERESOLVE under default npm resolution, so the committed
+  // admin/backend/.npmrc sets legacy-peer-deps (safe: the SDK bundles its own
+  // runtime and never loads the app's zod for the query() surface we use).
+  // A missing package now means deps were installed before this version —
+  // still a clean, actionable failure.
   let query;
   try {
     ({ query } = await import('@anthropic-ai/claude-agent-sdk'));
   } catch (err) {
     finishCycle(cycle.id, {
       status: 'failed',
-      error: `BUILD_RUNNER=sdk but @anthropic-ai/claude-agent-sdk is not installed: ${err?.message || err}. `
-        + 'Install it in admin/backend with `npm install @anthropic-ai/claude-agent-sdk --no-save --legacy-peer-deps` '
-        + '(the --legacy-peer-deps is required: the SDK peers zod@^4 while the backend pins zod@^3), or unset BUILD_RUNNER.',
+      error: `The Claude harness needs @anthropic-ai/claude-agent-sdk, which is not installed: ${err?.message || err}. `
+        + 'It is a standard backend dependency now — run `npm install` in admin/backend '
+        + '(or re-run update.sh) to pick it up, or switch this project back to the ProxyPilot harness.',
     });
     releaseLock(projectId, holder);
     setJob(cycle.id, { phase: 'failed', message: 'Claude Agent SDK is not installed (see cycle error for the install command).' });
@@ -140,7 +151,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   }
   updateCycle(cycle.id, { status: 'running', started_at: nowIso(), gates_json: JSON.stringify(initialGateReports(gateScripts)) });
   setJob(cycle.id, { phase: 'running', message: 'SDK runner starting (Claude Agent SDK)…' });
-  logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model: ready.model, framework_version: framework.version, runner: 'sdk' } });
+  logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model, framework_version: framework.version, runner: 'sdk', harness: 'claude', key_source: auth.source } });
 
   let checkoutDir = null;
   const runStartMs = Date.now();
@@ -150,7 +161,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   let usedCostThisRun = 0;
   const runUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const budgetDollars = budgetMode(process.env) === 'dollars';
-  const dollarCeilingCents = budgetDollars ? budgetCentsForTokenLegacy(SOFT_PAUSE_TOKENS, ready.model) : null;
+  const dollarCeilingCents = budgetDollars ? budgetCentsForTokenLegacy(SOFT_PAUSE_TOKENS, model) : null;
   let sessionId = null;
   let lastGateReports = initialGateReports(gateScripts);
   // No-progress circuit breaker threshold (harness safety) — same as the
@@ -215,8 +226,10 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     //    rounds: after each pass we sync the edits back and run the SAME battery in
     //    the container; if red and rounds remain, resume the SDK session with the
     //    gate output. Interrupt + soft-pause are honored at each round boundary.
-    const env = { ...process.env, ANTHROPIC_API_KEY: ready.apiKey };
-    if (ready.connector.base_url) env.ANTHROPIC_BASE_URL = String(ready.connector.base_url);
+    const env = { ...process.env, ANTHROPIC_API_KEY: apiKey };
+    // A connector base-URL override only applies to the connector's own key;
+    // the server-env key always talks to the standard Anthropic endpoint.
+    if (auth.source === 'connector' && ready.connector.base_url) env.ANTHROPIC_BASE_URL = String(ready.connector.base_url);
 
     // Enforcement + audit hooks (docs/agent-sdk-migration.md). PreToolUse blocks
     // edits to governed paths + destructive shell; PostToolUse audits every
@@ -291,16 +304,15 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
       pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });
 
+      // Pinned option shape (runner-logic sdkQueryOptions): the allowlisted
+      // tool set + the `search` / `pull-website` subagents (each restricted to
+      // its one network tool), CLAUDE.md auto-loading, permissionMode 'dontAsk'
+      // (allowlisted tools run unprompted, everything else is denied — and it
+      // works as root, where 'bypassPermissions' is refused by the CLI). The
+      // PreToolUse hook still denies protected paths + destructive shell.
       const options = {
-        cwd: checkoutDir,
-        model: ready.model,
-        allowedTools: [...SDK_ALLOWED_TOOLS],
-        permissionMode: 'bypassPermissions',
-        settingSources: ['project'], // auto-load .claude/CLAUDE.md from cwd
-        maxTurns: SDK_MAX_TURNS_PER_ROUND,
-        env,
+        ...sdkQueryOptions({ cwd: checkoutDir, model, maxTurns: SDK_MAX_TURNS_PER_ROUND, env, resumeSessionId: sessionId }),
         ...hookOptions, // PreToolUse guardrails + PostToolUse audit
-        ...(sessionId ? { resume: sessionId } : {}),
       };
 
       const round1 = await runSdkQuery({ query, prompt, options, cycleId: cycle.id, round, logEvent, noProgLimit });
@@ -325,7 +337,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
           usage_schema_version: USAGE_SCHEMA_VERSION,
         });
       } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
-      try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+      try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
       logEvent('ai_message', { role: 'assistant', content: round1.summary || '', meta: { round, num_turns: round1.numTurns, input_tokens: u.inputTokens, output_tokens: u.outputTokens, cache_read_tokens: u.cacheReadTokens, cache_write_tokens: u.cacheWriteTokens, cost_cents: cost, total_cost_usd: round1.totalCostUsd, sdk_error: round1.error || null } });
       touchLock(projectId, holder);
 

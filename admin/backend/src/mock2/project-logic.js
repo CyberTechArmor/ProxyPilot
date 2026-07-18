@@ -174,6 +174,24 @@ export function isIdleStale(project, now, days) {
   return nowMs - last >= Number(days) * 86400000;
 }
 
+// ---- per-project agent harness ----
+
+// Which agent harness drives a project's build cycles. 'proxypilot' is the
+// built-in hand-rolled runner (runner.js); 'claude' is the Claude Agent SDK
+// runner (runner-sdk.js). Stored per project (migration 533); NULL means "no
+// explicit choice" and falls back to the legacy global BUILD_RUNNER flag
+// (runner-logic.js resolveHarness) — 'proxypilot' in practice on any install
+// that never set that flag.
+export const HARNESSES = Object.freeze(['proxypilot', 'claude']);
+
+// normalizeHarness(value) → 'proxypilot' | 'claude' | null. NULL (no explicit
+// choice) for unset or unrecognized values — an unknown string in the column
+// must degrade to the default, never crash or select an unintended runner.
+export function normalizeHarness(value) {
+  const v = String(value ?? '').trim().toLowerCase();
+  return HARNESSES.includes(v) ? v : null;
+}
+
 // ---- API response shape ----
 
 // publicProjectShape(project, extra) — decorate a stored project row for the
@@ -199,6 +217,10 @@ export function publicProjectShape(project, extra = {}) {
     // Run phase — derived deploy signal (deploy-logic.deployProjectStatus of the
     // latest cycle's deploy_status).
     deployState = null,
+    // What a NULL harness column resolves to on this install — 'proxypilot'
+    // unless the caller passes the legacy BUILD_RUNNER=sdk resolution
+    // (runner-logic.js resolveHarness). Injected so this shape stays pure.
+    defaultHarness = 'proxypilot',
   } = extra;
 
   const status = deriveProjectStatus(project, {
@@ -263,6 +285,11 @@ export function publicProjectShape(project, extra = {}) {
     open_editor_questions: Number(openEditorQuestions) || 0,
     open_admin_items: Number(openAdminItems) || 0,
     drift: !!driftOpen,
+    // The agent harness driving this project's builds: the explicit per-project
+    // choice, else the install default. Always a concrete value so the UI can
+    // render the toggle without re-deriving the fallback.
+    harness: normalizeHarness(project.harness) || defaultHarness,
+    harness_choice: normalizeHarness(project.harness),
     framework_update_available: !!frameworkUpdateAvailable,
     framework_current_version: frameworkCurrentVersion,
     framework_last_built_version: frameworkLastBuiltVersion,

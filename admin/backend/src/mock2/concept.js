@@ -170,9 +170,12 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   const system = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';
   const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
   const tuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('chat'));
+  // Transcript turns use `text` (anthropicMessages reads turn.text — a
+  // `content` key maps to an EMPTY text block, which the API rejects when the
+  // cache breakpoint lands on it).
   const res = await callModelTurn({
     connector: ready.connector, apiKey: ready.apiKey, model: tuned.model,
-    system, tools: [], transcript: [{ role: 'user', content: user }], maxTokens: 4000,
+    system, tools: [], transcript: [{ role: 'user', text: user }], maxTokens: 4000,
     effort: tuned.effort, thinking: tuned.thinking,
   });
   if (!res.ok) return { ok: false, error: res.error };

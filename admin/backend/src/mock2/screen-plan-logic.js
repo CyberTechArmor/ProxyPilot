@@ -16,6 +16,13 @@ export const SCREEN_DECISIONS = Object.freeze(['planned', 'deferred']);
 // screenPlanFromInventory — inventory.screens[] → plan rows [{name, purpose,
 // sort}]. Tolerant of partial inventories; names are deduped (the UNIQUE
 // (project_id, name) index backs this) and clamped to sane lengths.
+// The initial "everything at once" build's instruction prefix (concept.js
+// composes INITIAL_BUILD_INSTRUCTION from this). When THAT request succeeds,
+// the whole approved inventory was implemented in one pass — every still-open
+// screen row is settled as built so the Screens panel reflects reality
+// instead of showing "0/N built" over a fully working app.
+export const INITIAL_BUILD_INSTRUCTION_PREFIX = 'Build the working application from the approved design inventory';
+
 export function screenPlanFromInventory(inventory) {
   const screens = Array.isArray(inventory?.screens) ? inventory.screens : [];
   const seen = new Set();

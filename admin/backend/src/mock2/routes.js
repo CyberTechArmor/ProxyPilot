@@ -121,7 +121,8 @@ import {
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
-import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI } from './design-presets.js';
+import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
+import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
@@ -227,7 +228,7 @@ import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleF
 import { listMessages } from './chats.js';
 import {
   startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
-  exportDesignTemplate, importDesignTemplate,
+  exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
 } from './concept.js';
 import { publicChatMessageShape } from './concept-logic.js';
 import { parseDesignTemplate, MAX_IMPORT_NOTES_CHARS } from './design-template-logic.js';
@@ -874,6 +875,50 @@ export function createMock2Router() {
   // The curated base-design presets a new project can start from (picker UI).
   router.get('/design-presets', (_req, res) => {
     res.json({ presets: publicDesignPresets() });
+  });
+
+  // Upload a design document (proxypilot-design@1) as a CUSTOM preset. Admin —
+  // presets are instance-wide. `overwrite` replaces an existing CUSTOM key;
+  // built-in keys are never writable.
+  router.post('/design-presets/import', requireAdmin, (req, res) => {
+    const doc = req.body?.doc;
+    const parsed = parseDesignDoc(doc);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    const saved = saveCustomDesignPreset({
+      ...parsed.data, createdBy: req.user.id, overwrite: !!req.body?.overwrite,
+    });
+    if (!saved.ok) return res.status(409).json({ error: saved.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_PRESET_IMPORT', 'mock2_setting', 0,
+      { key: parsed.data.key, created: saved.created }, req.ip);
+    res.status(saved.created ? 201 : 200).json({
+      preset: publicDesignPresets().find((x) => x.key === parsed.data.key) || null, created: saved.created,
+    });
+  });
+
+  // AI adjustment: instruction + a preset's current tokens -> a SANITIZED
+  // proposal (never saved here; the operator reviews it and saves via import).
+  router.post('/design-presets/:key/adjust', requireAdmin, async (req, res) => {
+    const instruction = String(req.body?.instruction || '').trim();
+    if (!instruction) return res.status(400).json({ error: 'instruction is required' });
+    let result;
+    try {
+      result = await adjustDesignPreset({ presetKey: req.params.key, instruction });
+    } catch (err) {
+      return res.status(500).json({ error: `Design adjustment failed: ${err?.message || 'unknown error'}` });
+    }
+    if (!result.ok) return res.status(422).json({ error: result.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_PRESET_ADJUST', 'mock2_setting', 0,
+      { base: result.base, instruction: instruction.slice(0, 200) }, req.ip);
+    res.json({ proposal: result.proposal, base: result.base });
+  });
+
+  // Delete a CUSTOM preset (built-ins are permanent). Projects that used it
+  // keep their seeded tokens - deletion only removes it from the picker.
+  router.delete('/design-presets/:key', requireAdmin, (req, res) => {
+    const out = deleteCustomDesignPreset(req.params.key);
+    if (!out.ok) return res.status(out.error?.includes('built-in') ? 409 : 404).json({ error: out.error });
+    logAudit(req.user.id, 'MOCK2_DESIGN_PRESET_DELETE', 'mock2_setting', 0, { key: req.params.key }, req.ip);
+    res.json({ ok: true });
   });
 
   router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {

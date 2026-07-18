@@ -1140,6 +1140,14 @@ export const api = {
   mock2GetProject: (id) => request(`/mock2/projects/${id}`),
   // Curated base-design presets for the new-project picker.
   mock2DesignPresets: () => request('/mock2/design-presets'),
+  // Custom design presets: upload a proxypilot-design@1 document, ask the AI
+  // for an adjusted proposal (returned, not saved), delete a custom preset.
+  mock2ImportDesignPreset: (doc, overwrite = false) =>
+    request('/mock2/design-presets/import', { method: 'POST', body: JSON.stringify({ doc, overwrite }) }),
+  mock2AdjustDesignPreset: (key, instruction) =>
+    request(`/mock2/design-presets/${encodeURIComponent(key)}/adjust`, { method: 'POST', body: JSON.stringify({ instruction }) }),
+  mock2DeleteDesignPreset: (key) =>
+    request(`/mock2/design-presets/${encodeURIComponent(key)}`, { method: 'DELETE' }),
   mock2CreateProject: ({ name, description, parent_domain_id, design_preset }) =>
     request('/mock2/projects', {
       method: 'POST',

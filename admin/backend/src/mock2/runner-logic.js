@@ -785,17 +785,24 @@ export function resolveHarness(project = {}, env = {}) {
 // The built-in Claude Agent SDK tools the build runner is allowed to use. These
 // replace the hand-rolled RUNNER_TOOLS: the SDK executes them itself against its
 // working directory (the local checkout), so we don't implement tool execution.
-// Deliberately the read/inspect/edit/run set — the MAIN loop gets no network
-// tools (the constitution and gate battery, not an allowlist here, govern what
-// the change may contain). Web access exists only through the two scoped
-// subagents below, each restricted to its single network tool.
+// Deliberately the read/inspect/edit/run set — the main loop's working tools.
+// Web access is designed to flow through the two scoped subagents below (each
+// restricted to its single network tool); their WebSearch/WebFetch are
+// appended separately in sdkQueryOptions (see SDK_WEB_TOOLS).
 export const SDK_ALLOWED_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob']);
 
 // The subagent-delegation tool. The current SDK docs name it 'Agent'; earlier
 // releases called it 'Task'. Both are allowlisted so the pinned option shape
-// keeps working across the SDK versions operators may have installed
-// (the package is installed out-of-band — see runner-sdk.js).
+// keeps working across SDK versions.
 export const SDK_SUBAGENT_TOOLS = Object.freeze(['Agent', 'Task']);
+
+// The subagents' network tools. Under permissionMode 'dontAsk' a tool call is
+// auto-approved only if allowlisted, and the allowlist is global — so the
+// subagents' WebSearch/WebFetch must appear here to run without prompting.
+// Which agent can CALL them is still scoped by each subagent's own `tools`
+// list; the main loop's job (edit + verify against the gate battery) gives it
+// no reason to reach for them, and the constitution/gates govern the change.
+export const SDK_WEB_TOOLS = Object.freeze(['WebSearch', 'WebFetch']);
 
 // The Claude harness's subagents (SDK `agents` option). Two are required by the
 // harness contract — a web-search agent and a URL-fetch agent — and each is
@@ -868,18 +875,24 @@ export function claudeHarnessModel({ provider = null, slotModel = null, env = {}
 
 // sdkQueryOptions — the pinned option shape for a Claude-harness query() round.
 // Pure so the harness contract is unit-testable without the SDK installed:
-// main-loop tools + the delegation tool allowlisted, the two scoped subagents
-// attached, permissionMode 'bypassPermissions' (no interactive prompts — safe
-// because the PreToolUse hook DENIES protected paths and destructive shell even
-// under bypass, deny > allow), and CLAUDE.md auto-loading from the checkout.
-// `env` is the SDK subprocess environment the caller builds (the API key rides
-// there, orchestrator-side only); `hooks` fragments are spread in by the caller.
+// the allowlisted tool set (main loop + delegation + the subagents' web tools),
+// the two scoped subagents attached, and CLAUDE.md auto-loading from the
+// checkout. permissionMode is 'dontAsk': every allowlisted tool runs without an
+// interactive prompt, anything NOT allowlisted is denied outright, and the
+// PreToolUse hook still denies protected paths + destructive shell (deny >
+// allow). Deliberately NOT 'bypassPermissions': that mode maps to the CLI's
+// --dangerously-skip-permissions, which the bundled binary REFUSES under
+// root/sudo — and the backend runs as root on standard installs — so bypass
+// hard-fails exactly where this harness deploys; 'dontAsk' is also strictly
+// tighter (deny-by-default instead of allow-everything). `env` is the SDK
+// subprocess environment the caller builds (the API key rides there,
+// orchestrator-side only); `hooks` fragments are spread in by the caller.
 export function sdkQueryOptions({ cwd, model, maxTurns, env, resumeSessionId = null } = {}) {
   return {
     cwd,
     model,
-    allowedTools: [...SDK_ALLOWED_TOOLS, ...SDK_SUBAGENT_TOOLS],
-    permissionMode: 'bypassPermissions',
+    allowedTools: [...SDK_ALLOWED_TOOLS, ...SDK_SUBAGENT_TOOLS, ...SDK_WEB_TOOLS],
+    permissionMode: 'dontAsk',
     settingSources: ['project'], // auto-load .claude/CLAUDE.md from cwd
     maxTurns,
     env,

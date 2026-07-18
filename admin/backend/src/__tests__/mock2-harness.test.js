@@ -19,7 +19,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveHarness, resolveClaudeAuth, claudeHarnessModel, CLAUDE_HARNESS_FALLBACK_MODEL,
-  sdkQueryOptions, sdkSubagents, SDK_SUBAGENTS, SDK_ALLOWED_TOOLS, SDK_SUBAGENT_TOOLS,
+  sdkQueryOptions, sdkSubagents, SDK_SUBAGENTS, SDK_ALLOWED_TOOLS, SDK_SUBAGENT_TOOLS, SDK_WEB_TOOLS,
 } from '../mock2/runner-logic.js';
 import { HARNESSES, normalizeHarness, publicProjectShape } from '../mock2/project-logic.js';
 import {
@@ -126,13 +126,18 @@ test('sdkQueryOptions: subagents attached, delegation allowlisted, no interactiv
   assert.equal(o.model, 'claude-opus-4-8');
   assert.equal(o.maxTurns, 200);
   assert.equal(o.env, env);
-  assert.equal(o.permissionMode, 'bypassPermissions'); // no prompts; PreToolUse hook still denies dangerous calls
+  // 'dontAsk': allowlisted tools run unprompted, everything else is DENIED.
+  // Never 'bypassPermissions' — the CLI refuses that mode under root/sudo, and
+  // the backend runs as root on standard installs.
+  assert.equal(o.permissionMode, 'dontAsk');
   assert.deepEqual(o.settingSources, ['project']);
-  // Main loop: read/edit/run set + subagent delegation — still no direct network tools.
+  // Allowlist: read/edit/run set + subagent delegation + the subagents' web
+  // tools ('dontAsk' permissions are global, so WebSearch/WebFetch must be
+  // allowlisted for the subagents to run them; which agent can CALL them is
+  // scoped by each subagent's own tools list).
   for (const t of SDK_ALLOWED_TOOLS) assert.ok(o.allowedTools.includes(t));
   for (const t of SDK_SUBAGENT_TOOLS) assert.ok(o.allowedTools.includes(t));
-  assert.ok(!o.allowedTools.includes('WebSearch'));
-  assert.ok(!o.allowedTools.includes('WebFetch'));
+  for (const t of SDK_WEB_TOOLS) assert.ok(o.allowedTools.includes(t));
   // Both required subagents ride along.
   assert.deepEqual(Object.keys(o.agents).sort(), ['pull-website', 'search']);
   assert.deepEqual(o.agents.search.tools, ['WebSearch']);

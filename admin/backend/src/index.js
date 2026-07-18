@@ -471,7 +471,7 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, sweepMock2OnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
@@ -493,6 +493,9 @@ if (mock2Gate.enabled) {
     // upgraded to the bundled version. Idempotent; never stomps a stored
     // version that already wires.
     try { seedBuiltinComponents(null); } catch (err) { console.error('[mock2] component seed failed:', err?.message || err); }
+    // Custom design presets (operator uploads / AI adjustments) into the pure
+    // preset registry overlay — before any request reads the picker.
+    try { loadCustomDesignPresets(); } catch (err) { console.error('[mock2] design preset load failed:', err?.message || err); }
     app.use('/api/mock2', authenticateToken, blockPendingRole, createMock2Router());
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.

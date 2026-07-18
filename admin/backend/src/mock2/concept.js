@@ -60,7 +60,7 @@ import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
-import { applyDesignPreset } from './design-presets.js';
+import { applyDesignPreset, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
 
@@ -156,6 +156,38 @@ function slotReady(slotName) {
     return { ok: false, reason: `The ${slotName} connector has no decryptable API key.` };
   }
   return { ok: true, connector, model: slot.model, apiKey };
+}
+
+// AI design adjustment — one stateless call on the concept_chat slot: takes a
+// preset's tokens + the operator's instruction and returns a SANITIZED
+// proposal (parseDesignDoc grammar — the model cannot inject CSS). Never saved
+// here; the operator reviews the proposal and saves it as a custom preset.
+export async function adjustDesignPreset({ presetKey, instruction }) {
+  const preset = getDesignPreset(presetKey);
+  if (!preset) return { ok: false, error: `No design preset "${String(presetKey).slice(0, 60)}"` };
+  const ready = slotReady('concept_chat');
+  if (!ready.ok) return { ok: false, error: ready.reason };
+  const system = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';
+  const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
+  const tuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('chat'));
+  const res = await callModelTurn({
+    connector: ready.connector, apiKey: ready.apiKey, model: tuned.model,
+    system, tools: [], transcript: [{ role: 'user', content: user }], maxTokens: 4000,
+    effort: tuned.effort, thinking: tuned.thinking,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  const text = String(res.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  let doc;
+  try { doc = JSON.parse(text); } catch { return { ok: false, error: 'the model did not return valid JSON — try the adjustment again' }; }
+  const parsed = parseDesignDoc({
+    format: DESIGN_DOC_FORMAT,
+    key: `${preset.key.replace(/-custom$/, '')}-custom`,
+    name: String(doc.name || `${preset.name} (adjusted)`).slice(0, 60),
+    description: String(doc.description || preset.description || '').slice(0, 300),
+    tokens: doc.tokens || doc,
+  });
+  if (!parsed.ok) return { ok: false, error: `the adjusted tokens did not validate: ${parsed.error}` };
+  return { ok: true, proposal: parsed.data, base: preset.key };
 }
 
 // The concept stage needs BOTH slots ready (chat + mockup). Returns

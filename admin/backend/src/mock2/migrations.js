@@ -1312,4 +1312,24 @@ export const MOCK2_MIGRATIONS = [
       d.exec(`ALTER TABLE mock2_projects ADD COLUMN base_app_deployed_at TEXT;`);
     },
   },
+  {
+    // Custom design presets: operator-uploaded (proxypilot-design@1 documents)
+    // or AI-adjusted variants, merged with the built-in presets at read time
+    // (design-presets.js setCustomPresets overlay).
+    version: 533,
+    name: 'mock2_custom_design_presets',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_design_presets (
+          key         TEXT PRIMARY KEY,
+          name        TEXT NOT NULL,
+          description TEXT,
+          tokens_json TEXT NOT NULL,
+          created_by  INTEGER,
+          created_at  TEXT NOT NULL,
+          updated_at  TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];

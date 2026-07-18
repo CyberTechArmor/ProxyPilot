@@ -120,10 +120,44 @@ export const DESIGN_PRESETS = Object.freeze([
       shadow: { card: '0 1px 2px rgba(0,0,0,0.08)' },
     },
   },
+  {
+    // ProxyPilot's own dashboard look: near-black navy wash, dark slate
+    // surfaces, high-contrast text, the signature green primary with blue
+    // accents — for apps that should feel like part of the ProxyPilot family.
+    key: 'proxypilot',
+    name: 'ProxyPilot',
+    description: 'The ProxyPilot dashboard look — dark navy surfaces, signature green primary, blue accents, high-contrast text. For consoles and ops tools that should match the platform.',
+    tokens: {
+      colors: {
+        background: '#0b1220', surface: '#101a2e', text: '#e2e8f0', muted: '#94a3b8',
+        border: '#1e293b', primary: '#22c55e', primaryText: '#06230f', accent: '#3b82f6',
+        danger: '#ef4444', success: '#22c55e',
+      },
+      typography: { fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', headingFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', baseSize: '15px' },
+      radius: { sm: '6px', md: '8px', lg: '12px' },
+      spacing: { unit: '8px' },
+      shadow: { card: '0 1px 2px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.25)' },
+    },
+  },
 ]);
 
+// ---- custom presets (operator-uploaded / AI-adjusted, DB-backed) ----
+//
+// This module stays PURE: the store (design-presets-store.js) loads the rows
+// and injects them here at boot and after every mutation. All existing callers
+// (seed files, prompt binding, key normalization) then work for custom presets
+// with no changes.
+let customPresets = [];
+export function setCustomPresets(list = []) {
+  customPresets = (Array.isArray(list) ? list : []).filter((p) => p && p.key && p.tokens);
+}
+
+function allPresets() {
+  return [...DESIGN_PRESETS, ...customPresets];
+}
+
 export function getDesignPreset(key) {
-  return DESIGN_PRESETS.find((p) => p.key === String(key || '').trim()) || null;
+  return allPresets().find((p) => p.key === String(key || '').trim()) || null;
 }
 
 // normalizeDesignPresetKey — a stored/user value into a valid preset key or
@@ -135,7 +169,80 @@ export function normalizeDesignPresetKey(key) {
 // The public list shape for the picker UI (tokens included — the frontend
 // renders swatches from them; they're small and non-secret).
 export function publicDesignPresets() {
-  return DESIGN_PRESETS.map((p) => ({ key: p.key, name: p.name, description: p.description, tokens: p.tokens }));
+  return [
+    ...DESIGN_PRESETS.map((p) => ({ key: p.key, name: p.name, description: p.description, tokens: p.tokens, source: 'builtin' })),
+    ...customPresets.map((p) => ({ key: p.key, name: p.name, description: p.description, tokens: p.tokens, source: 'custom' })),
+  ];
+}
+
+// ---- the portable design document (upload format) ----
+//
+// A design is uploaded as ONE JSON document:
+//   { "format": "proxypilot-design@1", "key": "my-brand", "name": "My Brand",
+//     "description": "…", "tokens": { colors, typography, radius, spacing, shadow } }
+// key is optional (derived from the name); every token value is validated
+// against the same grammar the presets use, so an upload can never inject CSS.
+export const DESIGN_DOC_FORMAT = 'proxypilot-design@1';
+
+const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const SIZE_RE = /^\d{1,3}(?:\.\d{1,2})?(?:px|rem|em)$/;
+const FONT_RE = /^[\w\s"',.\-()]{1,200}$/;
+const SHADOW_RE = /^[\w\s.,()#%\-]{1,200}$/;
+const KEY_RE = /^[a-z0-9][a-z0-9-]{1,40}$/;
+
+const COLOR_KEYS = ['background', 'surface', 'text', 'muted', 'border', 'primary', 'primaryText', 'accent', 'danger', 'success'];
+
+// parseDesignDoc(doc) → { ok, data: {key,name,description,tokens} } | { ok:false, error }.
+// Missing optional token fields fall back to sane values; colors are REQUIRED.
+export function parseDesignDoc(doc) {
+  if (!doc || typeof doc !== 'object') return { ok: false, error: 'the design document must be a JSON object' };
+  if (doc.format !== DESIGN_DOC_FORMAT) {
+    return { ok: false, error: `unsupported format "${String(doc.format || '(none)').slice(0, 60)}" — expected ${DESIGN_DOC_FORMAT}` };
+  }
+  const name = String(doc.name || '').trim();
+  if (!name || name.length > 60) return { ok: false, error: 'name is required (max 60 chars)' };
+  const key = String(doc.key || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')).trim();
+  if (!KEY_RE.test(key)) return { ok: false, error: 'key must be lowercase letters/digits/hyphens (2–41 chars)' };
+  const description = String(doc.description || '').trim().slice(0, 300);
+
+  const t = doc.tokens || {};
+  const colors = {};
+  for (const k of COLOR_KEYS) {
+    const v = String(t.colors?.[k] || '').trim();
+    if (!HEX_RE.test(v)) return { ok: false, error: `tokens.colors.${k} must be a hex color (#rgb or #rrggbb)` };
+    colors[k] = v;
+  }
+  const str = (v, re, fallback) => {
+    const s = String(v || '').trim();
+    return s && re.test(s) ? s : fallback;
+  };
+  const tokens = {
+    colors,
+    typography: {
+      fontFamily: str(t.typography?.fontFamily, FONT_RE, 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'),
+      headingFamily: str(t.typography?.headingFamily, FONT_RE, 'system-ui, sans-serif'),
+      baseSize: str(t.typography?.baseSize, SIZE_RE, '15px'),
+    },
+    radius: {
+      sm: str(t.radius?.sm, SIZE_RE, '4px'),
+      md: str(t.radius?.md, SIZE_RE, '8px'),
+      lg: str(t.radius?.lg, SIZE_RE, '12px'),
+    },
+    spacing: { unit: str(t.spacing?.unit, SIZE_RE, '8px') },
+    shadow: { card: str(t.shadow?.card, SHADOW_RE, '0 1px 2px rgba(0,0,0,0.08)') },
+  };
+  return { ok: true, data: { key, name, description, tokens } };
+}
+
+// The document shape, for the upload help and the AI-adjust prompt.
+export function designDocTemplate() {
+  return {
+    format: DESIGN_DOC_FORMAT,
+    key: 'my-brand',
+    name: 'My Brand',
+    description: 'Short human description of the look.',
+    tokens: DESIGN_PRESETS[0].tokens,
+  };
 }
 
 // The seed files a chosen preset contributes to a fresh project: the token doc

@@ -25,6 +25,7 @@ export { reconcileMock2Egress } from './egress.js';
 // re-exported here for index.js's first-enabled-boot insert (ADR-003 / R8).
 export { seedFrameworkV1, upgradeFrameworkFromSeed } from './framework.js';
 export { seedBuiltinComponents } from './component-seed.js';
+export { loadCustomDesignPresets } from './design-presets-store.js';
 // Project terminal authorizer (ADR-007). Registered into the core
 // streaming-terminal route (setMock2TerminalAuthorizer) on enabled boot so the
 // core file never statically imports mock2/db.js (ADR-001).

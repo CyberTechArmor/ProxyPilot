@@ -969,7 +969,12 @@ export function createMock2Router() {
       const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
       const code = Number(codeStr);
       const reachable = code >= 200 && code < 500;
-      const runtime = /node/.test(execLine) ? 'app' : /serve\.py|python/i.test(execLine) ? 'placeholder' : reachable ? 'unknown' : 'down';
+      // The unit's ExecStart is either the serve.py placeholder or the app's
+      // manifest start command (`/bin/sh -lc 'cd … && exec npm run start'`) —
+      // so "not serve.py" IS the app; never grep for 'node' (the wrapped npm
+      // command doesn't contain it, which once left the button on Updating…
+      // forever while the app served fine).
+      const runtime = /serve\.py/i.test(execLine) ? 'placeholder' : execLine.trim() ? 'app' : 'down';
       res.json({ live: reachable && runtime === 'app', reachable, code: Number.isFinite(code) ? code : 0, runtime });
     } catch (err) {
       res.json({ live: false, runtime: 'unknown', error: String(err?.message || err).slice(0, 200) });

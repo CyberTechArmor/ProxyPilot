@@ -217,7 +217,8 @@ import {
   getCycle, listCyclesForProject, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
   countRunningCycles,
 } from './cycles.js';
-import { publicCycleShape, INTERRUPTS } from './cycle-logic.js';
+import { publicCycleShape, INTERRUPTS, typicalDurationMs } from './cycle-logic.js';
+import { parseRoutingJson } from './routing-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
 } from './locks.js';
@@ -2318,9 +2319,20 @@ export function createMock2Router() {
   // on a finished build before the next cycle.
   router.get('/projects/:id/cycle', requireMock2Role('viewer'), (req, res) => {
     const cycle = latestCycle(req.mock2Project.id);
+    // The "typically ~X–Y" band for the live elapsed clock: recent succeeded
+    // cycles of the SAME build mode (quick predicts quick). Null until two
+    // comparable builds exist.
+    let typical = null;
+    if (cycle) {
+      try {
+        const mode = parseRoutingJson(cycle.routing_json)?.build_mode || null;
+        typical = typicalDurationMs(listCyclesForProject(req.mock2Project.id, { limit: 60 }), { buildMode: mode });
+      } catch { /* cosmetic */ }
+    }
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
+      typical_duration: typical,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),

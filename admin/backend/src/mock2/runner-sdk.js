@@ -47,6 +47,8 @@ import {
   resolveClaudeAuth, claudeHarnessModel, sdkQueryOptions,
 } from './runner-logic.js';
 import { buildResumeContextBlock } from './unblock-logic.js';
+import { parseRoutingJson } from './routing-logic.js';
+import { formatBriefForTask } from './prepass-logic.js';
 import { closeRequest } from './requests.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
@@ -298,8 +300,14 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
         try { const rc = getCycle(cycle.id)?.resume_context_json; resumeBlock = rc ? buildResumeContextBlock(JSON.parse(rc)) : ''; } catch { resumeBlock = ''; }
         if (resumeBlock) logEvent('resume_guidance', { role: 'user', content: resumeBlock, meta: { runner: 'sdk' } });
       }
+      // The quick-lane pre-pass brief (routing_json.prepass) rides round 0's
+      // task like on the hand-rolled runner — subordinate sizing notes only.
+      let prepassBrief = '';
+      if (round === 0) {
+        try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { prepassBrief = ''; }
+      }
       const prompt = round === 0
-        ? `${buildRunnerTask(cycle.instruction)}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
+        ? `${buildRunnerTask(cycle.instruction)}${prepassBrief}${resumeBlock ? `\n\n${resumeBlock}` : ''}`
         : pendingFeedback || `The verification gate battery is not all green yet. Fix the cause and stop.\n\n${formatGateReports(battery)}`;
       pendingFeedback = null;
       setJob(cycle.id, { phase: 'running', message: round === 0 ? 'SDK runner working…' : `SDK runner addressing gate feedback (round ${round + 1})…` });

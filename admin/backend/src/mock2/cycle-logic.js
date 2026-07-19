@@ -347,3 +347,31 @@ export function publicCycleShape(row) {
     created_at: row.created_at || null,
   };
 }
+
+// ---- typical build duration (the "you can leave the page" ETA) ----
+
+// typicalDurationMs — the p50/p80 wall-clock band of this project's recent
+// SUCCEEDED cycles, optionally narrowed to the same build mode (quick builds
+// predict quick builds, not full ones). Feeds the Build panel's "typically
+// ~4–7m" line next to the live elapsed clock. Needs ≥2 samples, else null —
+// a single data point is an anecdote, not an estimate. Rows are expected
+// newest-first (listCyclesForProject order).
+export function typicalDurationMs(rows = [], { buildMode = null, limit = 12 } = {}) {
+  const durs = [];
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    if (r?.status !== 'succeeded') continue;
+    if (buildMode) {
+      const mode = parseRoutingJson(r.routing_json)?.build_mode || null;
+      if (mode !== buildMode) continue;
+    }
+    const s = Date.parse(r.started_at || r.created_at || '');
+    const f = Date.parse(r.finished_at || '');
+    if (!Number.isFinite(s) || !Number.isFinite(f) || f <= s) continue;
+    durs.push(f - s);
+    if (durs.length >= limit) break;
+  }
+  if (durs.length < 2) return null;
+  durs.sort((a, b) => a - b);
+  const pct = (p) => durs[Math.max(0, Math.min(durs.length - 1, Math.round(p * (durs.length - 1))))];
+  return { p50: pct(0.5), p80: pct(0.8), n: durs.length };
+}

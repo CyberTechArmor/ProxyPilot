@@ -98,10 +98,22 @@ function CycleChangeSummary({ projectId, cycle }) {
   );
 }
 
+// Format a millisecond duration compactly: 95000 → "1m 35s", 4200000 → "1h 10m".
+function fmtDuration(ms) {
+  const total = Math.round(Number(ms) / 1000);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m${s ? ` ${s}s` : ''}`;
+  return `${s}s`;
+}
+
 export default function BuildStatus({
   projectId, canEdit, isAdmin, online, project, cycle, job, busy,
   onRetry, onRetryDeploy, onInterrupt, onRemediate, onStopAll, onRefresh,
-  needsFeedback = false, onFeedback,
+  needsFeedback = false, onFeedback, typical = null,
 }) {
   const { toast } = useToast();
   const [view, setView] = useState('build'); // 'build' | 'changes' | 'components'
@@ -179,6 +191,15 @@ export default function BuildStatus({
     return () => clearInterval(t);
   }, [active]);
   const elapsed = buildElapsed(cycle, nowTick);
+  // The "typically ~4–7m" band (from the project's recent succeeded builds of
+  // the same mode). Collapses to one figure when p50≈p80.
+  const typicalRange = (() => {
+    if (!typical?.p50) return null;
+    const lo = fmtDuration(typical.p50);
+    const hi = fmtDuration(typical.p80);
+    if (!lo) return null;
+    return hi && hi !== lo ? `~${lo}–${hi}` : `~${lo}`;
+  })();
   // A soft-paused cycle ('interrupted' + pause_reason) is a resumable checkpoint,
   // not a failure — it gets its own label + one-click Resume, distinct from a
   // plain user interrupt.
@@ -451,8 +472,23 @@ export default function BuildStatus({
                     {' · '}<Clock className="inline h-3 w-3 mb-0.5" /> {elapsed}
                   </span>
                 ) : null}
+                {active && typicalRange ? (
+                  <span title={`Based on your last ${typical.n} ${typical.n === 1 ? 'build' : 'builds'} of this kind`}>
+                    {' · typically '}{typicalRange}
+                  </span>
+                ) : null}
               </div>
             </div>
+
+            {/* While a build runs: it keeps going without this page open — the
+                finish fires a browser notification, and Interrupt (in the chat)
+                stops it at the next safe step. */}
+            {active ? (
+              <p className="text-[11px] text-muted-foreground">
+                You can leave this page — the build keeps running and you&apos;ll get a notification when it
+                finishes. Use Interrupt in the build chat to stop and redirect it.
+              </p>
+            ) : null}
 
             {/* Model routing (reviewable): which model ran this build, at what
                 effort, and why — including deterministic escalation to a stronger

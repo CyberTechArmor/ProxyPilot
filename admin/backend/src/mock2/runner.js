@@ -46,6 +46,10 @@ import { webSearchServerTools, RUNNER_WEB_SEARCH_FLAG } from './ask-logic.js';
 import { getRoutingRule } from './routing.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
 import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision, quickRoutingDecision } from './routing-logic.js';
+import {
+  prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
+  prepassEffort, formatBriefForTask, featureScaleNotice, PREPASS_MAX_TOKENS,
+} from './prepass-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
@@ -196,6 +200,48 @@ function quotaVerdict(projectId, estCostCents) {
 }
 
 // ---- start (route calls this; returns synchronously, runs in background) ----
+
+// Quick-lane pre-pass host half (pure decisions in prepass-logic.js): one
+// bounded call on the cheap classifier model against the build connector's own
+// key. Returns { scope, effort } (effort bumped when the request is bigger
+// than the lane assumes); stamps the scope + working brief into routing_json
+// (both harnesses append the brief to the task turn); posts the Build-MVP
+// suggestion for feature-scale asks. Spend lands in the ledger like every
+// other model call. Any failure returns null — callers treat that as "no
+// pre-pass" and run unchanged.
+async function runQuickPrepass({ project, cycle, ready, routing }) {
+  const model = prepassModel(routingEnv());
+  const res = await callModelTurn({
+    connector: ready.connector, apiKey: ready.apiKey, model,
+    system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
+    maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
+  });
+  if (!res.ok) return null;
+  try {
+    const u = res.usage || {};
+    const cost = costCentsForUsage({
+      inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
+      cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
+    }, effectivePrice(ready.connector.id, model));
+    insertLedgerEntry({ projectId: project.id, cycleId: cycle.id, connectorId: ready.connector.id, model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0 });
+  } catch (e) { console.warn('[mock2] pre-pass ledger write failed:', e?.message); }
+  const parsed = parsePrepassReply(res.text);
+  if (!parsed) return null;
+  try {
+    updateCycle(cycle.id, { routing_json: JSON.stringify({ ...(routing || {}), prepass: parsed }) });
+  } catch (e) { console.warn('[mock2] pre-pass routing stamp failed:', e?.message); }
+  try {
+    insertCycleEvent({
+      projectId: project.id, cycleId: cycle.id, kind: 'note', role: 'system',
+      content: `pre-pass: scope=${parsed.scope}${parsed.brief ? ' (working brief attached to the task)' : ''}`,
+      meta: { prepass: parsed },
+    });
+  } catch { /* best effort */ }
+  if (parsed.scope === 'feature_scale') {
+    try { insertMessage({ projectId: project.id, kind: 'system', cycleId: cycle.id, body: featureScaleNotice() }); } catch { /* best effort */ }
+  }
+  return { scope: parsed.scope, effort: prepassEffort(parsed.scope, ready.effort || 'high') };
+}
 
 // startCycle — the cycle-start sequence (04-phased-plan §M6):
 //   estimate → canStartCycle quota check (refused_quota terminal) → pin the
@@ -415,7 +461,23 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // the same gate/checkpoint/deploy tail.
   const args = { cycle, project, containerName, framework, gateScripts, ready, buildMode: modeStr };
   const harness = harnessForProject(project, process.env);
-  const driveCycle = () => harness.runTask(args);
+  // Quick-lane pre-pass (prepass-logic.js): one cheap classifier+enrichment
+  // call BEFORE the build — sizes the request (a "quick" ask can secretly be a
+  // whole feature), raises effort a notch when it's bigger than the lane
+  // assumes, stamps a working brief into routing_json for the task turn, and
+  // suggests Build MVP in chat for feature-scale asks. Fail-open: any error →
+  // the build runs exactly as before. Fresh (non-resume) quick cycles only.
+  const wantsPrepass = modeStr === BUILD_MODE_QUICK && !resumeContext && prepassEnabled(routingEnv());
+  const driveCycle = async () => {
+    if (wantsPrepass) {
+      try {
+        setJob(cycle.id, { phase: 'starting', message: 'Sizing the request…' });
+        const pp = await runQuickPrepass({ project, cycle, ready, routing });
+        if (pp?.effort && pp.effort !== args.ready.effort) args.ready = { ...args.ready, effort: pp.effort };
+      } catch (e) { console.warn('[mock2] quick pre-pass failed (build proceeds unchanged):', e?.message); }
+    }
+    return harness.runTask(args);
+  };
 
   // Fire-and-forget; the runner owns its own error handling and always lands the
   // cycle terminal + releases the lock.
@@ -778,7 +840,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     const req = cycle.request_id != null ? getRequest(cycle.request_id) : null;
     if (req?.attachments_json) taskImages = hydrateAttachments(cycle.project_id, parseAttachmentsJson(req.attachments_json));
   } catch (e) { console.warn('[mock2] task image hydration failed:', e?.message); }
-  const transcript = [{ role: 'user', text: buildRunnerTask(cycle.instruction), ...(taskImages.length ? { images: taskImages } : {}) }];
+  // The quick-lane pre-pass brief (routing_json.prepass, stamped before this
+  // run started) rides the task turn as subordinate sizing notes — the
+  // verbatim instruction stays authoritative.
+  let prepassBrief = '';
+  try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { /* optional */ }
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

@@ -23,6 +23,12 @@ test('prepass prompt: strict JSON contract with the scope rubric', () => {
   const p = buildPrepassPrompt();
   assert.match(p, /STRICT JSON only/);
   for (const s of PREPASS_SCOPES) assert.ok(p.includes(`"${s}"`), `rubric names ${s}`);
+  // The domain-expert enrichment (timesheets list EVERY punch pair, flag
+  // anomalies, …) is prompted for and parsed into the brief.
+  assert.match(p, /domain_expectations/);
+  assert.match(p, /DOMAIN EXPERT/);
+  const parsed = parsePrepassReply('{"scope":"multi_part","brief":{"domain_expectations":["show every punch pair","flag missing punch-out"]}}');
+  assert.deepEqual(parsed.brief.domain_expectations, ['show every punch pair', 'flag missing punch-out']);
 });
 
 test('parsePrepassReply: valid JSON, fenced JSON, junk, bad scope, clamps', () => {
@@ -53,10 +59,11 @@ test('prepassEffort: simple keeps the lane effort; bigger scopes bump one notch,
 });
 
 test('formatBriefForTask: subordinate block; empty brief renders nothing', () => {
-  const block = formatBriefForTask({ scope: 'multi_part', brief: { touches: ['a'], states: [], edge_cases: ['tz math'], acceptance: ['x works'] } });
+  const block = formatBriefForTask({ scope: 'multi_part', brief: { touches: ['a'], states: [], edge_cases: ['tz math'], acceptance: ['x works'], domain_expectations: ['every clock-in/out pair per day is listed'] } });
   assert.match(block, /the request above is authoritative/);
   assert.match(block, /Likely touches: a/);
   assert.match(block, /Edge cases: tz math/);
+  assert.match(block, /Domain expectations .*: every clock-in\/out pair per day is listed/);
   assert.ok(!block.includes('States to handle'), 'empty lists omitted');
   assert.equal(formatBriefForTask({ scope: 'simple', brief: null }), '');
   assert.equal(formatBriefForTask(null), '');

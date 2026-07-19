@@ -289,6 +289,11 @@ export default function ProjectDetail() {
   // Hide mutating controls from a pure viewer (the server still enforces every
   // mutation via requireMock2Role). Admins and project editors may edit.
   const canEdit = isAdmin || project.my_role === 'admin' || project.my_role === 'editor';
+  // Removing members is owner/admin-only (server-enforced too); anyone may
+  // remove THEMSELVES (leave the project).
+  const myId = String(user?.id ?? storedUser?.id ?? '');
+  const isOwner = project.created_by != null && String(project.created_by) === myId;
+  const canRemoveMember = (m) => isAdmin || isOwner || String(m.user_id) === myId;
   const isProvisioning = project.lifecycle === 'provisioning';
   const isArchived = project.lifecycle === 'archived';
   const isStopped = project.lifecycle === 'stopped';
@@ -605,7 +610,7 @@ export default function ProjectDetail() {
                   <span className="font-medium truncate">{m.username || `user ${m.user_id}`}</span>
                   <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{m.role}</span>
                 </div>
-                {canEdit && !readOnly ? (
+                {canEdit && !readOnly && canRemoveMember(m) ? (
                   <Button
                     variant="ghost" size="icon" className="h-9 w-9 text-red-500 shrink-0" disabled={busy}
                     onClick={() => run(() => api.mock2RemoveProjectMember(id, m.user_id), 'Member removed')}

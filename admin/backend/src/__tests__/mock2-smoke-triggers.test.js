@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SMOKE_CONFIG, smokeConfigFromEnv, matchGlob,
   evaluateSmokeTriggers, applyEscalations, resolveConnectorRun,
-  resolveSmokeConnectors, smokeLogLines, smokeGateOk,
+  resolveSmokeConnectors, smokeLogLines, smokeGateOk, pickContainerIp,
 } from '../mock2/smoke-triggers.js';
 
 test('matchGlob: * stays within a segment, ** spans segments', () => {
@@ -186,4 +186,18 @@ test('smokeConfigFromEnv: connectors default ON + required (change-69 lesson); f
   const cfg = smokeConfigFromEnv({ SMOKE_BROWSER_ENABLED: '1', SMOKE_DB_GLOBS: 'db/**, **/*.sql' });
   assert.equal(cfg.browserEnabled, true);
   assert.deepEqual(cfg.dbGlobs, ['db/**', '**/*.sql']);
+});
+
+// ---- browser target resolution ----
+
+test('pickContainerIp: first non-loopback IPv4 from ip/hostname output (req-76: the browser must target the container, not the backend loopback)', () => {
+  // `ip -4 -o addr … | cut` output: one address per line.
+  assert.equal(pickContainerIp('10.163.220.42\n'), '10.163.220.42');
+  // `hostname -I` output: space-separated, may lead with loopback.
+  assert.equal(pickContainerIp('127.0.0.1 10.0.3.17 fe80::1'), '10.0.3.17');
+  // Loopback-only, junk, and empty all resolve to null (caller falls back).
+  assert.equal(pickContainerIp('127.0.0.1'), null);
+  assert.equal(pickContainerIp('not-an-ip 999.1.1.1'), null);
+  assert.equal(pickContainerIp(''), null);
+  assert.equal(pickContainerIp(null), null);
 });

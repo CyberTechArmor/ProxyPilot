@@ -1429,6 +1429,8 @@ export const api = {
   // to retry-deploy from.
   mock2DeployBaseApp: (id) =>
     request(`/mock2/projects/${id}/base-app/deploy`, { method: 'POST' }),
+  // Live probe for the "Open app" button: is the REAL app answering its port?
+  mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
   // Screen plan (per-screen apply): seeded from the approved inventory.
   mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
   mock2DecideScreen: (id, screenId, status) =>

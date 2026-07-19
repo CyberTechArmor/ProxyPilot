@@ -194,7 +194,7 @@ import {
   publicRoutingRuleShape, aggregateRoutingOutcomes,
 } from './routing-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, execInContainer, buildRunnerReady } from './runner.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
@@ -946,6 +946,32 @@ export function createMock2Router() {
       provision_error: project.provision_error || null,
       progress: status ? { phase: status.phase, message: status.message, log: status.log || [] } : null,
     });
+  });
+
+  // Is the REAL app answering on its port right now? Drives the "Open app"
+  // button: disabled + pulsing "Updating…" until this says live (the deploy
+  // window between the placeholder and the built app otherwise hands the user
+  // a placeholder, then a connection error, then the app). runtime tells the
+  // states apart: 'app' (node serves), 'placeholder' (serve.py), 'down'.
+  router.get('/projects/:id/app-live', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active' || !project.container_name) {
+      return res.json({ live: false, runtime: 'offline' });
+    }
+    const port = Number(project.web_port) || 3000;
+    try {
+      const probe = await execInContainer(
+        project.container_name,
+        `code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:${port}/" 2>/dev/null); exec_line=$(grep -h "^ExecStart" /etc/systemd/system/mock2-dev.service 2>/dev/null); echo "$code|$exec_line"`,
+      );
+      const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
+      const code = Number(codeStr);
+      const reachable = code >= 200 && code < 500;
+      const runtime = /node/.test(execLine) ? 'app' : /serve\.py|python/i.test(execLine) ? 'placeholder' : reachable ? 'unknown' : 'down';
+      res.json({ live: reachable && runtime === 'app', reachable, code: Number.isFinite(code) ? code : 0, runtime });
+    } catch (err) {
+      res.json({ live: false, runtime: 'unknown', error: String(err?.message || err).slice(0, 200) });
+    }
   });
 
   // The mockup preview, served from the DASHBOARD's own origin: the API reads

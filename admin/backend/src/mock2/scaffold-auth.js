@@ -29,6 +29,7 @@ const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 export const AUTH_WIRING_TARGETS = Object.freeze([
   'src/app.ts', 'src/server.ts',
   'public/admin.html', 'public/admin.js', 'public/profile.html',
+  'public/login.html',
 ]);
 
 // componentWiresBootstrap — does this component provide the forced first-admin
@@ -668,6 +669,174 @@ function profileHtml() {
 `;
 }
 
+// public/login.html — the split sign-in page: a 2/3 brand banner beside a 1/3
+// form column (stacked on small screens). LAYOUT ONLY: every element id, form,
+// and the /login.js script are exactly the component's contract — login.js is
+// untouched and keeps driving the bootstrap/login/setup flows. Colors ride the
+// design tokens (/design.css) with tasteful dark fallbacks for projects whose
+// design isn't extracted yet.
+function loginHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign in</title>
+  <link rel="stylesheet" href="/design.css">
+  <style>
+    :root {
+      --bg: var(--app-bg, #0f1115); --card: var(--app-surface, #1a1d24);
+      --fg: var(--app-text, #e6e8ec); --muted: var(--app-muted, #9aa1ad);
+      --accent: var(--app-primary, #4f7cff); --accent-2: var(--app-accent, #7c5cff);
+      --border: var(--app-border, #2a2e38); --err: var(--app-danger, #ff6b6b);
+      --radius: var(--app-radius-lg, 12px);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 var(--app-font, system-ui, -apple-system, Segoe UI, Roboto, sans-serif);
+    }
+    .split { display: grid; grid-template-columns: 1fr; min-height: 100vh; }
+    @media (min-width: 900px) { .split { grid-template-columns: 2fr 1fr; } }
+
+    /* ---- banner (2/3) ---- */
+    .banner {
+      position: relative; overflow: hidden; display: flex; flex-direction: column;
+      justify-content: center; padding: 40px 32px; min-height: 160px; color: #fff;
+      background: var(--accent);
+      background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 55%, var(--accent-2)) 55%, var(--accent-2) 100%);
+    }
+    @media (min-width: 900px) { .banner { padding: 64px; } }
+    .banner::before, .banner::after {
+      content: ""; position: absolute; border-radius: 50%;
+      background: rgba(255, 255, 255, .08); pointer-events: none;
+    }
+    .banner::before { width: 420px; height: 420px; right: -120px; top: -140px; }
+    .banner::after { width: 280px; height: 280px; left: -90px; bottom: -110px; }
+    .banner .logo { font-size: 34px; margin-bottom: 14px; }
+    .banner h1 { margin: 0 0 8px; font-size: clamp(26px, 4vw, 40px); letter-spacing: -.02em; }
+    .banner p { margin: 0; max-width: 34rem; font-size: 15.5px; opacity: .9; }
+    .banner .foot { position: absolute; bottom: 18px; left: 32px; font-size: 12px; opacity: .65; }
+    @media (min-width: 900px) { .banner .foot { left: 64px; } }
+
+    /* ---- form column (1/3) ---- */
+    .pane { display: flex; align-items: center; justify-content: center; padding: 28px 20px; }
+    .login-wrap { width: 100%; max-width: 380px; }
+    .login-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 28px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 18px; }
+    .logo { color: var(--accent); font-size: 20px; }
+    h2 { margin: 0 0 6px; font-size: 20px; }
+    .muted { color: var(--muted); margin: 0 0 18px; font-size: 14px; }
+    .field { display: block; margin-bottom: 16px; }
+    .field > span { display: block; margin-bottom: 6px; font-size: 13px; color: var(--muted); }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 8px; min-height: 44px;
+      border: 1px solid var(--border); background: color-mix(in srgb, var(--card) 70%, var(--bg)); color: var(--fg); font: inherit;
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .field small { display: block; margin-top: 6px; }
+    .btn {
+      width: 100%; padding: 11px 14px; border: 0; border-radius: 8px; min-height: 44px;
+      background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.05); }
+    .form-msg { color: var(--err); min-height: 1.2em; margin: 12px 0 0; font-size: 14px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="split">
+  <aside class="banner">
+    <span class="logo" aria-hidden="true">◆</span>
+    <h1>Welcome</h1>
+    <p>Sign in to continue to your application. Your account, role, and permissions
+    are managed by your administrator.</p>
+    <span class="foot">Secured sign-in · sessions expire automatically</span>
+  </aside>
+  <main class="pane">
+  <div class="login-wrap">
+    <section class="panel login-card">
+      <div class="brand login-brand">
+        <span class="logo">◆</span>
+        <span>Sign in</span>
+      </div>
+
+      <!-- Loading state while we ask the server which flow to show. -->
+      <div id="login-loading">
+        <h2>Sign in</h2>
+        <p class="muted">Loading…</p>
+      </div>
+
+      <!-- First-run: no superadmin exists yet. Create one. -->
+      <form id="form-bootstrap" hidden autocomplete="off">
+        <h2>Create the first administrator</h2>
+        <p class="muted">
+          No account exists yet. Create the superadmin to finish setting up the app.
+        </p>
+        <label class="field">
+          <span>Email</span>
+          <input id="bootstrap-email" type="email" required autocomplete="username">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="bootstrap-password" type="password" required minlength="12"
+                 autocomplete="new-password">
+          <small class="muted">At least 12 characters.</small>
+        </label>
+        <button class="btn login-btn" type="submit">Create administrator</button>
+        <p class="form-msg" id="bootstrap-msg" role="alert"></p>
+      </form>
+
+      <!-- Normal sign-in. -->
+      <form id="form-login" hidden autocomplete="off">
+        <h2>Sign in</h2>
+        <p class="muted">Use your account email and password (or your enterprise directory account when configured).</p>
+        <label class="field">
+          <span>Email</span>
+          <input id="login-email" type="email" required autocomplete="username">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="login-password" type="password" required autocomplete="current-password">
+        </label>
+        <button class="btn login-btn" type="submit">Sign in</button>
+        <p class="form-msg" id="login-msg" role="alert"></p>
+      </form>
+
+      <!-- First-time password setup (server returned PASSWORD_SETUP_REQUIRED). -->
+      <form id="form-setup" hidden autocomplete="off">
+        <h2>Set your password</h2>
+        <p class="muted">
+          This account needs a password before you can sign in. Choose one now.
+        </p>
+        <label class="field">
+          <span>Email</span>
+          <input id="setup-email" type="email" required autocomplete="username" readonly>
+        </label>
+        <label class="field">
+          <span>New password</span>
+          <input id="setup-password" type="password" required minlength="12"
+                 autocomplete="new-password">
+          <small class="muted">At least 12 characters.</small>
+        </label>
+        <button class="btn login-btn" type="submit">Set password &amp; sign in</button>
+        <p class="form-msg" id="setup-msg" role="alert"></p>
+      </form>
+    </section>
+  </div>
+  </main>
+</div>
+
+  <script src="/login.js"></script>
+</body>
+</html>
+`;
+}
+
 // The wired file set (path → content). PURE.
 export function buildAuthWiredFiles() {
   return [
@@ -676,6 +845,7 @@ export function buildAuthWiredFiles() {
     { path: 'public/admin.html', content: adminHtml() },
     { path: 'public/admin.js', content: adminJs() },
     { path: 'public/profile.html', content: profileHtml() },
+    { path: 'public/login.html', content: loginHtml() },
   ];
 }
 
@@ -696,6 +866,11 @@ const WIRED_HISTORY = new Map([
   ['src/server.ts', [
     '070d8a86bed4239d087bf461ef9083acaca7c856188b18311f3560380d48919f', // v1-v2: pre listen-retry
     '23ee2276133346daf264ddae596d887f4a53ab464fb0597eb770c16005de22c5', // v3: EADDRINUSE listen-retry
+  ]],
+  ['public/login.html', [
+    // The component-shipped centered-card sign-in page (installer-written, no
+    // human edits) — safe to upgrade to the wired split-layout page below.
+    '7ca8c72fafbcbd8ef3995ce4da1e480bbf7fc5d1f2deae52c6a463f8ea542a33',
   ]],
 ]);
 

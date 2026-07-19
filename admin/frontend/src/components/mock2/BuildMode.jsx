@@ -28,6 +28,7 @@ export default function BuildMode({
   const { toast } = useToast();
   const [cycle, setCycle] = useState(null);
   const [job, setJob] = useState(null);
+  const [typical, setTypical] = useState(null); // { p50, p80, n } wall-clock band
   const [busy, setBusy] = useState(false);
   const lastBuiltCycleId = useRef(null);
   const lastTerminalKey = useRef(null);
@@ -39,6 +40,7 @@ export default function BuildMode({
       const r = await api.mock2GetLatestCycle(projectId);
       setCycle(r.cycle || null);
       setJob(r.job || null);
+      setTypical(r.typical_duration || null);
     } catch (err) {
       if (!(err instanceof ApiError)) console.error('load cycle failed:', err);
     }
@@ -191,6 +193,7 @@ export default function BuildMode({
           project={project}
           cycle={cycle}
           job={job}
+          typical={typical}
           busy={busy}
           onRetry={retry}
           onRetryDeploy={retryDeploy}

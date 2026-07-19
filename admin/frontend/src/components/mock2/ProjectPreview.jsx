@@ -85,7 +85,7 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
 // answer its port?) and stays disabled, pulsing "Updating…", through the
 // deploy window — where a click used to serve the placeholder, then a
 // connection error, then finally the app. Solid "Open app" only when live.
-export function LiveAppBar({ url, projectId }) {
+export function LiveAppBar({ url, projectId, probeKey = '' }) {
   const [live, setLive] = useState(null); // null = unknown (first probe pending)
   useEffect(() => {
     if (!projectId || !url) return undefined;
@@ -96,13 +96,16 @@ export function LiveAppBar({ url, projectId }) {
       try { isLive = !!(await api.mock2AppLive(projectId)).live; } catch { isLive = false; }
       if (stopped) return;
       setLive(isLive);
-      // Fast poll while updating (flip to solid the moment it serves); slow
+      // Fast poll while updating (flip to solid the moment it serves); gentle
       // heartbeat once live so a later crash flips the button back honestly.
-      timer = setTimeout(probe, isLive ? 20000 : 4000);
+      timer = setTimeout(probe, isLive ? 12000 : 3000);
     };
     probe();
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [projectId, url]);
+    // probeKey re-probes IMMEDIATELY on build/deploy transitions (cycle status,
+    // deploy sub-state, base-app deploy) — the button updates the moment a
+    // deploy lands instead of waiting out the poll interval or a page refresh.
+  }, [projectId, url, probeKey]);
 
   const ready = live === true;
   return (

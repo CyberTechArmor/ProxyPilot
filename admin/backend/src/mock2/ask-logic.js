@@ -3,12 +3,15 @@
 // Incus.
 //
 // The ASK lane is the build chat's conversational mode: a question about the
-// codebase, or a bounded task ("run the tests", "curl the health endpoint with
-// the stored credentials") answered by a tool-loop over the SAME fenced
-// container the builds use — WITHOUT the build ceremony. No audit gate, no
-// checkpoint, no deploy, no change record: the ask must not modify the project,
-// so there is nothing to record. Code changes are explicitly out of scope — the
-// answer directs the user to run a build for those.
+// codebase, or a bounded OPERATIONAL task ("run the tests", "add a user to the
+// database", "curl the health endpoint with the stored credentials") answered
+// by a tool-loop over the SAME fenced container the builds use — WITHOUT the
+// build ceremony. No audit gate, no checkpoint, no deploy, no change record:
+// the ask must not modify the CODE (files, packages, schema, git), so there is
+// nothing to record. Runtime actions against the RUNNING app and its data ARE
+// in scope when the user asks for them — that's the difference between
+// operating the app (ask) and changing the app (build). Code changes are
+// explicitly out of scope — the answer directs the user to run a build.
 //
 // Cost containment mirrors the consult lane: bounded turns, bounded output,
 // spend recorded to the quota ledger (cycle-less entries).
@@ -26,12 +29,13 @@ export function estimateAskTokens() {
 }
 
 // The ask lane's tools — the runner's read/exec/inspect subset, NO write_file /
-// materialize_component / run_gates. The lane is read-and-run, never edit.
+// materialize_component / run_gates. The lane operates the app; it never edits
+// the code.
 export const ASK_TOOLS = Object.freeze([
   {
     name: 'exec_in_container',
     description:
-      'Run a non-interactive shell command inside the project container (network-fenced: egress only via the filtering proxy). Use it to run tests, hit the app\'s own API (e.g. curl localhost with credentials from .env), inspect processes/logs, or query the project database. Returns combined stdout/stderr and the exit code.',
+      'Run a non-interactive shell command inside the project container (network-fenced: egress only via the filtering proxy). Use it to run tests, hit the app\'s own API (e.g. curl localhost with credentials from .env), inspect processes/logs, query the project database, or perform an operational action the user asked for (e.g. insert a row, restart the app service). Returns combined stdout/stderr and the exit code.',
     input_schema: {
       type: 'object',
       properties: {
@@ -101,10 +105,12 @@ export function webSearchServerTools({ provider, env = {}, flag = WEB_SEARCH_FLA
 
 export function buildAskSystemPrompt({ projectName = 'this project', appDir = '/srv/app', webPort = 3000, webSearch = false, installedComponentsSection = '' } = {}) {
   return `You are the ProxyPilot project assistant for "${projectName}" — the build chat's
-ASK mode. You answer questions about the project's codebase and run bounded,
-non-destructive tasks on request: run the test suite, exercise an API endpoint
-with the credentials already configured in the container, inspect logs or the
-database, explain how something works.
+ASK mode. You answer questions about the project's codebase and run bounded
+tasks on request: run the test suite, exercise an API endpoint with the
+credentials already configured in the container, inspect logs or the database,
+explain how something works — and perform OPERATIONAL actions the user asks
+for against the running app and its data (e.g. add a user to the database,
+call an admin API, re-run a seed script, restart the app service).
 
 You are working against the project's fenced container. The working tree at
 ${appDir} is a TypeScript / Express / Drizzle app (app under src/, migrations in
@@ -114,13 +120,17 @@ Credentials/config live in .env inside the container — use them in-place (e.g.
 back into the chat. Refer to secrets by key name only.
 
 HARD RULES — this is not a build:
-- Do NOT modify the project: no editing files, no installing packages, no
-  migrations, no git commands that change state, no deleting or truncating
-  data. Run read-only or side-effect-free commands (tests are fine; they run
-  against the fenced container).
-- If the user asks for a code or config CHANGE, briefly say what the change
-  would involve and tell them to run it as a build ("Run a cycle") — the build
-  lane audits, gates, and checkpoints changes; this lane must not.
+- Do NOT modify the CODE: no editing files, no installing packages, no schema
+  migrations, no git commands that change state. If the user asks for a code
+  or config CHANGE, briefly say what it would involve and tell them to run it
+  as a Quick update or build — the build lane audits, gates, and checkpoints
+  changes; this lane must not.
+- Operational data changes are allowed ONLY when the user explicitly asked for
+  them, and prefer the app's own API over raw SQL (the API enforces the app's
+  validation and hashing — e.g. create a user through the admin endpoint, not
+  an INSERT, when one exists). Say exactly what you changed.
+- NEVER destroy data in bulk: no DROP/TRUNCATE, no DELETE without a precise
+  WHERE clause, nothing irreversible the user didn't spell out.
 - Report command results honestly (exit codes, failures included). Never
   fabricate output.
 ${webSearch
@@ -139,11 +149,19 @@ export function buildAskTask(question) {
 }
 
 // Commands the ask lane refuses to run even if asked — the cheap, obvious
-// mutation surface (the prompt is the real guard; this backstops the worst).
-const FORBIDDEN_RE = /\b(rm\s+-rf?|git\s+(push|commit|reset|checkout|clean)|npm\s+(install|uninstall|update)|npx\s+drizzle|drop\s+table|truncate\s+table|delete\s+from|mkfs|shutdown|reboot)\b/i;
+// CODE-mutation and bulk-destruction surface (the prompt is the real guard;
+// this backstops the worst). Operational data changes (INSERT/UPDATE, a
+// targeted DELETE with a WHERE clause, service restarts) are deliberately NOT
+// here — the lane may operate the running app on request; it may not change
+// the code or destroy data wholesale.
+const FORBIDDEN_RE = /\b(rm\s+-rf?|git\s+(push|commit|reset|checkout|clean)|npm\s+(install|uninstall|update)|npx\s+drizzle|drop\s+(table|database|schema)|truncate\s+table|mkfs|shutdown|reboot)\b/i;
+// A DELETE with no WHERE clause wipes the table — refuse it outright (a
+// scoped, user-requested delete passes; the prompt requires the explicit ask).
+const BULK_DELETE_RE = /\bdelete\s+from\s+\S+\s*(?:;|"|'|$)/i;
 export function askCommandAllowed(command) {
   const c = String(command || '');
   if (!c.trim()) return { ok: false, reason: 'empty command' };
-  if (FORBIDDEN_RE.test(c)) return { ok: false, reason: 'this command can modify the project or its data — the ask lane is read-and-run only. Run it as a build instead.' };
+  if (FORBIDDEN_RE.test(c)) return { ok: false, reason: 'this command changes the project code or destroys data in bulk — run it as a build instead.' };
+  if (BULK_DELETE_RE.test(c) && !/\bwhere\b/i.test(c)) return { ok: false, reason: 'a DELETE without a WHERE clause wipes the table — scope it to specific rows, or run it as a build.' };
   return { ok: true };
 }

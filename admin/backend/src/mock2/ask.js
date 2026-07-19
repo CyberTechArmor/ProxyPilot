@@ -1,12 +1,14 @@
 // Mock2 ASK lane — the build chat's conversational mode (host/model
 // orchestration half; the pure decisions live in ask-logic.js).
 //
-// An ask is a question about the codebase or a bounded read-and-run task ("run
-// the tests", "curl the API with the stored credentials") answered by a small
-// tool loop over the SAME fenced container the builds use — with none of the
-// build ceremony: no audit gate, no checkpoint, no deploy, no change record.
-// The lane must not modify the project (read/exec tools only, plus a command
-// blocklist backstop) — a requested change is redirected to a build cycle.
+// An ask is a question about the codebase or a bounded operational task ("run
+// the tests", "add a user to the database", "curl the API with the stored
+// credentials") answered by a small tool loop over the SAME fenced container
+// the builds use — with none of the build ceremony: no audit gate, no
+// checkpoint, no deploy, no change record. The lane must not modify the CODE
+// (read/exec tools only, plus a command blocklist backstop) — a requested code
+// change is redirected to a build cycle; user-requested runtime actions
+// against the app and its data are in scope.
 //
 // It mirrors audit.js's shape: the 202+poll job map, the build_runner slot via
 // buildRunnerReady (the only slot with tool-capable models), quota check before

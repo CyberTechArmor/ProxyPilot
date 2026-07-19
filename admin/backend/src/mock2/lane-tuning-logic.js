@@ -21,7 +21,9 @@ import { ROUTING_EFFORTS } from './routing-logic.js';
 export const TUNING_LANES = Object.freeze(['build', 'mvp', 'audit', 'chat', 'mockup', 'ask']);
 export const TUNING_LANE_LABELS = Object.freeze({
   build: 'Full build',
-  mvp: 'MVP build',
+  // One tuning entry governs BOTH fast modes (runner.js applies the 'mvp'
+  // entry to MVP and Quick-update cycles alike).
+  mvp: 'MVP / Quick builds',
   audit: 'Build audit',
   chat: 'Design chat',
   mockup: 'Mockup render',

@@ -34,6 +34,17 @@ export const TOKEN_CLASSES = Object.freeze(['input', 'output', 'cache_read', 'ca
 // the ledger stores input_tokens; the SDK returns cache_read_input_tokens). cost_cents,
 // when not supplied, is computed via the untouched cost function against `price`.
 export function canonicalUsage(raw = {}, { price = null, schemaVersion = USAGE_SCHEMA_VERSION } = {}) {
+  // A publicCycleShape row nests the canonical record under `usage` (its top
+  // level only carries the legacy used_tokens figure) — unwrap it, or a
+  // request-log roll-up over SHAPED cycles reads zeros while the ledger and
+  // the per-turn events show the real spend (the "$0.00 in the exported log"
+  // bug). Only unwrap when the top level has no token fields of its own.
+  if (
+    raw && typeof raw === 'object' && raw.usage && typeof raw.usage === 'object'
+    && raw.input == null && raw.inputTokens == null && raw.input_tokens == null
+  ) {
+    return canonicalUsage(raw.usage, { price, schemaVersion: raw.usage.schema_version ?? schemaVersion });
+  }
   const n = (...keys) => {
     for (const k of keys) {
       const v = raw?.[k];
@@ -45,7 +56,11 @@ export function canonicalUsage(raw = {}, { price = null, schemaVersion = USAGE_S
   const output = n('output', 'outputTokens', 'output_tokens');
   const cache_read = n('cache_read', 'cacheReadTokens', 'cacheReadInputTokens', 'cache_read_tokens', 'cache_read_input_tokens');
   const cache_write = n('cache_write', 'cacheWriteTokens', 'cacheCreationInputTokens', 'cache_write_tokens', 'cache_creation_input_tokens');
-  let cost_cents = raw?.cost_cents != null ? Number(raw.cost_cents) || 0 : null;
+  // Cost preference: an explicit cost_cents, else the cycle row's accumulated
+  // used_cost_cents (the ledger-accurate figure), else compute from tokens.
+  let cost_cents = raw?.cost_cents != null ? Number(raw.cost_cents) || 0
+    : raw?.used_cost_cents != null ? Number(raw.used_cost_cents) || 0
+      : null;
   if (cost_cents == null) {
     cost_cents = usageCostCents({ input, output, cache_read, cache_write }, price);
   }

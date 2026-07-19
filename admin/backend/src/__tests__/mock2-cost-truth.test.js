@@ -71,6 +71,29 @@ test('sumUsage: cumulative roll-up; a legacy row makes the sum legacy-basis', ()
   assert.equal(mixed.schema_version, 2); // min → non-comparable
 });
 
+
+test('canonicalUsage: unwraps a publicCycleShape row (nested usage) — the $0.00-export bug', () => {
+  // The request-log routes pass SHAPED cycles: tokens nested under `usage`,
+  // top level only the legacy used_tokens figure. The roll-up must read the
+  // real numbers, not zeros.
+  const shaped = {
+    id: 322, status: 'succeeded', used_tokens: 21282, used_cost_cents: 139,
+    usage: { input: 46, output: 21236, cache_read: 500000, cache_write: 60000, cost_cents: 139, schema_version: 3, comparable: true },
+  };
+  const u = canonicalUsage(shaped);
+  assert.equal(u.input, 46);
+  assert.equal(u.output, 21236);
+  assert.equal(u.cost_cents, 139);
+  assert.equal(u.schema_version, 3);
+  // A raw cycle ROW (no cost_cents column) uses the accumulated used_cost_cents.
+  const rawRow = { input_tokens: 46, output_tokens: 21236, cache_read_tokens: 1, cache_write_tokens: 2, used_cost_cents: 139, usage_schema_version: 3 };
+  assert.equal(canonicalUsage(rawRow).cost_cents, 139);
+  // And a full request log over shaped cycles rolls up non-zero.
+  const log = buildRequestLog({ request: { id: 68, project_id: 25, status: 'succeeded' }, cycles: [shaped] });
+  assert.equal(log.cost.cents, 139);
+  assert.ok(log.segments[0].cost_cents === 139);
+});
+
 // ---- Part 2: dollar budget ceiling ----
 
 test('budget ceiling: token envelope migrates to dollars; trips on SPEND not token mix', () => {

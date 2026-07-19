@@ -38,12 +38,12 @@ test('quick mode: runs NO gate battery (the deploy pipeline is the backstop)', (
   assert.deepEqual(filterGatesForBuildMode(gates, 'quick'), []);
 });
 
-test('quickRoutingDecision: fast model at MEDIUM effort, env-overridable', () => {
+test('quickRoutingDecision: fast model at HIGH effort (quality default), env-overridable', () => {
   const d = quickRoutingDecision({}, 'claude-opus-4-8');
   assert.equal(d.model, DEFAULT_FAST_MODEL);
-  assert.equal(d.effort, 'medium');
+  assert.equal(d.effort, 'high');
   assert.equal(d.build_mode, 'quick');
-  assert.equal(quickRoutingDecision({ MOCK2_QUICK_EFFORT: 'high' }, '').effort, 'high');
+  assert.equal(quickRoutingDecision({ MOCK2_QUICK_EFFORT: 'medium' }, '').effort, 'medium');
   assert.equal(quickRoutingDecision({ MOCK2_FAST_MODEL: 'off' }, 'slot-model').model, 'slot-model');
 });
 
@@ -116,20 +116,20 @@ test('decideRouting: escalation still wins over the fast model', () => {
 
 // ---- MVP routing decision ----
 
-test('mvpRoutingDecision: fast model at low effort, stamped as mvp', () => {
+test('mvpRoutingDecision: fast model at HIGH effort (quality default), stamped as mvp', () => {
   const d = mvpRoutingDecision({}, 'claude-opus-4-8');
   assert.equal(d.model, DEFAULT_FAST_MODEL);
-  assert.equal(d.effort, 'low');
+  assert.equal(d.effort, 'high');
   assert.equal(d.rung, 0);
   assert.equal(d.build_mode, 'mvp');
 });
 
 test('mvpRoutingDecision: env overrides for model + effort; off falls back to the slot model', () => {
-  const d = mvpRoutingDecision({ MOCK2_MVP_EFFORT: 'high', MOCK2_FAST_MODEL: 'claude-haiku-4-5-20251001' }, 'slot');
+  const d = mvpRoutingDecision({ MOCK2_MVP_EFFORT: 'low', MOCK2_FAST_MODEL: 'claude-haiku-4-5-20251001' }, 'slot');
   assert.equal(d.model, 'claude-haiku-4-5-20251001');
-  assert.equal(d.effort, 'high');
+  assert.equal(d.effort, 'low');
   const off = mvpRoutingDecision({ MOCK2_FAST_MODEL: 'off' }, 'claude-opus-4-8');
   assert.equal(off.model, 'claude-opus-4-8');
   const bad = mvpRoutingDecision({ MOCK2_MVP_EFFORT: 'ultra' }, 'slot');
-  assert.equal(bad.effort, 'low');
+  assert.equal(bad.effort, 'high'); // invalid override → the quality default
 });

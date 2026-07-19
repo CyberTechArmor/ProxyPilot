@@ -296,7 +296,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
 
   const send = async () => {
     const text = message.trim();
-    if (!text) return;
+    if (!text || sendDisabled) return; // Ctrl+Enter must respect the same gate as the button
     setBusy(true);
     try {
       const res = await api.mock2SendChatMessage(projectId, text, mode, toWireImages(attach.images), mode === 'design' ? designDirection : null);
@@ -354,7 +354,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
-  const composerDisabled = busy || jobActive || !online || approved;
+  // Only SENDING is gated (project offline / a turn already running /
+  // design approved) — typing never is: draft the prompt while the project
+  // provisions or the model works, and press Send once it unlocks.
+  const sendDisabled = busy || jobActive || !online || approved;
 
   return (
     // Archived (Details tab): the card SIZES TO ITS CONTENT — the conversation
@@ -510,9 +513,8 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
                 ? (mode === 'plan' ? 'Think through what you want to build…' : 'Describe a screen, a change, or ask a question…')
-                : 'Project must be online to chat.'}
+                : 'Draft your prompt while the project comes online — Send unlocks when it’s ready.'}
               value={message}
-              disabled={composerDisabled}
               onChange={(e) => { setMessage(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
@@ -524,8 +526,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
             {/* Image attachments — paste/drop into the box above or pick with "+".
                 Design references and screenshots reach both the design partner
                 and the mockup render. */}
+            {/* Attaching is client-side (downscale + base64) — allowed while
+                drafting too; only blocked mid-send. */}
             <ImageAttachmentBar
-              images={attach.images} busy={attach.busy} disabled={composerDisabled}
+              images={attach.images} busy={attach.busy} disabled={busy}
               onPickFiles={attach.addFiles} onRemove={attach.remove}
             />
             <div className="flex items-center justify-between gap-2">
@@ -559,7 +563,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                 <Button
                   variant="outline"
                   className="h-11 sm:h-10 shrink-0"
-                  disabled={composerDisabled}
+                  disabled={sendDisabled}
                   title="Build the MVP — lock in the design and build it as fast MVP passes (screen by screen, or all at once); no rule interview, no gate battery"
                   onClick={() => setConfirmBuild(true)}
                 >
@@ -578,7 +582,12 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                 </Button>
               ) : null}
               <span className="text-[11px] text-muted-foreground hidden sm:block ml-auto">⌘/Ctrl+Enter to send</span>
-              <Button className="h-11 sm:h-10 ml-auto sm:ml-0" disabled={composerDisabled || !message.trim()} onClick={send}>
+              <Button
+                className="h-11 sm:h-10 ml-auto sm:ml-0"
+                disabled={sendDisabled || !message.trim()}
+                title={!online ? 'Sending unlocks when the project is online' : undefined}
+                onClick={send}
+              >
                 {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
                 Send
               </Button>

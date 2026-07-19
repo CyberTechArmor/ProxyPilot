@@ -182,8 +182,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const resumeMode = mode === 'build' && cycle?.status === 'awaiting_admin' && !needsFeedback;
   // Ask is deliberately NOT gated by the post-build rating (asking a question
   // shouldn't require rating the last build first) — but it does wait for a
-  // running build/ask (the lock serializes writers anyway).
-  const composerDisabled = mode === 'ask'
+  // running build/ask (the lock serializes writers anyway). Only SENDING is
+  // gated; typing never is — draft the next instruction while a build runs or
+  // the project comes online, and send when it unlocks.
+  const sendDisabled = mode === 'ask'
     ? (busy || askActive || active || !online)
     : (busy || (active && !resumeMode) || !online || needsFeedback);
 
@@ -200,7 +202,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setBusy(false); }
   };
-  const submitComposer = () => (mode === 'ask' ? startAsk() : resumeMode ? sendResume() : startBuild());
+  const submitComposer = () => {
+    if (sendDisabled) return; // Ctrl+Enter must respect the same gate as the buttons
+    return mode === 'ask' ? startAsk() : resumeMode ? sendResume() : startBuild();
+  };
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -252,16 +257,15 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
                 ? (mode === 'ask'
-                  ? (askActive ? 'Answering — one ask at a time…'
-                    : active ? 'A build is running — ask when it finishes…'
+                  ? (askActive ? 'Answering — draft your next question; ask when this one finishes…'
+                    : active ? 'A build is running — draft your question; ask when it finishes…'
                       : 'Ask about the codebase or a bounded task, e.g. “Why does login 403?” or “Run the test suite” — nothing is built or changed')
                   : (needsFeedback ? 'Rate the last build to continue…'
                     : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
-                      : active ? 'A build is running — wait for it to finish…'
+                      : active ? 'A build is running — draft the next change; send when it finishes…'
                         : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”'))
-                : 'Project must be online.'}
+                : 'Draft your instruction while the project comes online — sending unlocks when it’s ready.'}
               value={instruction}
-              disabled={composerDisabled}
               onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
@@ -274,7 +278,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 "+". Not offered on a resume (the resume message carries no images). */}
             {!resumeMode ? (
               <ImageAttachmentBar
-                images={attach.images} busy={attach.busy} disabled={composerDisabled}
+                images={attach.images} busy={attach.busy} disabled={busy}
                 onPickFiles={attach.addFiles} onRemove={attach.remove}
               />
             ) : null}
@@ -303,7 +307,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 <>
                   <Button
                     variant="outline" className="h-11 sm:h-10 ml-auto"
-                    disabled={composerDisabled || !instruction.trim()}
+                    disabled={sendDisabled || !instruction.trim()}
                     onClick={() => startBuild('mvp')}
                     title="Fast first version of a whole design: skips the rule interview and the spec/test gates"
                   >
@@ -311,7 +315,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                   </Button>
                   <Button
                     variant="outline" className="h-11 sm:h-10"
-                    disabled={composerDisabled || !instruction.trim()}
+                    disabled={sendDisabled || !instruction.trim()}
                     onClick={() => startBuild('full')}
                     title="The audited build: rule questions, per-rule tests, the whole gate battery"
                   >
@@ -321,7 +325,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               ) : null}
               <Button
                 className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`}
-                disabled={composerDisabled || (!resumeMode && !instruction.trim())}
+                disabled={sendDisabled || (!resumeMode && !instruction.trim())}
                 onClick={submitComposer}
                 title={mode === 'build' && !resumeMode ? 'One small scoped change — no gate battery, straight to deploy' : undefined}
               >

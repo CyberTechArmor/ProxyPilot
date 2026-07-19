@@ -411,7 +411,17 @@ screens you build — the app should look and navigate like the mockup.
 FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
 you do NOT implement in this cycle must be VISIBLY marked in the UI — a
 disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path.
+silently missing element, or a fake success path. STATES are conditions to
+HANDLE when they genuinely occur — NEVER fabricate an artificial state to
+satisfy a spec item (no fake spinners, invented delays, or placeholder loading
+UX for data that arrives at once).
+TIME HANDLING (binding): the SERVER is the time authority. Store and compute
+timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
+server-side; the BROWSER only CONVERTS for display with the user's own locale
+and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
+compute day boundaries from the client clock, and never compare client-local
+dates against server-UTC dates — that class of bug shifts punches/records
+across midnight.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -985,7 +995,17 @@ screens you build — the app should look and navigate like the mockup.
 FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
 you do NOT implement in this cycle must be VISIBLY marked in the UI — a
 disabled control with a small "Not built yet" badge — never a dead button, a
-silently missing element, or a fake success path.
+silently missing element, or a fake success path. STATES are conditions to
+HANDLE when they genuinely occur — NEVER fabricate an artificial state to
+satisfy a spec item (no fake spinners, invented delays, or placeholder loading
+UX for data that arrives at once).
+TIME HANDLING (binding): the SERVER is the time authority. Store and compute
+timestamps in UTC (ISO-8601 / timestamptz) and define day/period boundaries
+server-side; the BROWSER only CONVERTS for display with the user's own locale
+and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
+compute day boundaries from the client clock, and never compare client-local
+dates against server-UTC dates — that class of bug shifts punches/records
+across midnight.
 
 ## Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}

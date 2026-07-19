@@ -314,6 +314,50 @@ sync_mock2_infra() {
     ensure_mock2_infra "$deployed"
 }
 
+# retrofit_smoke_browser: make the Mock2 browser smoke connector RUNNABLE and
+# re-enable it. Historically SMOKE_BROWSER_ENABLED got set to 0/false because
+# the connector could never run (playwright wasn't a dependency and no Chromium
+# was installed) and enabled-but-unrunnable fails builds. This version ships
+# playwright-core in admin/backend/package.json and Chromium in the Docker
+# image; host (non-Docker) deployments get Chromium via apt here. Idempotent,
+# best-effort — the dashboard toggle (Admin queue → Browser verification)
+# overrides the env value either way.
+retrofit_smoke_browser() {
+    local deployed; deployed="$(resolve_env_path)"
+    [ -n "$deployed" ] || return 0
+
+    # Host (non-Docker) deployments run playwright on the host — install a
+    # system Chromium if none is present. Docker deployments (compose file next
+    # to the .env — same heuristic as ensure_mock2_infra; IS_DOCKER_DEPLOY is
+    # computed later in the script) get Chromium from the image rebuild
+    # (admin/Dockerfile apk list) and skip the host install.
+    local compose_probe; compose_probe="$(dirname "$deployed")/docker-compose.yml"
+    if [ ! -f "$compose_probe" ]; then
+        if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null; then
+            if command -v apt-get &>/dev/null; then
+                log "Installing Chromium for the Mock2 browser verification check…"
+                if apt-get install -y chromium >>"$LOG_FILE" 2>&1 || apt-get install -y chromium-browser >>"$LOG_FILE" 2>&1; then
+                    log "${GREEN}Chromium installed (browser verification can run).${NC}"
+                else
+                    log "${YELLOW}Could not install Chromium automatically — browser verification will report 'not ready' until you install it (apt-get install chromium) or set SMOKE_BROWSER_EXECUTABLE.${NC}"
+                fi
+            fi
+        fi
+    fi
+
+    # Re-enable the connector in .env if a previous install turned it off to
+    # avoid unrunnable-check failures. The operator can turn it back off from
+    # the dashboard (which wins over this value) or by editing .env again.
+    local current
+    current="$(grep -E '^[[:space:]]*SMOKE_BROWSER_ENABLED=' "$deployed" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+    case "$current" in
+        0|false|no|off)
+            set_env_key "SMOKE_BROWSER_ENABLED" "true"
+            log "${GREEN}Browser verification re-enabled (SMOKE_BROWSER_ENABLED=true) — it is now installable and runnable. Toggle it anytime under Admin queue → Browser verification.${NC}"
+            ;;
+    esac
+}
+
 # --enable-mock2: opt an upgrading host into the Mock2 dev/build module.
 # Runs after sync_env_keys so the key exists (as false) before we flip it.
 maybe_enable_mock2() {
@@ -725,6 +769,13 @@ maybe_enable_mock2
 # Keep an already-enabled host's Mock2 host-side infra (Caddy mount + squid cleanup) in
 # sync on every update, so it self-heals without needing --enable-mock2.
 sync_mock2_infra
+# Browser smoke connector: it used to be unrunnable (playwright was never a
+# dependency and no Chromium was installed), so installs disabled it in .env to
+# stop builds failing "unavailable". This version bundles playwright-core (npm
+# dep) + Chromium (Docker image apk / host apt below), so RE-ENABLE it — the
+# dashboard toggle (Admin queue → Browser verification) is the operator's
+# switch from here on and overrides the env either way.
+retrofit_smoke_browser
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

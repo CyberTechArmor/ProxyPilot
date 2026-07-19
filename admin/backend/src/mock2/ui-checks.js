@@ -14,19 +14,50 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { existsSync } from 'node:fs';
 import { stepShape } from './ui-check-logic.js';
 
 const NAV_TIMEOUT_MS = 15000;
 const STEP_TIMEOUT_MS = 5000;
 
-// Chromium launch options. SMOKE_BROWSER_EXECUTABLE lets an operator point at a
-// system/pre-provisioned Chromium (e.g. /opt/pw-browsers/chromium or
-// /usr/bin/chromium) instead of the revision the installed playwright package
-// would download — playwright refuses to launch when its pinned revision is
-// absent even though a compatible binary exists.
-export function launchOptions(env = process.env) {
+// Common system-Chromium locations, probed when SMOKE_BROWSER_EXECUTABLE is
+// not set. update.sh/install.sh install `chromium` via apt, which lands at one
+// of these — so the connector works out of the box with playwright-core (which
+// ships NO bundled browser).
+const CHROMIUM_CANDIDATES = Object.freeze([
+  '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/snap/bin/chromium', '/opt/pw-browsers/chromium',
+]);
+
+// The Chromium executable the connector would launch: the operator's explicit
+// SMOKE_BROWSER_EXECUTABLE, else the first system candidate present, else null
+// (a full `playwright` install can still use its own bundled revision).
+export function resolveBrowserExecutable(env = process.env) {
   const exe = String(env.SMOKE_BROWSER_EXECUTABLE || '').trim();
+  if (exe) return exe;
+  for (const c of CHROMIUM_CANDIDATES) {
+    try { if (existsSync(c)) return c; } catch { /* keep probing */ }
+  }
+  return null;
+}
+
+// Chromium launch options. SMOKE_BROWSER_EXECUTABLE (or an auto-detected
+// system Chromium) points playwright at a real binary — playwright-core ships
+// no browser, and full playwright refuses to launch when its pinned revision
+// is absent even though a compatible binary exists.
+export function launchOptions(env = process.env) {
+  const exe = resolveBrowserExecutable(env);
   return { headless: true, ...(exe ? { executablePath: exe } : {}) };
+}
+
+// Load the Playwright chromium driver: playwright-core first (a plain npm dep,
+// no browser download — we launch the system Chromium above), else the full
+// playwright package (its bundled browser also works). Returns null when
+// neither is installed; callers report `unavailable` loudly.
+export async function loadChromium() {
+  try { return (await import('playwright-core')).chromium; } catch { /* try full */ }
+  try { return (await import('playwright')).chromium; } catch { return null; }
 }
 
 // Run one step against a page. Returns { ok, detail } and never throws.
@@ -103,11 +134,9 @@ async function loginAs(page, baseUrl, login, role) {
 // Console errors ('console' type error + 'pageerror') collected on every page a
 // check visits fail that check. Never throws.
 export async function runUiChecks({ baseUrl, spec, checks }) {
-  let chromium;
-  try {
-    ({ chromium } = await import('playwright'));
-  } catch (err) {
-    return { ok: false, unavailable: true, results: [], detail: `ui-checks: playwright not installed (${err?.message || err}) — install it in admin/backend or disable the browser connector explicitly` };
+  const chromium = await loadChromium();
+  if (!chromium) {
+    return { ok: false, unavailable: true, results: [], detail: 'ui-checks: playwright-core is not installed (npm install in admin/backend, or rerun update.sh) — or disable the browser connector explicitly' };
   }
   let browser = null;
   const results = [];

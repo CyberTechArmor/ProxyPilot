@@ -1371,4 +1371,30 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Feature checklist (per-screen functionality tracking): one row per
+    // inventory action/state under a screen. Seeded at design approval;
+    // 'pending' until a build explicitly targeting the item succeeds (the
+    // request_id stamp) or an editor marks it manually. Drives the Screens
+    // panel's is/isn't-done checklist + "build selected next".
+    version: 536,
+    name: 'mock2_screen_items',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_screen_items (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id  INTEGER NOT NULL,
+          screen_id   INTEGER NOT NULL,
+          name        TEXT NOT NULL,
+          kind        TEXT NOT NULL DEFAULT 'action',
+          status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'built')),
+          request_id  INTEGER,
+          created_at  TEXT NOT NULL,
+          updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_screen_items_project ON mock2_screen_items (project_id);
+        CREATE INDEX IF NOT EXISTS idx_mock2_screen_items_screen ON mock2_screen_items (screen_id);
+      `);
+    },
+  },
 ];

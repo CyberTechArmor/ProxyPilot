@@ -77,3 +77,42 @@ test('production check instruction: readiness only, full battery, no features', 
   assert.match(PRODUCTION_CHECK_INSTRUCTION, /acceptance/);
   assert.match(PRODUCTION_CHECK_INSTRUCTION, /first-admin bootstrap/);
 });
+
+// ---- feature checklist (migration 536) pure layer ----
+
+test('screenItemsFromInventory: actions + states per screen, tolerant of shapes', async () => {
+  const { screenItemsFromInventory } = await import('../mock2/screen-plan-logic.js');
+  const inv = {
+    screens: [
+      { name: 'Home', actions: ['Clock in', 'Clock out', { name: 'Add note' }], states: ['On the clock', ''] },
+      { name: 'Timesheet', actions: [], states: null },
+      { name: '', actions: ['orphan'] },
+    ],
+  };
+  const items = screenItemsFromInventory(inv);
+  assert.deepEqual(items.map((i) => `${i.screen_name}:${i.kind}:${i.name}`), [
+    'Home:action:Clock in', 'Home:action:Clock out', 'Home:action:Add note', 'Home:state:On the clock',
+  ]);
+  assert.deepEqual(screenItemsFromInventory(null), []);
+});
+
+test('buildItemsBuildInstruction: grouped, binding scope, mockup-faithful, honesty rule', async () => {
+  const { buildItemsBuildInstruction } = await import('../mock2/screen-plan-logic.js');
+  const s = buildItemsBuildInstruction([
+    { screen: 'Home', items: ['Clock in', 'Add note'] },
+    { screen: 'Timesheet', items: ['Export CSV'] },
+  ]);
+  assert.match(s, /Home: Clock in; Add note/);
+  assert.match(s, /Timesheet: Export CSV/);
+  assert.match(s, /Scope is BINDING/);
+  assert.match(s, /state\/mockups\/current\.html/);
+  assert.match(s, /Not built yet/);
+});
+
+test('screen + initial-build instructions carry the mockup as the visual contract', async () => {
+  const { buildScreenBuildInstruction } = await import('../mock2/screen-plan-logic.js');
+  const s = buildScreenBuildInstruction({ name: 'History' });
+  assert.match(s, /state\/mockups\/current\.html/);
+  assert.match(s, /bottom tab bar/);
+  assert.match(s, /Not built yet/);
+});

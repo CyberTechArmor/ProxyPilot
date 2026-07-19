@@ -123,7 +123,7 @@ import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, 
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
-import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue } from './screen-plan.js';
+import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, listScreenItems, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
 import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
@@ -3076,8 +3076,43 @@ export function createMock2Router() {
   // ============================================================
 
   router.get('/projects/:id/screens', requireMock2Role('viewer'), (req, res) => {
+    // Self-heal first: a succeeded initial build settles still-'planned' rows
+    // even if the request-close hook hiccuped (the "0/N built over a working
+    // app" bug). Best-effort — the list renders regardless.
+    try { reconcileScreenPlan(req.mock2Project.id); } catch { /* cosmetic */ }
     const rows = listScreenPlan(req.mock2Project.id);
-    res.json({ screens: rows.map(publicScreenShape), counts: screenPlanCounts(rows) });
+    // The per-screen feature checklist (is/isn't done, migration 536).
+    let items = [];
+    try {
+      items = listScreenItems(req.mock2Project.id).map((r) => ({
+        id: r.id, screen_id: r.screen_id, name: r.name, kind: r.kind,
+        status: r.status, building: !!r.request_id,
+      }));
+    } catch { /* pre-migration read */ }
+    res.json({ screens: rows.map(publicScreenShape), counts: screenPlanCounts(rows), items });
+  });
+
+  // Manual is/isn't-done toggle on a checklist item (editor).
+  router.post('/projects/:id/screens/items/:itemId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const parsed = z.object({ status: z.enum(['pending', 'built']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'status must be pending or built' });
+    const r = setScreenItemStatus(req.mock2Project.id, req.params.itemId, parsed.data.status);
+    if (!r.ok) return res.status(409).json({ error: r.error });
+    logAudit(req.user.id, 'MOCK2_SCREEN_ITEM_SET', 'mock2_project', req.mock2Project.id,
+      { item_id: Number(req.params.itemId), status: parsed.data.status }, req.ip);
+    res.json({ item: { id: r.row.id, screen_id: r.row.screen_id, name: r.row.name, kind: r.row.kind, status: r.row.status, building: !!r.row.request_id } });
+  });
+
+  // "Finish these next": one scoped build over the selected pending checklist
+  // items (omit ids = all pending). Success settles exactly those items.
+  router.post('/projects/:id/screens/build-items', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const parsed = z.object({ ids: z.array(z.union([z.number().int(), z.string()])).optional() }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'ids must be an array of item ids' });
+    const r = await startItemsBuild(req.mock2Project.id, { itemIds: parsed.data.ids ?? null, initiatedBy: req.user.id });
+    if (r.status !== 'started') return res.status(409).json({ error: r.error });
+    logAudit(req.user.id, 'MOCK2_SCREEN_ITEMS_BUILD', 'mock2_project', req.mock2Project.id,
+      { count: r.count, request_id: r.request_id }, req.ip);
+    res.status(202).json({ started: r.count, request_id: r.request_id });
   });
 
   router.post('/projects/:id/screens/:screenId/decision', requireMock2Role('editor'), refuseIfArchived, (req, res) => {

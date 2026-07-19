@@ -1433,6 +1433,11 @@ export const api = {
   mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
+  // Feature checklist (per-screen is/isn't-done items).
+  mock2SetScreenItem: (id, itemId, status) =>
+    request(`/mock2/projects/${id}/screens/items/${itemId}`, { method: 'POST', body: JSON.stringify({ status }) }),
+  mock2BuildScreenItems: (id, ids = null) =>
+    request(`/mock2/projects/${id}/screens/build-items`, { method: 'POST', body: JSON.stringify(ids ? { ids } : {}) }),
   mock2CreateConnectToken: (id, label = null) =>
     request(`/mock2/projects/${id}/connect-tokens`, { method: 'POST', body: JSON.stringify({ label }) }),
   mock2RevokeConnectToken: (id, tokenId) =>

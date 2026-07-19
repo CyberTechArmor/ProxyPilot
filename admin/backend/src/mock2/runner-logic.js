@@ -404,6 +404,14 @@ The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
 to the shell's header — never hand-roll a parallel layout or restyle the shell.
+When the approved mockup exists at \`state/mockups/current.html\`, it is the
+visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
+structure (e.g. a mobile bottom tab bar), and component arrangement for the
+screens you build — the app should look and navigate like the mockup.
+FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
+you do NOT implement in this cycle must be VISIBLY marked in the UI — a
+disabled control with a small "Not built yet" badge — never a dead button, a
+silently missing element, or a fake success path.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -970,6 +978,14 @@ The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
 to the shell's header — never hand-roll a parallel layout or restyle the shell.
+When the approved mockup exists at \`state/mockups/current.html\`, it is the
+visual CONTRACT beyond the tokens: read it and reproduce its layout, navigation
+structure (e.g. a mobile bottom tab bar), and component arrangement for the
+screens you build — the app should look and navigate like the mockup.
+FEATURE-COMPLETENESS HONESTY (binding): anything from the inventory/instruction
+you do NOT implement in this cycle must be VISIBLY marked in the UI — a
+disabled control with a small "Not built yet" badge — never a dead button, a
+silently missing element, or a fake success path.
 
 ## Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}

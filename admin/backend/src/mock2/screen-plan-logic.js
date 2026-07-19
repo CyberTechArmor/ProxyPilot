@@ -50,8 +50,11 @@ export function buildScreenBuildInstruction({ name, purpose = null } = {}) {
     'Scope is BINDING: do not build, restyle, or refactor any other screen, and do not touch the auth wiring ' +
     '(src/auth/*, the login/bootstrap flow, or the withAuth/bootstrapGate mounts in src/app.ts). ' +
     'Serve the screen behind the existing sign-in (guard its routes with requireAuth/requireRole from ./auth/index.js) ' +
-    'and link it from the app shell at /. Reproduce the approved look — load /design.css and match ' +
-    'state/design-tokens.json; do not restyle from generic defaults. Keep the diff small: this is one screen, not the app.';
+    'and link it from the app shell at /. FIRST read the approved mockup at state/mockups/current.html and reproduce ' +
+    'its layout, navigation structure (e.g. a mobile bottom tab bar), and component patterns for this screen — the ' +
+    'mockup is the visual contract, not just its colors. Load /design.css and match state/design-tokens.json; never ' +
+    'restyle from generic defaults. Any inventory feature of this screen you cannot finish must be visibly marked ' +
+    '"Not built yet" in the UI (disabled control + badge), never a dead element. Keep the diff small: one screen, not the app.';
 }
 
 // nextQueuedScreen — the row the drainer should start next: queued rows in
@@ -98,4 +101,46 @@ export function publicScreenShape(row) {
     error: row.error || null,
     updated_at: row.updated_at || null,
   };
+}
+
+// ---- feature checklist (per-screen functionality tracking) ----
+
+// screenItemsFromInventory — inventory.screens[] → checklist items: one row
+// per ACTION (the functionality) and one per STATE worth handling. These are
+// the "is/isn't done yet" units the Screens panel tracks — screens can be
+// BUILT while several of their items are still pending, and that gap is
+// exactly what the checklist makes visible.
+export function screenItemsFromInventory(inventory) {
+  const screens = Array.isArray(inventory?.screens) ? inventory.screens : [];
+  const out = [];
+  for (const s of screens) {
+    const screenName = String(s?.name || '').trim().slice(0, 120);
+    if (!screenName) continue;
+    const push = (list, kind) => {
+      for (const raw of Array.isArray(list) ? list : []) {
+        const name = String(typeof raw === 'string' ? raw : raw?.name || raw?.label || '').trim().slice(0, 200);
+        if (name) out.push({ screen_name: screenName, name, kind });
+      }
+    };
+    push(s.actions, 'action');
+    push(s.states, 'state');
+  }
+  return out;
+}
+
+// buildItemsBuildInstruction — the scoped instruction for "finish THESE
+// checklist items next": grouped by screen, binding scope, mockup-faithful.
+export function buildItemsBuildInstruction(groups = []) {
+  const parts = [];
+  for (const g of groups) {
+    if (!g?.screen || !Array.isArray(g.items) || !g.items.length) continue;
+    parts.push(`${g.screen}: ${g.items.map((i) => String(i).trim()).filter(Boolean).join('; ')}`);
+  }
+  return 'Finish these specific features from the approved design inventory (state/inventory.json) — ' +
+    `${parts.join(' · ')}. ` +
+    'Scope is BINDING: implement ONLY the listed features, on their listed screens; do not build, restyle, or ' +
+    'refactor anything else, and do not touch the auth wiring. Match the approved mockup faithfully — read ' +
+    'state/mockups/current.html for the exact layout, navigation, and component patterns — and load /design.css. ' +
+    'Any listed feature you cannot finish this cycle must be visibly marked "Not built yet" in the UI (disabled ' +
+    'control + badge), never a dead or silently missing element.';
 }

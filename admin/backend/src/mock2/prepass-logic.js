@@ -109,6 +109,31 @@ export function parsePrepassReply(text) {
   return { scope, brief: hasContent ? brief : null, split };
 }
 
+// How a project handles the pre-pass's domain expectations:
+//   'ask'  — show the additions card, the user picks what to include (default)
+//   'auto' — fold every surfaced expectation into the build, no card
+//   'off'  — build exactly what was asked; expectations are dropped entirely
+export const SUGGEST_MODES = Object.freeze(['off', 'ask', 'auto']);
+
+export function normalizeSuggestMode(v) {
+  return SUGGEST_MODES.includes(v) ? v : 'ask';
+}
+
+// Fold confirmed (or auto-included) additions into the instruction as BINDING
+// deliverables — unlike the working brief, these were surfaced to the user (or
+// covered by their 'auto' setting), so they are scope, not advice.
+export function composeWithAdditions(instruction, extras = [], { auto = false } = {}) {
+  const items = (Array.isArray(extras) ? extras : [])
+    .map((s) => String(s || '').trim()).filter(Boolean)
+    .slice(0, LIST_MAX).map((s) => s.slice(0, ITEM_MAX_CHARS * 2));
+  const base = String(instruction || '');
+  if (!items.length) return base;
+  const label = auto
+    ? 'Also deliver these domain-expected additions (auto-included by this project\'s suggestion setting; binding):'
+    : 'Also deliver these additions the user confirmed (binding):';
+  return `${base}\n\n${label}\n${items.map((i) => `- ${i}`).join('\n')}`;
+}
+
 // The scoped instruction for ONE group of a split request. Binding scope; the
 // remaining groups are named so interconnection points get honest "Not built
 // yet" markers instead of dead elements.

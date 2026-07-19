@@ -8,6 +8,7 @@ import {
   prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
   prepassEffort, bumpEffort, formatBriefForTask, featureScaleNotice,
   PREPASS_DEFAULT_MODEL, PREPASS_SCOPES,
+  SUGGEST_MODES, normalizeSuggestMode, composeWithAdditions,
 } from '../mock2/prepass-logic.js';
 import { typicalDurationMs } from '../mock2/cycle-logic.js';
 
@@ -112,4 +113,26 @@ test('split proposal: parsed only for feature_scale with 2+ solid parts; group i
   assert.match(gi, /Scope is BINDING to this part/);
   assert.match(gi, /Not built yet/);
   assert.match(gi, /never fabricate artificial ones/);
+});
+
+test('suggest mode: normalize defaults to ask; confirmed additions compose as binding scope', () => {
+  assert.deepEqual([...SUGGEST_MODES], ['off', 'ask', 'auto']);
+  assert.equal(normalizeSuggestMode('auto'), 'auto');
+  assert.equal(normalizeSuggestMode('off'), 'off');
+  // Unknown / legacy rows (pre-539 NULL) settle on the card default.
+  assert.equal(normalizeSuggestMode(undefined), 'ask');
+  assert.equal(normalizeSuggestMode('sometimes'), 'ask');
+
+  const composed = composeWithAdditions('Add a timesheet page', ['show every clock-in/out pair', ' flag missing punch-outs ']);
+  assert.match(composed, /^Add a timesheet page\n\n/);
+  assert.match(composed, /additions the user confirmed \(binding\)/);
+  assert.match(composed, /- show every clock-in\/out pair\n- flag missing punch-outs$/);
+  // Auto mode labels the additions as setting-driven, not user-picked.
+  assert.match(composeWithAdditions('x', ['y'], { auto: true }), /auto-included by this project's suggestion setting/);
+  // No additions → instruction unchanged; junk items are dropped.
+  assert.equal(composeWithAdditions('x', []), 'x');
+  assert.equal(composeWithAdditions('x', ['', '   ', null]), 'x');
+  // Clamped to six items.
+  const many = composeWithAdditions('x', Array.from({ length: 9 }, (_, i) => `item ${i}`));
+  assert.equal((many.match(/^- /gm) || []).length, 6);
 });

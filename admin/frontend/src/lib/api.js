@@ -1359,6 +1359,8 @@ export const api = {
         ...(images?.length ? { images } : {}),
         ...(mode ? { mode } : {}),
         ...(opts.skipSplit ? { skip_split: true } : {}),
+        ...(opts.skipSuggest ? { skip_suggest: true } : {}),
+        ...(opts.extras?.length ? { extras: opts.extras } : {}),
       }),
     }),
   mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
@@ -1439,6 +1441,9 @@ export const api = {
     request(`/mock2/projects/${id}/build-groups`, { method: 'POST', body: JSON.stringify({ instruction, groups }) }),
   mock2CancelQueuedBuild: (id, qid) =>
     request(`/mock2/projects/${id}/build-queue/${qid}`, { method: 'DELETE' }),
+  // Domain-suggestion handling: 'off' | 'ask' | 'auto'.
+  mock2SetSuggestMode: (id, mode) =>
+    request(`/mock2/projects/${id}/suggest-mode`, { method: 'PUT', body: JSON.stringify({ mode }) }),
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).
   mock2GetSmokeBrowser: () => request('/mock2/settings/smoke-browser'),
   mock2SetSmokeBrowser: (setting) =>

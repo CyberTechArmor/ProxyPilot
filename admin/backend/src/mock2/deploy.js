@@ -198,7 +198,7 @@ async function deployProjectUnqueued({
   report('health');
   const health = await containerSh(
     containerName,
-    `: ${DEPLOY_MARKER}\nlast="000"\ni=0\nwhile [ $i -lt 20 ]; do\n`
+    `: ${DEPLOY_MARKER}\nlast="000"\ni=0\nwhile [ $i -lt 45 ]; do\n`
       + `  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${webPort}/" 2>/dev/null)\n`
       + `  [ -n "$code" ] && last="$code"\n`
       + `  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then echo "MOCK2_SERVING ($code)"; exit 0; fi\n`

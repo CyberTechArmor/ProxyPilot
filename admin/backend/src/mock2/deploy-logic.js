@@ -134,9 +134,14 @@ WantedBy=multi-user.target
 function portShellHelpers(p) {
   const hex = Number(p).toString(16).toUpperCase().padStart(4, '0');
   return [
-    `mock2_port_inodes() { awk '$4 == "0A" && $2 ~ /:${hex}$/ {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; }`,
+    // ANY socket with this local port in a state other than TIME_WAIT (06)
+    // blocks bind() even with SO_REUSEADDR — a killed server's keep-alive
+    // connections linger as ownerless FIN_WAIT sockets for ~60s and produce
+    // the paradox "EADDRINUSE but no listener". LISTEN-only checks look
+    // straight past them, so everything here considers all blocking states.
+    `mock2_port_inodes() { awk '$4 != "06" && $2 ~ /:${hex}$/ {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; }`,
     `mock2_port_busy() {`,
-    `  if command -v ss >/dev/null 2>&1; then ss -ltn 2>/dev/null | grep -q ":${p} "; return $?; fi`,
+    `  if command -v ss >/dev/null 2>&1; then [ -n "$(ss -tanH "sport = :${p}" 2>/dev/null | grep -v TIME-WAIT)" ]; return $?; fi`,
     `  [ -n "$(mock2_port_inodes)" ]`,
     `}`,
     `mock2_port_pids() {`,
@@ -146,6 +151,9 @@ function portShellHelpers(p) {
     `    done`,
     `  done | sort -u`,
     `}`,
+    // Force-close ownerless sockets (FIN_WAIT etc. have no pid to kill).
+    // ss -K needs iproute2 + CONFIG_INET_DIAG_DESTROY; best-effort like the rest.
+    `mock2_port_kill_sockets() { command -v ss >/dev/null 2>&1 && ss -K "sport = :${p}" >/dev/null 2>&1 || true; }`,
   ].join('\n');
 }
 
@@ -166,16 +174,19 @@ export function freeWebPortScript(webPort = 3000) {
     `  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true;`,
     `fi`,
     `for hp in $(mock2_port_pids); do kill "$hp" 2>/dev/null || true; done`,
-    // Wait (bounded) until the kernel actually releases the socket — a TERM'd
-    // holder can linger past a fixed 1s pause and the fresh instance then
-    // crash-loops on EADDRINUSE. Escalate to SIGKILL halfway through.
-    `i=0; while [ $i -lt 6 ]; do`,
+    `mock2_port_kill_sockets`,
+    // Wait (bounded, ~20s) until the kernel actually releases EVERY blocking
+    // socket — the dead server's FIN_WAIT connections expire on their own
+    // (~60s worst case) but ss -K reaps them instantly where supported.
+    // Escalate to SIGKILL early; keep force-closing sockets each pass.
+    `i=0; while [ $i -lt 20 ]; do`,
     `  if mock2_port_busy; then`,
     `    if [ $i -eq 3 ]; then`,
     `      fuser -k -KILL ${p}/tcp 2>/dev/null || true`,
     `      pkill -9 -f '[s]erve\\.py' 2>/dev/null || true`,
     `      for hp in $(mock2_port_pids); do kill -9 "$hp" 2>/dev/null || true; done`,
     `    fi`,
+    `    mock2_port_kill_sockets`,
     `    i=$((i+1)); sleep 1;`,
     `  else break; fi`,
     `done`,
@@ -192,11 +203,15 @@ export function portHoldersReportScript(webPort = 3000) {
   return [
     portShellHelpers(p),
     `if command -v ss >/dev/null 2>&1; then`,
-    `  ss -ltnp 2>/dev/null | grep ":${p} " || echo "(no listener on :${p})"`,
+    // ALL states, not just LISTEN: a dead server's FIN_WAIT sockets block
+    // bind() while no listener exists — they must show up here by state.
+    `  ss -tanp "sport = :${p}" 2>/dev/null | grep -v '^State' || echo "(no socket on :${p} in any state)"`,
     `else`,
     `  pids=$(mock2_port_pids)`,
-    `  if [ -z "$pids" ]; then`,
-    `    [ -n "$(mock2_port_inodes)" ] && echo "listener exists on :${p} but no owning pid found (via /proc)" || echo "(no listener on :${p} — via /proc; ss not installed)"`,
+    `  if [ -n "$(mock2_port_inodes)" ] && [ -z "$pids" ]; then`,
+    `    echo "OWNERLESS socket(s) on :${p} (dead process's FIN_WAIT connections — they block bind for ~60s, no pid to kill)"`,
+    `  elif [ -z "$pids" ]; then`,
+    `    echo "(no socket on :${p} — via /proc; ss not installed)"`,
     `  else`,
     `    for hp in $pids; do echo "pid $hp ($(cat /proc/$hp/comm 2>/dev/null)): $(tr '\\0' ' ' < /proc/$hp/cmdline 2>/dev/null | cut -c1-140)"; done`,
     `  fi`,
@@ -212,11 +227,14 @@ export const DEPLOY_STEP_TIMEOUTS_MS = Object.freeze({
   migrate: 180000,
   build: 300000,
   start: 60000,
-  // Covers the 20-poll × (3s curl + 2s sleep) serving loop in deploy.js plus
+  // Covers the 45-poll serving loop in deploy.js (a refused connection fails
+  // instantly, so each poll costs ~2s sleep; a dead server's lingering
+  // FIN_WAIT sockets can block the new bind for ~60s and the window must
+  // OUTLAST that) plus
   // the journal dump — a first boot that spends a while in a restart loop
   // (e.g. waiting out a lingering port holder) still gets counted as serving
   // once it recovers, instead of being marked failed while actually fine.
-  health: 120000,
+  health: 240000,
 });
 
 // deployPlan(contract) → the ordered [{ key, command, timeoutMs }] the deploy

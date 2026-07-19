@@ -583,6 +583,17 @@ export function mockupPreviewUrl(projectUrl, hasMockup) {
   return `${String(projectUrl).replace(/\/+$/, '')}${MOCKUP_PREVIEW_PATH}`;
 }
 
+// The DASHBOARD-origin preview URL — the API route that reads the mockup HTML
+// out of the container and serves it itself. This is what the embedded iframe
+// uses: unlike the container-served /_preview (mockupPreviewUrl above), it
+// works while the project's app is crash-looping, gating requests behind the
+// first-admin bootstrap, or setting its own frame policy. Relative, so it
+// rides the SPA's origin + auth cookies.
+export function dashboardMockupPreviewUrl(projectId, hasMockup) {
+  if (!projectId || !hasMockup) return null;
+  return `/api/mock2/projects/${Number(projectId)}/mockup-preview`;
+}
+
 // ---- cost envelope (R5 — concept cycles spend too) ----
 
 // A concept turn spends on TWO model calls: the concept_chat reply and (usually)

@@ -296,10 +296,11 @@ export default function ProjectDetail() {
   const jobBusy = busy || !!pendingJob;
   const designApproved = !!project.stage?.design_approved;
 
-  // The Chat tab's centerpiece: the live preview iframe. While online, prefer the
-  // current mockup's /_preview; once the design is approved (mockup discarded)
-  // fall back to the built app at the project URL. Null ⇒ show a placeholder and
-  // center the chat instead (matches "if the iframe can display, center the chat").
+  // The Chat tab's centerpiece: the live preview iframe. While online, prefer
+  // the current mockup (served same-origin by the dashboard's /mockup-preview
+  // route, so it works even while the project app is down or gated); once the
+  // design is approved (mockup discarded) fall back to the built app at the
+  // project URL. Null ⇒ show a placeholder and center the chat instead.
   const previewSrc = project.lifecycle === 'active'
     ? (project.preview_url || (designApproved && project.url ? project.url : null))
     : null;

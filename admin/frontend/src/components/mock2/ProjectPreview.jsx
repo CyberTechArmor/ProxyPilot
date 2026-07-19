@@ -2,8 +2,9 @@
 //
 // Extracted from ProjectDetail so both the pre-approval design layout and the
 // post-approval build layout render the same live preview (the mockup before
-// approval, the working app after). The framed doc is the project's own HTTPS
-// origin (the mock2 dev server sets no X-Frame-Options), so it embeds cleanly.
+// approval, the working app after). The mockup is served same-origin by the
+// dashboard's /mockup-preview API route (CSP-sandboxed to an opaque origin),
+// so it embeds cleanly regardless of the project app's own state or headers.
 //
 // MOBILE_FIRST: full-width, the Desktop/Mobile toggle labels collapse to icons.
 

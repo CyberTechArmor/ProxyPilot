@@ -948,6 +948,34 @@ export function createMock2Router() {
     });
   });
 
+  // The mockup preview, served from the DASHBOARD's own origin: the API reads
+  // the (single, self-contained) mockup HTML straight out of the container and
+  // serves it itself. The container-served /_preview stays for direct visits,
+  // but the EMBEDDED preview must not depend on the project's app being up —
+  // a crash-looping deploy, the bootstrap gate (which 302s html navigations to
+  // /login while zero users exist), or the app's own frame policy each turned
+  // the design review into "refused to connect".
+  router.get('/projects/:id/mockup-preview', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') {
+      return res.status(409).json({ error: 'The project container is not running — wake the project to view the mockup.' });
+    }
+    if (!project.current_mockup_id && !project.mockup_archived_id) {
+      return res.status(404).json({ error: 'No mockup yet — describe the app in the chat to generate one.' });
+    }
+    const r = await readFileInContainer(project.container_name, 'state/mockups/current.html');
+    if (!r.ok) return res.status(404).json({ error: `Mockup file not readable: ${r.error || 'unknown error'}` });
+    // Override the app-wide helmet CSP for THIS document only: it must be
+    // frameable by the dashboard ('self'), and it must NOT run with the admin
+    // origin's authority — `sandbox` without allow-same-origin gives the
+    // AI-generated mockup an opaque origin, so its inline scripts can't read
+    // cookies or call the admin API with credentials.
+    res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups allow-modals; frame-ancestors 'self'");
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('html').send(r.content);
+  });
+
   // Rotate the slug: new slug, 1h grace on the old one, old slug 404s after and
   // is never reusable. Editor-gated; republishes the domain's Caddy file.
   router.post('/projects/:id/rotate-slug', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {

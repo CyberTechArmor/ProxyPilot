@@ -68,6 +68,29 @@ export function createApp(): express.Express {
   app.use(express.json());
   app.use(securityHeaders);
 
+  // Concept-stage mockup preview (coexists with the app) — same contract as the
+  // placeholder dev server: /_preview serves state/mockups, default current.html.
+  // Mounted BEFORE the auth gate: the mockup is static, non-functional design
+  // HTML the operator reviews from the ProxyPilot dashboard while the app has
+  // ZERO users — behind bootstrapGate every preview navigation would 302 to
+  // /login, whose frame-ancestors 'self' blanks the dashboard's iframe.
+  app.use('/_preview', (_req, res, next) => {
+    // The dashboard embeds this preview from its own (different) origin. The
+    // app-wide security headers pin frame-ancestors to 'self', which blanks
+    // that iframe — relax framing for the preview ONLY (the app itself stays
+    // framed-off).
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors *");
+    res.removeHeader('X-Frame-Options');
+    next();
+  }, express.static(MOCKUPS_DIR, { index: 'current.html' }));
+
+  // The extracted design tokens stylesheet — pages (and the mockup preview
+  // above) link /design.css, so it must stay reachable before the gate too.
+  app.get('/design.css', (_req, res) => {
+    if (fs.existsSync(DESIGN_CSS)) res.type('text/css').sendFile(DESIGN_CSS);
+    else res.type('text/css').send('');
+  });
+
   // Auth is wired by the platform and is part of the base app contract:
   // withAuth attaches the caller's identity, bootstrapGate() forces the
   // create-administrator flow while zero users exist (503 for APIs, redirect
@@ -85,29 +108,10 @@ export function createApp(): express.Express {
   // The sign-in page (shows the create-administrator form while uninitialized).
   app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));
 
-  // The extracted design tokens stylesheet — pages link /design.css so the
-  // approved look applies app-wide. Empty until the design is approved.
-  app.get('/design.css', (_req, res) => {
-    if (fs.existsSync(DESIGN_CSS)) res.type('text/css').sendFile(DESIGN_CSS);
-    else res.type('text/css').send('');
-  });
-
   // Static assets — CSS / JS / images the app ships under public/ are served at
   // the root (so <link href="/styles.css"> resolves). index:false so a stray
   // public/index.html never shadows the app's own routes.
   app.use(express.static(PUBLIC_DIR, { index: false }));
-
-  // Concept-stage mockup preview (coexists with the app) — same contract as the
-  // placeholder dev server: /_preview serves state/mockups, default current.html.
-  app.use('/_preview', (_req, res, next) => {
-    // The ProxyPilot dashboard embeds this mockup preview in an iframe from its
-    // own (different) origin. The app-wide security headers pin frame-ancestors
-    // to 'self', which blanks that iframe — relax framing for the preview ONLY
-    // (it is non-functional, static mockup HTML; the app itself stays framed-off).
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors *");
-    res.removeHeader('X-Frame-Options');
-    next();
-  }, express.static(MOCKUPS_DIR, { index: 'current.html' }));
 
   // The authenticated app shell (public/app-shell.html — the base-style page
   // the build extends with screens); unauthenticated visitors always land on
@@ -199,15 +203,52 @@ export function buildAuthWiredFiles() {
   ];
 }
 
+// Wired-content history: sha256 of every PREVIOUS generation of the wired
+// files (computed from the git revisions of this module). A target matching
+// one of these was written by the installer, never touched by a build — safe
+// to upgrade to the current wired content. Without this list, any fix to the
+// wired files (e.g. mounting /_preview before the bootstrap gate) would read
+// as "kept-adapted" on already-provisioned projects and never propagate.
+// APPEND the outgoing hashes here whenever wiredAppTs/wiredServerTs change.
+const WIRED_HISTORY = new Map([
+  ['src/app.ts', [
+    '5474502d25c50b7dace725b78293eea6a1208c372754231cb82b9df0af94297a', // v1: original wiring
+    'f1c15fb614e17d6be1e52c392c3a5f088630214085f0917e76adf5d3ff009936', // v2: base-app-at-provisioning era
+    '0115a022c6cfdb1c4dd0942e7f52c649e86cb6ed291c2637636b6ede4bf44fb9', // v3: /_preview CSP relax (still behind the gate)
+  ]],
+  ['src/server.ts', [
+    '070d8a86bed4239d087bf461ef9083acaca7c856188b18311f3560380d48919f', // v1-v2: pre listen-retry
+    '23ee2276133346daf264ddae596d887f4a53ab464fb0597eb770c16005de22c5', // v3: EADDRINUSE listen-retry
+  ]],
+]);
+
+// Same idea for the UNWIRED scaffold seeds: containers provisioned before the
+// current scaffold still hold older seed generations of the entry files —
+// pristine (no build touched them), just older. APPEND outgoing hashes when
+// scaffold.js's appTs/serverTs change.
+const SEED_HISTORY = new Map([
+  ['src/app.ts', [
+    'aaed8c6846f5c981a8c28f490f704ee0c8456e4afc0a731c9f6a4a6094bb8df9', // pre listen-retry / pre /_preview-CSP era
+  ]],
+  ['src/server.ts', [
+    '6b2469766850122ff1ccece514835de8a79a6d31fa050f554258a92224e3ee86', // pre listen-retry era
+  ]],
+]);
+
 // Known-pristine hashes per target: the scaffold seed content (any project name
-// — these files don't vary by project). A target matching one of these is safe
-// to rewrite; anything else was adapted by a build and is KEPT.
+// — these files don't vary by project) plus every historical wired generation.
+// A target matching one of these is safe to rewrite; anything else was adapted
+// by a build and is KEPT.
 function pristineShaByPath() {
   const seeds = buildScaffoldFiles({ name: 'app' });
   const out = new Map();
   for (const t of AUTH_WIRING_TARGETS) {
     const seed = seeds.find((f) => f.path === t);
-    out.set(t, new Set(seed ? [sha256(seed.content)] : []));
+    out.set(t, new Set([
+      ...(seed ? [sha256(seed.content)] : []),
+      ...(SEED_HISTORY.get(t) || []),
+      ...(WIRED_HISTORY.get(t) || []),
+    ]));
   }
   return out;
 }

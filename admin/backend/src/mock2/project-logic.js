@@ -17,7 +17,7 @@
 // named "agent".
 
 import { slugFqdn } from './slug.js';
-import { conceptStageInfo, mockupPreviewUrl } from './concept-logic.js';
+import { conceptStageInfo, dashboardMockupPreviewUrl } from './concept-logic.js';
 
 // ---- role / access resolution (ADR-007) ----
 
@@ -255,8 +255,8 @@ export function publicProjectShape(project, extra = {}) {
     archived_at: project.archived_at || null,
     // M7 concept stage: the persistent stage indicator (Concept → Define →
     // Build → Run), the design-approval sign-off, and the live mockup preview
-    // URL (project URL + the dev-server preview path). preview_url is null until
-    // a mockup exists / the project has a live URL.
+    // URL (the dashboard's own /mockup-preview route). preview_url is null
+    // until a mockup exists.
     stage: conceptStageInfo(project),
     // The design preset the project was created with ('' / 'ai' = AI-derived) —
     // the Design specs page highlights it.
@@ -270,14 +270,17 @@ export function publicProjectShape(project, extra = {}) {
     // user got a bare 409). Derived from the in-process guard, never stored.
     base_app_deploying: !!extra.baseAppDeploying,
     current_mockup_id: project.current_mockup_id || null,
-    preview_url: mockupPreviewUrl(host ? `https://${host}` : null, !!project.current_mockup_id),
+    // Served by the dashboard itself (reads the mockup HTML out of the
+    // container) so the design review never depends on the project app being
+    // up, un-gated, and frameable — see the /mockup-preview route.
+    preview_url: dashboardMockupPreviewUrl(project.id, !!project.current_mockup_id),
     // The archived design mockup — the record of where the design started. Set
     // once the design is approved (the live mockup pointer is cleared but the
-    // mockup HTML is kept at /_preview/). Surfaced in the Details tab so anyone
-    // can revisit the original design. Falls back to the live mockup pre-approval
+    // mockup HTML is kept on disk). Surfaced in the Details tab so anyone can
+    // revisit the original design. Falls back to the live mockup pre-approval
     // so callers always have "the design preview" regardless of stage.
-    mockup_archive_url: mockupPreviewUrl(
-      host ? `https://${host}` : null,
+    mockup_archive_url: dashboardMockupPreviewUrl(
+      project.id,
       !!(project.mockup_archived_id || project.current_mockup_id),
     ),
     // M8 audit-gate counts (drive the awaiting/drift chips + the in-detail

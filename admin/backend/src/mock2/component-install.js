@@ -375,6 +375,47 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     scaffoldDeps = await ensureScaffoldDeps({ containerName });
   } catch (e) { console.warn('[mock2] scaffold dep repair failed:', e?.message); }
 
+  // Wiring repair pass: selections already 'installed' never re-run installOne,
+  // so fixes to the WIRED entry files (e.g. mounting the /_preview mockup
+  // preview BEFORE the bootstrap gate — behind it, a fresh app with zero users
+  // 302'd the preview iframe to /login and the design was unreviewable) would
+  // otherwise never reach provisioned projects. planAuthWiring is idempotent:
+  // current content → 'already-wired'; a historical wired/seed generation
+  // (hash-matched) → rewritten; anything a build adapted → kept, untouched.
+  try {
+    const wireRow = listProjectComponents(projectId).find(
+      (r) => r.status === 'installed' && r.version_id && versionWiresBootstrap(getComponentVersion(r.version_id)),
+    );
+    if (wireRow) {
+      const version = getComponentVersion(wireRow.version_id);
+      let vFiles = [];
+      try { vFiles = JSON.parse(version.files_json || '[]') || []; } catch { vFiles = []; }
+      const vs = await containerSh(
+        containerName,
+        buildManifestVerifyScript(AUTH_WIRING_TARGETS, { appDir: APP_DIR }),
+        { timeoutMs: 60000 },
+      );
+      const plan = planAuthWiring({
+        contract: parseContractJson(version.contract_json),
+        files: vFiles,
+        currentShaByPath: parseShaVerifyOutput(vs.stdout),
+      });
+      const rewired = [];
+      for (const a of plan.actions) {
+        if (a.action !== 'wire') continue;
+        const w = await writeFileInContainer(containerName, a.path, a.content);
+        if (w.ok) rewired.push(a.path);
+        else console.warn(`[mock2] wiring repair write failed for ${a.path}: ${w.error || 'write failed'}`);
+      }
+      if (rewired.length) {
+        insertMessage({
+          projectId, kind: 'system', cycleId,
+          body: `Platform maintenance: refreshed the wired entry file${rewired.length === 1 ? '' : 's'} ${rewired.join(' + ')} to the current base-app wiring (files a build adapted are never touched).`,
+        });
+      }
+    }
+  } catch (e) { console.warn('[mock2] auth wiring repair failed:', e?.message); }
+
   // Mirror the full selection to state/components.json (rides the hash-chained
   // history like integrations.json), checkpoint, and record the change. Skipped
   // when the project has no component selections at all (nothing to mirror —

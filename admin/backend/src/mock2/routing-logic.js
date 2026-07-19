@@ -131,18 +131,17 @@ export function fastCodeModel(env = {}) {
 
 // ---- MVP build routing (speed path — see cycle-logic BUILD_MODE_MVP) ----
 
-// The fixed routing an MVP build runs with: the fast code model at LOW effort.
-// Deliberately not knowledge-base driven — MVP is an explicit operator choice
-// ("give me a testable first version fast"), not a classification. Low effort
-// is the speed lever that matters most here: observed MVP builds spent ~95% of
-// wall-clock on model generation across ~90 small turns, and lower effort
-// means fewer, more-consolidated tool calls with far less per-turn thinking —
-// scaffold-quality code doesn't need deep reasoning. MOCK2_MVP_EFFORT raises
-// it back if an install's MVPs come out too shallow.
+// The fixed routing an MVP build runs with: the fast code model at HIGH effort.
+// Deliberately not knowledge-base driven — MVP is an explicit operator choice,
+// not a classification. Effort started at 'low' for wall-clock, but shipped
+// apps read as too basic (the observed quality complaint): high buys real
+// judgment on layout, states, and completeness, and the operator can trade it
+// back down anytime from Admin queue → "Model thinking & effort" (the
+// MVP/Quick lane's effort override) or MOCK2_MVP_EFFORT.
 export function mvpRoutingDecision(env = {}, slotModel = '') {
   const model = fastCodeModel(env) || String(slotModel || '');
   const rawEffort = String(env?.MOCK2_MVP_EFFORT ?? '').trim().toLowerCase();
-  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'low';
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'high';
   return {
     model, effort, rung: 0, task_kind: 'feature', difficulty: null,
     reason: 'mvp build', build_mode: 'mvp',
@@ -151,15 +150,14 @@ export function mvpRoutingDecision(env = {}, slotModel = '') {
 
 // ---- Quick-update routing (the iteration path) ----
 
-// The fixed routing a QUICK update runs with: the fast code model at MEDIUM
-// effort. Quick changes are small and scoped, so the diff is cheap either way —
-// medium buys noticeably better judgment than the MVP scaffold's 'low' (the
-// observed quality complaint) while the tiny scope keeps wall-clock short.
-// MOCK2_QUICK_EFFORT overrides.
+// The fixed routing a QUICK update runs with: the fast code model at HIGH
+// effort (raised from 'medium' with the MVP lane — quality default; the small
+// scope keeps wall-clock short either way). Operator-editable from the same
+// lane-tuning card; MOCK2_QUICK_EFFORT overrides.
 export function quickRoutingDecision(env = {}, slotModel = '') {
   const model = fastCodeModel(env) || String(slotModel || '');
   const rawEffort = String(env?.MOCK2_QUICK_EFFORT ?? '').trim().toLowerCase();
-  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'medium';
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'high';
   return {
     model, effort, rung: 0, task_kind: 'feature', difficulty: null,
     reason: 'quick update', build_mode: 'quick',

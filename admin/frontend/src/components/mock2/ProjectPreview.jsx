@@ -8,7 +8,8 @@
 //
 // MOBILE_FIRST: full-width, the Desktop/Mobile toggle labels collapse to icons.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { RefreshCw, ExternalLink, Monitor, Smartphone, Loader2, Sparkles, CheckCircle2 } from 'lucide-react';
 
@@ -79,7 +80,31 @@ export function PreviewPanel({ src, title, approved, reloadKey = 0 }) {
 // embedded, so an iframe just shows "refused to connect". Instead we show a
 // compact bar with the live URL and an open-in-new-tab button — the running app
 // opens in a real tab where its own security headers apply.
-export function LiveAppBar({ url }) {
+//
+// The button is LIVENESS-AWARE: it polls the app-live probe (does the REAL app
+// answer its port?) and stays disabled, pulsing "Updating…", through the
+// deploy window — where a click used to serve the placeholder, then a
+// connection error, then finally the app. Solid "Open app" only when live.
+export function LiveAppBar({ url, projectId }) {
+  const [live, setLive] = useState(null); // null = unknown (first probe pending)
+  useEffect(() => {
+    if (!projectId || !url) return undefined;
+    let stopped = false;
+    let timer = null;
+    const probe = async () => {
+      let isLive = false;
+      try { isLive = !!(await api.mock2AppLive(projectId)).live; } catch { isLive = false; }
+      if (stopped) return;
+      setLive(isLive);
+      // Fast poll while updating (flip to solid the moment it serves); slow
+      // heartbeat once live so a later crash flips the button back honestly.
+      timer = setTimeout(probe, isLive ? 20000 : 4000);
+    };
+    probe();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [projectId, url]);
+
+  const ready = live === true;
   return (
     <div className="rounded-lg border bg-muted/20 overflow-hidden shrink-0">
       <div className="flex items-center justify-between gap-2 border-b bg-background/60 px-3 py-2">
@@ -89,22 +114,35 @@ export function LiveAppBar({ url }) {
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
             <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/25" />
           </span>
-          {url ? (
+          {url && ready ? (
             <a href={url} target="_blank" rel="noreferrer" className="truncate text-xs font-mono text-primary hover:underline">{url}</a>
+          ) : url ? (
+            <span className="truncate text-xs font-mono text-muted-foreground">{url}</span>
           ) : (
             <span className="truncate text-xs font-mono text-muted-foreground">No live URL yet</span>
           )}
         </div>
         {url ? (
-          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
-            <a href={url} target="_blank" rel="noreferrer" aria-label="Open the app in a new tab">
-              <ExternalLink className="h-4 w-4 mr-1" /> Open app
-            </a>
-          </Button>
+          ready ? (
+            <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
+              <a href={url} target="_blank" rel="noreferrer" aria-label="Open the app in a new tab">
+                <ExternalLink className="h-4 w-4 mr-1" /> Open app
+              </a>
+            </Button>
+          ) : (
+            <Button
+              variant="outline" size="sm" className="h-9 shrink-0 animate-pulse" disabled
+              title="The app is deploying or restarting — this goes solid the moment it answers"
+            >
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" /> Updating…
+            </Button>
+          )
         ) : null}
       </div>
       <p className="px-3 py-2.5 text-[11px] text-muted-foreground">
-        The running app opens in a new tab — it sets a frame policy that blocks being embedded here.
+        {ready
+          ? 'The running app opens in a new tab — it sets a frame policy that blocks being embedded here.'
+          : 'The app is deploying or restarting — the button goes solid and clickable the moment the real app answers.'}
       </p>
     </div>
   );

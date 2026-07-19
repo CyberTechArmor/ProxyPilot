@@ -85,6 +85,25 @@ test('wired app ships the FULL admin surface: external routes, /api/me, admin co
   assert.ok(!adminScript.includes('${'), 'admin.js has no unexpanded interpolation');
 });
 
+test('wired login page: split banner layout, component contract (ids + login.js) preserved', () => {
+  const login = buildAuthWiredFiles().find((f) => f.path === 'public/login.html').content;
+  // 2/3 banner beside a 1/3 form column.
+  assert.match(login, /grid-template-columns: 2fr 1fr/);
+  assert.match(login, /class="banner"/);
+  // login.js's contract: every id it drives, and the script itself, unchanged.
+  for (const id of [
+    'login-loading', 'form-bootstrap', 'form-login', 'form-setup',
+    'bootstrap-email', 'bootstrap-password', 'bootstrap-msg',
+    'login-email', 'login-password', 'login-msg',
+    'setup-email', 'setup-password', 'setup-msg',
+  ]) {
+    assert.ok(login.includes(`id="${id}"`), `login.html keeps #${id}`);
+  }
+  assert.match(login, /<script src="\/login\.js"><\/script>/);
+  // Rides the design tokens with fallbacks (styled before AND after extraction).
+  assert.match(login, /var\(--app-primary/);
+});
+
 test('planAuthWiring: pristine scaffold targets are wired, missing files too', () => {
   const doc = loadAuthExample();
   const seeds = buildScaffoldFiles({ name: 'updoc' });

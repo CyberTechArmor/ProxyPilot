@@ -81,3 +81,28 @@ test('typicalDurationMs: p50/p80 band over succeeded same-mode cycles; null unde
   assert.equal(typicalDurationMs([row(3)], { buildMode: 'quick' }), null);
   assert.equal(typicalDurationMs([], {}), null);
 });
+
+test('split proposal: parsed only for feature_scale with 2+ solid parts; group instruction is binding', async () => {
+  const { parsePrepassReply, buildGroupInstruction } = await import('../mock2/prepass-logic.js');
+  const withSplit = parsePrepassReply(JSON.stringify({
+    scope: 'feature_scale',
+    brief: { touches: ['x'] },
+    split: { parts: [
+      { title: 'ADP settings page', items: ['credentials form', 'test connection'] },
+      { title: 'Local-first submit', items: ['save locally', 'post when connected', 'retry queue'] },
+    ] },
+  }));
+  assert.equal(withSplit.split.parts.length, 2);
+  assert.equal(withSplit.split.parts[0].title, 'ADP settings page');
+  // Non-feature scope drops the split even if provided.
+  const wrongScope = parsePrepassReply('{"scope":"multi_part","split":{"parts":[{"title":"a","items":["b"]},{"title":"c","items":["d"]}]}}');
+  assert.equal(wrongScope.split, null);
+  // A single-part split is not a split.
+  const onePart = parsePrepassReply('{"scope":"feature_scale","split":{"parts":[{"title":"a","items":["b"]}]}}');
+  assert.equal(onePart.split, null);
+  const gi = buildGroupInstruction({ title: 'ADP settings page', items: ['credentials form', 'test connection'], index: 1, total: 2, original: 'Please add the adp connection page and submit flow' });
+  assert.match(gi, /Part 1 of 2/);
+  assert.match(gi, /Scope is BINDING to this part/);
+  assert.match(gi, /Not built yet/);
+  assert.match(gi, /never fabricate artificial ones/);
+});

@@ -48,12 +48,17 @@ Reply with STRICT JSON only — no prose, no code fences. Schema:
     "states": ["UI/data states worth handling (empty, loading, error, edge sizes)", ...],
     "edge_cases": ["specific pitfalls for THIS request", ...],
     "acceptance": ["concrete checks that would prove it works", ...]
-  }
+  },
+  "split": { "parts": [{ "title": "...", "items": ["deliverable", ...] }, ...] }
 }
 Scope rubric:
 - "simple": one screen/element, one behavior — a button, a label, one endpoint tweak.
 - "multi_part": several coordinated changes — a screen plus its API, or 2-4 related elements.
 - "feature_scale": a whole page/feature/redesign — would take a person a session, not minutes.
+"split" ONLY when scope is "feature_scale" AND the request naturally decomposes into
+2-4 sequential parts that are EACH independently buildable, deployable, and
+checkable by a human (part 1 must be useful before part 2 exists). Order parts by
+dependency. Omit "split" entirely when a decomposition would be artificial.
 Keep every list to at most ${LIST_MAX} short items; omit empty lists. Be concrete, never generic.`;
 }
 
@@ -82,7 +87,30 @@ export function parsePrepassReply(text) {
     acceptance: clampList(rawBrief.acceptance),
   };
   const hasContent = Object.values(brief).some((l) => l.length);
-  return { scope, brief: hasContent ? brief : null };
+  // The optional split proposal (feature_scale only): 2-4 titled parts, each
+  // with its deliverable items — the "build half, check it, rest follows" plan.
+  let split = null;
+  const rawParts = doc.split && Array.isArray(doc.split.parts) ? doc.split.parts : [];
+  if (scope === 'feature_scale' && rawParts.length >= 2) {
+    const parts = rawParts.slice(0, 4).map((p) => ({
+      title: String(p?.title ?? '').trim().slice(0, 80),
+      items: clampList(p?.items),
+    })).filter((p) => p.title && p.items.length);
+    if (parts.length >= 2) split = { parts };
+  }
+  return { scope, brief: hasContent ? brief : null, split };
+}
+
+// The scoped instruction for ONE group of a split request. Binding scope; the
+// remaining groups are named so interconnection points get honest "Not built
+// yet" markers instead of dead elements.
+export function buildGroupInstruction({ title, items = [], index = 1, total = 1, original = '' }) {
+  const later = total > index ? ` Later groups of this same request handle the rest — where this group's UI touches
+their territory, leave a visibly disabled control with a "Not built yet" badge, never a dead element.` : '';
+  return `Part ${index} of ${total} of a split request — ${title}. Deliver exactly: ${items.join('; ')}. ` +
+    `The ORIGINAL full request, for context only (do NOT build beyond this part's deliverables): "${String(original).slice(0, 800)}". ` +
+    'Scope is BINDING to this part. Match the approved mockup (state/mockups/current.html) and load /design.css. ' +
+    'STATE items are conditions to handle when they genuinely occur — never fabricate artificial ones.' + later;
 }
 
 // One effort notch up for requests that turned out bigger than the lane

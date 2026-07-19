@@ -243,6 +243,30 @@ async function runQuickPrepass({ project, cycle, ready, routing }) {
   return { scope: parsed.scope, effort: prepassEffort(parsed.scope, ready.effort || 'high') };
 }
 
+// probeSplitProposal — the ROUTE-TIME half of the pre-pass: before a quick
+// update starts, one cheap call sizes the request; a feature-scale ask that
+// naturally decomposes comes back with a split proposal the UI renders as a
+// grouping card (build all as one / in ordered groups). Bounded and fail-open:
+// null (no proposal) on any error, timeout, or a non-splittable request.
+export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {}) {
+  if (!prepassEnabled(routingEnv())) return null;
+  const ready = buildRunnerReady();
+  if (!ready.ok) return null;
+  const call = callModelTurn({
+    connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
+    system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
+    maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
+  });
+  const res = await Promise.race([
+    call,
+    new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+  if (!res || !res.ok) return null;
+  const parsed = parsePrepassReply(res.text);
+  if (!parsed) return null;
+  return parsed; // { scope, brief, split|null }
+}
+
 // startCycle — the cycle-start sequence (04-phased-plan §M6):
 //   estimate → canStartCycle quota check (refused_quota terminal) → pin the
 //   current framework version → take the lock → copy the pinned gate scripts into

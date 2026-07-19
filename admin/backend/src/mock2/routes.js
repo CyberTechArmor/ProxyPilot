@@ -196,6 +196,9 @@ import {
 // ---- M6: cycle runner + checkout lock ----
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
+import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
+import { buildGroupInstruction } from './prepass-logic.js';
+import { probeSplitProposal } from './runner.js';
 import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
@@ -436,6 +439,16 @@ const cycleStartSchema = z.object({
   // 'full' (default) runs the audited build with the whole gate battery; 'mvp'
   // is the speed path — rule interview skipped, reduced battery, fast model.
   mode: z.enum(['full', 'mvp', 'quick']).optional(),
+  // True after the user chose "build as one" on the split card — skips the
+  // route-time split probe so the card doesn't re-appear in a loop.
+  skip_split: z.boolean().optional(),
+});
+const buildGroupsSchema = z.object({
+  instruction: z.string().trim().min(1).max(8000),
+  groups: z.array(z.object({
+    title: z.string().trim().min(1).max(120),
+    items: z.array(z.string().trim().min(1).max(200)).min(1).max(12),
+  })).min(1).max(6),
 });
 const cycleFeedbackSchema = z.object({
   rating: z.enum(['up', 'down']),
@@ -2317,6 +2330,30 @@ export function createMock2Router() {
     // approved inventory + rules.md + the pinned framework and either asks
     // editor/admin questions (blocking the build) or, when clear, hands off to
     // the M6 runner. 202 + poll: the audit runs in the background.
+    const mode = parsed.data.mode || 'full';
+    // Quick lane, no other build running: probe for a SPLIT first. A
+    // feature-scale ask that naturally decomposes returns a proposal (no build
+    // started) — the chat renders the grouping card and the user decides.
+    // skip_split (the card's "build as one") bypasses the probe. Fail-open.
+    if (mode === 'quick' && !parsed.data.skip_split && !(parsed.data.images || []).length) {
+      try {
+        const probe = await probeSplitProposal(parsed.data.instruction);
+        if (probe?.scope === 'feature_scale' && probe.split?.parts?.length >= 2) {
+          return res.json({ split_proposal: { instruction: parsed.data.instruction, parts: probe.split.parts } });
+        }
+      } catch { /* fail-open — build normally */ }
+    }
+    // Quick lane while another build is running: QUEUE it instead of refusing —
+    // queued entries run back-to-back as each build finishes (build-queue.js).
+    if (mode === 'quick') {
+      const cur = latestCycle(project.id);
+      const busy = cur && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cur.status);
+      if (busy) {
+        const row = enqueueBuild({ projectId: project.id, instruction: parsed.data.instruction, buildMode: 'quick', initiatedBy: req.user.id });
+        logAudit(req.user.id, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { queue_id: row.id }, req.ip);
+        return res.status(202).json({ queued: true, queue: publicQueueShape(row) });
+      }
+    }
     let result;
     try {
       const imgCheck = validateChatImages(parsed.data.images);
@@ -2325,7 +2362,7 @@ export function createMock2Router() {
         project, instruction: parsed.data.instruction,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
-        buildMode: parsed.data.mode || 'full',
+        buildMode: mode,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });
@@ -2337,6 +2374,40 @@ export function createMock2Router() {
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused',
       audit: result.status === 'started', reason: result.error || null,
     });
+  });
+
+  // Split-request groups: the grouping card's submit — each ordered group
+  // becomes a scoped queued build; they run back-to-back in the background,
+  // deploying between groups so part 1 is checkable while part 2 builds.
+  router.post('/projects/:id/build-groups', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const parsed = buildGroupsSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'groups are required' });
+    const { instruction, groups } = parsed.data;
+    const rows = groups.map((g, i) => enqueueBuild({
+      projectId: project.id,
+      instruction: buildGroupInstruction({ title: g.title, items: g.items, index: i + 1, total: groups.length, original: instruction }),
+      buildMode: 'quick',
+      label: `Part ${i + 1}/${groups.length}: ${g.title}`,
+      initiatedBy: req.user.id,
+    }));
+    try {
+      insertMessage({
+        projectId: project.id, kind: 'system',
+        body: `Split build queued — ${groups.length} group${groups.length === 1 ? '' : 's'}, running back-to-back in the background:\n${groups.map((g, i) => `${i + 1}. ${g.title}`).join('\n')}\nEach group deploys when it finishes, so you can check part 1 while part 2 builds.`,
+      });
+    } catch { /* best effort */ }
+    drainBuildQueue(project.id).catch((e) => console.warn('[mock2] build-queue drain failed:', e?.message));
+    logAudit(req.user.id, 'MOCK2_BUILD_GROUPS', 'mock2_project', project.id, { groups: groups.length }, req.ip);
+    res.status(202).json({ queued: rows.length, queue: rows.map(publicQueueShape) });
+  });
+
+  // Cancel a queued (not yet started) build.
+  router.delete('/projects/:id/build-queue/:qid', requireMock2Role('editor'), (req, res) => {
+    const r = cancelQueuedBuild(req.mock2Project.id, req.params.qid);
+    if (!r.ok) return res.status(409).json({ error: r.error });
+    logAudit(req.user.id, 'MOCK2_BUILD_QUEUE_CANCEL', 'mock2_project', req.mock2Project.id, { queue_id: Number(req.params.qid) }, req.ip);
+    res.json({ ok: true });
   });
 
   // List a project's cycles (viewer).
@@ -2370,10 +2441,15 @@ export function createMock2Router() {
         }
       } catch { /* cosmetic */ }
     }
+    // The build request queue (submissions while busy + split groups) rides
+    // the same poll so the chat shows "building now / up next" for free.
+    let buildQueue = [];
+    try { buildQueue = listBuildQueue(req.mock2Project.id).map(publicQueueShape); } catch { /* pre-migration */ }
     res.json({
       cycle: cycle ? { ...publicCycleShape(cycle), feedback: getCycleFeedback(cycle.id) } : null,
       job: cycle ? getCycleJobStatus(cycle.id) : null,
       typical_duration: typical,
+      build_queue: buildQueue,
       // Pending one-time authorization requests (Part 4) so the blocked card can show
       // them + an admin Grant/Deny without a separate fetch.
       authorizations: listOpenAuthorizations(req.mock2Project.id).map(publicAuthorizationShape),

@@ -416,6 +416,13 @@ export async function onRequestClosed(requestRow) {
   }
   if (Number.isFinite(pid)) {
     try { await drainScreenQueue(pid); } catch (e) { console.warn('[mock2] screen queue drain failed:', e?.message); }
+    // Then the general build-request queue (submissions while busy + split
+    // groups) — screens first, then queued requests; the writer lock keeps
+    // them from ever overlapping.
+    try {
+      const { drainBuildQueue } = await import('./build-queue.js');
+      await drainBuildQueue(pid);
+    } catch (e) { console.warn('[mock2] build queue drain failed:', e?.message); }
   }
 }
 

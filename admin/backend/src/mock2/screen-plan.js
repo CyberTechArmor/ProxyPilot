@@ -14,6 +14,7 @@ import { insertMessage } from './chats.js';
 import {
   screenPlanFromInventory, buildScreenBuildInstruction, nextQueuedScreen,
   isTransientStartError, SCREEN_DECISIONS, INITIAL_BUILD_INSTRUCTION_PREFIX,
+  screenItemsFromInventory, buildItemsBuildInstruction,
 } from './screen-plan-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -70,7 +71,122 @@ export function replaceScreenPlan(projectId, inventory) {
     }
   });
   tx();
+  // Seed the per-screen FEATURE CHECKLIST (actions + states from the same
+  // inventory). Best-effort — a checklist hiccup must not fail approval.
+  try { syncScreenItems(projectId, inventory); } catch (e) { console.warn('[mock2] screen-item sync failed:', e?.message); }
   return listScreenPlan(projectId);
+}
+
+// ---- feature checklist items (mock2_screen_items, migration 536) ----
+
+export function listScreenItems(projectId) {
+  return getMock2Db()
+    .prepare(`SELECT * FROM mock2_screen_items WHERE project_id = ? ORDER BY screen_id, id`)
+    .all(Number(projectId));
+}
+
+// Sync the checklist to the (re-)approved inventory: items that survived keep
+// their status (a design tweak must not forget what's finished); vanished
+// items are removed unless a build is targeting them; new ones append pending.
+function syncScreenItems(projectId, inventory) {
+  const items = screenItemsFromInventory(inventory);
+  const screenIdByName = new Map(listScreenPlan(projectId).map((s) => [s.name.toLowerCase(), s.id]));
+  const db = getMock2Db();
+  const existing = listScreenItems(projectId);
+  const keyOf = (screenId, name, kind) => `${screenId}:${kind}:${String(name).toLowerCase()}`;
+  const byKey = new Map(existing.map((r) => [keyOf(r.screen_id, r.name, r.kind), r]));
+  const keep = new Set();
+  const tx = db.transaction(() => {
+    for (const it of items) {
+      const sid = screenIdByName.get(it.screen_name.toLowerCase());
+      if (!sid) continue;
+      const cur = byKey.get(keyOf(sid, it.name, it.kind));
+      if (cur) { keep.add(cur.id); continue; }
+      db.prepare(`
+        INSERT INTO mock2_screen_items (project_id, screen_id, name, kind, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `).run(Number(projectId), sid, it.name, it.kind, nowIso(), nowIso());
+    }
+    for (const r of existing) {
+      if (!keep.has(r.id) && !r.request_id) db.prepare(`DELETE FROM mock2_screen_items WHERE id = ?`).run(r.id);
+    }
+  });
+  tx();
+}
+
+// Manual is/isn't-done toggle (editor): the honest override for work verified
+// by a human, or an item the initial build actually finished.
+export function setScreenItemStatus(projectId, itemId, status) {
+  if (!['pending', 'built'].includes(status)) return { ok: false, error: 'status must be pending or built' };
+  const db = getMock2Db();
+  const row = db.prepare(`SELECT * FROM mock2_screen_items WHERE project_id = ? AND id = ?`).get(Number(projectId), Number(itemId));
+  if (!row) return { ok: false, error: 'item not found' };
+  db.prepare(`UPDATE mock2_screen_items SET status = ?, updated_at = ? WHERE id = ?`).run(status, nowIso(), row.id);
+  return { ok: true, row: db.prepare(`SELECT * FROM mock2_screen_items WHERE id = ?`).get(row.id) };
+}
+
+// startItemsBuild — "finish THESE next": one scoped build over the selected
+// pending items (or all of them), stamped with the request so success settles
+// exactly those items as built (failure returns them to selectable).
+export async function startItemsBuild(projectId, { itemIds = null, initiatedBy = null } = {}) {
+  const pid = Number(projectId);
+  const project = getProject(pid);
+  if (!project || project.lifecycle !== 'active') return { status: 'error', error: 'The project must be online to build.' };
+  const pending = listScreenItems(pid).filter((r) => r.status === 'pending' && !r.request_id);
+  const wanted = itemIds == null ? pending : pending.filter((r) => itemIds.map(Number).includes(r.id));
+  if (!wanted.length) return { status: 'error', error: 'No pending checklist items selected.' };
+  const screenName = new Map(listScreenPlan(pid).map((s) => [s.id, s.name]));
+  const byScreen = new Map();
+  for (const it of wanted) {
+    const name = screenName.get(it.screen_id) || 'App';
+    if (!byScreen.has(name)) byScreen.set(name, []);
+    byScreen.get(name).push(it.name);
+  }
+  const groups = [...byScreen.entries()].map(([screen, items]) => ({ screen, items }));
+  // Lazy import (same cycle-avoidance as the drain).
+  const { startBuild } = await import('./audit.js');
+  const res = await startBuild({
+    project, instruction: buildItemsBuildInstruction(groups),
+    user: { id: initiatedBy ?? project.created_by ?? null }, buildMode: 'quick',
+  });
+  if (res.status !== 'started') {
+    return { status: 'error', error: res.error || res.reason || 'The build could not start.' };
+  }
+  const reqId = res.cycle?.request_id ?? null;
+  if (reqId) {
+    const db = getMock2Db();
+    for (const it of wanted) {
+      db.prepare(`UPDATE mock2_screen_items SET request_id = ?, updated_at = ? WHERE id = ?`).run(Number(reqId), nowIso(), it.id);
+    }
+  }
+  return { status: 'started', count: wanted.length, request_id: reqId };
+}
+
+// reconcileScreenPlan — self-heal on read: rows still 'planned' although a
+// LATER initial "everything at once" build SUCCEEDED settle as built (the
+// request-close hook is fire-and-forget, so a hiccup there must not leave the
+// panel stuck on "0/N built" forever). Only rows that existed BEFORE that
+// build finished settle — a screen added by a later re-approval stays planned.
+export function reconcileScreenPlan(projectId) {
+  const pid = Number(projectId);
+  const stale = listScreenPlan(pid).filter((r) => r.status === 'planned' && !r.request_id);
+  if (!stale.length) return { settled: 0 };
+  const req = getMock2Db().prepare(`
+    SELECT id, finished_at FROM mock2_requests
+    WHERE project_id = ? AND status = 'succeeded' AND instruction LIKE ?
+    ORDER BY id DESC LIMIT 1
+  `).get(pid, `${INITIAL_BUILD_INSTRUCTION_PREFIX}%`);
+  if (!req?.finished_at) return { settled: 0 };
+  const settleable = stale.filter((r) => String(r.created_at || '') <= String(req.finished_at));
+  if (!settleable.length) return { settled: 0 };
+  for (const r of settleable) updateScreenRow(r.id, { status: 'built', error: null });
+  try {
+    insertMessage({
+      projectId: pid, kind: 'system',
+      body: `Screens reconciled: the initial build succeeded, so ${settleable.length} screen${settleable.length === 1 ? ' is' : 's are'} now marked built. The feature checklist under each screen tracks what still needs finishing — select items and press "Build selected" to finish them next.`,
+    });
+  } catch { /* best effort */ }
+  return { settled: settleable.length };
 }
 
 // decideScreen — the Builder's per-screen call: keep it in the plan or park it.
@@ -186,6 +302,27 @@ export async function onRequestClosed(requestRow) {
       } catch { /* best effort */ }
     }
   }
+  // Feature-checklist items THIS request targeted settle with it: built on
+  // success, back to selectable (stamp cleared) otherwise.
+  try {
+    const items = db.prepare(`SELECT * FROM mock2_screen_items WHERE request_id = ?`).all(Number(requestRow.id));
+    if (items.length) {
+      const ok = requestRow.status === 'succeeded';
+      for (const it of items) {
+        db.prepare(`UPDATE mock2_screen_items SET status = ?, request_id = NULL, updated_at = ? WHERE id = ?`)
+          .run(ok ? 'built' : it.status, nowIso(), it.id);
+      }
+      const p = Number(requestRow.project_id);
+      if (Number.isFinite(p)) {
+        insertMessage({
+          projectId: p, kind: 'system',
+          body: ok
+            ? `Checklist: ${items.length} feature${items.length === 1 ? '' : 's'} finished and marked built (${items.slice(0, 5).map((i) => i.name).join('; ')}${items.length > 5 ? '…' : ''}).`
+            : `Checklist: the build targeting ${items.length} feature${items.length === 1 ? '' : 's'} ended ${requestRow.status} — they are selectable again.`,
+        });
+      }
+    }
+  } catch (e) { console.warn('[mock2] screen-item settle failed:', e?.message); }
   if (Number.isFinite(pid)) {
     try { await drainScreenQueue(pid); } catch (e) { console.warn('[mock2] screen queue drain failed:', e?.message); }
   }

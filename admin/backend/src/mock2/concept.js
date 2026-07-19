@@ -75,7 +75,7 @@ const nowIso = () => new Date().toISOString();
 // Starts with screen-plan-logic's INITIAL_BUILD_INSTRUCTION_PREFIX — the
 // request hook keys off that prefix to settle the whole screen plan as built
 // when this one-pass build succeeds. Keep them composed, never divergent.
-const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder. Reproduce the approved design's look — load state/design.css and match the tokens in state/design-tokens.json (colors, fonts, spacing, radii, component styling); do not fall back to a generic style.`;
+const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implement every screen, field, and action it defines on the pinned framework, so the live URL serves the real app in place of the placeholder. The approved mockup is preserved at state/mockups/current.html — READ IT FIRST and reproduce it faithfully: its layout, navigation structure (including patterns like a mobile bottom tab bar), component arrangement, and interaction patterns, screen by screen. The mockup is the visual contract — the app should look and navigate like it, not merely share its colors. Also load state/design.css and match the tokens in state/design-tokens.json (colors, fonts, spacing, radii, component styling); never fall back to a generic style. Any inventory feature you cannot finish this cycle must be visibly marked "Not built yet" in the UI (a disabled control + badge), never a dead or silently missing element.`;
 
 // Bound the HTML we round-trip so a runaway mockup can't blow the token envelope
 // (R5) or the working tree. A real mockup is well under this.

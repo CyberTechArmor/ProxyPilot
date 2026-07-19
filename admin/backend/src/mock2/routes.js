@@ -123,7 +123,7 @@ import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, 
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
-import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, listScreenItems, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
+import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
 import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
@@ -214,7 +214,7 @@ import { buildRequestLog, requestLogArtifact } from './request-log.js';
 import { runConsult } from './consult.js';
 import { consultAllowed } from './consult-logic.js';
 import {
-  getCycle, listCyclesForProject, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
+  getCycle, listCyclesForProject, listRecentSucceededCyclesAllProjects, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
   countRunningCycles,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS, typicalDurationMs } from './cycle-logic.js';
@@ -2319,14 +2319,25 @@ export function createMock2Router() {
   // on a finished build before the next cycle.
   router.get('/projects/:id/cycle', requireMock2Role('viewer'), (req, res) => {
     const cycle = latestCycle(req.mock2Project.id);
-    // The "typically ~X–Y" band for the live elapsed clock: recent succeeded
-    // cycles of the SAME build mode (quick predicts quick). Null until two
-    // comparable builds exist.
+    // The "typically ~X–Y" band for the live elapsed clock. Prediction ladder:
+    // this project's builds of the same mode → ALL projects' builds of the
+    // same mode (a first build predicts from the whole install's history) →
+    // all recent builds anywhere. `source` tells the UI which pool answered;
+    // the estimate self-improves as more builds finish.
     let typical = null;
     if (cycle) {
       try {
         const mode = parseRoutingJson(cycle.routing_json)?.build_mode || null;
         typical = typicalDurationMs(listCyclesForProject(req.mock2Project.id, { limit: 60 }), { buildMode: mode });
+        if (typical) typical.source = 'project';
+        if (!typical) {
+          typical = typicalDurationMs(listRecentSucceededCyclesAllProjects({ limit: 300 }), { buildMode: mode });
+          if (typical) typical.source = 'global';
+        }
+        if (!typical) {
+          typical = typicalDurationMs(listRecentSucceededCyclesAllProjects({ limit: 300 }), {});
+          if (typical) typical.source = 'any';
+        }
       } catch { /* cosmetic */ }
     }
     res.json({
@@ -3075,11 +3086,14 @@ export function createMock2Router() {
   // one at a time (screen-plan.js).
   // ============================================================
 
-  router.get('/projects/:id/screens', requireMock2Role('viewer'), (req, res) => {
+  router.get('/projects/:id/screens', requireMock2Role('viewer'), async (req, res) => {
     // Self-heal first: a succeeded initial build settles still-'planned' rows
     // even if the request-close hook hiccuped (the "0/N built over a working
-    // app" bug). Best-effort — the list renders regardless.
+    // app" bug), and projects approved before the checklist existed get their
+    // items seeded from the container's inventory. Best-effort — the list
+    // renders regardless.
     try { reconcileScreenPlan(req.mock2Project.id); } catch { /* cosmetic */ }
+    try { await backfillScreenItems(req.mock2Project); } catch { /* cosmetic */ }
     const rows = listScreenPlan(req.mock2Project.id);
     // The per-screen feature checklist (is/isn't done, migration 536).
     let items = [];

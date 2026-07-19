@@ -23,6 +23,21 @@ export function listCyclesForProject(projectId, { limit = 50 } = {}) {
     .all(Number(projectId), Number(limit));
 }
 
+// Recent finished cycles across EVERY project — the global training pool for
+// the build-time estimate (a brand-new project's FIRST build predicts from the
+// whole install's history, and the band tightens as more builds finish).
+// Only the duration-relevant columns; newest first.
+export function listRecentSucceededCyclesAllProjects({ limit = 300 } = {}) {
+  return getMock2Db()
+    .prepare(`
+      SELECT id, status, routing_json, started_at, finished_at, created_at
+      FROM mock2_cycles
+      WHERE status = 'succeeded' AND finished_at IS NOT NULL
+      ORDER BY id DESC LIMIT ?
+    `)
+    .all(Number(limit));
+}
+
 // Every cycle that is a SEGMENT of one request (cost-truth), in execution order.
 export function listCyclesForRequest(requestId) {
   if (requestId == null) return [];

@@ -473,7 +473,9 @@ export default function BuildStatus({
                   </span>
                 ) : null}
                 {active && typicalRange ? (
-                  <span title={`Based on your last ${typical.n} ${typical.n === 1 ? 'build' : 'builds'} of this kind`}>
+                  <span title={typical.source === 'project'
+                    ? `Based on this project's last ${typical.n} builds of this kind`
+                    : `Based on ${typical.n} recent builds across all projects${typical.source === 'any' ? ' (any kind)' : ' of this kind'} — tightens as this project builds`}>
                     {' · typically '}{typicalRange}
                   </span>
                 ) : null}

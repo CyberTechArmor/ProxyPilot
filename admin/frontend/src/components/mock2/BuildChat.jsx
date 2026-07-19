@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -32,6 +32,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // per-part include + group assignment edited locally before submit.
   const [splitPlan, setSplitPlan] = useState(null);
   const [splitBusy, setSplitBusy] = useState(false);
+  // The suggestions card (project suggest_mode 'ask'): domain expectations the
+  // pre-pass surfaced beyond the literal request — tick to include as binding
+  // additions. { instruction, items: [{ text, include }] }.
+  const [suggestPlan, setSuggestPlan] = useState(null);
+  // 'off' | 'ask' | 'auto' — the project's suggestion handling, editable here.
+  const [suggestMode, setSuggestMode] = useState(project?.suggest_mode || 'ask');
+  useEffect(() => { if (project?.suggest_mode) setSuggestMode(project.suggest_mode); }, [project?.suggest_mode]);
   const [deployingBase, setDeployingBase] = useState(false);
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
@@ -130,12 +137,12 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false } = {}) => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null } = {}) => {
     const body = instruction.trim();
     if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode, { skipSplit });
+      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode, { skipSplit, skipSuggest, extras });
       if (res.split_proposal) {
         // Feature-scale ask that decomposes — show the grouping card; nothing
         // has started yet. Default: every part included, one group per part.
@@ -143,6 +150,17 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           instruction: res.split_proposal.instruction,
           parts: res.split_proposal.parts.map((pt, i) => ({ ...pt, include: true, group: i + 1 })),
         });
+        setSuggestPlan(null);
+        return;
+      }
+      if (res.suggest_proposal) {
+        // Domain expectations beyond the literal ask (suggest_mode 'ask') —
+        // show the additions card; nothing has started yet.
+        setSuggestPlan({
+          instruction: res.suggest_proposal.instruction,
+          items: res.suggest_proposal.items.map((text) => ({ text, include: true })),
+        });
+        setSplitPlan(null);
         return;
       }
       if (res.queued) {
@@ -211,6 +229,26 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     } finally { setSplitBusy(false); }
   };
   const buildAsOne = async () => { setSplitPlan(null); await startBuild('quick', { skipSplit: true }); };
+
+  // ---- suggestions card + mode toggle ----
+  const submitSuggestions = async () => {
+    if (!suggestPlan) return;
+    const extras = suggestPlan.items.filter((i) => i.include).map((i) => i.text);
+    setSuggestPlan(null);
+    await startBuild('quick', { skipSuggest: true, extras: extras.length ? extras : null });
+  };
+  const buildAsAsked = async () => { setSuggestPlan(null); await startBuild('quick', { skipSuggest: true }); };
+  const saveSuggestMode = async (m) => {
+    if (m === suggestMode) return;
+    const prev = suggestMode;
+    setSuggestMode(m);
+    if (m !== 'ask') setSuggestPlan(null);
+    try { await api.mock2SetSuggestMode(projectId, m); }
+    catch (err) {
+      setSuggestMode(prev);
+      toast({ variant: 'destructive', title: 'Could not save the suggestion setting', description: err.message });
+    }
+  };
   const cancelQueued = async (qid) => {
     try { await api.mock2CancelQueuedBuild(projectId, qid); if (onStarted) onStarted(); }
     catch (err) { toast({ variant: 'destructive', title: 'Could not cancel', description: err.message }); }
@@ -382,6 +420,45 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 </div>
               </div>
             ) : null}
+            {/* Suggestions card (suggest_mode 'ask') — domain expectations the
+                pre-pass surfaced beyond the literal request. Ticked items become
+                binding additions; untick to leave them out entirely. */}
+            {suggestPlan ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Sparkles className="h-3.5 w-3.5" /> An expert would probably expect these too — include any?
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Ticked items are built as part of this update; unticked ones are simply left out.
+                  The Suggestions toggle below switches this card off (build exactly what you type) or to Auto (always include everything).
+                </p>
+                {suggestPlan.items.map((it, i) => (
+                  <label key={i} className="flex cursor-pointer items-start gap-2 rounded border bg-background/40 p-2">
+                    <input
+                      type="checkbox" className="mt-0.5 h-4 w-4 shrink-0 accent-primary" checked={it.include}
+                      onChange={() => setSuggestPlan((cur) => ({ ...cur, items: cur.items.map((x, j) => (j === i ? { ...x, include: !x.include } : x)) }))}
+                    />
+                    <span className="min-w-0 flex-1 text-xs break-words">{it.text}</span>
+                  </label>
+                ))}
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="min-h-[44px] flex-1"
+                    disabled={busy || !suggestPlan.items.some((i) => i.include)}
+                    onClick={submitSuggestions}
+                  >
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1" />}
+                    Build with {suggestPlan.items.filter((i) => i.include).length} addition{suggestPlan.items.filter((i) => i.include).length === 1 ? '' : 's'}
+                  </Button>
+                  <Button variant="outline" className="min-h-[44px]" disabled={busy} onClick={buildAsAsked}>
+                    Build as asked
+                  </Button>
+                  <Button variant="ghost" className="min-h-[44px]" disabled={busy} onClick={() => setSuggestPlan(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {needsFeedback && !resumeMode ? (
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
@@ -463,6 +540,35 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 </>
               )}
             </div>
+            {/* Suggestion handling for quick updates: Off (build exactly what
+                you type) / Ask (show the additions card, default) / Auto
+                (always include every surfaced expectation). Saved per project. */}
+            {!resumeMode ? (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Sparkles className="h-3 w-3 shrink-0" />
+                <span className="mr-0.5">Suggestions:</span>
+                {[
+                  { key: 'off', label: 'Off', hint: 'Build exactly what you type — expert suggestions are never added.' },
+                  { key: 'ask', label: 'Ask', hint: 'Show suggested additions as a card so you pick what to include (default).' },
+                  { key: 'auto', label: 'Auto', hint: 'Automatically include every suggested addition — no card.' },
+                ].map((opt) => (
+                  <button
+                    key={opt.key} type="button" title={opt.hint}
+                    onClick={() => saveSuggestMode(opt.key)}
+                    className={`h-9 rounded-md border px-3 text-xs transition-colors ${suggestMode === opt.key
+                      ? 'border-primary bg-primary/10 font-medium text-foreground'
+                      : 'border-input bg-transparent hover:bg-muted'}`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                <span className="basis-full sm:basis-auto sm:ml-1">
+                  {suggestMode === 'off' ? 'builds exactly what you type'
+                    : suggestMode === 'auto' ? 'expert additions are always included'
+                      : 'you pick suggested additions per build'}
+                </span>
+              </div>
+            ) : null}
             {/* The build queue — "building now / up next", each queued entry
                 cancellable. Submissions while a build runs land here and run
                 back-to-back automatically. */}

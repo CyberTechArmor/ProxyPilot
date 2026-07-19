@@ -197,7 +197,7 @@ import {
 import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
 import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
-import { buildGroupInstruction } from './prepass-logic.js';
+import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
 import { probeSplitProposal } from './runner.js';
 import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
 import {
@@ -442,6 +442,12 @@ const cycleStartSchema = z.object({
   // True after the user chose "build as one" on the split card — skips the
   // route-time split probe so the card doesn't re-appear in a loop.
   skip_split: z.boolean().optional(),
+  // True after the user answered the suggestions card (with or without picks) —
+  // stops it re-appearing on the resend.
+  skip_suggest: z.boolean().optional(),
+  // The additions the user ticked on the suggestions card; folded into the
+  // instruction as binding deliverables.
+  extras: z.array(z.string().trim().min(1).max(300)).max(6).optional(),
 });
 const buildGroupsSchema = z.object({
   instruction: z.string().trim().min(1).max(8000),
@@ -2339,15 +2345,30 @@ export function createMock2Router() {
     // editor/admin questions (blocking the build) or, when clear, hands off to
     // the M6 runner. 202 + poll: the audit runs in the background.
     const mode = parsed.data.mode || 'full';
-    // Quick lane, no other build running: probe for a SPLIT first. A
-    // feature-scale ask that naturally decomposes returns a proposal (no build
-    // started) — the chat renders the grouping card and the user decides.
-    // skip_split (the card's "build as one") bypasses the probe. Fail-open.
+    // The user's ticked additions (suggestions card) become binding scope.
+    let instruction = composeWithAdditions(parsed.data.instruction, parsed.data.extras || []);
+    // Quick lane, no other build running: one route-time probe sizes the ask.
+    // A feature-scale request that naturally decomposes returns a SPLIT
+    // proposal (no build started) — the grouping card decides. Otherwise the
+    // pre-pass's domain expectations feed the project's suggestion setting:
+    // 'ask' returns the additions card, 'auto' folds them all in, 'off'
+    // ignores them. skip_split / skip_suggest (the cards' resends) bypass
+    // their own card so neither re-appears in a loop. Fail-open throughout.
+    const suggestMode = normalizeSuggestMode(project.suggest_mode);
     if (mode === 'quick' && !parsed.data.skip_split && !(parsed.data.images || []).length) {
       try {
-        const probe = await probeSplitProposal(parsed.data.instruction);
+        const probe = await probeSplitProposal(instruction);
         if (probe?.scope === 'feature_scale' && probe.split?.parts?.length >= 2) {
-          return res.json({ split_proposal: { instruction: parsed.data.instruction, parts: probe.split.parts } });
+          return res.json({ split_proposal: { instruction, parts: probe.split.parts } });
+        }
+        const expectations = (probe?.brief?.domain_expectations || []).filter(Boolean);
+        if (expectations.length && !parsed.data.skip_suggest && !(parsed.data.extras || []).length) {
+          if (suggestMode === 'ask') {
+            return res.json({ suggest_proposal: { instruction, items: expectations } });
+          }
+          if (suggestMode === 'auto') {
+            instruction = composeWithAdditions(instruction, expectations, { auto: true });
+          }
         }
       } catch { /* fail-open — build normally */ }
     }
@@ -2357,7 +2378,7 @@ export function createMock2Router() {
       const cur = latestCycle(project.id);
       const busy = cur && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cur.status);
       if (busy) {
-        const row = enqueueBuild({ projectId: project.id, instruction: parsed.data.instruction, buildMode: 'quick', initiatedBy: req.user.id });
+        const row = enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', initiatedBy: req.user.id });
         logAudit(req.user.id, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { queue_id: row.id }, req.ip);
         return res.status(202).json({ queued: true, queue: publicQueueShape(row) });
       }
@@ -2367,7 +2388,7 @@ export function createMock2Router() {
       const imgCheck = validateChatImages(parsed.data.images);
       if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
       result = await startBuild({
-        project, instruction: parsed.data.instruction,
+        project, instruction,
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
         buildMode: mode,
@@ -2377,7 +2398,7 @@ export function createMock2Router() {
     }
     if (result.status === 'error') return res.status(409).json({ error: result.error });
     logAudit(req.user.id, 'MOCK2_BUILD_AUDIT_START', 'mock2_cycle', result.cycle?.id || 0,
-      { instruction: parsed.data.instruction, status: result.status, mode: parsed.data.mode || 'full', acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
+      { instruction, status: result.status, mode: parsed.data.mode || 'full', acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     return res.status(result.status === 'refused' ? 200 : 202).json({
       cycle: publicCycleShape(result.cycle), refused: result.status === 'refused',
       audit: result.status === 'started', reason: result.error || null,
@@ -2408,6 +2429,18 @@ export function createMock2Router() {
     drainBuildQueue(project.id).catch((e) => console.warn('[mock2] build-queue drain failed:', e?.message));
     logAudit(req.user.id, 'MOCK2_BUILD_GROUPS', 'mock2_project', project.id, { groups: groups.length }, req.ip);
     res.status(202).json({ queued: rows.length, queue: rows.map(publicQueueShape) });
+  });
+
+  // How this project handles the pre-pass's domain suggestions:
+  // 'ask' (card, default) | 'auto' (fold all in) | 'off' (build exactly as asked).
+  router.put('/projects/:id/suggest-mode', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const mode = String(req.body?.mode || '');
+    if (!SUGGEST_MODES.includes(mode)) {
+      return res.status(400).json({ error: `mode must be one of: ${SUGGEST_MODES.join(', ')}` });
+    }
+    const updated = updateProject(req.mock2Project.id, { suggest_mode: mode });
+    logAudit(req.user.id, 'MOCK2_SUGGEST_MODE_SET', 'mock2_project', req.mock2Project.id, { mode }, req.ip);
+    res.json({ project: shapeProject(updated, { isAdmin: isReqAdmin(req) }) });
   });
 
   // Cancel a queued (not yet started) build.

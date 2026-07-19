@@ -49,6 +49,7 @@ import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRo
 import {
   prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
   prepassEffort, formatBriefForTask, featureScaleNotice, PREPASS_MAX_TOKENS,
+  normalizeSuggestMode,
 } from './prepass-logic.js';
 import { insertCycleEvent } from './cycle-events.js';
 import {
@@ -227,6 +228,12 @@ async function runQuickPrepass({ project, cycle, ready, routing }) {
   } catch (e) { console.warn('[mock2] pre-pass ledger write failed:', e?.message); }
   const parsed = parsePrepassReply(res.text);
   if (!parsed) return null;
+  // Suggestions 'off': the operator asked for exactly what they typed — drop
+  // the domain expectations so they never reach the working brief. ('ask' picks
+  // ride the instruction as confirmed extras; 'auto' keeps them here.)
+  if (parsed.brief && normalizeSuggestMode(project.suggest_mode) === 'off') {
+    parsed.brief.domain_expectations = [];
+  }
   try {
     updateCycle(cycle.id, { routing_json: JSON.stringify({ ...(routing || {}), prepass: parsed }) });
   } catch (e) { console.warn('[mock2] pre-pass routing stamp failed:', e?.message); }

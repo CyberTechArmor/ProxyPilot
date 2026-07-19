@@ -253,6 +253,9 @@ export function publicProjectShape(project, extra = {}) {
     created_by: project.created_by ?? null,
     created_at: project.created_at || null,
     archived_at: project.archived_at || null,
+    // Domain-suggestion handling ('off'|'ask'|'auto', migration 539); rows
+    // predating the column normalize to the 'ask' default.
+    suggest_mode: ['off', 'ask', 'auto'].includes(project.suggest_mode) ? project.suggest_mode : 'ask',
     // M7 concept stage: the persistent stage indicator (Concept → Define →
     // Build → Run), the design-approval sign-off, and the live mockup preview
     // URL (the dashboard's own /mockup-preview route). preview_url is null

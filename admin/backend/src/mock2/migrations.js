@@ -1445,4 +1445,18 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Domain-suggestion handling per project: when the quick-lane pre-pass
+    // surfaces expert expectations beyond the literal request, 'ask' shows the
+    // additions card (default), 'auto' folds them all in without asking, and
+    // 'off' builds exactly what was asked.
+    version: 539,
+    name: 'mock2_projects_suggest_mode',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN suggest_mode TEXT NOT NULL DEFAULT 'ask'
+          CHECK (suggest_mode IN ('off', 'ask', 'auto'));
+      `);
+    },
+  },
 ];

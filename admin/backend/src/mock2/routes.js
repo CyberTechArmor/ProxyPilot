@@ -194,7 +194,9 @@ import {
   publicRoutingRuleShape, aggregateRoutingOutcomes,
 } from './routing-logic.js';
 // ---- M6: cycle runner + checkout lock ----
-import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, execInContainer, buildRunnerReady } from './runner.js';
+import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendingVerification, readFileInContainer, buildRunnerReady } from './runner.js';
+import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
+import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
   insertAuthorization, decideAuthorization, publicAuthorizationShape,
@@ -1729,6 +1731,52 @@ export function createMock2Router() {
     const { cleared } = clearProjectRemote(project.id);
     logAudit(req.user.id, 'MOCK2_PROJECT_REMOTE_CLEAR', 'mock2_project', project.id, {}, req.ip);
     res.json({ ok: true, cleared });
+  });
+
+  // ---- Quick connect (VS Code / git over smart HTTP) ----
+  // Mint/list/revoke the per-user connect tokens the /api/mock2/git router
+  // authenticates with. The clone URL + a vscode:// deep link come back with a
+  // freshly minted token (the plaintext is shown exactly once).
+  router.get('/projects/:id/connect', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const origin = process.env.DOMAIN ? `https://${process.env.DOMAIN}` : `${req.protocol}://${req.get('host')}`;
+    const mine = listConnectTokens(project.id, req.mock2Access.actingAsAdmin ? {} : { userId: req.user.id });
+    res.json({
+      clone_url: cloneUrlFor(origin, project.id),
+      can_push: req.mock2Access.role !== 'viewer',
+      tokens: mine.map(shapeConnectToken),
+    });
+  });
+
+  router.post('/projects/:id/connect-tokens', requireMock2Role('viewer'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    const label = typeof req.body?.label === 'string' ? req.body.label.slice(0, 80) : null;
+    const { token, row } = mintConnectToken({ projectId: project.id, userId: req.user.id, label });
+    const origin = process.env.DOMAIN ? `https://${process.env.DOMAIN}` : `${req.protocol}://${req.get('host')}`;
+    const cloneUrl = cloneUrlFor(origin, project.id);
+    const withCreds = cloneUrlWithCreds(origin, project.id, req.user.username || 'proxypilot', token);
+    logAudit(req.user.id, 'MOCK2_CONNECT_TOKEN_CREATE', 'mock2_project', project.id, { token_id: row.id }, req.ip);
+    res.status(201).json({
+      token, // plaintext — shown once, never retrievable again
+      username: req.user.username || 'proxypilot',
+      clone_url: cloneUrl,
+      clone_url_with_creds: withCreds,
+      vscode_url: vscodeCloneLink(withCreds),
+      record: shapeConnectToken(row),
+    });
+  });
+
+  router.delete('/projects/:id/connect-tokens/:tokenId', requireMock2Role('viewer'), (req, res) => {
+    const project = req.mock2Project;
+    const row = getConnectToken(req.params.tokenId);
+    if (!row || Number(row.project_id) !== Number(project.id)) return res.status(404).json({ error: 'Token not found' });
+    // Your own token, or any token when acting as admin.
+    if (row.user_id !== req.user.id && !req.mock2Access.actingAsAdmin && !isReqAdmin(req)) {
+      return res.status(403).json({ error: 'You can only revoke your own connect tokens' });
+    }
+    revokeConnectToken(row.id);
+    logAudit(req.user.id, 'MOCK2_CONNECT_TOKEN_REVOKE', 'mock2_project', project.id, { token_id: row.id }, req.ip);
+    res.json({ ok: true });
   });
 
   // Export as zip = git archive of the bare repo's working tree at HEAD (ADR-006).

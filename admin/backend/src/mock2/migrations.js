@@ -1347,4 +1347,28 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Quick connect (VS Code / git over smart HTTP): per-user, per-project
+    // connect tokens. Only the sha256 is stored; user_id is users.id (UUID
+    // text — never numeric).
+    version: 535,
+    name: 'mock2_connect_tokens',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_connect_tokens (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id   INTEGER NOT NULL,
+          user_id      TEXT NOT NULL,
+          token_hash   TEXT NOT NULL UNIQUE,
+          label        TEXT,
+          created_at   TEXT NOT NULL,
+          expires_at   TEXT,
+          last_used_at TEXT,
+          revoked_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_connect_tokens_project
+          ON mock2_connect_tokens (project_id);
+      `);
+    },
+  },
 ];

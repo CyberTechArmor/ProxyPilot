@@ -38,6 +38,7 @@ import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 import ProjectTerminal from '@/components/mock2/ProjectTerminal';
 import BuildMode from '@/components/mock2/BuildMode';
+import ConnectVsCode from '@/components/mock2/ConnectVsCode';
 import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPreview';
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
 import { fireConfetti } from '@/lib/confetti';
@@ -536,6 +537,10 @@ export default function ProjectDetail() {
       {/* Standard components — what this app uses (suggested at define time or
           picked here), installed by the platform with zero build credits. */}
       <ProjectComponentsCard projectId={id} canEdit={canEdit} isActive={project.lifecycle === 'active'} />
+
+      {/* Quick connect — clone/push the project repo from VS Code or any git
+          client; pushes are recorded, synced into the container, and deployed. */}
+      {!isArchived ? <ConnectVsCode projectId={id} canEdit={canEdit} /> : null}
 
       {/* (build cycle + build chat now live in the Chat tab above) */}
 

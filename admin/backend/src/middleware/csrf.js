@@ -27,6 +27,12 @@ const CSRF_EXEMPT_PREFIXES = [
   // the binding token here — no CSRF cookie is necessary.
   '/api/auth/passkey/authenticate/begin',
   '/api/auth/passkey/authenticate/verify',
+  // Mock2 quick connect: git smart-HTTP endpoints (VS Code / git CLI).
+  // Auth is a per-user connect token over HTTP Basic — no ambient cookies
+  // are involved, so a cross-site request can't ride a session and the
+  // double-submit check has nothing to protect (git clients also cannot
+  // echo a CSRF header).
+  '/api/mock2/git/',
 ];
 
 export function csrfProtection(req, res, next) {

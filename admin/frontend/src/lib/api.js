@@ -1431,6 +1431,12 @@ export const api = {
     request(`/mock2/projects/${id}/base-app/deploy`, { method: 'POST' }),
   // Live probe for the "Open app" button: is the REAL app answering its port?
   mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
+  // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
+  mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
+  mock2CreateConnectToken: (id, label = null) =>
+    request(`/mock2/projects/${id}/connect-tokens`, { method: 'POST', body: JSON.stringify({ label }) }),
+  mock2RevokeConnectToken: (id, tokenId) =>
+    request(`/mock2/projects/${id}/connect-tokens/${tokenId}`, { method: 'DELETE' }),
   // Screen plan (per-screen apply): seeded from the approved inventory.
   mock2ListScreens: (id) => request(`/mock2/projects/${id}/screens`),
   mock2DecideScreen: (id, screenId, status) =>

@@ -137,17 +137,30 @@ export default function ConnectVsCode({ projectId, canEdit }) {
                   <ExternalLink className="h-4 w-4 mr-1" /> Open in VS Code (clone)
                 </a>
               </Button>
-              <p className="text-xs text-muted-foreground">
-                Or connect manually with any git client:
-              </p>
+              <div className="rounded-md border bg-muted/20 p-3">
+                <p className="text-xs font-medium mb-1.5">Where to go in VS Code</p>
+                <ol className="list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
+                  <li>The button above opens VS Code&apos;s clone flow directly (your browser asks to open VS Code — allow it).</li>
+                  <li>
+                    Manually instead: in VS Code press <span className="font-mono">Ctrl+Shift+P</span> (Mac:{' '}
+                    <span className="font-mono">Cmd+Shift+P</span>), type <span className="font-medium">Git: Clone</span>,
+                    press Enter, and paste the Clone URL below. Pick a folder; when VS Code asks for credentials,
+                    enter the Username and Token below (the token is the password).
+                  </li>
+                  <li>Open the cloned folder when prompted ("Open in new window").</li>
+                  <li>
+                    To send changes back: Source Control panel (<span className="font-mono">Ctrl+Shift+G</span>) →
+                    write a message → <span className="font-medium">Commit</span> → <span className="font-medium">Sync Changes</span> (push).
+                  </li>
+                </ol>
+              </div>
               <CopyRow label="Clone URL" value={minted.clone_url} />
               <CopyRow label="Username" value={minted.username} />
               <CopyRow label="Token (password)" value={minted.token} />
-              <CopyRow label="One-line clone" value={`git clone ${minted.clone_url_with_creds}`} />
+              <CopyRow label="One-line clone (terminal)" value={`git clone ${minted.clone_url_with_creds}`} />
               <p className="text-xs text-muted-foreground">
-                Work normally and <span className="font-medium">git push</span> when ready — the push is recorded
-                in the project&apos;s change history, synced into the container, and deployed automatically. If a
-                build is running, your commits wait safely in the repository.
+                Every push is recorded in the project&apos;s change history, synced into the container, and deployed
+                automatically. If a build is running, your commits wait safely in the repository.
               </p>
             </div>
           ) : null}

@@ -402,7 +402,10 @@ function scheduleBaseAppRecheck(projectId, attempt = 1) {
       );
       const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
       const code = Number(codeStr);
-      if (code >= 200 && code < 500 && /node/.test(execLine)) {
+      // The unit is either the serve.py placeholder or the app's wrapped start
+      // command (`/bin/sh -lc '… exec npm run start'`) — "not serve.py" IS the
+      // app; a /node/ grep never matches the npm-wrapped command.
+      if (code >= 200 && code < 500 && execLine.trim() && !/serve\.py/i.test(execLine)) {
         updateProject(projectId, { base_app_deployed_at: new Date().toISOString() });
         setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
         try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }
@@ -463,7 +466,10 @@ async function deployBaseAppInner(project, projectId, { reason }) {
       );
       const [codeStr, execLine = ''] = String(probe.stdout || '').trim().split('|');
       const code = Number(codeStr);
-      if (code >= 200 && code < 500 && /node/.test(execLine)) {
+      // The unit is either the serve.py placeholder or the app's wrapped start
+      // command (`/bin/sh -lc '… exec npm run start'`) — "not serve.py" IS the
+      // app; a /node/ grep never matches the npm-wrapped command.
+      if (code >= 200 && code < 500 && execLine.trim() && !/serve\.py/i.test(execLine)) {
         updateProject(projectId, { base_app_deployed_at: new Date().toISOString() });
         setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
         try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }

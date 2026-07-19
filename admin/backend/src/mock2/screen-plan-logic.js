@@ -139,8 +139,75 @@ export function buildItemsBuildInstruction(groups = []) {
   return 'Finish these specific features from the approved design inventory (state/inventory.json) — ' +
     `${parts.join(' · ')}. ` +
     'Scope is BINDING: implement ONLY the listed features, on their listed screens; do not build, restyle, or ' +
-    'refactor anything else, and do not touch the auth wiring. Match the approved mockup faithfully — read ' +
+    'refactor anything else, and do not touch the auth wiring. STATE items are conditions to HANDLE when they ' +
+    'genuinely occur (empty, error, in-progress, submitted…) — NEVER fabricate an artificial one to tick the box ' +
+    '(no fake spinners, no invented delays, no placeholder loading UX for data that arrives at once). ' +
+    'Match the approved mockup faithfully — read ' +
     'state/mockups/current.html for the exact layout, navigation, and component patterns — and load /design.css. ' +
     'Any listed feature you cannot finish this cycle must be visibly marked "Not built yet" in the UI (disabled ' +
     'control + badge), never a dead or silently missing element.';
+}
+
+// ---- checklist post-pass (keep the plan in sync with what builds ACTUALLY did) ----
+
+// After a build request succeeds, one cheap model call reads the instruction +
+// the recorded change summary against the current checklist and reports the
+// DELTAS: pages the build added, features it added, and existing pending items
+// it completed. Deterministic settle (the request-stamp path) stays the source
+// of truth for targeted item builds — this covers everything else (quick
+// updates, the initial build, chat-driven additions). Fail-open like the
+// pre-pass: garbage/model failure = no checklist change.
+export const POSTPASS_LIST_MAX = 8;
+
+export function buildChecklistPostPassPrompt() {
+  return `You keep a build system's feature checklist in sync with what a build ACTUALLY did.
+You are given: the build instruction, the recorded change summary, and the current
+checklist (screens with their items and statuses). Reply with STRICT JSON only:
+{
+  "new_screens": [{"name": "...", "purpose": "..."}],
+  "new_items": [{"screen": "<existing or new screen name>", "name": "...", "kind": "action" | "state"}],
+  "completed_item_ids": [123, ...]
+}
+Rules:
+- new_screens: ONLY pages the build genuinely created that are missing from the checklist.
+- new_items: ONLY functionality the build genuinely added that no existing item covers.
+- completed_item_ids: ids of existing PENDING items this build clearly finished (be
+  conservative — when unsure, leave it pending).
+- Never invent work the summary does not support. Empty lists are the normal answer
+  for a small fix. At most ${POSTPASS_LIST_MAX} entries per list.`;
+}
+
+export function buildChecklistPostPassTask({ instruction = '', summary = '', screens = [] } = {}) {
+  const plan = screens.map((s) => {
+    const items = (s.items || []).map((i) => `  [${i.id}] (${i.status}) ${i.kind}: ${i.name}`).join('\n');
+    return `Screen "${s.name}" (${s.status}):\n${items || '  (no items)'}`;
+  }).join('\n');
+  return `Build instruction:\n${String(instruction).slice(0, 2000)}\n\nRecorded change summary:\n${String(summary).slice(0, 3000)}\n\nCurrent checklist:\n${plan}`;
+}
+
+export function parseChecklistPostPassReply(text) {
+  let s = String(text || '').trim();
+  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(s);
+  if (fence) s = fence[1].trim();
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  let doc;
+  try { doc = JSON.parse(s.slice(start, end + 1)); } catch { return null; }
+  if (!doc || typeof doc !== 'object') return null;
+  const str = (v, max) => String(v ?? '').trim().slice(0, max);
+  const newScreens = (Array.isArray(doc.new_screens) ? doc.new_screens : [])
+    .map((r) => ({ name: str(r?.name, 120), purpose: str(r?.purpose, 500) || null }))
+    .filter((r) => r.name)
+    .slice(0, POSTPASS_LIST_MAX);
+  const newItems = (Array.isArray(doc.new_items) ? doc.new_items : [])
+    .map((r) => ({ screen: str(r?.screen, 120), name: str(r?.name, 200), kind: r?.kind === 'state' ? 'state' : 'action' }))
+    .filter((r) => r.screen && r.name)
+    .slice(0, POSTPASS_LIST_MAX);
+  const completed = (Array.isArray(doc.completed_item_ids) ? doc.completed_item_ids : [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isInteger(v) && v > 0)
+    .slice(0, POSTPASS_LIST_MAX * 4);
+  if (!newScreens.length && !newItems.length && !completed.length) return { empty: true, newScreens, newItems, completed };
+  return { empty: false, newScreens, newItems, completed };
 }

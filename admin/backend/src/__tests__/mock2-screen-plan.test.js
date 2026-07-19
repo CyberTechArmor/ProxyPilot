@@ -116,3 +116,30 @@ test('screen + initial-build instructions carry the mockup as the visual contrac
   assert.match(s, /bottom tab bar/);
   assert.match(s, /Not built yet/);
 });
+
+test('checklist post-pass: prompt contract, tolerant parsing, clamps, conservative empties', async () => {
+  const { buildChecklistPostPassPrompt, buildChecklistPostPassTask, parseChecklistPostPassReply } = await import('../mock2/screen-plan-logic.js');
+  assert.match(buildChecklistPostPassPrompt(), /STRICT JSON only/);
+  assert.match(buildChecklistPostPassPrompt(), /be\s+conservative/i);
+  const task = buildChecklistPostPassTask({
+    instruction: 'add exports', summary: 'Added CSV export to Timesheet',
+    screens: [{ name: 'Timesheet', status: 'built', items: [{ id: 7, status: 'pending', kind: 'action', name: 'Export CSV' }] }],
+  });
+  assert.match(task, /\[7\] \(pending\) action: Export CSV/);
+  const good = parseChecklistPostPassReply('{"new_screens":[{"name":"Reports","purpose":"weekly totals"}],"new_items":[{"screen":"Reports","name":"Print view","kind":"action"}],"completed_item_ids":[7,"9",-1]}');
+  assert.equal(good.empty, false);
+  assert.deepEqual(good.newScreens, [{ name: 'Reports', purpose: 'weekly totals' }]);
+  assert.deepEqual(good.newItems, [{ screen: 'Reports', name: 'Print view', kind: 'action' }]);
+  assert.deepEqual(good.completed, [7, 9]); // strings coerce, negatives dropped
+  // A small fix legitimately changes nothing.
+  const none = parseChecklistPostPassReply('{"new_screens":[],"new_items":[],"completed_item_ids":[]}');
+  assert.equal(none.empty, true);
+  assert.equal(parseChecklistPostPassReply('cannot help with that'), null);
+});
+
+test('items-build instruction forbids fabricated states (the fake-spinner regression)', async () => {
+  const { buildItemsBuildInstruction } = await import('../mock2/screen-plan-logic.js');
+  const s = buildItemsBuildInstruction([{ screen: 'Timesheet', items: ['loading state'] }]);
+  assert.match(s, /NEVER fabricate/);
+  assert.match(s, /no fake spinners/);
+});

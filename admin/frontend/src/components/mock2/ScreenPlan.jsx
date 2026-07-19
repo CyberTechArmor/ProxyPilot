@@ -11,7 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
-  Loader2, LayoutList, CheckCircle2, XCircle, Clock, Hammer, PauseCircle,
+  Loader2, LayoutList, CheckCircle2, XCircle, Clock, Hammer, PauseCircle, ChevronDown, ChevronRight,
 } from 'lucide-react';
 
 const STATUS_CHIP = {
@@ -29,6 +29,8 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
   const [counts, setCounts] = useState(null);
   const [items, setItems] = useState([]); // feature checklist rows
   const [selected, setSelected] = useState(() => new Set()); // item ids picked to build next
+  const [expandedScreens, setExpandedScreens] = useState({}); // screen id -> manual expand/collapse override
+  const [openItems, setOpenItems] = useState(() => new Set()); // item ids with version history open
   const [itemsBusy, setItemsBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const timer = useRef(null);
@@ -82,6 +84,21 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
 
   // ---- feature checklist (per-screen is/isn't-done items) ----
   const itemsFor = (screenId) => (items || []).filter((i) => i.screen_id === screenId);
+  // Collapse rule: all items done -> collapsed; any pending -> expanded; a
+  // manual toggle (chevron) overrides either way.
+  const isExpanded = (screenId) => {
+    const list = itemsFor(screenId);
+    if (!list.length) return false;
+    const override = expandedScreens[screenId];
+    if (override !== undefined) return override;
+    return list.some((i) => i.status === 'pending' || i.building);
+  };
+  const toggleScreen = (screenId) => setExpandedScreens((cur) => ({ ...cur, [screenId]: !isExpanded(screenId) }));
+  const toggleItemOpen = (id) => setOpenItems((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const pendingItems = (items || []).filter((i) => i.status === 'pending' && !i.building);
   const toggleSelect = (id) => setSelected((cur) => {
     const next = new Set(cur);
@@ -165,39 +182,76 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
                     Restore
                   </Button>
                 ) : null}
-                {/* The screen's feature checklist: tap the row to select it for
-                    the next build; "done" flips honestly (auto on a targeted
-                    build's success, manual for human-verified work). */}
+                {/* Expand/collapse the screen's checklist: auto-collapsed when
+                    every feature is done, auto-expanded while any is pending;
+                    the chevron overrides manually. */}
                 {itemsFor(s.id).length ? (
+                  <button
+                    type="button"
+                    className="inline-flex min-h-[44px] items-center gap-1 rounded px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    onClick={() => toggleScreen(s.id)}
+                    aria-expanded={isExpanded(s.id)}
+                    aria-label={`${isExpanded(s.id) ? 'Collapse' : 'Expand'} the ${s.name} feature checklist`}
+                  >
+                    {isExpanded(s.id) ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    {itemsFor(s.id).filter((i) => i.status === 'built').length}/{itemsFor(s.id).length} done
+                  </button>
+                ) : null}
+                {/* The screen's feature checklist: tick to select for the next
+                    build; tap a feature name to read its version history
+                    (newest first); "done"/"reopen" is the human override. */}
+                {itemsFor(s.id).length && isExpanded(s.id) ? (
                   <div className="w-full basis-full space-y-0.5 border-t pt-1.5 mt-1">
                     {itemsFor(s.id).map((it) => (
-                      <div key={it.id} className="flex items-center gap-1.5">
-                        <label className={`flex min-h-[40px] flex-1 min-w-0 items-center gap-2 rounded px-1 text-xs ${it.status === 'built' ? 'text-muted-foreground' : ''} ${canEdit && it.status === 'pending' && !it.building ? 'cursor-pointer hover:bg-muted/40' : ''}`}>
-                          {canEdit ? (
-                            <input
-                              type="checkbox" className="h-4 w-4 shrink-0 accent-primary"
-                              disabled={it.status === 'built' || it.building}
-                              checked={selected.has(it.id)}
-                              onChange={() => toggleSelect(it.id)}
-                              aria-label={`Select "${it.name}" to build next`}
-                            />
-                          ) : (
-                            <span className={`h-2 w-2 shrink-0 rounded-full ${it.status === 'built' ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
-                          )}
-                          <span className={`min-w-0 break-words ${it.status === 'built' ? 'line-through decoration-muted-foreground/50' : ''}`}>
-                            {it.name}
-                            {it.kind === 'state' ? <span className="text-muted-foreground/70"> (state)</span> : null}
-                          </span>
-                          {it.building ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" /> : null}
-                        </label>
-                        {canEdit && !it.building ? (
-                          <Button
-                            variant="ghost" size="sm" className="h-9 shrink-0 px-2 text-[11px] text-muted-foreground"
-                            onClick={() => markItem(it, it.status === 'built' ? 'pending' : 'built')}
-                            title={it.status === 'built' ? 'Mark as not done (it needs more work)' : 'Mark as done (verified by you)'}
-                          >
-                            {it.status === 'built' ? 'reopen' : 'done'}
-                          </Button>
+                      <div key={it.id} className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <div className={`flex min-h-[40px] flex-1 min-w-0 items-center gap-2 rounded px-1 text-xs ${it.status === 'built' ? 'text-muted-foreground' : ''}`}>
+                            {canEdit ? (
+                              <input
+                                type="checkbox" className="h-4 w-4 shrink-0 accent-primary"
+                                disabled={it.status === 'built' || it.building}
+                                checked={selected.has(it.id)}
+                                onChange={() => toggleSelect(it.id)}
+                                aria-label={`Select "${it.name}" to build next`}
+                              />
+                            ) : (
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${it.status === 'built' ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+                            )}
+                            <button
+                              type="button"
+                              className={`min-w-0 break-words text-left hover:underline decoration-dotted ${it.status === 'built' ? 'line-through decoration-muted-foreground/50' : ''}`}
+                              onClick={() => toggleItemOpen(it.id)}
+                              aria-expanded={openItems.has(it.id)}
+                              title="Show this feature's change history"
+                            >
+                              {it.name}
+                              {it.kind === 'state' ? <span className="text-muted-foreground/70"> (state)</span> : null}
+                            </button>
+                            {it.building ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" /> : null}
+                          </div>
+                          {canEdit && !it.building ? (
+                            <Button
+                              variant="ghost" size="sm" className="h-9 shrink-0 px-2 text-[11px] text-muted-foreground"
+                              onClick={() => markItem(it, it.status === 'built' ? 'pending' : 'built')}
+                              title={it.status === 'built' ? 'Mark as not done (it needs more work)' : 'Mark as done (verified by you)'}
+                            >
+                              {it.status === 'built' ? 'reopen' : 'done'}
+                            </Button>
+                          ) : null}
+                        </div>
+                        {openItems.has(it.id) ? (
+                          <div className="ml-6 mb-1 space-y-1 rounded-md border bg-muted/20 p-2">
+                            {(it.history || []).length ? (it.history || []).map((h, i) => (
+                              <div key={i} className="text-[11px]">
+                                <span className="text-muted-foreground">{String(h.created_at || '').slice(0, 16).replace('T', ' ')}</span>
+                                <span className="block break-words text-foreground/90">{h.summary}</span>
+                              </div>
+                            )) : (
+                              <p className="text-[11px] text-muted-foreground">
+                                No recorded changes yet — history starts with the next build (or manual mark) that touches this feature.
+                              </p>
+                            )}
+                          </div>
                         ) : null}
                       </div>
                     ))}

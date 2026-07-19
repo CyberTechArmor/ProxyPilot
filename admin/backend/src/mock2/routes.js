@@ -123,7 +123,7 @@ import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, 
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
-import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
+import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, listScreenItemHistory, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
 import { publicScreenShape, screenPlanCounts, SCREEN_DECISIONS, PRODUCTION_CHECK_INSTRUCTION } from './screen-plan-logic.js';
 import { INTEGRATION_GATE_MODES } from './accept-pending-logic.js';
 import { reconcileMock2Egress, readEgressLog } from './egress.js';
@@ -3095,12 +3095,20 @@ export function createMock2Router() {
     try { reconcileScreenPlan(req.mock2Project.id); } catch { /* cosmetic */ }
     try { await backfillScreenItems(req.mock2Project); } catch { /* cosmetic */ }
     const rows = listScreenPlan(req.mock2Project.id);
-    // The per-screen feature checklist (is/isn't done, migration 536).
+    // The per-screen feature checklist (is/isn't done, migration 536) with
+    // each item's version history (migration 537, newest first, capped).
     let items = [];
     try {
+      const historyByItem = new Map();
+      for (const h of listScreenItemHistory(req.mock2Project.id)) {
+        if (!historyByItem.has(h.item_id)) historyByItem.set(h.item_id, []);
+        const list = historyByItem.get(h.item_id);
+        if (list.length < 6) list.push({ summary: h.summary, created_at: h.created_at });
+      }
       items = listScreenItems(req.mock2Project.id).map((r) => ({
         id: r.id, screen_id: r.screen_id, name: r.name, kind: r.kind,
         status: r.status, building: !!r.request_id,
+        history: historyByItem.get(r.id) || [],
       }));
     } catch { /* pre-migration read */ }
     res.json({ screens: rows.map(publicScreenShape), counts: screenPlanCounts(rows), items });

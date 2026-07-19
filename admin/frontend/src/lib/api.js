@@ -1412,10 +1412,10 @@ export const api = {
 
   // ---- Mock2 M7: Stage 1 (Concept) — chat, mockup, design approval ----
   mock2GetChat: (id) => request(`/mock2/projects/${id}/chat`),
-  mock2SendChatMessage: (id, message, mode, images = null) =>
+  mock2SendChatMessage: (id, message, mode, images = null, design = null) =>
     request(`/mock2/projects/${id}/chat`, {
       method: 'POST',
-      body: JSON.stringify({ message, ...(mode ? { mode } : {}), ...(images?.length ? { images } : {}) }),
+      body: JSON.stringify({ message, ...(mode ? { mode } : {}), ...(images?.length ? { images } : {}), ...(design ? { design } : {}) }),
     }),
   // build: 'all' (one initial build — default) | 'screens' (queue every screen
   // as a scoped background build) | 'none' (approval only).

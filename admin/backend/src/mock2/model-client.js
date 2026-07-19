@@ -296,8 +296,14 @@ function withMessageCacheBreakpoint(messages) {
   const last = out[lastIdx];
   if (Array.isArray(last.content) && last.content.length) {
     const content = last.content.map((b) => ({ ...b }));
-    content[content.length - 1] = { ...content[content.length - 1], cache_control: { type: 'ephemeral' } };
-    out[lastIdx] = { ...last, content };
+    const tail = content[content.length - 1];
+    // Anthropic 400s on cache_control over an EMPTY text block ("cache_control
+    // cannot be set for empty text blocks") — skip the breakpoint rather than
+    // reject the whole request when the last block carries no text.
+    if (!(tail.type === 'text' && !String(tail.text || '').length)) {
+      content[content.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } };
+      out[lastIdx] = { ...last, content };
+    }
   }
   return out;
 }

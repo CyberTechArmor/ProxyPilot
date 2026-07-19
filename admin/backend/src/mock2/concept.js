@@ -60,7 +60,7 @@ import { callModelTurn } from './model-client.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
-import { applyDesignPreset, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
+import { applyDesignPreset, applyExploreDesign, getDesignPreset, parseDesignDoc, DESIGN_DOC_FORMAT } from './design-presets.js';
 import { replaceScreenPlan, queueScreens, drainScreenQueue } from './screen-plan.js';
 import { INITIAL_BUILD_INSTRUCTION_PREFIX } from './screen-plan-logic.js';
 
@@ -170,9 +170,12 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   const system = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';
   const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
   const tuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('chat'));
+  // Transcript turns use `text` (anthropicMessages reads turn.text — a
+  // `content` key maps to an EMPTY text block, which the API rejects when the
+  // cache breakpoint lands on it).
   const res = await callModelTurn({
     connector: ready.connector, apiKey: ready.apiKey, model: tuned.model,
-    system, tools: [], transcript: [{ role: 'user', content: user }], maxTokens: 4000,
+    system, tools: [], transcript: [{ role: 'user', text: user }], maxTokens: 4000,
     effort: tuned.effort, thinking: tuned.thinking,
   });
   if (!res.ok) return { ok: false, error: res.error };
@@ -410,7 +413,7 @@ export async function importDesignTemplate({ project, template, notes = '', sour
 // `images` is the VALIDATED list from chat-image-logic.validateChatImages —
 // saved to disk here (content-addressed) and stamped on the user message as
 // small descriptors; the turn hydrates them into the model calls.
-export async function startConceptTurn({ project, message, user, actingAsAdmin = 0, mode = 'design', images = [] }) {
+export async function startConceptTurn({ project, message, user, actingAsAdmin = 0, mode = 'design', images = [], design = 'theme' }) {
   const projectId = Number(project.id);
   const turnMode = mode === 'plan' ? 'plan' : 'design';
 
@@ -461,7 +464,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   updateCycle(cycle.id, { started_at: nowIso() });
   setJob(projectId, { phase: 'thinking', message: 'Thinking…', kind: 'turn', cycleId: cycle.id, startedAt: Date.now() });
 
-  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message, mode: turnMode, userAttachments: attachments }).catch((err) => {
+  runConceptTurn({ project, cycle: getCycle(cycle.id), ready, framework, user, actingAsAdmin, message, mode: turnMode, userAttachments: attachments, design: design === 'explore' ? 'explore' : 'theme' }).catch((err) => {
     console.error(`[mock2] concept turn crashed for project ${projectId}:`, err?.message || err);
     try { finishCycle(cycle.id, { status: 'failed', error: `concept turn crashed: ${err?.message || err}` }); } catch { /* ignore */ }
     try { insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Something went wrong on that turn: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -472,7 +475,7 @@ export async function startConceptTurn({ project, message, user, actingAsAdmin =
   return { status: 'started', cycle: getCycle(cycle.id), userMessage };
 }
 
-async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message, mode = 'design', userAttachments = [] }) {
+async function runConceptTurn({ project, cycle, ready, framework, user, actingAsAdmin, message, mode = 'design', userAttachments = [], design = 'theme' }) {
   const projectId = Number(project.id);
   const containerName = project.container_name || containerNameForProject(projectId);
   const holder = { type: 'user', id: user.id };
@@ -491,7 +494,13 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   const hasMockup = !!project.current_mockup_id;
   // The locked design system, plus the binding palette of the base preset the
   // Builder chose at creation (no preset → unchanged, the model picks the look).
-  const boundDesignSystem = applyDesignPreset(framework.design_system_md, project.design_preset);
+  // Design direction (Builder's per-turn choice): 'theme' binds the base theme
+  // (extend-complementarily wording), 'explore' sets it aside for a fresh,
+  // reference-quality look — adopted as the project design only on approval.
+  const explore = design === 'explore';
+  const boundDesignSystem = explore
+    ? applyExploreDesign(framework.design_system_md)
+    : applyDesignPreset(framework.design_system_md, project.design_preset);
   const system = buildConceptChatSystemPrompt({ designSystem: boundDesignSystem, projectName: project.name, hasMockup, mode });
 
   // Stream the reply where the provider supports it (Anthropic): visible text
@@ -587,7 +596,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // output. The lane default turns thinking OFF so the WHOLE budget goes
       // to the HTML (adaptive thinking otherwise eats into max_tokens and
       // truncates the document mid-page). Operator lane tuning may override.
-      const mockupTuned = applyLaneTuning({ model: ready.mockup.model, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
+      // Explore turns get the claude.ai-style depth back: adaptive thinking ON
+      // and high effort on the mockup render, overriding the lane default and
+      // the global thinking-off switch for THIS call only (design exploration
+      // is exactly where the reasoning pays for itself). Theme turns keep the
+      // fast lane defaults (pure transcription of the brief onto the theme).
+      const mockupTuned = explore
+        ? { model: ready.mockup.model, effort: 'high', thinking: null }
+        : applyLaneTuning({ model: ready.mockup.model, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupTuned.model,
         system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),

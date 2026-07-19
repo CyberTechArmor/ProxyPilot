@@ -50,7 +50,12 @@ test('applyDesignPreset: binds the palette; no preset leaves the design system a
   const base = '# Locked design system\ncontent';
   const bound = applyDesignPreset(base, 'forest-ledger');
   assert.ok(bound.startsWith(base));
-  assert.match(bound, /Chosen base design preset \(binding\): Forest Ledger/);
+  // The theme binds as a BASE the model extends complementarily — the strict
+  // "EXACTLY these tokens" wording was deliberately retired (it flattened
+  // mockups); the core-palette guardrail stays.
+  assert.match(bound, /Base design theme \(binding as a BASE\): Forest Ledger/);
+  assert.match(bound, /extend it complementarily/i);
+  assert.match(bound, /Never replace the core palette/);
   assert.ok(bound.includes(getDesignPreset('forest-ledger').tokens.colors.primary));
   assert.equal(applyDesignPreset(base, null), base);
   assert.equal(applyDesignPreset(base, 'unknown'), base);

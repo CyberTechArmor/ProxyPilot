@@ -47,7 +47,8 @@ Reply with STRICT JSON only — no prose, no code fences. Schema:
     "touches": ["screens/areas/files likely affected", ...],
     "states": ["UI/data states worth handling (empty, loading, error, edge sizes)", ...],
     "edge_cases": ["specific pitfalls for THIS request", ...],
-    "acceptance": ["concrete checks that would prove it works", ...]
+    "acceptance": ["concrete checks that would prove it works", ...],
+    "domain_expectations": ["what a domain expert would assume is included", ...]
   },
   "split": { "parts": [{ "title": "...", "items": ["deliverable", ...] }, ...] }
 }
@@ -59,6 +60,12 @@ Scope rubric:
 2-4 sequential parts that are EACH independently buildable, deployable, and
 checkable by a human (part 1 must be useful before part 2 exists). Order parts by
 dependency. Omit "split" entirely when a decomposition would be artificial.
+"domain_expectations" is where you think like a DOMAIN EXPERT, not a coder: what
+would a professional in this domain assume the feature obviously includes even
+though the request doesn't spell it out? (A timesheet records and shows EVERY
+clock-in/out pair per day, not one line; a payment flow shows a receipt; an
+approval queue flags items stuck too long.) Include derived signals worth
+surfacing (anomalies, missing entries, overages). Skip it for trivial tweaks.
 Keep every list to at most ${LIST_MAX} short items; omit empty lists. Be concrete, never generic.`;
 }
 
@@ -85,6 +92,7 @@ export function parsePrepassReply(text) {
     states: clampList(rawBrief.states),
     edge_cases: clampList(rawBrief.edge_cases),
     acceptance: clampList(rawBrief.acceptance),
+    domain_expectations: clampList(rawBrief.domain_expectations),
   };
   const hasContent = Object.values(brief).some((l) => l.length);
   // The optional split proposal (feature_scale only): 2-4 titled parts, each
@@ -139,6 +147,7 @@ export function formatBriefForTask(prepass) {
     section('States to handle', b.states),
     section('Edge cases', b.edge_cases),
     section('Acceptance checks', b.acceptance),
+    section('Domain expectations (what an expert user assumes is included)', b.domain_expectations),
   ].filter(Boolean);
   if (!lines.length) return '';
   return `\n\nWorking brief (auto-generated sizing notes — the request above is authoritative; ignore any note that contradicts it):\n- ${lines.join('\n- ')}`;

@@ -1060,6 +1060,14 @@ export function createMock2Router() {
   router.delete('/projects/:id/members/:userId', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
     const project = req.mock2Project;
     const userId = String(req.params.userId);  // users.id is a UUID, never coerce to Number
+    // Removal is reserved for the project owner (creator) or a platform admin —
+    // a fellow editor must not be able to evict teammates. The one exception is
+    // removing YOURSELF (leaving the project), which any member may do.
+    const isOwner = String(project.created_by || '') === String(req.user.id);
+    const isSelf = userId === String(req.user.id);
+    if (!isOwner && !isSelf && !isReqAdmin(req)) {
+      return res.status(403).json({ error: 'Only the project owner or an admin can remove members' });
+    }
     removeMember(project.id, userId);
     logAudit(req.user.id, 'MOCK2_PROJECT_MEMBER_REMOVE', 'mock2_project', project.id, { user_id: userId }, req.ip);
     // Surface the resulting editor count so the UI can warn about an

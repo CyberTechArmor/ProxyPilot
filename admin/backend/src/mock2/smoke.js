@@ -29,7 +29,7 @@
 import { sh, b64 } from './host.js';
 import {
   smokeConfigFromEnv, evaluateSmokeTriggers, applyEscalations,
-  resolveSmokeConnectors, smokeLogLines, smokeGateOk,
+  resolveSmokeConnectors, smokeLogLines, smokeGateOk, pickContainerIp,
 } from './smoke-triggers.js';
 import { readRunContract } from './deploy.js';
 import {
@@ -100,6 +100,25 @@ async function httpSmoke(containerName, webPort) {
 }
 
 // ---- browser connector (lazy Playwright; started only on a hit) ----
+
+// The browser runs in the BACKEND process, so 127.0.0.1 is the backend's own
+// loopback — the app listens inside the project's Incus container (req-76: the
+// connector failed a green build with ERR_CONNECTION_REFUSED at
+// http://127.0.0.1:3000/). Resolve the container's bridge IPv4 and target that;
+// last resort stays loopback so a resolution hiccup degrades to the old
+// behavior instead of throwing.
+async function resolveBrowserTarget(containerName, webPort) {
+  try {
+    const r = await containerSh(
+      containerName,
+      `ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1; hostname -I 2>/dev/null`,
+      { timeoutMs: 15000 },
+    );
+    const ip = pickContainerIp(r.stdout);
+    if (ip) return `http://${ip}:${webPort}/`;
+  } catch { /* fall through */ }
+  return `http://127.0.0.1:${webPort}/`;
+}
 
 // Read the project's declarative interaction spec (state/ui-checks.json) from
 // the working tree. Returns { exists, text } — parsing/validation is the pure
@@ -301,7 +320,7 @@ export async function runSmokeGate({
   const report = { http, decision: resolved, rejected, browser: null, db: null };
 
   if (resolved.browser.disposition === 'ran') {
-    const target = url || `http://127.0.0.1:${webPort}/`;
+    const target = url || await resolveBrowserTarget(containerName, webPort);
     report.browser = { ...(await driveBrowserConnector({ url: target, config, containerName, appDir, changedFiles, requiredIds: acceptanceUi })), reason: resolved.browser.reason };
   }
   if (resolved.db.disposition === 'ran') {

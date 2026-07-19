@@ -233,3 +233,15 @@ export function smokeGateOk({ http, report = {}, config = DEFAULT_SMOKE_CONFIG }
     && !invokedFail
     && !(config.requireTriggered && unavailableWarranted);
 }
+
+// pickContainerIp — first non-loopback IPv4 in `ip -4 -o addr` / `hostname -I`
+// output. The browser connector runs Playwright in the BACKEND process, which
+// cannot see the app on its own 127.0.0.1 (the app listens inside the project's
+// container — req-76 burned a cycle on exactly that ERR_CONNECTION_REFUSED), so
+// the target must be the container's bridge address.
+export function pickContainerIp(text) {
+  const tokens = String(text || '').split(/\s+/).filter(Boolean);
+  return tokens.find((t) => /^(\d{1,3})(\.\d{1,3}){3}$/.test(t)
+    && !t.startsWith('127.')
+    && t.split('.').every((o) => Number(o) <= 255)) || null;
+}

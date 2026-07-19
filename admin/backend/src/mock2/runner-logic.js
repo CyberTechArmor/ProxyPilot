@@ -422,6 +422,36 @@ and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
 compute day boundaries from the client clock, and never compare client-local
 dates against server-UTC dates — that class of bug shifts punches/records
 across midnight.
+DESIGN CRAFT (the fidelity floor is not the ceiling): the mockup fixes the
+layout and style; production polish is still your job. Keep a consistent
+spacing rhythm and clear visual hierarchy (one primary action per view), align
+numeric columns (tabular numerals), and give every interactive control real
+hover/focus/active affordances. DESIGN the empty, loading, and error state of
+each screen — an empty state names the next action ("No punches yet — Clock in
+to start"), never a bare "No data". Guard destructive actions, prefer dense
+well-formatted real data over oversized placeholder cards, and tie badge/status
+colors to semantic states. These touches are the difference between a demo and
+a product; apply them without being asked.
+DOMAIN COMPLETENESS (binding): model the data like a domain expert, not a
+demo. Persist and display the COMPLETE record the domain implies — every event
+in the period, not just the latest state (a timesheet day lists EVERY
+clock-in/out pair, not one line); make full history reachable where one exists
+(audit trails, prior versions). Surface DERIVED signals the domain expects —
+a missing punch-out, an overtime day, a stale sync, an anomalous gap — as
+visible, server-computed flags. When the instruction allows both a shallow and
+a complete reading, build the complete one; if that meaningfully changes
+scope, say so in your summary and mark the deferred depth "Not built yet".
+LIVE DATABASE HYGIENE (binding): the container's Postgres at DATABASE_URL IS
+this project's LIVE production database — there is no separate staging copy,
+and "the deploy will reset it" is FALSE (deploys migrate in place). Any
+account or row you create to verify your work must be deleted before you
+finish, in the same cycle. Accounts that must persist for automated checks
+(the login users referenced by state/ui-checks.json) MUST use the reserved
+fixture domain \`@fixture.invalid\` — never a real-looking address. NEVER
+consume the app's first-admin bootstrap: do not create a real-domain account
+through the bootstrap/superadmin flow — the first real account belongs to the
+operator. If the users table was empty when your cycle started, it must hold
+only \`@fixture.invalid\` accounts (or nothing) when you finish.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -1006,6 +1036,36 @@ and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
 compute day boundaries from the client clock, and never compare client-local
 dates against server-UTC dates — that class of bug shifts punches/records
 across midnight.
+DESIGN CRAFT (the fidelity floor is not the ceiling): the mockup fixes the
+layout and style; production polish is still your job. Keep a consistent
+spacing rhythm and clear visual hierarchy (one primary action per view), align
+numeric columns (tabular numerals), and give every interactive control real
+hover/focus/active affordances. DESIGN the empty, loading, and error state of
+each screen — an empty state names the next action ("No punches yet — Clock in
+to start"), never a bare "No data". Guard destructive actions, prefer dense
+well-formatted real data over oversized placeholder cards, and tie badge/status
+colors to semantic states. These touches are the difference between a demo and
+a product; apply them without being asked.
+DOMAIN COMPLETENESS (binding): model the data like a domain expert, not a
+demo. Persist and display the COMPLETE record the domain implies — every event
+in the period, not just the latest state (a timesheet day lists EVERY
+clock-in/out pair, not one line); make full history reachable where one exists
+(audit trails, prior versions). Surface DERIVED signals the domain expects —
+a missing punch-out, an overtime day, a stale sync, an anomalous gap — as
+visible, server-computed flags. When the instruction allows both a shallow and
+a complete reading, build the complete one; if that meaningfully changes
+scope, say so in your summary and mark the deferred depth "Not built yet".
+LIVE DATABASE HYGIENE (binding): the container's Postgres at DATABASE_URL IS
+this project's LIVE production database — there is no separate staging copy,
+and "the deploy will reset it" is FALSE (deploys migrate in place). Any
+account or row you create to verify your work must be deleted before you
+finish, in the same cycle. Accounts that must persist for automated checks
+(the login users referenced by state/ui-checks.json) MUST use the reserved
+fixture domain \`@fixture.invalid\` — never a real-looking address. NEVER
+consume the app's first-admin bootstrap: do not create a real-domain account
+through the bootstrap/superadmin flow — the first real account belongs to the
+operator. If the users table was empty when your cycle started, it must hold
+only \`@fixture.invalid\` accounts (or nothing) when you finish.
 
 ## Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}

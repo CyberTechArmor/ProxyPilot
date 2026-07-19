@@ -15,19 +15,23 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
 import { useTypingTracker } from '@/hooks/use-typing-tracker';
 
-export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, onStarted }) {
+export default function BuildChat({ projectId, project, cycle = null, canEdit, online, active, job, needsFeedback = false, buildQueue = [], onStarted }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [instruction, setInstruction] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
+  // The split-proposal card (route-time pre-pass): { instruction, parts } with
+  // per-part include + group assignment edited locally before submit.
+  const [splitPlan, setSplitPlan] = useState(null);
+  const [splitBusy, setSplitBusy] = useState(false);
   const [deployingBase, setDeployingBase] = useState(false);
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
@@ -126,12 +130,29 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick') => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false } = {}) => {
     const body = instruction.trim();
     if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode);
+      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode, { skipSplit });
+      if (res.split_proposal) {
+        // Feature-scale ask that decomposes — show the grouping card; nothing
+        // has started yet. Default: every part included, one group per part.
+        setSplitPlan({
+          instruction: res.split_proposal.instruction,
+          parts: res.split_proposal.parts.map((pt, i) => ({ ...pt, include: true, group: i + 1 })),
+        });
+        return;
+      }
+      if (res.queued) {
+        toast({ title: 'Queued', description: 'A build is running — this update runs automatically when it finishes.' });
+        setInstruction('');
+        attach.clear();
+        if (onStarted) onStarted();
+        await load();
+        return;
+      }
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Build refused', description: res.reason || 'Quota exceeded.' });
       } else if (buildMode === 'quick') {
@@ -156,6 +177,43 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not start the build', description: err.message });
     } finally { setBusy(false); }
+  };
+
+  // ---- split-proposal card + build queue ----
+  const submitSplitGroups = async () => {
+    if (!splitPlan) return;
+    const included = splitPlan.parts.filter((p) => p.include);
+    if (!included.length) { setSplitPlan(null); return; }
+    const byGroup = new Map();
+    for (const p of included) {
+      const g = Number(p.group) || 1;
+      if (!byGroup.has(g)) byGroup.set(g, []);
+      byGroup.get(g).push(p);
+    }
+    const groups = [...byGroup.entries()].sort((a, b) => a[0] - b[0]).map(([, parts]) => ({
+      title: parts.map((p) => p.title).join(' + '),
+      items: parts.flatMap((p) => p.items),
+    }));
+    setSplitBusy(true);
+    try {
+      await api.mock2BuildGroups(projectId, splitPlan.instruction, groups);
+      toast({
+        title: `Queued ${groups.length} build group${groups.length === 1 ? '' : 's'}`,
+        description: 'They run back-to-back in the background — each deploys when it finishes, so you can check group 1 while group 2 builds.',
+      });
+      setSplitPlan(null);
+      setInstruction('');
+      attach.clear();
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not queue the groups', description: err.message });
+    } finally { setSplitBusy(false); }
+  };
+  const buildAsOne = async () => { setSplitPlan(null); await startBuild('quick', { skipSplit: true }); };
+  const cancelQueued = async (qid) => {
+    try { await api.mock2CancelQueuedBuild(projectId, qid); if (onStarted) onStarted(); }
+    catch (err) { toast({ variant: 'destructive', title: 'Could not cancel', description: err.message }); }
   };
 
   // Ask: a question about the codebase or a bounded operational task ("run the
@@ -189,7 +247,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // SENDING is gated; typing never is — draft the next instruction while a
   // build runs or the project comes online, and send when it unlocks.
   const askDisabled = busy || askActive || active || !online;
-  const quickDisabled = busy || (active && !resumeMode) || !online || needsFeedback;
+  // Quick sends are allowed WHILE a build runs — the server queues them and
+  // they run back-to-back (build-queue). Only the post-build rating still
+  // gates new work.
+  const quickDisabled = busy || !online || needsFeedback;
 
   // Interrupt a running build: honored at the next step boundary — progress is
   // checkpointed, and the cycle can be resumed/continued from the Build panel.
@@ -270,6 +331,57 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">
+            {/* Split-proposal card — a feature-scale ask that decomposes: pick
+                which parts to build, combine/reorder via group numbers, or run
+                it all as one build. Nothing starts until you choose. */}
+            {splitPlan ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <Layers className="h-3.5 w-3.5" /> This request has several deliverables — build in groups?
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Groups build and deploy in order, in the background — check group 1 while group 2 builds.
+                  Untick a part to skip it for now; change group numbers to combine or reorder.
+                </p>
+                {splitPlan.parts.map((pt, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded border bg-background/40 p-2">
+                    <input
+                      type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-primary" checked={pt.include}
+                      onChange={() => setSplitPlan((cur) => ({ ...cur, parts: cur.parts.map((x, j) => (j === i ? { ...x, include: !x.include } : x)) }))}
+                      aria-label={`Include "${pt.title}"`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-medium break-words">{pt.title}</p>
+                      <p className="text-[11px] text-muted-foreground break-words">{pt.items.join('; ')}</p>
+                    </div>
+                    <select
+                      className="h-9 shrink-0 rounded border bg-background px-1 text-xs"
+                      value={pt.group} disabled={!pt.include}
+                      onChange={(e) => setSplitPlan((cur) => ({ ...cur, parts: cur.parts.map((x, j) => (j === i ? { ...x, group: Number(e.target.value) } : x)) }))}
+                      aria-label={`Build group for ${pt.title}`}
+                    >
+                      {splitPlan.parts.map((_, g) => <option key={g} value={g + 1}>Group {g + 1}</option>)}
+                    </select>
+                  </div>
+                ))}
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="min-h-[44px] flex-1"
+                    disabled={splitBusy || !splitPlan.parts.some((p) => p.include)}
+                    onClick={submitSplitGroups}
+                  >
+                    {splitBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Layers className="h-4 w-4 mr-1" />}
+                    Build {new Set(splitPlan.parts.filter((p) => p.include).map((p) => p.group)).size} group{new Set(splitPlan.parts.filter((p) => p.include).map((p) => p.group)).size === 1 ? '' : 's'} in background
+                  </Button>
+                  <Button variant="outline" className="min-h-[44px]" disabled={splitBusy} onClick={buildAsOne}>
+                    Build as one
+                  </Button>
+                  <Button variant="ghost" className="min-h-[44px]" disabled={splitBusy} onClick={() => setSplitPlan(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {needsFeedback && !resumeMode ? (
               <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
@@ -346,11 +458,38 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                     title="One small scoped code change — no gate battery, straight to deploy (Ctrl+Enter)"
                   >
                     {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
-                    Quick update
+                    {active ? 'Queue update' : 'Quick update'}
                   </Button>
                 </>
               )}
             </div>
+            {/* The build queue — "building now / up next", each queued entry
+                cancellable. Submissions while a build runs land here and run
+                back-to-back automatically. */}
+            {buildQueue.length ? (
+              <div className="space-y-1">
+                <p className="text-[11px] font-medium text-muted-foreground">Build queue</p>
+                {buildQueue.map((q) => (
+                  <div key={q.id} className="flex items-center gap-2 rounded border p-1.5 text-[11px]">
+                    {q.status === 'started'
+                      ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" />
+                      : <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40" />}
+                    <span className="min-w-0 flex-1 break-words">
+                      {q.status === 'started' ? 'Building now: ' : 'Up next: '}
+                      {q.label || q.instruction.slice(0, 120)}
+                    </span>
+                    {q.status === 'queued' ? (
+                      <Button
+                        variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-red-500"
+                        onClick={() => cancelQueued(q.id)} aria-label="Cancel this queued build"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground shrink-0">Viewers can follow the build; editors run cycles.</p>

@@ -1351,13 +1351,14 @@ export const api = {
   // ---- Mock2 M6: cycle runner + checkout lock ----
   // mode: 'full' (default — audited build, whole gate battery) or 'mvp' (speed
   // path — rule interview skipped, reduced battery, fast model).
-  mock2StartCycle: (id, instruction, images = null, mode = null) =>
+  mock2StartCycle: (id, instruction, images = null, mode = null, opts = {}) =>
     request(`/mock2/projects/${id}/cycles`, {
       method: 'POST',
       body: JSON.stringify({
         instruction,
         ...(images?.length ? { images } : {}),
         ...(mode ? { mode } : {}),
+        ...(opts.skipSplit ? { skip_split: true } : {}),
       }),
     }),
   mock2GetLatestCycle: (id) => request(`/mock2/projects/${id}/cycle`),
@@ -1433,6 +1434,11 @@ export const api = {
   mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
+  // Split-request groups + the build queue (background back-to-back builds).
+  mock2BuildGroups: (id, instruction, groups) =>
+    request(`/mock2/projects/${id}/build-groups`, { method: 'POST', body: JSON.stringify({ instruction, groups }) }),
+  mock2CancelQueuedBuild: (id, qid) =>
+    request(`/mock2/projects/${id}/build-queue/${qid}`, { method: 'DELETE' }),
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).
   mock2GetSmokeBrowser: () => request('/mock2/settings/smoke-browser'),
   mock2SetSmokeBrowser: (setting) =>

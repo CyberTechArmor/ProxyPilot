@@ -1419,4 +1419,30 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Build request queue: quick updates submitted while another build runs
+    // (or split-request groups) wait here and run back-to-back automatically —
+    // "fire off three thoughts, come back to three deployed increments".
+    version: 538,
+    name: 'mock2_build_queue',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_build_queue (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id   INTEGER NOT NULL,
+          instruction  TEXT NOT NULL,
+          build_mode   TEXT NOT NULL DEFAULT 'quick',
+          label        TEXT,
+          status       TEXT NOT NULL DEFAULT 'queued'
+            CHECK (status IN ('queued', 'started', 'cancelled', 'failed')),
+          initiated_by TEXT,
+          request_id   INTEGER,
+          error        TEXT,
+          created_at   TEXT NOT NULL,
+          updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_build_queue_project ON mock2_build_queue (project_id);
+      `);
+    },
+  },
 ];

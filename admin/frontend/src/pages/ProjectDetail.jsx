@@ -210,7 +210,9 @@ export default function ProjectDetail() {
   const addMember = () => {
     if (!newMember.user_id) return;
     run(
-      () => api.mock2SetProjectMember(id, { user_id: Number(newMember.user_id), role: newMember.role }),
+      // users.id is a UUID string — Number() coercion turned it into NaN→null
+      // and the server rejected the add ("user_id and role are required").
+      () => api.mock2SetProjectMember(id, { user_id: String(newMember.user_id), role: newMember.role }),
       'Member added',
     ).then(() => setNewMember({ user_id: '', role: 'editor' }));
   };

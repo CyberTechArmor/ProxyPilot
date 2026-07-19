@@ -9,6 +9,10 @@
 
 export { initMock2Db, getMock2Db, mock2DbPath, sweepMock2OnBoot } from './db.js';
 export { createMock2Router } from './routes.js';
+// Quick connect (VS Code / git over smart HTTP): its own router because git
+// clients authenticate with connect tokens (HTTP Basic), not session cookies —
+// index.js mounts it at /api/mock2/git BEFORE the cookie-authenticated mount.
+export { createMock2GitRouter } from './connect.js';
 // M6 checkout-lock idle sweep (ADR-004): auto-release stale human checkouts. The
 // boot sweep (sweepMock2OnBoot) already releases orphaned CYCLE locks; this is the
 // periodic reclaim for human holds. index.js runs it on boot + on a timer.

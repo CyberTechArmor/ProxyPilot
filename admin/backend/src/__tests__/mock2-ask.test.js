@@ -26,11 +26,15 @@ test('ASK_TOOLS: exec/read/get_component only — no write, no materialize, no g
 
 // ---- prompt polarity ----
 
-test('buildAskSystemPrompt: states web-search availability truthfully, forbids edits', () => {
+test('buildAskSystemPrompt: states web-search availability truthfully, forbids code edits', () => {
   const withSearch = buildAskSystemPrompt({ projectName: 'ADP4', webSearch: true });
   assert.match(withSearch, /web_search tool/);
-  assert.match(withSearch, /Do NOT modify the project/);
-  assert.match(withSearch, /run it as a build|Run a cycle/i);
+  assert.match(withSearch, /Do NOT modify the CODE/);
+  // Operational actions (the user's "add a user to the database" case) are in
+  // scope; bulk destruction is not.
+  assert.match(withSearch, /OPERATIONAL actions/);
+  assert.match(withSearch, /NEVER destroy data in bulk/);
+  assert.match(withSearch, /run it\s+as a Quick update or build/i);
   const noSearch = buildAskSystemPrompt({ projectName: 'ADP4', webSearch: false });
   assert.match(noSearch, /NO internet\/web search access/);
   assert.doesNotMatch(noSearch, /You have a web_search tool/);
@@ -63,17 +67,25 @@ test('webSearchServerTools: anthropic-only, flag polarity per lane', () => {
 
 // ---- command blocklist backstop ----
 
-test('askCommandAllowed: runs tests/curl/queries, refuses the mutation surface', () => {
+test('askCommandAllowed: runs tests/curl/queries and operational actions, refuses code mutation + bulk destruction', () => {
   assert.equal(askCommandAllowed('npm test').ok, true);
   assert.equal(askCommandAllowed('curl -s http://localhost:3000/api/health').ok, true);
   assert.equal(askCommandAllowed('psql -c "select count(*) from users"').ok, true);
   assert.equal(askCommandAllowed('tail -50 /var/log/app.log').ok, true);
+  // Operational actions the user asked for are in scope: data inserts/updates,
+  // targeted row deletes, service restarts.
+  assert.equal(askCommandAllowed(`psql -c "insert into users (email, role) values ('a@b.c', 'member')"`).ok, true);
+  assert.equal(askCommandAllowed(`psql -c "update users set role = 'admin' where email = 'a@b.c'"`).ok, true);
+  assert.equal(askCommandAllowed(`psql -c "delete from sessions where user_id = 42"`).ok, true);
+  assert.equal(askCommandAllowed('systemctl restart mock2-dev').ok, true);
 
   assert.equal(askCommandAllowed('').ok, false);
   assert.equal(askCommandAllowed('rm -rf node_modules').ok, false);
   assert.equal(askCommandAllowed('git commit -am wip').ok, false);
   assert.equal(askCommandAllowed('git push origin main').ok, false);
   assert.equal(askCommandAllowed('npm install leftpad').ok, false);
+  // Bulk destruction stays refused: WHERE-less DELETE, DROP, TRUNCATE.
   assert.equal(askCommandAllowed('psql -c "delete from users"').ok, false);
   assert.equal(askCommandAllowed('psql -c "DROP TABLE users"').ok, false);
+  assert.equal(askCommandAllowed('psql -c "truncate table sessions"').ok, false);
 });

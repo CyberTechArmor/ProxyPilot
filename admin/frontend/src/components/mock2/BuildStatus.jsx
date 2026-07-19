@@ -14,6 +14,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
   CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package,
@@ -125,8 +126,49 @@ export default function BuildStatus({
   const [egressOpen, setEgressOpen] = useState(false); // operator egress-grant form
   const [egress, setEgress] = useState({ host: '', port: '', protocol: 'tcp', reason: '' });
   const [egressBusy, setEgressBusy] = useState(false);
+  // The audited lanes live HERE (the build chat only offers Ask/Quick update):
+  // Full build takes an instruction through the whole gate battery; the
+  // production check validates the app as-is with no new features.
+  const [fullOpen, setFullOpen] = useState(false);
+  const [fullText, setFullText] = useState('');
+  const [fullBusy, setFullBusy] = useState(false);
+  const [checkBusy, setCheckBusy] = useState(false);
 
   const active = cycle && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cycle.status);
+
+  const startFullBuild = async () => {
+    const body = fullText.trim();
+    if (!body) return;
+    setFullBusy(true);
+    try {
+      const res = await api.mock2StartCycle(projectId, body, null, 'full');
+      if (res.refused) {
+        toast({ variant: 'destructive', title: 'Full build refused', description: res.reason || 'Quota exceeded.' });
+      } else {
+        toast({
+          title: res.audit ? 'Auditing the build…' : 'Full build started',
+          description: 'The audited lane: rule questions, per-rule tests, and the whole gate battery.',
+        });
+        setFullOpen(false);
+        setFullText('');
+      }
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the full build', description: err.message });
+    } finally { setFullBusy(false); }
+  };
+
+  const productionCheck = async () => {
+    setCheckBusy(true);
+    try {
+      const r = await api.mock2ProductionCheck(projectId);
+      if (r.refused) toast({ variant: 'destructive', title: 'Production check refused', description: r.reason || 'Quota exceeded.' });
+      else toast({ title: 'Production check started', description: 'Full readiness pass: rule interview, per-rule tests, acceptance checks, and every gate. No new features.' });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the production check', description: err.message });
+    } finally { setCheckBusy(false); }
+  };
   // The running build clock: tick once a second while the cycle is live so the
   // elapsed time next to the spend counts up; a finished cycle shows its final
   // duration (finished_at) and needs no ticking.
@@ -942,9 +984,72 @@ export default function BuildStatus({
         ) : (
           online ? <p className="text-sm text-muted-foreground">No builds yet. Describe a change in the build chat to start one.</p> : null
         )}
+
+        {/* Production readiness — the audited lanes (the chat only offers
+            Ask / Quick update). Full build runs one change through the whole
+            gate battery; the production check validates the app as-is. */}
+        {canEdit && online && !active ? (
+          <div className="rounded-md border p-3 space-y-2">
+            <p className="text-xs font-medium flex items-center gap-1">
+              <ShieldCheck className="h-3.5 w-3.5" /> Production readiness
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Quick updates skip the gates to keep iteration fast. When the app (or a feature) is worth
+              keeping, run it through the audited lane.
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                variant="outline" className="min-h-[44px] flex-1"
+                disabled={fullBusy}
+                onClick={() => setFullOpen(true)}
+                title="Build one change through the audited lane: rule questions, per-rule tests, the whole gate battery"
+              >
+                <Hammer className="h-4 w-4 mr-1" /> Full build
+              </Button>
+              <Button
+                variant="outline" className="min-h-[44px] flex-1"
+                disabled={checkBusy}
+                onClick={productionCheck}
+                title="Full-gate readiness pass over the app as it is — rule interview, per-rule tests, acceptance checks. No new features."
+              >
+                {checkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ShieldCheck className="h-4 w-4 mr-1" />}
+                Production check
+              </Button>
+            </div>
+          </div>
+        ) : null}
         </>
         )}
       </CardContent>
+
+      {/* Full-build dialog — the audited lane needs an instruction; everything
+          else about the cycle (audit, rule questions, gates) runs as usual.
+          Full-screen on <sm (MOBILE_FIRST). */}
+      <Dialog open={fullOpen} onOpenChange={(o) => { if (!fullBusy) setFullOpen(o); }}>
+        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-md sm:h-auto sm:rounded-lg">
+          <DialogHeader>
+            <DialogTitle>Full build (audited)</DialogTitle>
+            <DialogDescription>
+              Describe the change to build through the audited lane — rule questions, per-rule tests,
+              and the whole gate battery. Slower than a Quick update; this is the production-grade pass.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder="e.g. “Harden the check-in flow: validation, error states, and tests for every rule”"
+            value={fullText}
+            disabled={fullBusy}
+            onChange={(e) => setFullText(e.target.value)}
+          />
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" className="min-h-[44px]" disabled={fullBusy} onClick={() => setFullOpen(false)}>Cancel</Button>
+            <Button className="min-h-[44px]" disabled={fullBusy || !fullText.trim()} onClick={startFullBuild}>
+              {fullBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Hammer className="h-4 w-4 mr-1" />}
+              Start full build
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

@@ -1,7 +1,7 @@
 // ScreenPlan — the per-screen apply panel (post-approval, left column). One row
 // per inventory screen: approve/defer each, apply the kept ones, and watch them
-// build one at a time in the background. Also hosts the Production check action
-// (the full-gate readiness pass) once screens are built.
+// build one at a time in the background. The Production check action lives in
+// the BuildStatus panel above (with Full build), not here.
 //
 // MOBILE_FIRST: single-column rows, 44px touch targets, no fixed widths.
 
@@ -11,7 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
-  Loader2, LayoutList, CheckCircle2, XCircle, Clock, Hammer, PauseCircle, ShieldCheck,
+  Loader2, LayoutList, CheckCircle2, XCircle, Clock, Hammer, PauseCircle,
 } from 'lucide-react';
 
 const STATUS_CHIP = {
@@ -28,7 +28,6 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
   const [screens, setScreens] = useState(null); // null while loading
   const [counts, setCounts] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [checkBusy, setCheckBusy] = useState(false);
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -77,18 +76,6 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
     } finally { setBusy(false); }
   };
 
-  const productionCheck = async () => {
-    setCheckBusy(true);
-    try {
-      const r = await api.mock2ProductionCheck(projectId);
-      if (r.refused) toast({ variant: 'destructive', title: 'Production check refused', description: r.reason || 'Quota exceeded.' });
-      else toast({ title: 'Production check started', description: 'Full build pass: rule interview, per-rule tests, acceptance checks, and every gate. No new features.' });
-      if (onChanged) onChanged();
-    } catch (err) {
-      toast({ variant: 'destructive', title: 'Could not start the production check', description: err.message });
-    } finally { setCheckBusy(false); }
-  };
-
   if (screens == null) {
     return (
       <Card>
@@ -101,7 +88,6 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
   if (!screens.length) return null; // pre-approval, or a legacy project with no plan
 
   const applicable = screens.filter((s) => ['planned', 'failed'].includes(s.status)).length;
-  const allBuilt = counts && counts.built > 0 && counts.built + counts.deferred === counts.total;
 
   return (
     <Card>
@@ -151,24 +137,14 @@ export default function ScreenPlan({ projectId, canEdit, online, onChanged }) {
           })}
         </ul>
         {canEdit ? (
-          <div className="flex flex-col gap-2 pt-1 sm:flex-row">
+          <div className="pt-1">
             <Button
-              className="min-h-[44px] flex-1"
+              className="min-h-[44px] w-full"
               disabled={busy || !online || !applicable}
               onClick={applyAll}
             >
               {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Hammer className="mr-1 h-4 w-4" />}
               Build {applicable || 'the'} screen{applicable === 1 ? '' : 's'} in the background
-            </Button>
-            <Button
-              variant={allBuilt ? 'default' : 'outline'}
-              className="min-h-[44px] flex-1"
-              disabled={checkBusy || !online}
-              onClick={productionCheck}
-              title="Full-gate readiness pass — rule interview, per-rule tests, acceptance checks. No new features."
-            >
-              {checkBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-1 h-4 w-4" />}
-              Production check
             </Button>
           </div>
         ) : null}

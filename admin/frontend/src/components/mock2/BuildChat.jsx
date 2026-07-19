@@ -15,7 +15,7 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, Rocket, RefreshCw } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle } from 'lucide-react';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -27,7 +27,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   const [instruction, setInstruction] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
-  const [mode, setMode] = useState('build'); // 'build' (run a cycle) | 'ask' (question / read-and-run task, no build)
+  const [interrupting, setInterrupting] = useState(false);
   const [deployingBase, setDeployingBase] = useState(false);
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && online);
@@ -158,10 +158,11 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     } finally { setBusy(false); }
   };
 
-  // Ask mode: a question about the codebase or a bounded read-and-run task
-  // ("run the tests", "curl the API with the stored credentials") — answered in
-  // chat with NO build cycle. It takes the checkout lock while running, so it
-  // waits its turn behind a live build.
+  // Ask: a question about the codebase or a bounded operational task ("run the
+  // tests", "add user bob@example.com to the database", "curl the API with the
+  // stored credentials") — answered in chat with NO build cycle and NO code
+  // changes. It takes the checkout lock while running, so it waits its turn
+  // behind a live build.
   const startAsk = async () => {
     const body = instruction.trim();
     if (!body) return;
@@ -179,13 +180,32 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // When the cycle is blocked/awaiting an admin, the composer becomes the
   // resume-message input: what you type is carried into the resumed cycle as operator
   // guidance (bare resume — empty — is still allowed). Otherwise it starts a new cycle.
-  const resumeMode = mode === 'build' && cycle?.status === 'awaiting_admin' && !needsFeedback;
-  // Ask is deliberately NOT gated by the post-build rating (asking a question
-  // shouldn't require rating the last build first) — but it does wait for a
-  // running build/ask (the lock serializes writers anyway).
-  const composerDisabled = mode === 'ask'
-    ? (busy || askActive || active || !online)
-    : (busy || (active && !resumeMode) || !online || needsFeedback);
+  const resumeMode = cycle?.status === 'awaiting_admin' && !needsFeedback;
+  // The composer submits ONE drafted message two ways: Quick update (the
+  // default — a small scoped code change) or Ask (question / operational
+  // action, no code change). Ask is deliberately NOT gated by the post-build
+  // rating (asking shouldn't require rating the last build first) — but both
+  // wait for a running build/ask (the lock serializes writers anyway). Only
+  // SENDING is gated; typing never is — draft the next instruction while a
+  // build runs or the project comes online, and send when it unlocks.
+  const askDisabled = busy || askActive || active || !online;
+  const quickDisabled = busy || (active && !resumeMode) || !online || needsFeedback;
+
+  // Interrupt a running build: honored at the next step boundary — progress is
+  // checkpointed, and the cycle can be resumed/continued from the Build panel.
+  const interruptRequested = !!cycle?.interrupt_request;
+  const interruptBuild = async () => {
+    if (!cycle?.id) return;
+    setInterrupting(true);
+    try {
+      await api.mock2InterruptCycle(projectId, cycle.id, 'stop_after_step');
+      toast({ title: 'Interrupting the build', description: 'It stops at the next safe step — progress is checkpointed and can be continued.' });
+      if (onStarted) onStarted();
+      await load();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not interrupt', description: err.message });
+    } finally { setInterrupting(false); }
+  };
 
   const sendResume = async () => {
     const body = instruction.trim();
@@ -200,7 +220,12 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setBusy(false); }
   };
-  const submitComposer = () => (mode === 'ask' ? startAsk() : resumeMode ? sendResume() : startBuild());
+  // Ctrl+Enter = the default action (Resume when blocked, else Quick update),
+  // respecting the same gate as the buttons.
+  const submitComposer = () => {
+    if (quickDisabled) return;
+    return resumeMode ? sendResume() : startBuild('quick');
+  };
 
   return (
     <Card className="flex flex-col min-h-[26rem] lg:min-h-0 lg:flex-1">
@@ -222,7 +247,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           partialText={askPartial}
           emptyLabel={online
-            ? 'Describe a change below to run a build cycle, or switch to Ask to question the codebase / run a test. Rule questions and build events appear here.'
+            ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}
         />
 
@@ -245,23 +270,19 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">
-            {needsFeedback && mode === 'build' ? (
-              <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next change — or switch to Ask.</p>
+            {needsFeedback && !resumeMode ? (
+              <p className="text-[11px] text-amber-500">Rate the last build (in the Build panel) to unlock the next update — Ask still works meanwhile.</p>
             ) : null}
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
-                ? (mode === 'ask'
-                  ? (askActive ? 'Answering — one ask at a time…'
-                    : active ? 'A build is running — ask when it finishes…'
-                      : 'Ask about the codebase or a bounded task, e.g. “Why does login 403?” or “Run the test suite” — nothing is built or changed')
-                  : (needsFeedback ? 'Rate the last build to continue…'
-                    : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
-                      : active ? 'A build is running — wait for it to finish…'
-                        : 'Describe a change to build, e.g. “Add a /health endpoint that returns 200 OK”'))
-                : 'Project must be online.'}
+                ? (askActive ? 'Answering — draft your next message; send when this finishes…'
+                  : resumeMode ? 'The build is blocked — add context or an instruction for the resume (optional), then Resume…'
+                    : active ? 'A build is running — draft the next change or question; send when it finishes (or Interrupt it)…'
+                      : needsFeedback ? 'Rate the last build (Build panel) to run the next update — Ask still works…'
+                        : 'Describe a change (Quick update), or ask a question / request an action (Ask) — e.g. “Add a stats card” or “Add user bob@example.com as admin”')
+                : 'Draft your instruction while the project comes online — sending unlocks when it’s ready.'}
               value={instruction}
-              disabled={composerDisabled}
               onChange={(e) => { setInstruction(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
@@ -274,60 +295,61 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                 "+". Not offered on a resume (the resume message carries no images). */}
             {!resumeMode ? (
               <ImageAttachmentBar
-                images={attach.images} busy={attach.busy} disabled={composerDisabled}
+                images={attach.images} busy={attach.busy} disabled={busy}
                 onPickFiles={attach.addFiles} onRemove={attach.remove}
               />
             ) : null}
             <div className="flex flex-wrap items-center justify-between gap-2">
-              {/* Build ↔ Ask mode toggle: Build runs a full audited cycle; Ask
-                  answers questions / runs bounded tasks with no build. */}
-              <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Composer mode">
-                <button
-                  type="button" role="tab" aria-selected={mode === 'build'}
-                  onClick={() => setMode('build')}
-                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'build' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+              {/* Interrupt — visible while a build is running: stops it at the
+                  next safe step (checkpointed, resumable from the Build panel). */}
+              {active && cycle?.id ? (
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 text-red-500 border-red-500/40 hover:text-red-500"
+                  disabled={interrupting || interruptRequested}
+                  onClick={interruptBuild}
+                  title="Stop the running build at the next safe step — progress is checkpointed and can be continued"
                 >
-                  <Hammer className="h-3.5 w-3.5" /> Build
-                </button>
-                <button
-                  type="button" role="tab" aria-selected={mode === 'ask'}
-                  onClick={() => setMode('ask')}
-                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${mode === 'ask' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                  {interrupting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <StopCircle className="h-4 w-4 mr-1" />}
+                  {interruptRequested ? 'Interrupting…' : 'Interrupt'}
+                </Button>
+              ) : null}
+              {resumeMode ? (
+                <Button
+                  className="h-11 sm:h-10 ml-auto"
+                  disabled={quickDisabled}
+                  onClick={sendResume}
                 >
-                  <HelpCircle className="h-3.5 w-3.5" /> Ask
-                </button>
-              </div>
-              {/* Slower paths, still one tap away: MVP (scaffold) and the fully
-                  audited Build. The primary action is the quick update. */}
-              {mode === 'build' && !resumeMode ? (
+                  {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
+                  Resume build
+                </Button>
+              ) : (
                 <>
+                  {/* One drafted message, two ways to send it: Ask (question or
+                      operational action — no code changes) and Quick update
+                      (the default: one small scoped code change). The audited
+                      Full build and the Production check live in the Build
+                      panel on the left. */}
                   <Button
-                    variant="outline" className="h-11 sm:h-10 ml-auto"
-                    disabled={composerDisabled || !instruction.trim()}
-                    onClick={() => startBuild('mvp')}
-                    title="Fast first version of a whole design: skips the rule interview and the spec/test gates"
+                    variant="outline"
+                    className="h-11 sm:h-10 ml-auto"
+                    disabled={askDisabled || !instruction.trim()}
+                    onClick={startAsk}
+                    title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."
                   >
-                    <Rocket className="h-4 w-4 mr-1" /> MVP
+                    <HelpCircle className="h-4 w-4 mr-1" /> Ask
                   </Button>
                   <Button
-                    variant="outline" className="h-11 sm:h-10"
-                    disabled={composerDisabled || !instruction.trim()}
-                    onClick={() => startBuild('full')}
-                    title="The audited build: rule questions, per-rule tests, the whole gate battery"
+                    className="h-11 sm:h-10"
+                    disabled={quickDisabled || !instruction.trim()}
+                    onClick={() => startBuild('quick')}
+                    title="One small scoped code change — no gate battery, straight to deploy (Ctrl+Enter)"
                   >
-                    <Hammer className="h-4 w-4 mr-1" /> Full build
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Zap className="h-4 w-4 mr-1" />}
+                    Quick update
                   </Button>
                 </>
-              ) : null}
-              <Button
-                className={`h-11 sm:h-10 ${mode === 'build' && !resumeMode ? '' : 'ml-auto'}`}
-                disabled={composerDisabled || (!resumeMode && !instruction.trim())}
-                onClick={submitComposer}
-                title={mode === 'build' && !resumeMode ? 'One small scoped change — no gate battery, straight to deploy' : undefined}
-              >
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : mode === 'ask' ? <HelpCircle className="h-4 w-4 mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
-                {mode === 'ask' ? 'Ask' : resumeMode ? 'Resume build' : 'Quick update'}
-              </Button>
+              )}
             </div>
           </div>
         ) : (

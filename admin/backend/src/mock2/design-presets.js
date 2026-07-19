@@ -258,9 +258,12 @@ export function buildDesignPresetSeedFiles(key) {
   ];
 }
 
-// applyDesignPreset — bind the Concept prompts to the chosen palette by
-// appending a hard section to the locked design system. No preset → the
-// design system rides unchanged (the model picks the look, as before).
+// applyDesignPreset — bind the Concept prompts to the chosen theme by
+// appending a section to the locked design system. The theme is a BASE the
+// model builds on and may extend COMPLEMENTARILY — not a cage: the original
+// "EXACTLY these tokens, nothing else" wording measurably flattened mockups
+// (the model couldn't reach the modern component/detail language it knows).
+// No preset → the design system rides unchanged (the model picks the look).
 export function applyDesignPreset(designSystemMd, key) {
   const preset = getDesignPreset(key);
   const base = String(designSystemMd || '');
@@ -268,11 +271,44 @@ export function applyDesignPreset(designSystemMd, key) {
   const t = preset.tokens;
   return `${base}
 
-## Chosen base design preset (binding): ${preset.name}
-The Builder chose this preset at project creation — every mockup and screen uses
-EXACTLY these tokens. Do not introduce other colors, families, or radii:
+## Base design theme (binding as a BASE): ${preset.name}
+The Builder chose this theme at project creation. Treat it as the FOUNDATION,
+and design UP from it to the level of today's best product UIs:
+- The core stays recognizable on every screen: these background/surface/text
+  colors, this primary and accent, and these font families anchor the chrome,
+  nav, buttons, and body text.
+- You SHOULD extend it complementarily where it improves the design: tints,
+  shades, and translucent variants of the base colors; at most one or two
+  additional accents that harmonize with the palette; gradients and elevated
+  surfaces derived from it; refined component detail (hover/focus states,
+  subtle shadows and transitions, empty states, iconography). Additions must
+  read as the SAME family — never a different theme.
+- Never replace the core palette or the font families with unrelated ones, and
+  never leave the design flat when a complementary touch would lift it.
+Base tokens:
 - background ${t.colors.background}, surface ${t.colors.surface}, text ${t.colors.text}, muted ${t.colors.muted}, border ${t.colors.border}
 - primary ${t.colors.primary} (on-primary text ${t.colors.primaryText}), accent ${t.colors.accent}, danger ${t.colors.danger}, success ${t.colors.success}
-- type: body ${t.typography.fontFamily}; headings ${t.typography.headingFamily}; base size ${t.typography.baseSize}
+- type: body ${t.typography.fontFamily}; headings ${t.typography.headingFamily}; base size ${t.typography.baseSize}${t.typography.monoFamily ? `; code ${t.typography.monoFamily}` : ''}
 - radii ${t.radius.sm}/${t.radius.md}/${t.radius.lg}; spacing unit ${t.spacing.unit}; card shadow ${t.shadow.card}`;
+}
+
+// applyExploreDesign — the Builder chose "new look" for THIS turn: the base
+// theme is set aside and the model designs freely at reference quality. If the
+// mockup is approved, the extractor adopts its look as the project's design
+// system — exploration is a proposal until approval, never a silent fork.
+export function applyExploreDesign(designSystemMd) {
+  const base = String(designSystemMd || '');
+  return `${base}
+
+## Design direction for THIS turn: EXPLORE a new look (Builder's choice)
+Set aside any base theme above for this mockup. Design at the level of the
+best modern product UIs (shadcn/Radix-inspired component language,
+Linear/Stripe-class polish):
+1. First think about what THIS application's domain needs — its core objects,
+   states, and tasks — and the display patterns the best products use for them.
+2. Then choose a palette, typography, and component language that FIT that
+   domain (not a generic default), and apply them consistently.
+Everything must remain fully self-contained HTML/CSS (no CDNs, no external
+fonts — pick from families commonly installed). If the Builder approves this
+mockup, its look becomes the project's design system going forward.`;
 }

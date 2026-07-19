@@ -455,6 +455,7 @@ const chatMessageSchema = z.object({
   // Conversation mode (M7): 'plan' talks through requirements without touching
   // the mockup; 'design' (default) may generate/iterate the mockup.
   mode: z.enum(['plan', 'design']).optional(),
+  design: z.enum(['theme', 'explore']).optional(),
 });
 // Design-template import: either an uploaded exported document OR another
 // project to copy the design from (the server exports that project's template
@@ -2870,6 +2871,7 @@ export function createMock2Router() {
         actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         mode: parsed.data.mode || 'design',
         images: imgCheck.images,
+        design: parsed.data.design || 'theme',
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not send message: ${err?.message || 'unknown error'}` });

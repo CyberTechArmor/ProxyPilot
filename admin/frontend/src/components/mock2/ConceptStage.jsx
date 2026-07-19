@@ -74,7 +74,12 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
-  const [mode, setMode] = useState('design'); // 'plan' | 'design' — directs the turn
+  const [mode, setMode] = useState('design');
+  // Design direction for design-mode turns: 'theme' keeps the project's base
+  // theme (the AI may extend it complementarily); 'explore' sets it aside for a
+  // fresh reference-quality look this turn (adopted only if approved). Explore
+  // renders with thinking on + high effort, so it is slower but deeper.
+  const [designDirection, setDesignDirection] = useState('theme'); // 'plan' | 'design' — directs the turn
   const scrollRef = useRef(null);
   const onTyping = useTypingTracker(projectId, canEdit && !archived && project?.lifecycle === 'active');
   const wasApproved = useRef(!!project?.design_approved_at);
@@ -294,7 +299,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     if (!text) return;
     setBusy(true);
     try {
-      const res = await api.mock2SendChatMessage(projectId, text, mode, toWireImages(attach.images));
+      const res = await api.mock2SendChatMessage(projectId, text, mode, toWireImages(attach.images), mode === 'design' ? designDirection : null);
       if (res.refused) {
         toast({ variant: 'destructive', title: 'Message not processed', description: res.reason || 'Quota exceeded.' });
       } else {
@@ -530,6 +535,26 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                   version (rule interview skipped, no gate battery, fast
                   model). The fully audited Build comes later, from the build
                   chat. */}
+              {mode === 'design' ? (
+                <div className="inline-flex rounded-md border p-0.5 shrink-0" role="radiogroup" aria-label="Design direction">
+                  <button
+                    type="button" role="radio" aria-checked={designDirection === 'theme'}
+                    onClick={() => setDesignDirection('theme')}
+                    title="Stay on the project's base theme — the AI keeps the core colors/fonts/components and may add complementary touches"
+                    className={`rounded px-2.5 py-1.5 text-xs font-medium min-h-[36px] ${designDirection === 'theme' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                  >
+                    On theme
+                  </button>
+                  <button
+                    type="button" role="radio" aria-checked={designDirection === 'explore'}
+                    onClick={() => setDesignDirection('explore')}
+                    title="Explore a new look this turn — the AI designs freely at reference quality (thinking on, high effort; slower). Approving the mockup adopts its look as the project design."
+                    className={`rounded px-2.5 py-1.5 text-xs font-medium min-h-[36px] ${designDirection === 'explore' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`}
+                  >
+                    New look
+                  </button>
+                </div>
+              ) : null}
               {hasMockup && online ? (
                 <Button
                   variant="outline"

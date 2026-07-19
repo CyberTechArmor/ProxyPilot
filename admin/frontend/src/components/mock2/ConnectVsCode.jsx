@@ -23,16 +23,19 @@ function CopyRow({ label, value, mono = true }) {
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium">{label}</p>
-      <div className="flex items-center gap-1.5">
-        <code className={`min-w-0 flex-1 truncate rounded border bg-muted/40 px-2 py-2 text-xs ${mono ? 'font-mono' : ''}`}>{value}</code>
+      {/* break-all + wrap (never truncate): on a phone the full value must be
+          readable and selectable — a clipped token or URL is unusable. The
+          copy button stays a 44px target aligned to the top of the value. */}
+      <div className="flex items-start gap-1.5">
+        <code className={`min-w-0 flex-1 whitespace-pre-wrap break-all rounded border bg-muted/40 px-2 py-2 text-xs leading-relaxed ${mono ? 'font-mono' : ''}`}>{value}</code>
         <Button
-          variant="ghost" size="icon" className="h-9 w-9 shrink-0" aria-label={`Copy ${label}`}
+          variant="outline" size="icon" className="h-11 w-11 sm:h-9 sm:w-9 shrink-0" aria-label={`Copy ${label}`}
           onClick={async () => {
             try { await navigator.clipboard.writeText(value); toast({ title: 'Copied' }); }
             catch { toast({ variant: 'destructive', title: 'Copy failed — select and copy manually' }); }
           }}
         >
-          <Copy className="h-3.5 w-3.5" />
+          <Copy className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
         </Button>
       </div>
     </div>
@@ -87,12 +90,12 @@ export default function ConnectVsCode({ projectId, canEdit }) {
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <Button className="min-h-[44px]" disabled={minting} onClick={mint}>
+          <Button className="min-h-[44px] w-full sm:w-auto" disabled={minting} onClick={mint}>
             {minting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plug className="h-4 w-4 mr-1" />}
             Quick connect
           </Button>
           {info?.clone_url ? (
-            <span className="min-w-0 truncate text-xs font-mono text-muted-foreground">{info.clone_url}</span>
+            <span className="min-w-0 break-all text-xs font-mono text-muted-foreground">{info.clone_url}</span>
           ) : null}
         </div>
 
@@ -101,13 +104,13 @@ export default function ConnectVsCode({ projectId, canEdit }) {
             <p className="text-xs font-medium text-muted-foreground">Active connect tokens</p>
             {activeTokens.map((t) => (
               <div key={t.id} className="flex items-center justify-between gap-2 rounded-md border p-2">
-                <span className="min-w-0 truncate text-xs">
+                <span className="min-w-0 break-words text-xs">
                   {t.label || 'token'} · created {String(t.created_at).slice(0, 10)}
                   {t.expires_at ? ` · expires ${String(t.expires_at).slice(0, 10)}` : ''}
                   {t.last_used_at ? ` · last used ${String(t.last_used_at).slice(0, 10)}` : ' · never used'}
                 </span>
                 <Button
-                  variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-red-500" aria-label="Revoke token"
+                  variant="ghost" size="icon" className="h-11 w-11 sm:h-9 sm:w-9 shrink-0 text-red-500" aria-label="Revoke token"
                   disabled={revoking === t.id}
                   onClick={() => revoke(t.id)}
                 >
@@ -117,12 +120,11 @@ export default function ConnectVsCode({ projectId, canEdit }) {
             ))}
           </div>
         ) : null}
-        {!canEdit && !activeTokens.length ? null : null}
       </CardContent>
 
       {/* One-time token reveal + connect options. */}
       <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setMinted(null); }}>
-        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:rounded-lg">
+        <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:max-h-[85vh] sm:rounded-lg">
           <DialogHeader>
             <DialogTitle>Connect VS Code</DialogTitle>
             <DialogDescription>

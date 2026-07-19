@@ -175,7 +175,11 @@ export default function BuildMode({
           so we show a compact open-in-new-tab bar instead of an embedded preview. */}
       <div className="min-w-0 flex flex-col gap-4 lg:flex-[1.55] lg:min-h-0 lg:overflow-y-auto">
         {online ? (
-          <LiveAppBar url={project.url || null} projectId={projectId} />
+          <LiveAppBar
+            url={project.url || null}
+            projectId={projectId}
+            probeKey={`${cycle?.id || 0}:${cycle?.status || ''}:${cycle?.deploy_status || ''}:${project?.base_app_deploying ? 1 : 0}:${project?.deploy_state || ''}`}
+          />
         ) : (
           <PreviewPlaceholder project={project} provLog={provLog} provMessage={provMessage} />
         )}

@@ -119,7 +119,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
@@ -1288,6 +1288,36 @@ export function createMock2Router() {
     const value = setFastCodeModelSetting(parsed.data.model, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_FAST_MODEL', 'mock2_setting', 0, { fast_code_model: value || '(default)' }, req.ip);
     res.json({ fast_code_model: value });
+  });
+  // Browser smoke connector toggle — the dashboard's on/off for the Playwright
+  // check that drives the deployed UI after user-facing diffs. '' follows the
+  // env default (SMOKE_BROWSER_ENABLED, on unless turned off); 'on'/'off' is
+  // the operator's explicit choice and WINS over env. The GET also reports
+  // whether the connector could actually RUN (driver installed + a Chromium
+  // found), so the toggle never lies about what enabling would do.
+  router.get('/settings/smoke-browser', requireAdmin, async (_req, res) => {
+    const setting = getSmokeBrowserSetting();
+    const effEnv = smokeEnv(process.env);
+    const envRaw = String(process.env.SMOKE_BROWSER_ENABLED ?? '').trim();
+    const envEnabled = envRaw === '' ? true : /^(1|true|yes|on)$/i.test(envRaw);
+    const { loadChromium: load, resolveBrowserExecutable } = await import('./ui-checks.js');
+    const driver = !!(await load());
+    const executable = resolveBrowserExecutable(process.env);
+    res.json({
+      setting, // '' | 'on' | 'off'
+      effective: /^(1|true|yes|on)$/i.test(String(effEnv.SMOKE_BROWSER_ENABLED ?? 'true')) || String(effEnv.SMOKE_BROWSER_ENABLED ?? '').trim() === '',
+      env_enabled: envEnabled,
+      driver_installed: driver,
+      executable,
+      ready: driver && !!executable,
+    });
+  });
+  router.post('/settings/smoke-browser', requireAdmin, (req, res) => {
+    const parsed = z.object({ setting: z.enum(['', 'on', 'off']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be '', 'on', or 'off'" });
+    const value = setSmokeBrowserSetting(parsed.data.setting, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_SMOKE_BROWSER', 'mock2_setting', 0, { smoke_browser: value || '(env default)' }, req.ip);
+    res.json({ setting: value });
   });
   // Global thinking switch — 'off' disables thinking for every lane at once
   // (overlays per-lane tuning at read time; the stored per-lane doc is kept).

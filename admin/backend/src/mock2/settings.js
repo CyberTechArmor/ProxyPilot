@@ -138,6 +138,30 @@ export function routingEnv(env = process.env) {
   return v ? { ...env, MOCK2_FAST_MODEL: v } : env;
 }
 
+// ---- browser smoke connector toggle (dashboard-controlled) ----
+// '' = follow the env/default (SMOKE_BROWSER_ENABLED, default on),
+// 'on'/'off' = the operator's explicit dashboard choice, which WINS over env.
+export const SMOKE_BROWSER_KEY = 'smoke_browser';
+
+export function getSmokeBrowserSetting() {
+  const v = String(getMock2Setting(SMOKE_BROWSER_KEY, '') || '').trim().toLowerCase();
+  return v === 'on' || v === 'off' ? v : '';
+}
+
+export function setSmokeBrowserSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(SMOKE_BROWSER_KEY, v === 'on' || v === 'off' ? v : '', updatedBy);
+  return getSmokeBrowserSetting();
+}
+
+// The env the smoke gate should read: process.env with the dashboard's browser
+// toggle overlaid (an explicit 'on'/'off' wins over SMOKE_BROWSER_ENABLED).
+export function smokeEnv(env = process.env) {
+  const v = getSmokeBrowserSetting();
+  if (!v) return env;
+  return { ...env, SMOKE_BROWSER_ENABLED: v === 'on' ? 'true' : '0' };
+}
+
 // ---- Global thinking switch (kill thinking everywhere at once) ----
 export const GLOBAL_THINKING_KEY = 'global_thinking';
 

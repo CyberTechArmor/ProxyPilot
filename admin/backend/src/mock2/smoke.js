@@ -35,8 +35,9 @@ import { readRunContract } from './deploy.js';
 import {
   UI_CHECKS_PATH, parseUiChecks, checksForChangedFiles, uiCheckLogLines, uiCheckFailSummary,
 } from './ui-check-logic.js';
-import { runUiChecks, launchOptions } from './ui-checks.js';
+import { runUiChecks, launchOptions, loadChromium } from './ui-checks.js';
 import { ACCEPTANCE_PATH, parseAcceptance } from './acceptance-logic.js';
+import { smokeEnv } from './settings.js';
 
 // Run a script inside the container (same base64-streamed pivot as the runner).
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -163,11 +164,9 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
   }
 
   // 2) Fallback: the original journey render check + console errors on load.
-  let chromium;
-  try {
-    ({ chromium } = await import('playwright'));
-  } catch (err) {
-    return { ok: false, unavailable: true, detail: `browser connector: playwright not installed (${err?.message || err})` };
+  const chromium = await loadChromium();
+  if (!chromium) {
+    return { ok: false, unavailable: true, detail: 'browser connector: playwright-core is not installed (npm install in admin/backend, or rerun update.sh)' };
   }
   let browser = null;
   try {
@@ -267,7 +266,9 @@ export async function runSmokeGate({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   changedFiles = [], changeMeta = {}, escalations = [], env = process.env,
 }) {
-  const config = smokeConfigFromEnv(env);
+  // The dashboard's browser toggle (settings.smokeEnv) overlays the env var —
+  // an operator flips the connector from the UI without touching .env.
+  const config = smokeConfigFromEnv(smokeEnv(env));
 
   // 1) The cheap default layer — always runs, no connector.
   const http = await httpSmoke(containerName, webPort);

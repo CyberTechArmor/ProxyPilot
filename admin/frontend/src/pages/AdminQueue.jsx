@@ -281,6 +281,32 @@ export default function AdminQueue() {
       .catch((err) => { if (!(err instanceof ApiError)) console.error('load lane tuning failed:', err); });
   }, [gate]);
 
+  // Browser smoke connector (post-deploy UI verification) — toggle + readiness.
+  const [smokeBrowser, setSmokeBrowser] = useState(null);
+  const [savingSmoke, setSavingSmoke] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetSmokeBrowser()
+      .then(setSmokeBrowser)
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load smoke-browser failed:', err); });
+  }, [gate]);
+  const saveSmokeBrowser = async (setting) => {
+    setSavingSmoke(true);
+    try {
+      await api.mock2SetSmokeBrowser(setting);
+      const fresh = await api.mock2GetSmokeBrowser();
+      setSmokeBrowser(fresh);
+      toast({
+        title: 'Browser verification updated',
+        description: setting === 'off'
+          ? 'Builds ship without the browser check — you test the deployed app by hand.'
+          : 'User-facing builds are driven in a real browser after deploy (dead buttons and console errors fail the build).',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingSmoke(false); }
+  };
+
   // Save one lane's patch; on failure re-fetch to resync (edits are per-field).
   const saveLaneTuning = async (lane, patch) => {
     setLaneTuning((cur) => cur && ({ ...cur, lanes: { ...cur.lanes, [lane]: { ...cur.lanes[lane], ...patch } } }));
@@ -535,6 +561,58 @@ export default function AdminQueue() {
             support are clamped automatically. Turning thinking off speeds a lane up at the cost of
             reasoning depth (the mockup lane is off by default on purpose).
           </p>
+        </CardContent>
+      </Card>
+
+      {/* Browser verification (smoke connector) — drives the deployed UI after
+          user-facing diffs; dead buttons and console errors fail the build. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Browser verification</CardTitle>
+          <CardDescription>
+            After a build that touches user-facing files deploys, a real (headless) browser opens the live
+            app and runs its interaction checks — dead buttons, broken forms, and console errors fail the
+            build instead of shipping. Turning it off ships builds for live human testing instead.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {smokeBrowser == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-end">
+                <div className="space-y-1">
+                  <label className="text-xs text-muted-foreground" htmlFor="smoke-browser-setting">Browser checks</label>
+                  <Select
+                    value={smokeBrowser.setting === '' ? 'default' : smokeBrowser.setting}
+                    disabled={savingSmoke}
+                    onValueChange={(v) => saveSmokeBrowser(v === 'default' ? '' : v)}
+                  >
+                    <SelectTrigger id="smoke-browser-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="on">On (recommended) — verify user-facing builds in a real browser</SelectItem>
+                      <SelectItem value="default">Follow .env ({smokeBrowser.env_enabled ? 'currently on' : 'currently off'})</SelectItem>
+                      <SelectItem value="off">Off — ship for live human testing</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p className={`text-xs ${smokeBrowser.ready ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {smokeBrowser.ready
+                    ? `Ready — driver installed, browser at ${smokeBrowser.executable}`
+                    : !smokeBrowser.driver_installed
+                      ? 'Not ready: playwright-core is not installed — run update.sh (or npm install in admin/backend).'
+                      : 'Not ready: no Chromium found — run update.sh (installs it) or set SMOKE_BROWSER_EXECUTABLE.'}
+                </p>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The check only runs when a build&apos;s diff touches user-facing paths (HTML/CSS/public/views) —
+                backend-only changes never start a browser. If it&apos;s enabled but can&apos;t run, the build fails
+                visibly rather than pretending it was checked.
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 

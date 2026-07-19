@@ -1433,6 +1433,10 @@ export const api = {
   mock2AppLive: (id) => request(`/mock2/projects/${id}/app-live`),
   // Quick connect (VS Code / git over smart HTTP): clone URL + connect tokens.
   mock2GetConnect: (id) => request(`/mock2/projects/${id}/connect`),
+  // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).
+  mock2GetSmokeBrowser: () => request('/mock2/settings/smoke-browser'),
+  mock2SetSmokeBrowser: (setting) =>
+    request('/mock2/settings/smoke-browser', { method: 'POST', body: JSON.stringify({ setting }) }),
   // Feature checklist (per-screen is/isn't-done items).
   mock2SetScreenItem: (id, itemId, status) =>
     request(`/mock2/projects/${id}/screens/items/${itemId}`, { method: 'POST', body: JSON.stringify({ status }) }),

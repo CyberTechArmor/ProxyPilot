@@ -1397,4 +1397,26 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Feature-version history: one row per checklist-item change — what a
+    // build (or an editor) did to that feature, newest first in the UI. The
+    // "click a feature to read what the current update does / how it changed"
+    // ledger.
+    version: 537,
+    name: 'mock2_screen_item_history',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_screen_item_history (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          item_id    INTEGER NOT NULL,
+          summary    TEXT NOT NULL,
+          request_id INTEGER,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_item_history_item ON mock2_screen_item_history (item_id);
+        CREATE INDEX IF NOT EXISTS idx_mock2_item_history_project ON mock2_screen_item_history (project_id);
+      `);
+    },
+  },
 ];

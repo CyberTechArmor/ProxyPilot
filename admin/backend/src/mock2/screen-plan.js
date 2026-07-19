@@ -15,6 +15,7 @@ import {
   screenPlanFromInventory, buildScreenBuildInstruction, nextQueuedScreen,
   isTransientStartError, SCREEN_DECISIONS, INITIAL_BUILD_INSTRUCTION_PREFIX,
   screenItemsFromInventory, buildItemsBuildInstruction,
+  buildChecklistPostPassPrompt, buildChecklistPostPassTask, parseChecklistPostPassReply,
 } from './screen-plan-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -114,6 +115,43 @@ function syncScreenItems(projectId, inventory) {
   tx();
 }
 
+// ---- feature version history (mock2_screen_item_history, migration 537) ----
+
+// One ledger row per checklist-item change: what a build (or an editor) did to
+// that feature. The UI shows them newest-first when a feature is expanded.
+export function recordItemHistory(projectId, itemId, summary, requestId = null) {
+  try {
+    getMock2Db().prepare(`
+      INSERT INTO mock2_screen_item_history (project_id, item_id, summary, request_id, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(Number(projectId), Number(itemId), String(summary || '').slice(0, 1000), requestId == null ? null : Number(requestId), nowIso());
+  } catch (e) { console.warn('[mock2] item history write failed:', e?.message); }
+}
+
+export function listScreenItemHistory(projectId) {
+  try {
+    return getMock2Db()
+      .prepare(`SELECT * FROM mock2_screen_item_history WHERE project_id = ? ORDER BY id DESC`)
+      .all(Number(projectId));
+  } catch { return []; }
+}
+
+// The recorded change summary for a request (the change records its cycles
+// wrote), used as the history text — far more descriptive than the raw
+// instruction. Falls back to the instruction.
+function requestChangeSummary(requestRow) {
+  try {
+    const db = getMock2Db();
+    const rec = db.prepare(`
+      SELECT cr.summary FROM mock2_change_records cr
+      JOIN mock2_cycles c ON c.id = cr.cycle_id
+      WHERE c.request_id = ? ORDER BY cr.id DESC LIMIT 1
+    `).get(Number(requestRow.id));
+    if (rec?.summary) return String(rec.summary);
+  } catch { /* fall through */ }
+  return String(requestRow?.instruction || '').slice(0, 400);
+}
+
 // Manual is/isn't-done toggle (editor): the honest override for work verified
 // by a human, or an item the initial build actually finished.
 export function setScreenItemStatus(projectId, itemId, status) {
@@ -122,6 +160,11 @@ export function setScreenItemStatus(projectId, itemId, status) {
   const row = db.prepare(`SELECT * FROM mock2_screen_items WHERE project_id = ? AND id = ?`).get(Number(projectId), Number(itemId));
   if (!row) return { ok: false, error: 'item not found' };
   db.prepare(`UPDATE mock2_screen_items SET status = ?, updated_at = ? WHERE id = ?`).run(status, nowIso(), row.id);
+  if (row.status !== status) {
+    recordItemHistory(projectId, row.id, status === 'built'
+      ? 'Marked done by an editor (verified by a human).'
+      : 'Reopened by an editor — needs more work.');
+  }
   return { ok: true, row: db.prepare(`SELECT * FROM mock2_screen_items WHERE id = ?`).get(row.id) };
 }
 
@@ -339,15 +382,20 @@ export async function onRequestClosed(requestRow) {
     }
   }
   // Feature-checklist items THIS request targeted settle with it: built on
-  // success, back to selectable (stamp cleared) otherwise.
+  // success, back to selectable (stamp cleared) otherwise. Each transition
+  // lands in the item's version history with the recorded change summary.
+  let itemsSettled = 0;
   try {
     const items = db.prepare(`SELECT * FROM mock2_screen_items WHERE request_id = ?`).all(Number(requestRow.id));
     if (items.length) {
       const ok = requestRow.status === 'succeeded';
+      const summary = ok ? requestChangeSummary(requestRow) : null;
       for (const it of items) {
         db.prepare(`UPDATE mock2_screen_items SET status = ?, request_id = NULL, updated_at = ? WHERE id = ?`)
           .run(ok ? 'built' : it.status, nowIso(), it.id);
+        if (ok) recordItemHistory(requestRow.project_id, it.id, summary, requestRow.id);
       }
+      itemsSettled = ok ? items.length : 0;
       const p = Number(requestRow.project_id);
       if (Number.isFinite(p)) {
         insertMessage({
@@ -359,7 +407,93 @@ export async function onRequestClosed(requestRow) {
       }
     }
   } catch (e) { console.warn('[mock2] screen-item settle failed:', e?.message); }
+  // Post-pass: keep the checklist in sync with what the build ACTUALLY did —
+  // new pages become screen rows, new functionality becomes items, and
+  // existing pending items the build clearly finished settle. Skipped when the
+  // deterministic settle already covered this request. Fail-open.
+  if (requestRow.status === 'succeeded' && !itemsSettled) {
+    try { await checklistPostPass(requestRow); } catch (e) { console.warn('[mock2] checklist post-pass failed:', e?.message); }
+  }
   if (Number.isFinite(pid)) {
     try { await drainScreenQueue(pid); } catch (e) { console.warn('[mock2] screen queue drain failed:', e?.message); }
+  }
+}
+
+// ---- checklist post-pass (one cheap model call per finished build) ----
+
+async function checklistPostPass(requestRow) {
+  const pid = Number(requestRow.project_id);
+  if (!Number.isFinite(pid)) return;
+  const screens = listScreenPlan(pid);
+  if (!screens.length) return; // no plan (mockup skipped) — nothing to sync
+  const items = listScreenItems(pid);
+  const db = getMock2Db();
+
+  // The model inputs: instruction + recorded summary + the current plan.
+  const { prepassEnabled, prepassModel } = await import('./prepass-logic.js');
+  const { routingEnv } = await import('./settings.js');
+  if (!prepassEnabled(routingEnv())) return;
+  const { buildRunnerReady } = await import('./runner.js');
+  const ready = buildRunnerReady();
+  if (!ready?.ok) return;
+  const { callModelTurn } = await import('./model-client.js');
+  const byScreen = screens.map((s) => ({
+    name: s.name, status: s.status,
+    items: items.filter((i) => i.screen_id === s.id).map((i) => ({ id: i.id, status: i.status, kind: i.kind, name: i.name })),
+  }));
+  const res = await callModelTurn({
+    connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
+    system: buildChecklistPostPassPrompt(), tools: [],
+    transcript: [{ role: 'user', text: buildChecklistPostPassTask({ instruction: requestRow.instruction, summary: requestChangeSummary(requestRow), screens: byScreen }) }],
+    maxTokens: 900, effort: 'low', thinking: 'off',
+  });
+  if (!res.ok) return;
+  const parsed = parseChecklistPostPassReply(res.text);
+  if (!parsed || parsed.empty) return;
+
+  const summary = requestChangeSummary(requestRow);
+  const notes = [];
+  const screenIdByName = new Map(listScreenPlan(pid).map((s) => [s.name.toLowerCase(), s.id]));
+  // New pages the build created → built screen rows (appended after existing).
+  for (const ns of parsed.newScreens) {
+    if (screenIdByName.has(ns.name.toLowerCase())) continue;
+    const maxSort = Math.max(0, ...listScreenPlan(pid).map((s) => s.sort ?? 0));
+    db.prepare(`
+      INSERT INTO mock2_screen_plan (project_id, name, purpose, sort, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'built', ?, ?)
+    `).run(pid, ns.name, ns.purpose, maxSort + 1, nowIso(), nowIso());
+    screenIdByName.set(ns.name.toLowerCase(), db.prepare(`SELECT id FROM mock2_screen_plan WHERE project_id = ? AND name = ?`).get(pid, ns.name)?.id);
+    notes.push(`new page "${ns.name}"`);
+  }
+  // New functionality the build added → built items (they exist as of now).
+  for (const ni of parsed.newItems) {
+    const sid = screenIdByName.get(ni.screen.toLowerCase());
+    if (!sid) continue;
+    const dup = listScreenItems(pid).some((i) => i.screen_id === sid && i.kind === ni.kind && i.name.toLowerCase() === ni.name.toLowerCase());
+    if (dup) continue;
+    const info = db.prepare(`
+      INSERT INTO mock2_screen_items (project_id, screen_id, name, kind, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'built', ?, ?)
+    `).run(pid, sid, ni.name, ni.kind, nowIso(), nowIso());
+    recordItemHistory(pid, info.lastInsertRowid, `Added by this build: ${summary}`.slice(0, 1000), requestRow.id);
+    notes.push(`new feature "${ni.name}"`);
+  }
+  // Existing pending items the build clearly finished.
+  let completed = 0;
+  for (const id of parsed.completed) {
+    const it = listScreenItems(pid).find((i) => i.id === id && i.status === 'pending' && !i.request_id);
+    if (!it) continue;
+    db.prepare(`UPDATE mock2_screen_items SET status = 'built', updated_at = ? WHERE id = ?`).run(nowIso(), it.id);
+    recordItemHistory(pid, it.id, summary, requestRow.id);
+    completed += 1;
+  }
+  if (completed) notes.push(`${completed} feature${completed === 1 ? '' : 's'} marked built`);
+  if (notes.length) {
+    try {
+      insertMessage({
+        projectId: pid, kind: 'system',
+        body: `Checklist updated from this build: ${notes.join(', ')}. Tap a feature in the Screens panel to read its change history.`,
+      });
+    } catch { /* best effort */ }
   }
 }

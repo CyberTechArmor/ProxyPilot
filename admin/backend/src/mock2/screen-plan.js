@@ -162,6 +162,42 @@ export async function startItemsBuild(projectId, { itemIds = null, initiatedBy =
   return { status: 'started', count: wanted.length, request_id: reqId };
 }
 
+// backfillScreenItems — checklist self-heal for projects whose design was
+// approved BEFORE migration 536 existed (approval is the only seeding moment,
+// so those projects would never get a checklist). When a project has screens
+// but ZERO items, read the approved inventory back out of the container
+// (state/inventory.json — the design-approval exit artifact) and seed from it.
+// Runs at most once per project in practice: after a successful seed the
+// items exist and this returns immediately.
+export async function backfillScreenItems(project) {
+  const pid = Number(project?.id);
+  if (!Number.isFinite(pid)) return { seeded: 0 };
+  if (!listScreenPlan(pid).length) return { seeded: 0 };
+  if (listScreenItems(pid).length) return { seeded: 0 };
+  if (project.lifecycle !== 'active' || !project.container_name) return { seeded: 0 };
+  try {
+    // Lazy import (runner.js sits above this module via requests → screen-plan).
+    const { readFileInContainer } = await import('./runner.js');
+    const r = await readFileInContainer(project.container_name, 'state/inventory.json');
+    if (!r.ok) return { seeded: 0 };
+    const inventory = JSON.parse(r.content);
+    syncScreenItems(pid, inventory);
+    const seeded = listScreenItems(pid).length;
+    if (seeded) {
+      try {
+        insertMessage({
+          projectId: pid, kind: 'system',
+          body: `Feature checklist added: ${seeded} item${seeded === 1 ? '' : 's'} from the approved design inventory now appear under their screens. Tick the unfinished ones and press "Build selected" to finish them next; mark items done once you've verified them.`,
+        });
+      } catch { /* best effort */ }
+    }
+    return { seeded };
+  } catch (e) {
+    console.warn('[mock2] screen-item backfill failed:', e?.message);
+    return { seeded: 0 };
+  }
+}
+
 // reconcileScreenPlan — self-heal on read: rows still 'planned' although a
 // LATER initial "everything at once" build SUCCEEDED settle as built (the
 // request-close hook is fire-and-forget, so a hiccup there must not leave the

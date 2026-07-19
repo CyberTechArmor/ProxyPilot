@@ -616,6 +616,8 @@ function appShellHtml(project) {
   <span class="brand"><span class="logo">◆</span> <span id="app-name">${name}</span></span>
   <nav id="app-nav"><!-- screens add their nav entries here --></nav>
   <span class="headspace"></span>
+  <a class="btn subtle sm" id="admin-link" href="/admin" hidden>Admin</a>
+  <a class="btn subtle sm" href="/profile">Profile</a>
   <span class="whoami"><span class="avatar" id="avatar">·</span></span>
   <button class="btn subtle sm" id="logout">Sign out</button>
 </header>
@@ -626,6 +628,8 @@ function appShellHtml(project) {
       <p>This is the base application shell — sign-in, the first-admin setup, and the design
       tokens are already working. Describe screens in the ProxyPilot chat and each one lands
       here, behind this sign-in, in the same style.</p>
+      <p>Administration (users, roles &amp; permissions, directory sign-in) lives in the
+      <a href="/admin">admin console</a>; your own account is on the <a href="/profile">profile page</a>.</p>
     </div>
   </div>
 </main>
@@ -634,6 +638,13 @@ document.getElementById('logout').addEventListener('click', async () => {
   await fetch('/api/auth/logout', { method: 'POST' });
   window.location.assign('/login');
 });
+// Identity chip + admin-link visibility (the wired base app serves /api/me).
+fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((me) => {
+  if (!me) return;
+  const email = me.user && me.user.email;
+  if (email) document.getElementById('avatar').textContent = email[0].toUpperCase();
+  if (me.role === 'admin') document.getElementById('admin-link').hidden = false;
+}).catch(() => {});
 </script>
 </body>
 </html>

@@ -21,8 +21,15 @@ import { buildScaffoldFiles } from './scaffold.js';
 
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
-// The wiring targets — the scaffold entry files the wired variants replace.
-export const AUTH_WIRING_TARGETS = Object.freeze(['src/app.ts', 'src/server.ts']);
+// The wiring targets — the scaffold entry files the wired variants replace,
+// plus the platform admin/profile pages the wired app serves (the component
+// ships the full admin API — users, roles/permissions, LDAPS, self-signup —
+// and these pages are its deterministic UI, so every base app STARTS with a
+// working admin area; builds add app features, not user management).
+export const AUTH_WIRING_TARGETS = Object.freeze([
+  'src/app.ts', 'src/server.ts',
+  'public/admin.html', 'public/admin.js', 'public/profile.html',
+]);
 
 // componentWiresBootstrap — does this component provide the forced first-admin
 // flow this module knows how to wire? Requires the gate export, the module
@@ -39,12 +46,15 @@ export function componentWiresBootstrap(contract, files = []) {
   );
 }
 
-// src/app.ts, wired: withAuth + bootstrapGate mounted before every route, the
-// component's routers under /api, the shipped sign-in page at /login, the
-// extracted design stylesheet at /design.css, and an authenticated app shell
-// at / that the build extends. Matches the component's own mount example
-// (usage_md §2) and the scaffold's conventions (NodeNext ESM, .js-suffixed
-// relative imports, securityHeaders, /_preview coexistence).
+// src/app.ts, wired: withAuth + bootstrapGate mounted before every route, ALL
+// of the component's routers under /api (auth, admin users/roles/LDAPS,
+// external self-signup + its admin toggle), the shipped sign-in page at
+// /login, the platform admin console at /admin and profile at /profile, an
+// identity endpoint at /api/me, the extracted design stylesheet at
+// /design.css, and an authenticated app shell at / that the build extends.
+// Matches the component's own mount example (usage_md §2) and the scaffold's
+// conventions (NodeNext ESM, .js-suffixed relative imports, securityHeaders,
+// /_preview coexistence).
 function wiredAppTs() {
   return `import express from 'express';
 import fs from 'node:fs';
@@ -54,6 +64,7 @@ import { securityHeaders } from './middleware/security.js';
 import healthRoutes from './health/routes.js';
 import {
   withAuth, bootstrapGate, authRoutes, adminAuthRoutes, isAuthenticated,
+  externalAuthRoutes, adminExternalRoutes, requireRole, getAuth, authRepo, toPublicUser,
 } from './auth/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,6 +115,29 @@ export function createApp(): express.Express {
   app.use('/api', healthRoutes);
   app.use('/api', authRoutes);
   app.use('/api', adminAuthRoutes);
+  // External self-signup (public endpoints re-check the admin toggle) + its
+  // admin surface (the on/off switch and the external-accounts roster).
+  app.use('/api/auth', externalAuthRoutes);
+  app.use('/api/admin/external', requireRole('admin'), adminExternalRoutes);
+
+  // Who am I — the signed-in identity (drives the profile page and the app
+  // shell's admin-link visibility). The token's claims are the source of
+  // truth; the DB row enriches with email/status when reachable.
+  app.get('/api/me', async (req, res) => {
+    if (!isAuthenticated(req)) {
+      res.status(401).json({ error: 'UNAUTHENTICATED' });
+      return;
+    }
+    const auth = getAuth(req);
+    let user = null;
+    try {
+      const row = auth.userId != null ? await authRepo.findUserById(auth.userId) : undefined;
+      user = row ? toPublicUser(row) : null;
+    } catch {
+      // The identity from the verified token is still returned below.
+    }
+    res.json({ user, role: auth.role, tenantId: auth.tenantId, provider: auth.provider ?? user?.provider ?? 'local' });
+  });
 
   // The sign-in page (shows the create-administrator form while uninitialized).
   app.get('/login', (_req, res) => res.sendFile('login.html', { root: PUBLIC_DIR }));
@@ -112,6 +146,29 @@ export function createApp(): express.Express {
   // the root (so <link href="/styles.css"> resolves). index:false so a stray
   // public/index.html never shadows the app's own routes.
   app.use(express.static(PUBLIC_DIR, { index: false }));
+
+  // The platform admin console (users, roles & permissions, LDAPS directory,
+  // self-signup) and the profile page — served with the app from day one.
+  // These pages drive the component's /api/admin/* surface; builds add app
+  // screens, never a second user-management UI.
+  app.get('/admin', (req, res) => {
+    if (!isAuthenticated(req)) {
+      res.redirect('/login');
+      return;
+    }
+    if (getAuth(req).role !== 'admin') {
+      res.redirect('/');
+      return;
+    }
+    res.sendFile('admin.html', { root: PUBLIC_DIR });
+  });
+  app.get('/profile', (req, res) => {
+    if (!isAuthenticated(req)) {
+      res.redirect('/login');
+      return;
+    }
+    res.sendFile('profile.html', { root: PUBLIC_DIR });
+  });
 
   // The authenticated app shell (public/app-shell.html — the base-style page
   // the build extends with screens); unauthenticated visitors always land on
@@ -138,6 +195,7 @@ export function createApp(): express.Express {
           '<p>This is the base application shell — authentication, the first-admin bootstrap, ' +
           'and the design stylesheet are already working. Describe screens in the ProxyPilot ' +
           'chat and the build will add them here, behind this sign-in.</p>' +
+          '<p><a href="/admin">Admin console</a> · <a href="/profile">Profile</a></p>' +
           '<p><button id="logout" style="min-height:44px;padding:0 1rem">Sign out</button></p>' +
           '<script>document.getElementById(\\'logout\\').addEventListener(\\'click\\', async () => {' +
           'await fetch(\\'/api/auth/logout\\', { method: \\'POST\\' }); window.location.assign(\\'/login\\');' +
@@ -195,11 +253,429 @@ listen();
 `;
 }
 
+// public/admin.html — the platform admin console: users, roles & permissions,
+// the LDAPS directory connection, and external self-signup. Static page in the
+// base style (base.css + design.css); admin.js drives the component's
+// /api/admin/* surface. NO app features live here — builds add screens to the
+// app shell, never a second user-management UI.
+function adminHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Admin console</title>
+<link rel="stylesheet" href="/design.css">
+<link rel="stylesheet" href="/base.css">
+<style>
+.note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin:6px 0 0}
+.note.err{color:var(--app-danger,#d24545)}
+.linklike{background:none;border:none;padding:2px 4px;cursor:pointer;color:var(--app-muted,#5a6b81);font-size:12px;min-height:0}
+.linklike:hover{color:var(--app-text,#12263f)}
+.row-2{display:grid;grid-template-columns:1fr;gap:0 16px}
+@media (min-width:640px){.row-2{grid-template-columns:1fr 1fr}}
+.sect{margin-top:22px}
+.sect:first-child{margin-top:0}
+.switch{display:flex;align-items:center;gap:10px;min-height:44px}
+.switch input{width:18px;height:18px}
+table.list input[type=checkbox]{width:18px;height:18px}
+</style>
+</head>
+<body>
+<header class="app">
+  <span class="brand"><span class="logo">◆</span> Admin console</span>
+  <nav><a class="btn subtle sm" href="/">← App</a> <a class="btn subtle sm" href="/profile">Profile</a></nav>
+  <span class="headspace"></span>
+  <button class="btn subtle sm" id="logout">Sign out</button>
+</header>
+<main class="wrap">
+  <p class="note" id="page-note"></p>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Users</h3><span class="badge b-info" id="users-count"></span></div>
+    <div class="card-b">
+      <p class="note">Accounts that have signed in. Change a role, or deactivate an account to block sign-in.
+      New internal users appear after their first sign-in (local password or the directory below).</p>
+      <div class="table-scroll">
+        <table class="list">
+          <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Provider</th><th>Last sign-in</th><th></th></tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+      <p class="note" id="users-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Roles &amp; permissions</h3></div>
+    <div class="card-b">
+      <p class="note">Tick a box to allow that permission for the role (differences from the built-in default are
+      stored as overrides). System roles can't be deleted; custom roles authorize purely through this matrix.</p>
+      <div class="table-scroll">
+        <table class="list" id="perm-table"></table>
+      </div>
+      <div class="row-2" style="margin-top:12px">
+        <div class="field"><label for="new-role-key">New role key (a–z, 0–9, _)</label><input id="new-role-key" placeholder="auditor"></div>
+        <div class="field"><label for="new-role-label">Label</label><input id="new-role-label" placeholder="Auditor"></div>
+      </div>
+      <button class="btn sm" id="add-role">Add role</button>
+      <p class="note" id="perm-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Directory sign-in (LDAPS)</h3><span class="badge b-neutral" id="ld-badge">optional</span></div>
+    <div class="card-b">
+      <p class="note">Connect an enterprise directory so staff sign in with their existing accounts. Secrets are
+      encrypted at rest and never shown back. Local password sign-in keeps working either way.</p>
+      <div class="row-2">
+        <div class="field"><label for="ld-host">Host</label><input id="ld-host" placeholder="ldaps.example.com"></div>
+        <div class="field"><label for="ld-port">Port</label><input id="ld-port" type="number" value="636"></div>
+        <div class="field"><label for="ld-basedn">Base DN</label><input id="ld-basedn" placeholder="dc=example,dc=com"></div>
+        <div class="field"><label for="ld-binddn">Bind DN (service account)</label><input id="ld-binddn" placeholder="cn=svc,dc=example,dc=com"></div>
+        <div class="field"><label for="ld-bindpw">Bind password (blank keeps the stored one)</label><input id="ld-bindpw" type="password" autocomplete="new-password"></div>
+        <div class="field"><label for="ld-filter">User search filter</label><input id="ld-filter" placeholder="(sAMAccountName={{username}})"></div>
+      </div>
+      <div class="switch"><input type="checkbox" id="ld-tls" checked><label for="ld-tls">Verify the directory's TLS certificate</label></div>
+      <div class="field"><label for="ld-ca">CA certificate (PEM, optional — blank keeps the stored one)</label><textarea id="ld-ca" rows="3" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div>
+      <div class="switch"><input type="checkbox" id="ld-clear-ca"><label for="ld-clear-ca">Remove the stored CA certificate (use the system trust store)</label></div>
+      <p><button class="btn sm" id="ld-save">Save settings</button> <button class="btn subtle sm" id="ld-test">Test connection</button></p>
+      <p class="note" id="ld-status"></p>
+      <p class="note" id="ld-note"></p>
+    </div>
+  </div>
+
+  <div class="card sect">
+    <div class="card-h"><h3>Self-signup (external accounts)</h3><span class="badge b-neutral" id="ext-badge">off</span></div>
+    <div class="card-b">
+      <p class="note">When enabled, outside individuals can create their own least-privileged accounts from the
+      sign-in page. They only ever see their own data; internal roles are unaffected.</p>
+      <div class="switch"><input type="checkbox" id="ext-enabled"><label for="ext-enabled">Allow external self-signup</label></div>
+      <p class="note" id="ext-status"></p>
+      <div class="table-scroll">
+        <table class="list">
+          <thead><tr><th>Email</th><th>Status</th></tr></thead>
+          <tbody id="ext-body"></tbody>
+        </table>
+      </div>
+      <p class="note" id="ext-note"></p>
+    </div>
+  </div>
+</main>
+<script src="/admin.js"></script>
+</body>
+</html>
+`;
+}
+
+// public/admin.js — drives the admin console against the component's admin API.
+// Vanilla JS (no framework, no build step); every fetch rides the httpOnly
+// access-token cookie the sign-in set. 401 → back to /login.
+function adminJs() {
+  return `// Platform admin console (wired by ProxyPilot's base-app setup).
+(function () {
+  'use strict';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
+  }
+
+  function api(path, opts) {
+    opts = opts || {};
+    var init = { method: opts.method || 'GET', credentials: 'same-origin', headers: {} };
+    if (opts.body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(opts.body);
+    }
+    return fetch(path, init).then(function (res) {
+      if (res.status === 401) { window.location.assign('/login'); throw new Error('Signed out'); }
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) {
+          var msg = (body && (body.message || body.error)) || ('HTTP ' + res.status);
+          throw new Error(msg);
+        }
+        return body;
+      });
+    });
+  }
+
+  function note(id, text, isError) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'note' + (isError ? ' err' : '');
+  }
+
+  var roles = []; // [{ role, label, isSystem, isEditable, isDeletable, permissions: [...] }]
+
+  // ---- Roles & permissions ----
+  function loadPermissions() {
+    return api('/api/admin/permissions').then(function (data) {
+      roles = data.roles || [];
+      var head = '<tr><th>Permission</th>' + roles.map(function (r) {
+        var tools = '';
+        if (r.isEditable) tools += ' <button class="linklike rename-role" data-role="' + esc(r.role) + '" title="Rename role">✎</button>';
+        if (r.isDeletable) tools += ' <button class="linklike del-role" data-role="' + esc(r.role) + '" title="Delete role">✕</button>';
+        return '<th>' + esc(r.label || r.role) + tools + '</th>';
+      }).join('') + '</tr>';
+      var rows = (data.permissions || []).map(function (p) {
+        return '<tr><td>' + esc(p) + '</td>' + roles.map(function (r) {
+          var cell = null;
+          (r.permissions || []).forEach(function (c) { if (c.permission === p) cell = c; });
+          var checked = cell && cell.allowed ? ' checked' : '';
+          var overridden = cell && cell.source === 'override' ? ' title="override (differs from the built-in default)"' : '';
+          return '<td style="text-align:center"><input type="checkbox" class="perm-box" data-role="' + esc(r.role) + '" data-perm="' + esc(p) + '"' + checked + overridden + '></td>';
+        }).join('') + '</tr>';
+      }).join('');
+      document.getElementById('perm-table').innerHTML = head + rows;
+    });
+  }
+
+  document.getElementById('perm-table').addEventListener('change', function (ev) {
+    var box = ev.target;
+    if (!box.classList.contains('perm-box')) return;
+    api('/api/admin/permissions', { method: 'PUT', body: { role: box.dataset.role, permission: box.dataset.perm, allowed: box.checked } })
+      .then(function () { note('perm-note', 'Saved.'); })
+      .catch(function (err) { box.checked = !box.checked; note('perm-note', err.message, true); });
+  });
+
+  document.getElementById('perm-table').addEventListener('click', function (ev) {
+    var btn = ev.target;
+    if (btn.classList.contains('rename-role')) {
+      var label = window.prompt('New label for role "' + btn.dataset.role + '":');
+      if (!label) return;
+      api('/api/admin/permissions/roles/' + encodeURIComponent(btn.dataset.role), { method: 'PATCH', body: { label: label } })
+        .then(function () { return loadPermissions().then(loadUsers); })
+        .catch(function (err) { note('perm-note', err.message, true); });
+    } else if (btn.classList.contains('del-role')) {
+      if (!window.confirm('Delete role "' + btn.dataset.role + '"? Users holding it must be moved first.')) return;
+      api('/api/admin/permissions/roles/' + encodeURIComponent(btn.dataset.role), { method: 'DELETE' })
+        .then(function () { return loadPermissions().then(loadUsers); })
+        .catch(function (err) { note('perm-note', err.message, true); });
+    }
+  });
+
+  document.getElementById('add-role').addEventListener('click', function () {
+    var key = document.getElementById('new-role-key').value.trim().toLowerCase();
+    var label = document.getElementById('new-role-label').value.trim();
+    if (!key || !label) { note('perm-note', 'Both a key and a label are required.', true); return; }
+    api('/api/admin/permissions/roles', { method: 'POST', body: { key: key, label: label } })
+      .then(function () {
+        document.getElementById('new-role-key').value = '';
+        document.getElementById('new-role-label').value = '';
+        note('perm-note', 'Role created — set its permissions above.');
+        return loadPermissions().then(loadUsers);
+      })
+      .catch(function (err) { note('perm-note', err.message, true); });
+  });
+
+  // ---- Users ----
+  function loadUsers() {
+    return api('/api/admin/users').then(function (users) {
+      users = users || [];
+      document.getElementById('users-count').textContent = users.length + ' account' + (users.length === 1 ? '' : 's');
+      var tb = document.getElementById('users-body');
+      tb.innerHTML = users.map(function (u) {
+        var options = roles.map(function (r) {
+          return '<option value="' + esc(r.role) + '"' + (r.role === u.role ? ' selected' : '') + '>' + esc(r.label || r.role) + '</option>';
+        }).join('');
+        return '<tr>' +
+          '<td>' + esc(u.email) + '</td>' +
+          '<td><select class="role-sel" data-user="' + u.id + '">' + options + '</select></td>' +
+          '<td><span class="badge ' + (u.isActive ? 'b-ok' : 'b-warn') + '">' + (u.isActive ? 'active' : 'disabled') + '</span></td>' +
+          '<td>' + esc(u.provider || 'local') + '</td>' +
+          '<td>' + (u.lastLoginAt ? esc(String(u.lastLoginAt).slice(0, 16).replace('T', ' ')) : '—') + '</td>' +
+          '<td><button class="btn subtle sm toggle-active" data-user="' + u.id + '" data-next="' + (u.isActive ? 'false' : 'true') + '">' + (u.isActive ? 'Deactivate' : 'Activate') + '</button></td>' +
+          '</tr>';
+      }).join('');
+    });
+  }
+
+  document.getElementById('users-body').addEventListener('change', function (ev) {
+    var sel = ev.target;
+    if (!sel.classList.contains('role-sel')) return;
+    api('/api/admin/users/' + sel.dataset.user + '/role', { method: 'PATCH', body: { role: sel.value } })
+      .then(function () { note('users-note', 'Role updated.'); })
+      .catch(function (err) { note('users-note', err.message, true); loadUsers(); });
+  });
+
+  document.getElementById('users-body').addEventListener('click', function (ev) {
+    var btn = ev.target;
+    if (!btn.classList.contains('toggle-active')) return;
+    api('/api/admin/users/' + btn.dataset.user + '/status', { method: 'PATCH', body: { isActive: btn.dataset.next === 'true' } })
+      .then(function () { note('users-note', 'Status updated.'); return loadUsers(); })
+      .catch(function (err) { note('users-note', err.message, true); });
+  });
+
+  // ---- LDAPS ----
+  function fillLdaps(v) {
+    document.getElementById('ld-host').value = v.host || '';
+    document.getElementById('ld-port').value = v.port || 636;
+    document.getElementById('ld-basedn').value = v.baseDn || '';
+    document.getElementById('ld-binddn').value = v.bindDn || '';
+    document.getElementById('ld-filter').value = v.userSearchFilter || '';
+    document.getElementById('ld-tls').checked = v.tlsVerify !== false;
+    document.getElementById('ld-badge').textContent = v.configured ? 'configured' : 'optional';
+    document.getElementById('ld-badge').className = 'badge ' + (v.configured ? 'b-ok' : 'b-neutral');
+    var s = [];
+    if (v.bindPasswordSet) s.push('bind password stored');
+    if (v.caCertSet) s.push('CA certificate stored');
+    if (v.status) s.push('status: ' + v.status);
+    if (v.lastTestedAt) s.push('last tested ' + String(v.lastTestedAt).slice(0, 16).replace('T', ' '));
+    note('ld-status', s.join(' · '));
+  }
+  function loadLdaps() { return api('/api/admin/ldaps').then(fillLdaps); }
+
+  document.getElementById('ld-save').addEventListener('click', function () {
+    var body = {
+      host: document.getElementById('ld-host').value.trim(),
+      port: Number(document.getElementById('ld-port').value) || 636,
+      baseDn: document.getElementById('ld-basedn').value.trim(),
+      bindDn: document.getElementById('ld-binddn').value.trim(),
+      userSearchFilter: document.getElementById('ld-filter').value.trim() || '(sAMAccountName={{username}})',
+      tlsVerify: document.getElementById('ld-tls').checked,
+    };
+    var pw = document.getElementById('ld-bindpw').value;
+    if (pw) body.bindPassword = pw;
+    if (document.getElementById('ld-clear-ca').checked) body.caCert = '__CLEAR__';
+    else if (document.getElementById('ld-ca').value.trim()) body.caCert = document.getElementById('ld-ca').value;
+    api('/api/admin/ldaps', { method: 'PUT', body: body })
+      .then(function (r) {
+        document.getElementById('ld-bindpw').value = '';
+        document.getElementById('ld-ca').value = '';
+        document.getElementById('ld-clear-ca').checked = false;
+        note('ld-note', (r && r.message) || 'Saved.');
+        if (r && r.settings) fillLdaps(r.settings);
+      })
+      .catch(function (err) { note('ld-note', err.message, true); });
+  });
+
+  document.getElementById('ld-test').addEventListener('click', function () {
+    note('ld-note', 'Testing…');
+    api('/api/admin/ldaps/test', { method: 'POST' })
+      .then(function (r) { note('ld-note', r.message || (r.ok ? 'Connection OK.' : 'Test failed.'), !r.ok); return loadLdaps(); })
+      .catch(function (err) { note('ld-note', err.message, true); });
+  });
+
+  // ---- External self-signup ----
+  function loadExternal() {
+    return api('/api/admin/external').then(function (d) {
+      document.getElementById('ext-enabled').checked = !!d.external_signup_enabled;
+      document.getElementById('ext-badge').textContent = d.external_signup_enabled ? 'on' : 'off';
+      document.getElementById('ext-badge').className = 'badge ' + (d.external_signup_enabled ? 'b-ok' : 'b-neutral');
+      note('ext-status', (d.external_user_count || 0) + ' external account(s)');
+      return api('/api/admin/external/users');
+    }).then(function (d) {
+      var users = (d && d.users) || [];
+      document.getElementById('ext-body').innerHTML = users.map(function (u) {
+        var active = u.isActive !== false;
+        return '<tr><td>' + esc(u.email) + '</td><td><span class="badge ' + (active ? 'b-ok' : 'b-warn') + '">' + (active ? 'active' : 'disabled') + '</span></td></tr>';
+      }).join('');
+    });
+  }
+
+  document.getElementById('ext-enabled').addEventListener('change', function (ev) {
+    api('/api/admin/external', { method: 'PUT', body: { enabled: ev.target.checked } })
+      .then(function () { return loadExternal(); })
+      .catch(function (err) { ev.target.checked = !ev.target.checked; note('ext-note', err.message, true); });
+  });
+
+  document.getElementById('logout').addEventListener('click', function () {
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).then(function () {
+      window.location.assign('/login');
+    });
+  });
+
+  // ---- boot ----
+  loadPermissions()
+    .then(loadUsers)
+    .then(loadLdaps)
+    .then(loadExternal)
+    .catch(function (err) { note('page-note', err.message, true); });
+})();
+`;
+}
+
+// public/profile.html — the signed-in user's own page: identity, role, account
+// type, and sign-out. Passwords are administrator/directory-managed in the base
+// app, and the page says so.
+function profileHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Profile</title>
+<link rel="stylesheet" href="/design.css">
+<link rel="stylesheet" href="/base.css">
+<style>
+.kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:14px}
+.kv dt{color:var(--app-muted,#5a6b81)}
+.kv dd{margin:0;font-weight:600;word-break:break-all}
+.note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin-top:12px}
+</style>
+</head>
+<body>
+<header class="app">
+  <span class="brand"><span class="logo">◆</span> Profile</span>
+  <nav><a class="btn subtle sm" href="/">← App</a> <a class="btn subtle sm" id="admin-link" href="/admin" hidden>Admin console</a></nav>
+  <span class="headspace"></span>
+  <button class="btn subtle sm" id="logout">Sign out</button>
+</header>
+<main class="wrap">
+  <div class="card">
+    <div class="card-h"><h3>Your account</h3><span class="badge b-ok" id="role-badge"></span></div>
+    <div class="card-b">
+      <dl class="kv">
+        <dt>Email</dt><dd id="me-email">…</dd>
+        <dt>Role</dt><dd id="me-role">…</dd>
+        <dt>Sign-in</dt><dd id="me-provider">…</dd>
+        <dt>Status</dt><dd id="me-status">…</dd>
+      </dl>
+      <p class="note">Passwords are managed by an administrator (or by your directory when enterprise
+      sign-in is configured). Contact an administrator to change yours.</p>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+  fetch('/api/me', { credentials: 'same-origin' }).then(function (res) {
+    if (res.status === 401) { window.location.assign('/login'); throw new Error('signed out'); }
+    return res.json();
+  }).then(function (me) {
+    var email = (me.user && me.user.email) || '(unknown)';
+    document.getElementById('me-email').textContent = email;
+    document.getElementById('me-role').textContent = me.role || 'viewer';
+    document.getElementById('role-badge').textContent = me.role || '';
+    document.getElementById('me-provider').textContent = me.provider === 'ldap' ? 'Enterprise directory (LDAPS)' : 'Local password';
+    document.getElementById('me-status').textContent = me.user && me.user.isActive === false ? 'disabled' : 'active';
+    if (me.role === 'admin') document.getElementById('admin-link').hidden = false;
+  }).catch(function () { /* redirected or transient */ });
+  document.getElementById('logout').addEventListener('click', function () {
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).then(function () {
+      window.location.assign('/login');
+    });
+  });
+})();
+</script>
+</body>
+</html>
+`;
+}
+
 // The wired file set (path → content). PURE.
 export function buildAuthWiredFiles() {
   return [
     { path: 'src/app.ts', content: wiredAppTs() },
     { path: 'src/server.ts', content: wiredServerTs() },
+    { path: 'public/admin.html', content: adminHtml() },
+    { path: 'public/admin.js', content: adminJs() },
+    { path: 'public/profile.html', content: profileHtml() },
   ];
 }
 
@@ -215,6 +691,7 @@ const WIRED_HISTORY = new Map([
     '5474502d25c50b7dace725b78293eea6a1208c372754231cb82b9df0af94297a', // v1: original wiring
     'f1c15fb614e17d6be1e52c392c3a5f088630214085f0917e76adf5d3ff009936', // v2: base-app-at-provisioning era
     '0115a022c6cfdb1c4dd0942e7f52c649e86cb6ed291c2637636b6ede4bf44fb9', // v3: /_preview CSP relax (still behind the gate)
+    '90e2b13411612074ec2fa93dc9383f9a971c51c92a3cb0f18ab03559438a32c8', // v4: /_preview before the gate, pre admin-console
   ]],
   ['src/server.ts', [
     '070d8a86bed4239d087bf461ef9083acaca7c856188b18311f3560380d48919f', // v1-v2: pre listen-retry

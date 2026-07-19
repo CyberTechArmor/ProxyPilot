@@ -888,7 +888,13 @@ off /. This wiring is the app's contract with the operator:
   identity with getAuth(req) — never from headers or your own session code.
 - Drive any auth UI state from the component's real endpoints (e.g.
   GET /api/auth/bootstrap/status returns { canCreateSuperadmin }) — never guess
-  field names; read the installed source when unsure.`;
+  field names; read the installed source when unsure.
+- The ADMIN AREA already exists: /admin (public/admin.html + admin.js — users,
+  roles & permissions, LDAPS directory sign-in, external self-signup) and
+  /profile (public/profile.html), backed by /api/admin/* and /api/me. NEVER
+  build a second user-management/permissions/settings UI — link to /admin and
+  /profile from your navigation instead. App screens are what you build; the
+  admin surface is the platform's.`;
 }
 
 // The materialize_component tool result: what landed where, verbatim-verified —

@@ -56,13 +56,47 @@ test('wired files mount the gate, routers, sign-in page, and auth init', () => {
   assert.ok(server.indexOf('initAuth(') < server.indexOf('createApp()'), 'initAuth before createApp');
 });
 
+test('wired app ships the FULL admin surface: external routes, /api/me, admin console, profile', () => {
+  const files = buildAuthWiredFiles();
+  const app = files.find((f) => f.path === 'src/app.ts').content;
+  // Every component router is mounted, including self-signup + its admin toggle.
+  assert.match(app, /app\.use\('\/api\/auth', externalAuthRoutes\)/);
+  assert.match(app, /app\.use\('\/api\/admin\/external', requireRole\('admin'\), adminExternalRoutes\)/);
+  // Identity endpoint + the platform pages, all admin-gated appropriately.
+  assert.match(app, /app\.get\('\/api\/me'/);
+  assert.match(app, /app\.get\('\/admin'/);
+  assert.match(app, /app\.get\('\/profile'/);
+  assert.ok(app.indexOf("getAuth(req).role !== 'admin'") > -1, '/admin is role-gated server-side');
+  // The console + profile pages drive the real admin API, not invented ones.
+  const adminPage = files.find((f) => f.path === 'public/admin.html').content;
+  const adminScript = files.find((f) => f.path === 'public/admin.js').content;
+  const profile = files.find((f) => f.path === 'public/profile.html').content;
+  assert.match(adminPage, /Roles &amp; permissions/);
+  assert.match(adminPage, /LDAPS/);
+  assert.match(adminPage, /Self-signup/);
+  for (const endpoint of [
+    '/api/admin/users', '/api/admin/permissions', '/api/admin/permissions/roles',
+    '/api/admin/ldaps', '/api/admin/ldaps/test', '/api/admin/external', '/api/auth/logout',
+  ]) {
+    assert.ok(adminScript.includes(endpoint), `admin.js drives ${endpoint}`);
+  }
+  assert.match(profile, /\/api\/me/);
+  // No template-literal leakage into the generated pages (they are plain files).
+  assert.ok(!adminScript.includes('${'), 'admin.js has no unexpanded interpolation');
+});
+
 test('planAuthWiring: pristine scaffold targets are wired, missing files too', () => {
   const doc = loadAuthExample();
   const seeds = buildScaffoldFiles({ name: 'updoc' });
-  const shas = new Map(AUTH_WIRING_TARGETS.map((t) => [t, sha256(seeds.find((f) => f.path === t).content)]));
+  // Entry files carry the scaffold-seed hash; the admin/profile pages have no
+  // scaffold seed (they exist only as wired content) — absent from the map,
+  // i.e. missing in the container, which plans as 'wire' too.
+  const shas = new Map(AUTH_WIRING_TARGETS
+    .filter((t) => seeds.some((f) => f.path === t))
+    .map((t) => [t, sha256(seeds.find((f) => f.path === t).content)]));
   const plan = planAuthWiring({ contract: doc.contract, files: doc.files, currentShaByPath: shas });
   assert.equal(plan.applies, true);
-  assert.deepEqual(plan.actions.map((a) => a.action), ['wire', 'wire']);
+  assert.deepEqual(plan.actions.map((a) => a.action), AUTH_WIRING_TARGETS.map(() => 'wire'));
   assert.ok(plan.actions.every((a) => typeof a.content === 'string' && a.content.length > 0));
   // A missing target (null sha) is also written.
   const missing = planAuthWiring({ contract: doc.contract, files: doc.files, currentShaByPath: new Map([['src/app.ts', null]]) });
@@ -71,17 +105,14 @@ test('planAuthWiring: pristine scaffold targets are wired, missing files too', (
 
 test('planAuthWiring: adapted files are kept; re-install is idempotent', () => {
   const doc = loadAuthExample();
-  // Adapted: hash of some build-edited content.
-  const adapted = new Map([
-    ['src/app.ts', sha256('// a build already changed this file')],
-    ['src/server.ts', sha256('// and this one')],
-  ]);
+  // Adapted: hash of build-edited content for EVERY target.
+  const adapted = new Map(AUTH_WIRING_TARGETS.map((t) => [t, sha256(`// a build already changed ${t}`)]));
   const keep = planAuthWiring({ contract: doc.contract, files: doc.files, currentShaByPath: adapted });
-  assert.deepEqual(keep.actions.map((a) => a.action), ['kept-adapted', 'kept-adapted']);
+  assert.deepEqual(keep.actions.map((a) => a.action), AUTH_WIRING_TARGETS.map(() => 'kept-adapted'));
   // Already wired: hashes of the wired contents themselves → nothing to do.
   const wiredShas = new Map(buildAuthWiredFiles().map((f) => [f.path, sha256(f.content)]));
   const again = planAuthWiring({ contract: doc.contract, files: doc.files, currentShaByPath: wiredShas });
-  assert.deepEqual(again.actions.map((a) => a.action), ['already-wired', 'already-wired']);
+  assert.deepEqual(again.actions.map((a) => a.action), AUTH_WIRING_TARGETS.map(() => 'already-wired'));
 });
 
 test('planAuthWiring: non-auth components never apply', () => {

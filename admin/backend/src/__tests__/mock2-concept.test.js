@@ -130,10 +130,10 @@ test('inventoryCounts: totals screens, fields, actions', () => {
 
 // ---- chat → model transcript ----
 
-test('classifyConceptTurn: detects generate_mockup + pulls the brief', () => {
-  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form' });
-  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null });
-  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null });
+test('classifyConceptTurn: detects generate_mockup + pulls the brief (scope defaults full)', () => {
+  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form', scope: 'full' });
+  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full' });
+  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full' });
 });
 
 test('buildConceptTranscript: maps user/assistant, skips system, appends new user text', () => {
@@ -263,4 +263,30 @@ test('concept chat prompt: brief-enrichment — thorough passes through, simple 
   // Plan mode keeps its own block — no enrichment directives there.
   const plan = buildConceptChatSystemPrompt({ designSystem: 'X', mode: 'plan' });
   assert.ok(!plan.includes("THE BRIEF YOU WRITE IS THE DESIGN'S CEILING"));
+});
+
+test('mockup tweak mode: scope classification, edit parse/apply, fallback signals', async () => {
+  const { classifyConceptTurn, buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits } = await import('../mock2/concept-logic.js');
+  // Tool scope: tweak recognized; anything else (or absent) is a safe 'full'.
+  assert.equal(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: 'b', scope: 'tweak' } }]).scope, 'tweak');
+  assert.equal(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: 'b' } }]).scope, 'full');
+  assert.equal(classifyConceptTurn([]).scope, 'full');
+  assert.match(buildMockupEditSystemPrompt(), /FULL_RERENDER/);
+
+  const doc = '<h1>Riverside Clinic</h1>\n<p>Welcome</p>\n<p>Welcome</p>';
+  // Clean single-match edit applies.
+  const one = parseMockupEdits('<<<<SEARCH\n<h1>Riverside Clinic</h1>\n====\n<h1>Lakeside Clinic</h1>\n>>>>');
+  assert.equal(one.ok, true);
+  const applied = applyMockupEdits(doc, one.edits);
+  assert.equal(applied.ok, true);
+  assert.match(applied.html, /Lakeside Clinic/);
+  // Ambiguous search (two <p>Welcome</p>) refuses — half-applied mockups never ship.
+  const ambig = applyMockupEdits(doc, [{ search: '<p>Welcome</p>', replace: '<p>Hi</p>' }]);
+  assert.equal(ambig.ok, false);
+  assert.match(ambig.error, /more than once/);
+  // Missing search refuses; FULL_RERENDER is the model's structural escape.
+  assert.equal(applyMockupEdits(doc, [{ search: 'nope', replace: 'x' }]).ok, false);
+  assert.deepEqual(parseMockupEdits('FULL_RERENDER'), { ok: true, fullRerender: true, edits: [] });
+  // Prose without blocks is unusable (falls back to the full renderer).
+  assert.equal(parseMockupEdits('I changed the heading for you!').ok, false);
 });

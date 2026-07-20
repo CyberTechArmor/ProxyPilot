@@ -64,6 +64,11 @@ export const CONCEPT_CHAT_TOOLS = Object.freeze([
           type: 'string',
           description: 'Plain-language description of the screens, sections, fields, and actions the mockup should show, and what changed since the last version.',
         },
+        scope: {
+          type: 'string',
+          enum: ['tweak', 'full'],
+          description: 'Size of the change. "tweak": a SMALL revision to the existing mockup (copy/labels, a color, one element) — applied as surgical edits at a fraction of the cost. "full": new screens, layout/structure changes, or the first mockup. Default "full"; when unsure, use "full".',
+        },
       },
       required: ['brief'],
       additionalProperties: false,
@@ -106,6 +111,11 @@ What you do:
   system below. ${hasMockup ? 'A mockup already exists; describe it as a revision of the current one.' : 'No mockup exists yet; the first substantive idea should produce one.'}
 - Always ALSO reply to the Builder in plain, warm language — say what you changed
   or what you need, and remind them they can approve the design when it feels right.
+- COST-AWARE REVISIONS: for a SMALL change to the existing mockup — copy/label
+  edits, a color, one element — call generate_mockup with scope "tweak": it
+  applies surgical edits to the current file at a fraction of a re-render's
+  cost. Anything structural (new screens, layout changes, the first mockup)
+  uses scope "full". When unsure, "full".
 
 THE BRIEF YOU WRITE IS THE DESIGN'S CEILING — extrapolate it like a multi-step
 domain expert on the Builder's behalf:
@@ -152,6 +162,66 @@ forbids; honor the system and say so if a request conflicts with it:
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Keep replies short and concrete. Guide toward a design the Builder is happy to approve.`;
+}
+
+// ---- mockup TWEAK mode (surgical edits instead of a full re-render) ----
+// A one-line copy change used to re-output the ENTIRE document — output tokens
+// dominate render cost, so "change the heading" cost as much as the original
+// render (user report). Tweak mode asks for exact search/replace blocks against
+// the current HTML; the orchestrator applies them and falls back to the full
+// renderer whenever they don't apply cleanly.
+
+export const MOCKUP_EDIT_MAX_BLOCKS = 12;
+
+export function buildMockupEditSystemPrompt() {
+  return `You make a SMALL, TARGETED revision to an existing HTML mockup.
+Output ONLY edit blocks in exactly this format — no prose, no code fences:
+
+<<<<SEARCH
+exact text copied from the current file
+====
+replacement text
+>>>>
+
+Rules:
+- Each SEARCH must be copied EXACTLY from the current file (whitespace
+  included) and long enough to be UNIQUE in it — include surrounding lines
+  when needed.
+- Use the fewest, smallest edits that fulfil the request (at most ${MOCKUP_EDIT_MAX_BLOCKS} blocks).
+- The edited file must remain a complete, valid document: matching tags,
+  balanced braces, working script.
+- If the request actually needs new screens, layout restructuring, or more
+  change than a few edits can express, output exactly FULL_RERENDER (nothing
+  else) — the full renderer will run instead.`;
+}
+
+export function parseMockupEdits(text) {
+  const s = String(text || '').trim();
+  if (!s) return { ok: false, error: 'empty reply' };
+  if (/^FULL_RERENDER\b/.test(s)) return { ok: true, fullRerender: true, edits: [] };
+  const edits = [];
+  const re = /<<<<SEARCH\n([\s\S]*?)\n====\n([\s\S]*?)\n>>>>/g;
+  let m;
+  while ((m = re.exec(s)) !== null) edits.push({ search: m[1], replace: m[2] });
+  if (!edits.length) return { ok: false, error: 'no edit blocks found' };
+  if (edits.length > MOCKUP_EDIT_MAX_BLOCKS) return { ok: false, error: `too many edit blocks (max ${MOCKUP_EDIT_MAX_BLOCKS})` };
+  return { ok: true, fullRerender: false, edits };
+}
+
+// Apply sequentially; every search must match EXACTLY ONCE (absent or
+// ambiguous → the whole tweak fails and the caller falls back to a full
+// render — a half-applied mockup must never ship).
+export function applyMockupEdits(html, edits = []) {
+  let out = String(html || '');
+  for (let i = 0; i < edits.length; i++) {
+    const { search, replace } = edits[i];
+    if (!search) return { ok: false, error: `edit ${i + 1}: empty search` };
+    const first = out.indexOf(search);
+    if (first === -1) return { ok: false, error: `edit ${i + 1}: search text not found` };
+    if (out.indexOf(search, first + 1) !== -1) return { ok: false, error: `edit ${i + 1}: search text matches more than once` };
+    out = out.slice(0, first) + String(replace ?? '') + out.slice(first + search.length);
+  }
+  return { ok: true, html: out };
 }
 
 // buildMockupSystemPrompt — the mockup slot's system prompt. It renders a single
@@ -607,8 +677,17 @@ input, select, textarea { background: var(--app-bg); color: var(--app-text); bor
 export function classifyConceptTurn(toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const gen = calls.find((c) => c && c.name === 'generate_mockup');
-  if (gen) return { generateMockup: true, brief: String(gen.input?.brief || '').trim() };
-  return { generateMockup: false, brief: null };
+  if (gen) {
+    return {
+      generateMockup: true,
+      brief: String(gen.input?.brief || '').trim(),
+      // 'tweak' = surgical edits to the current mockup; anything else is a
+      // full render (safe default — a wrong 'full' costs money, a wrong
+      // 'tweak' falls back to full anyway).
+      scope: gen.input?.scope === 'tweak' ? 'tweak' : 'full',
+    };
+  }
+  return { generateMockup: false, brief: null, scope: 'full' };
 }
 
 // buildConceptTranscript — the neutral transcript (model-client.js turn shapes)

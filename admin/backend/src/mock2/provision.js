@@ -367,6 +367,14 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   if (!rehydrate) {
     await deployBaseApp(getProject(projectId), { reason: 'provision' });
   }
+  // ---- Fire-and-forget: run the design action queued during provisioning ----
+  // (send the brief → first concept turn; skip mockup → lock design and run
+  // the typed brief as the first quick build). Best-effort; every outcome
+  // lands in the chat.
+  try {
+    const { runPendingDesign } = await import('./pending-design.js');
+    await runPendingDesign(projectId);
+  } catch (e) { console.warn('[mock2] pending design action failed:', e?.message); }
   scheduleCleanup(projectId);
 }
 

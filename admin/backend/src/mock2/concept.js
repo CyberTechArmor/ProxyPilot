@@ -605,8 +605,14 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // build inherits the mockup's quality), with operator lane tuning still
       // the last word; the caller falls back to the slot model if the
       // connector rejects the preferred one.
+      // The FIRST render of a project gets exploration-grade depth even on
+      // "On theme": there is no existing mockup to transcribe, so low-effort/
+      // thinking-off "pure transcription" produced exactly the flat, junior
+      // first designs the operator flagged. Iterations on an existing mockup
+      // keep the fast lane defaults (they really are transcription).
       const renderModel = mockupRenderModel(process.env, ready.mockup.model);
-      const mockupTuned = explore
+      const deepRender = explore || !currentHtml;
+      const mockupTuned = deepRender
         ? { model: renderModel, effort: 'high', thinking: null }
         : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
       return callModelTurn({
@@ -633,7 +639,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // so spend is priced on the model that actually served the call.
       {
         const pref = mockupRenderModel(process.env, ready.mockup.model);
-        activeModel = explore ? pref
+        activeModel = (explore || !currentHtml) ? pref
           : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
       }
       let res = await mockupCall(40000);

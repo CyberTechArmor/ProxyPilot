@@ -224,3 +224,19 @@ test('inventory extraction prompt asks for JSON-only, screen-complete output', (
   assert.match(task, /X/);
   assert.match(task, /<html>/);
 });
+
+test('mockup prompt: senior design-craft bar with the emoji-iconography ban', async () => {
+  const { buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
+  const p = buildMockupSystemPrompt({ designSystem: 'SYSTEM_TOKENS' });
+  // The junior tells the operator flagged (emoji icons, wrapping pill
+  // steppers, five loud badges a row, everything boxed) are each named.
+  assert.match(p, /# Design craft/);
+  assert.match(p, /NEVER use emoji as UI iconography/);
+  assert.match(p, /inline SVG\s+icons/i);
+  assert.match(p, /never a row of large pills that wraps/);
+  assert.match(p, /not every element needs a border/i);
+  assert.match(p, /ONE primary action per view/);
+  // The craft section sits INSIDE the prompt, before the locked system.
+  assert.ok(p.indexOf('# Design craft') < p.indexOf('# Locked design system'));
+  assert.match(p, /SYSTEM_TOKENS/);
+});

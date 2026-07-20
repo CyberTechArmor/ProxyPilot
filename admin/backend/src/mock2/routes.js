@@ -199,6 +199,7 @@ import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToke
 import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
 import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
 import { probeSplitProposal, distillChatPrompt } from './runner.js';
+import { queuePendingDesign, clearPendingDesign, publicPendingDesignShape } from './pending-design.js';
 import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
@@ -3266,6 +3267,43 @@ export function createMock2Router() {
 
   // Skip the mockup: lock the design stage with an empty inventory (zero
   // tokens) and unlock builds — the live base app is the starting point.
+  // Fire-and-forget project start: queue the design action (send the brief /
+  // skip the mockup, optionally with the typed brief as the first quick
+  // build) WHILE the project is still provisioning; it runs automatically the
+  // moment provisioning completes. 409 when already online — send directly.
+  router.post('/projects/:id/design-queue', requireMock2Role('editor'), refuseIfArchived, (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle === 'active') {
+      return res.status(409).json({ error: 'The project is already online — send it directly.' });
+    }
+    const parsed = z.object({
+      kind: z.enum(['design_send', 'skip_mockup']),
+      message: z.string().trim().max(getChatMaxChars()).optional(),
+      mode: z.enum(['plan', 'design']).optional(),
+      design: z.enum(['theme', 'explore']).optional(),
+      images: chatImagesSchema,
+    }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'kind is required' });
+    if (parsed.data.kind === 'design_send' && !String(parsed.data.message || '').trim()) {
+      return res.status(400).json({ error: 'A design message is required to queue a send.' });
+    }
+    const imgCheck = validateChatImages(parsed.data.images);
+    if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
+    const doc = queuePendingDesign(project.id, {
+      kind: parsed.data.kind, text: parsed.data.message || '',
+      mode: parsed.data.mode || 'design', design: parsed.data.design || 'theme',
+      images: imgCheck.images, userId: req.user.id,
+    });
+    logAudit(req.user.id, 'MOCK2_DESIGN_QUEUED', 'mock2_project', project.id, { kind: doc.kind }, req.ip);
+    res.status(202).json({ queued: true, pending: publicPendingDesignShape(doc) });
+  });
+
+  router.delete('/projects/:id/design-queue', requireMock2Role('editor'), (req, res) => {
+    clearPendingDesign(req.mock2Project.id);
+    logAudit(req.user.id, 'MOCK2_DESIGN_QUEUE_CANCEL', 'mock2_project', req.mock2Project.id, {}, req.ip);
+    res.json({ ok: true });
+  });
+
   router.post('/projects/:id/design/skip', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     let result;
     try {

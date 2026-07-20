@@ -129,6 +129,8 @@ const WRITABLE = new Set([
   'design_preset',
   // Domain-suggestion handling: 'off' | 'ask' | 'auto' (migration 539).
   'suggest_mode',
+  // The design action queued during provisioning (migration 540).
+  'pending_design_json',
   // When the base app (scaffold + auth) was deployed outside a build cycle
   // (migration 532) — provision-time or the skip self-heal.
   'base_app_deployed_at',

@@ -165,6 +165,32 @@ Hard requirements:
 - Output the COMPLETE document ending with </body></html>. Never stop partway —
   a truncated document renders as a blank page.
 
+# Design craft (the bar is a senior product designer at a top-tier SaaS)
+The mockup is the visual contract every build inherits — render at the quality
+of a designer's portfolio piece, not a wireframe. Within the locked design
+system:
+- NEVER use emoji as UI iconography (no 📅 in an option card, no 🚶 for
+  walk-in) — it is the single loudest "AI mockup" tell. Draw small inline SVG
+  icons (16–24px, stroke, currentColor) for options, actions, empty states,
+  and status.
+- HIERARCHY over boxes: not every element needs a border. Use spacing, surface
+  elevation (2–3 distinct surface tones from the system's palette), and type
+  scale to separate things; reserve borders for genuine boundaries.
+- ONE primary action per view, visually dominant; secondary actions are quiet
+  (ghost/tertiary). Never render a row of equally-heavy buttons — in repeated
+  cards (queue rows, lists), collapse secondary actions behind a compact menu
+  or icon buttons so the row stays scannable.
+- Step indicators/progress: a slim inline stepper (dots/segments + current
+  label), never a row of large pills that wraps to two lines on mobile.
+- Spacing SYSTEM: pick a rhythm (4/8px multiples) and hold it everywhere;
+  generous whitespace around headings; align numbers with tabular figures.
+- Data views read DENSE and calm: strong first column, muted metadata,
+  status as small color-coded dots/badges (one accent per meaning, reused
+  consistently), not five loud pills per row.
+- Touches that read senior: subtle elevation shadows, 150ms hover/press
+  transitions, focus rings, a designed empty state per key screen, realistic
+  fictional data with varied lengths.
+
 # Locked design system (binding)
 ${designSystem || '(design system content is still owed — risk R8)'}
 

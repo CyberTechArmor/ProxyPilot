@@ -99,7 +99,16 @@ export default function UsersPage() {
     setCreatingUser(true);
     try {
       const result = await api.createUser(newUserForm);
-      setCreatedUser(result.user);
+      // Prefer the one-time sign-in link over reading out a generated
+      // password: the user opens it, chooses their OWN password, then the
+      // normal first-login TOTP enrollment runs. Fall back to showing the
+      // generated password only if the link could not be issued.
+      let link = null;
+      try {
+        const l = await api.createUserLoginLink(result.user.id);
+        link = { url: window.location.origin + l.path, expiresAt: l.expiresAt };
+      } catch { /* fall back to the password display */ }
+      setCreatedUser({ ...result.user, link });
       fetchUsers();
       toast({
         title: 'Success',
@@ -271,6 +280,20 @@ export default function UsersPage() {
 
   const handleResetPassword = async (userId) => {
     try {
+      // Reset = issue a fresh one-time sign-in link. The user's old password
+      // keeps working until they use the link (so a reset can never lock an
+      // account); local accounts only. Falls back to a generated password if
+      // the link can't be issued (e.g. LDAP account).
+      try {
+        const l = await api.createUserLoginLink(userId);
+        setCreatedUser({ ...users.find(u => u.id === userId), link: { url: window.location.origin + l.path, expiresAt: l.expiresAt } });
+        setCreateUserOpen(true);
+        toast({
+          title: 'Sign-in link ready',
+          description: 'Send it to the user — they will choose a new password.',
+        });
+        return;
+      } catch { /* fall through to the password reset */ }
       const result = await api.updateUser(userId, { resetPassword: true });
       if (result.newPassword) {
         setCreatedUser({ ...users.find(u => u.id === userId), password: result.newPassword });
@@ -459,8 +482,10 @@ export default function UsersPage() {
             </DialogTitle>
             <DialogDescription>
               {createdUser
-                ? 'Save the generated password - it will only be shown once!'
-                : 'Create a new user account with auto-generated password'}
+                ? (createdUser.link
+                  ? 'Send the one-time sign-in link to the user — no password to read out.'
+                  : 'Save the generated password - it will only be shown once!')
+                : 'Create a new user account — you get a one-time sign-in link to send them'}
             </DialogDescription>
           </DialogHeader>
 
@@ -471,24 +496,47 @@ export default function UsersPage() {
                   <Label className="text-muted-foreground">Username</Label>
                   <p className="font-medium">{createdUser.username}</p>
                 </div>
-                <div>
-                  <Label className="text-muted-foreground">Generated Password</Label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="flex-1 bg-background p-2 rounded border font-mono text-sm break-all">
-                      {createdUser.password}
-                    </code>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => copyPassword(createdUser.password)}
-                    >
-                      {copiedPassword ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                    </Button>
+                {createdUser.link ? (
+                  <div>
+                    <Label className="text-muted-foreground">One-time sign-in link</Label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <code className="flex-1 bg-background p-2 rounded border font-mono text-xs break-all">
+                        {createdUser.link.url}
+                      </code>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => copyPassword(createdUser.link.url)}
+                      >
+                        {copiedPassword ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Send it by chat, email, or SMS. The user opens it, chooses their own
+                      password, and sets up TOTP at first sign-in. Valid 7 days or until used —
+                      link previews can&apos;t consume it, and it dies the moment the password is set.
+                    </p>
                   </div>
-                </div>
-                <p className="text-sm text-yellow-600">
-                  The user will be prompted to change this password and set up TOTP on first login.
-                </p>
+                ) : (
+                  <div>
+                    <Label className="text-muted-foreground">Generated Password</Label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <code className="flex-1 bg-background p-2 rounded border font-mono text-sm break-all">
+                        {createdUser.password}
+                      </code>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => copyPassword(createdUser.password)}
+                      >
+                        {copiedPassword ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                    <p className="text-sm text-yellow-600">
+                      The user will be prompted to change this password and set up TOTP on first login.
+                    </p>
+                  </div>
+                )}
               </div>
               <DialogFooter>
                 <Button onClick={() => setCreateUserOpen(false)}>Done</Button>

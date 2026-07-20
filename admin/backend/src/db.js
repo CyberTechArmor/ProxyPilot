@@ -1543,6 +1543,29 @@ export function initDatabase() {
     `);
   });
 
+  // 603 One-time sign-in links: admin-issued URL that lets a local user set
+  // their own password — no temporary password ever changes hands. The raw
+  // token exists only in the URL (sha256 stored here). Validation GETs never
+  // consume a link (mail/SMS previewers prefetch URLs); it is spent only when
+  // the password is actually set, which also voids the user's other open links.
+  runMigration(db, 603, 'user_login_links', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS user_login_links (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    d.exec(`
+      CREATE INDEX IF NOT EXISTS idx_user_login_links_user
+        ON user_login_links(user_id)
+    `);
+  });
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

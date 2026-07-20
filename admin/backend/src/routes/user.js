@@ -927,6 +927,37 @@ userRouter.delete('/users/:id', requireAdmin, requireSudo, async (req, res) => {
   }
 });
 
+// One-time sign-in link (migration 603): replaces reading a generated
+// password over the phone. The user opens the URL, sets their OWN password,
+// and signs in — TOTP enrollment still runs at first sign-in as usual.
+// Consumed when the password is set; validation GETs never spend it, so
+// email/SMS link previews are harmless. Also the manual password-reset path
+// (the old password keeps working until the link is used). Admin + sudo,
+// same bar as a password reset.
+userRouter.post('/users/:id/login-link', requireAdmin, requireSudo, (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDb();
+    const user = db.prepare('SELECT id, username, auth_source FROM users WHERE id = ?').get(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if ((user.auth_source || 'local') !== 'local') {
+      return res.status(409).json({ error: 'LDAP accounts sign in with their directory password — sign-in links are for local accounts.' });
+    }
+    const token = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    db.prepare(`
+      INSERT INTO user_login_links (id, user_id, token_hash, created_by, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(uuidv4(), id, tokenHash, req.user.id, expiresAt);
+    logAudit(req.user.id, 'USER_LOGIN_LINK_ISSUED', 'user', id, { username: user.username }, req.ip);
+    res.json({ path: `/login#link=${token}`, expiresAt, username: user.username });
+  } catch (error) {
+    console.error('Error issuing sign-in link:', error);
+    res.status(500).json({ error: 'Failed to issue the sign-in link' });
+  }
+});
+
 // Get user's service access (includes folder access)
 userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
   try {
@@ -949,9 +980,13 @@ userRouter.get('/users/:id/access', requireAdmin, (req, res) => {
       });
     }
 
-    // Get service access
+    // Get service access. services.domain moved to service_http_routes when
+    // multi-route support landed — the bare `s.domain` here made this whole
+    // route 500 ("Failed to get user access" on every Access Control open).
+    // A service can hold several routes; show its first domain alphabetically.
     const access = db.prepare(`
-      SELECT usa.service_id, usa.can_view, usa.can_write, s.name as service_name, s.domain
+      SELECT usa.service_id, usa.can_view, usa.can_write, s.name as service_name,
+             (SELECT r.domain FROM service_http_routes r WHERE r.service_id = s.id ORDER BY r.domain LIMIT 1) as domain
       FROM user_service_access usa
       INNER JOIN services s ON usa.service_id = s.id
       WHERE usa.user_id = ?

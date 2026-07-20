@@ -68,10 +68,63 @@ export default function Login() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
+  // One-time sign-in link (/login#link=<token>, issued from User Management):
+  // the token is the credential — the user chooses their own password here,
+  // then the NORMAL sign-in flow runs (TOTP enrollment included). Validation
+  // is a non-consuming GET, so link previews never spend it.
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkToken, setLinkToken] = useState(null);
+  const [linkAutoLogin, setLinkAutoLogin] = useState(false);
+
   // Check if initial setup is needed on mount
   useEffect(() => {
     checkSetupStatus();
   }, []);
+
+  useEffect(() => {
+    const m = (window.location.hash || '').match(/link=([A-Za-z0-9_-]{10,})/);
+    if (!m) return;
+    api.authLinkStatus(m[1])
+      .then((s) => {
+        if (s.valid) {
+          setLinkToken(m[1]);
+          setUsername(s.username || '');
+          setLinkMode(true);
+        } else {
+          toast({ variant: 'destructive', title: 'Sign-in link invalid', description: 'It has expired or was already used — ask an administrator for a new one.' });
+        }
+      })
+      .catch(() => { /* fall through to the normal login */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // After the link sets the password, run the NORMAL login submit so TOTP
+  // enrollment (and every other first-login step) proceeds exactly as usual.
+  useEffect(() => {
+    if (!linkAutoLogin) return;
+    setLinkAutoLogin(false);
+    handleSubmit({ preventDefault: () => {} });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkAutoLogin]);
+
+  const handleLinkComplete = async (e) => {
+    e.preventDefault();
+    if (newPassword.length < 12 || newPassword !== confirmPassword) return;
+    setLoading(true);
+    try {
+      const r = await api.authLinkComplete(linkToken, newPassword);
+      if (r.username) setUsername(r.username);
+      setPassword(newPassword);
+      setLinkMode(false);
+      window.history.replaceState(null, '', window.location.pathname);
+      toast({ title: 'Password set', description: 'Signing you in…' });
+      setLinkAutoLogin(true);
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Could not set the password', description: error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const checkSetupStatus = async () => {
     try {
@@ -309,6 +362,85 @@ export default function Login() {
   }
 
   // ========== INITIAL SETUP: Set Password ==========
+  // One-time sign-in link: choose a password, then the normal flow signs in.
+  if (linkMode) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="flex justify-center mb-4">
+              <Rocket className="h-12 w-12 text-primary" />
+            </div>
+            <CardTitle className="text-2xl">Welcome{username ? `, ${username}` : ''}</CardTitle>
+            <CardDescription>
+              Choose your password to finish setting up your account
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleLinkComplete} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="link-password">
+                  <span className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4" />
+                    New Password
+                  </span>
+                </Label>
+                <div className="relative">
+                  <Input
+                    id="link-password"
+                    type={showPassword ? 'text' : 'password'}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Minimum 12 characters"
+                    required
+                    minLength={12}
+                    autoComplete="new-password"
+                    autoFocus
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-0 top-0 h-full px-3"
+                    onClick={() => setShowPassword(!showPassword)}
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="link-confirm">Confirm Password</Label>
+                <Input
+                  id="link-confirm"
+                  type={showPassword ? 'text' : 'password'}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm your password"
+                  required
+                  minLength={12}
+                  autoComplete="new-password"
+                />
+                {confirmPassword && newPassword !== confirmPassword && (
+                  <p className="text-xs text-red-500">Passwords do not match</p>
+                )}
+              </div>
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={loading || newPassword.length < 12 || newPassword !== confirmPassword}
+              >
+                {loading ? 'Setting password…' : 'Set password & sign in'}
+              </Button>
+              <p className="text-xs text-muted-foreground text-center">
+                You&apos;ll set up two-factor authentication (TOTP) next.
+              </p>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (setupMode && !setupTotpStep) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">

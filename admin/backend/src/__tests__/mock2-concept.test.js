@@ -318,3 +318,25 @@ test('screen sections: contract in the prompt, find/replace/extract helpers', as
   assert.equal(c.scope, 'screen');
   assert.equal(c.screen, 'Kiosk');
 });
+
+test('precedence: the brief outranks the locked design system (theme-guardrail regression)', async () => {
+  const { buildMockupSystemPrompt, buildMockupTask, buildConceptChatSystemPrompt } = await import('../mock2/concept-logic.js');
+  // Operator review: an explicit token spec (teal palette, light theme, per-
+  // stage hues) lost to the locked system — geometry obeyed, color ignored.
+  const p = buildMockupSystemPrompt({ designSystem: 'DS' });
+  assert.match(p, /# PRECEDENCE — the brief outranks the locked system/);
+  assert.match(p, /a requested light theme must never\s+render dark/);
+  assert.match(p, /Never resolve a conflict by\s+keeping the incumbent look/);
+  // The precedence section reads BEFORE the (now default-labeled) system.
+  assert.ok(p.indexOf('# PRECEDENCE') < p.indexOf('# Locked design system'));
+  assert.match(p, /Locked design system \(defaults — applies where the brief is silent\)/);
+  // Iteration turns: stability never protects styling the brief replaces.
+  const iter = buildMockupTask({ brief: 'switch to the teal light theme', currentHtml: '<!doctype html><html></html>' });
+  assert.match(iter, /restyle the ENTIRE document/);
+  assert.match(iter, /palette must not survive/);
+  // The design partner carries Builder token specs verbatim, at the top.
+  const chat = buildConceptChatSystemPrompt({ designSystem: 'DS', mode: 'design' });
+  assert.match(chat, /THE BUILDER OWNS THE LOOK/);
+  assert.match(chat, /VERBATIM/);
+  assert.match(chat, /prevent drift, not to veto the Builder/);
+});

@@ -243,7 +243,7 @@ test('mockup prompt: design-judgment craft bar (operator-validated language)', a
   assert.match(p, /inline SVG icons/i);
   assert.match(p, /ANTI-PATTERNS/);
   assert.match(p, /generic-dashboard look/);
-  assert.match(p, /exactly four rows of data/);
+  assert.match(p, /exactly four rows of\s+data/);
   // The craft section sits INSIDE the prompt, before the locked system.
   assert.ok(p.indexOf('# Design craft') < p.indexOf('# Locked design system'));
   assert.match(p, /SYSTEM_TOKENS/);

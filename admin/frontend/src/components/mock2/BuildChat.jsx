@@ -83,7 +83,12 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       const firstOpen = el.querySelector('[data-open-question]');
       if (firstOpen) { firstOpen.scrollIntoView({ block: 'start' }); return; }
     }
-    el.scrollTop = el.scrollHeight;
+    // TOP of the newest message, not its end — a long answer should be read
+    // from its first line without scrolling back up. Trailing status rows
+    // ("Building…") are skipped so they never steal the scroll target.
+    const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
+    const last = kids[kids.length - 1];
+    if (last) el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
   }, [data?.messages?.length, active, openQuestionKey, askPartial?.length]);
 
   const openIds = new Set(data?.open_question_ids || []);

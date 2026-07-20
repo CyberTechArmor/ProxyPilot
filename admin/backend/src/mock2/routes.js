@@ -91,6 +91,7 @@ import {
   countEditors,
   countMembersByRole,
   listMembers,
+  listUserMemberships,
   getMembership,
   upsertMember,
   removeMember,
@@ -842,6 +843,13 @@ export function createMock2Router() {
     let rows = listProjects();
     if (!admin) rows = rows.filter((p) => getMembership(p.id, req.user.id));
     res.json({ projects: rows.map((p) => shapeProject(p, { isAdmin: admin })) });
+  });
+
+  // One user's memberships across ALL projects — the dashboard's Access
+  // Control dialog shows projects next to services. Admin-only (it reveals
+  // the whole project list).
+  router.get('/user-memberships/:userId', requireAdmin, (req, res) => {
+    res.json({ memberships: listUserMemberships(String(req.params.userId)) });
   });
 
   // Create a project: mint a slug under a SELECTABLE parent domain (the M1

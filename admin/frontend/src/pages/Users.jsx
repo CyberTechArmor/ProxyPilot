@@ -50,7 +50,11 @@ export default function UsersPage() {
   const [loadingAccess, setLoadingAccess] = useState(false);
   const [savingAccess, setSavingAccess] = useState(false);
   const [copiedPassword, setCopiedPassword] = useState(false);
-  const [accessTab, setAccessTab] = useState('services'); // 'services' or 'folders'
+  const [accessTab, setAccessTab] = useState('services'); // 'services' | 'folders' | 'projects'
+  // Mock2 projects the user can be a member of: [{ projectId, name, url,
+  // role: 'none'|'viewer'|'editor', originalRole }] — null when the Projects
+  // module is off/unavailable (tab hidden).
+  const [userProjects, setUserProjects] = useState(null);
   const [serviceFolders, setServiceFolders] = useState(() => {
     const saved = localStorage.getItem('serviceFolders');
     return saved ? JSON.parse(saved) : {};
@@ -186,6 +190,21 @@ export default function UsersPage() {
     setAccessTab('services');
 
     try {
+      // Projects (Mock2) memberships ride alongside services — best-effort so
+      // an install with the module off just hides the tab.
+      setUserProjects(null);
+      if (user.role !== 'admin') {
+        Promise.all([api.mock2ListProjects(), api.mock2UserMemberships(user.id)])
+          .then(([pl, ml]) => {
+            const roleByProject = new Map((ml.memberships || []).map((m) => [m.project_id, m.role]));
+            setUserProjects((pl.projects || []).map((p) => {
+              const role = roleByProject.get(p.id) || 'none';
+              return { projectId: p.id, name: p.name, url: p.url || null, role, originalRole: role };
+            }));
+          })
+          .catch(() => setUserProjects(null));
+      }
+
       const result = await api.getUserAccess(user.id);
       if (result.isAdmin) {
         setUserAccess([]);
@@ -235,7 +254,13 @@ export default function UsersPage() {
 
     setSavingAccess(true);
     try {
-      // Save service access, folder access, and feature permissions
+      // Project membership changes: only rows the admin actually touched.
+      const projectOps = (userProjects || [])
+        .filter((p) => p.role !== p.originalRole)
+        .map((p) => (p.role === 'none'
+          ? api.mock2RemoveProjectMember(p.projectId, selectedUser.id)
+          : api.mock2SetProjectMember(p.projectId, { user_id: String(selectedUser.id), role: p.role })));
+      // Save service access, folder access, feature permissions, and projects
       await Promise.all([
         api.updateUserAccess(selectedUser.id, userAccess.map(a => ({
           serviceId: a.serviceId,
@@ -248,6 +273,7 @@ export default function UsersPage() {
           canWrite: f.canWrite,
         }))),
         api.updateUserPermissions(selectedUser.id, userPermissions),
+        ...projectOps,
       ]);
       toast({
         title: 'Success',
@@ -733,9 +759,48 @@ export default function UsersPage() {
                 >
                   Folders ({userFolderAccess.length})
                 </button>
+                {userProjects ? (
+                  <button
+                    className={`flex-1 px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                      accessTab === 'projects' ? 'bg-background shadow' : 'hover:bg-background/50'
+                    }`}
+                    onClick={() => setAccessTab('projects')}
+                  >
+                    Projects ({userProjects.filter((p) => p.role !== 'none').length}/{userProjects.length})
+                  </button>
+                ) : null}
               </div>
 
-              {accessTab === 'services' ? (
+              {accessTab === 'projects' && userProjects ? (
+                <div className="space-y-2 max-h-80 overflow-auto">
+                  {userProjects.length === 0 ? (
+                    <p className="text-center text-muted-foreground py-4">No projects yet</p>
+                  ) : (
+                    userProjects.map((p, index) => (
+                      <div key={p.projectId} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg">
+                        <div className="min-w-0">
+                          <p className="font-medium text-sm truncate">{p.name}</p>
+                          {p.url ? <p className="text-xs text-muted-foreground truncate">{p.url.replace(/^https?:\/\//, '')}</p> : null}
+                        </div>
+                        <select
+                          className="h-10 rounded-md border bg-background px-2 text-sm sm:w-40"
+                          value={p.role}
+                          onChange={(e) => setUserProjects((cur) => cur.map((x, j) => (j === index ? { ...x, role: e.target.value } : x)))}
+                          aria-label={`Project role for ${p.name}`}
+                        >
+                          <option value="none">No access</option>
+                          <option value="viewer">Viewer — follow only</option>
+                          <option value="editor">Editor — build & manage</option>
+                        </select>
+                      </div>
+                    ))
+                  )}
+                  <p className="text-xs text-muted-foreground pt-1">
+                    Editors can run builds and manage the project; viewers can watch. The Developer
+                    feature permission above controls whether the Projects page shows at all.
+                  </p>
+                </div>
+              ) : accessTab === 'services' ? (
                 <div className="space-y-2 max-h-80 overflow-auto">
                   {userAccess.length === 0 ? (
                     <p className="text-center text-muted-foreground py-4">No services available</p>

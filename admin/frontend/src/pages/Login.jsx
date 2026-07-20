@@ -75,6 +75,7 @@ export default function Login() {
   const [linkMode, setLinkMode] = useState(false);
   const [linkToken, setLinkToken] = useState(null);
   const [linkAutoLogin, setLinkAutoLogin] = useState(false);
+  const [linkGreeting, setLinkGreeting] = useState(''); // display name > username
 
   // Check if initial setup is needed on mount
   useEffect(() => {
@@ -89,6 +90,7 @@ export default function Login() {
         if (s.valid) {
           setLinkToken(m[1]);
           setUsername(s.username || '');
+          setLinkGreeting(s.displayName || s.username || '');
           setLinkMode(true);
         } else {
           toast({ variant: 'destructive', title: 'Sign-in link invalid', description: 'It has expired or was already used — ask an administrator for a new one.' });
@@ -371,7 +373,7 @@ export default function Login() {
             <div className="flex justify-center mb-4">
               <Rocket className="h-12 w-12 text-primary" />
             </div>
-            <CardTitle className="text-2xl">Welcome{username ? `, ${username}` : ''}</CardTitle>
+            <CardTitle className="text-2xl">Welcome{linkGreeting ? `, ${linkGreeting}` : ''}</CardTitle>
             <CardDescription>
               Choose your password to finish setting up your account
             </CardDescription>

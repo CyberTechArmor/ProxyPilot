@@ -192,14 +192,23 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
     browser = await chromium.launch(launchOptions());
     const page = await browser.newPage();
     const consoleErrors = [];
-    page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
+    // Same collection rules as runUiChecks: the favicon probe is noise, and
+    // every entry carries the failing URL so a "404 (Not Found)" names the
+    // resource (a New-6 build failed on exactly this with no way to tell what
+    // 404'd).
+    page.on('console', (msg) => {
+      if (msg.type() !== 'error') return;
+      const src = String(msg.location()?.url || '');
+      if (/failed to load resource/i.test(msg.text()) && /favicon\.ico(\?|$)/i.test(src)) return;
+      consoleErrors.push(`${msg.text()}${src ? ` [${src}]` : ''}`.slice(0, 300));
+    });
     page.on('pageerror', (err) => { consoleErrors.push(String(err?.message || err).slice(0, 300)); });
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
     // Count VISIBLE forms — the multi-form render regression shows 3 where 1 is right.
     const forms = await page.locator('form:visible').count();
     const expected = Number(config.browserExpectedForms ?? 1);
     const ok = forms === expected && consoleErrors.length === 0;
-    const consoleNote = consoleErrors.length ? ` · ${consoleErrors.length} console error(s): ${consoleErrors[0]}` : '';
+    const consoleNote = consoleErrors.length ? ` · ${consoleErrors.length} console error(s): ${consoleErrors.slice(0, 3).join(' | ')}` : '';
     return { ok, detail: `no matching ui-checks — render fallback: ${forms} visible form(s), expected ${expected}${consoleNote}` };
   } catch (err) {
     return { ok: false, detail: `browser connector error: ${err?.message || err}` };

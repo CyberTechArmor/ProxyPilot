@@ -22,6 +22,7 @@ import { housekeepingRouter } from './routes/housekeeping.js';
 import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
+import { domainsRouter } from './routes/domains.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
@@ -456,6 +457,11 @@ app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRo
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
 app.use('/api/ldap', authenticateToken, ldapRouter);
+// Domain provisioning: NOT behind authenticateToken — the /provision/*
+// endpoints authenticate with the X-API-Key provisioning key (validated
+// per-request inside the router), while its /admin/* endpoints apply the
+// cookie-session middleware themselves.
+app.use('/api/domains', domainsRouter);
 
 // Mock2 — absence-by-installation (ADR-001). The gate is evaluated with
 // no native imports; only when it resolves enabled do we dynamically

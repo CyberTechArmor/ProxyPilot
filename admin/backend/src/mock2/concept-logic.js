@@ -149,6 +149,14 @@ Hard requirements:
   are at least 44×44px.
 - Interactivity is fine (tabs, toggles, showing/hiding, fake navigation between
   in-page screens) but it must be self-contained and non-persistent.
+- REALISTIC SAMPLE CONTENT: populate every screen with plausible, domain-true
+  sample data — real-looking names, dates, amounts, statuses, and ENOUGH rows
+  to show density (a timesheet shows a full period of days with several
+  clock-in/out pairs, not two placeholder rows). Sample data lives ONLY here
+  in the mockup — the built app starts empty — so this is where the design's
+  data density is judged. Also show at least one designed EMPTY state (an
+  icon, one line, and the next action) so the built app's day-one look is part
+  of the approved design.
 - RENDER-ON-LOAD: the first/default screen must be VISIBLE immediately from the
   HTML + CSS alone, before any JavaScript runs. Do NOT hide the initial content
   with an inline style/attribute that a <script> later reveals — if the script
@@ -161,6 +169,21 @@ Hard requirements:
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Return the full HTML document and nothing else.`;
+}
+
+// mockupRenderModel — the model the mockup RENDER runs on. Every build in the
+// project inherits the mockup's quality (it is the visual contract), so the
+// render defaults to the strongest available model rather than the (typically
+// cheaper) slot model; one HTML file at top quality is the best token-for-token
+// spend in the pipeline. MOCK2_MOCKUP_MODEL overrides; the literal value
+// 'slot' restores the slot model. The caller falls back to the slot model when
+// the preferred one is rejected by the connector (older keys/orgs).
+export const MOCKUP_PREFERRED_MODEL = 'claude-fable-5';
+
+export function mockupRenderModel(env = {}, slotModel = '') {
+  const v = String(env?.MOCK2_MOCKUP_MODEL ?? '').trim();
+  if (v.toLowerCase() === 'slot') return slotModel || MOCKUP_PREFERRED_MODEL;
+  return v || MOCKUP_PREFERRED_MODEL;
 }
 
 // The mockup slot's user turn: the brief + the current mockup (to iterate on) +
@@ -244,6 +267,11 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
     }
   ],
   "entities": [ { "name": "string", "fields": ["string"] } ],
+  "journeys": [
+    { "name": "string — a primary user journey, e.g. 'clock in for the day'",
+      "steps": [ "string — the screens/actions the journey passes through, in order" ],
+      "frequency": "daily|weekly|occasional — how often a typical user does this" }
+  ],
   "required_capabilities": [ "string — lowercase capability slugs, see below" ],
   "notes": "string — anything important the structure above doesn't capture"
 }
@@ -252,7 +280,9 @@ Rules:
 - Every distinct screen or view in the mockup is a screen. In-page tabs/steps that
   show different content are separate screens.
 - Infer a field's type from how it looks and behaves; default to "text" when unsure.
-- entities and notes may be empty ([] / "") but screens must not be.
+- journeys are the 3–6 PRIMARY things a user comes to do, judged from the mockup's
+  navigation and emphasis; frequency decides navigation prominence downstream.
+- entities, journeys, and notes may be empty ([] / "") but screens must not be.
 - Do not invent screens, fields, or actions the mockup does not show.
 - required_capabilities are the INFRASTRUCTURE needs the mockup implies, as
   lowercase slugs. Include "users" whenever the app has user accounts, sign-in,
@@ -316,10 +346,22 @@ export function parseInventory(text) {
       .filter((c) => /^[a-z0-9][a-z0-9.-]*$/.test(c))
       .slice(0, 32),
   )];
+  // Primary user journeys (tolerant, optional — older extractions have none):
+  // frequent journeys drive the built app's navigation weight (bottom tab bar
+  // vs. behind-a-menu), so capture name + steps + how often a user does it.
+  const journeys = (Array.isArray(doc.journeys) ? doc.journeys : [])
+    .filter((j) => j && typeof j === 'object' && String(j.name || '').trim())
+    .slice(0, 8)
+    .map((j) => ({
+      name: String(j.name).trim().slice(0, 120),
+      steps: (Array.isArray(j.steps) ? j.steps : []).map((x) => String(x)).filter(Boolean).slice(0, 8),
+      frequency: ['daily', 'weekly', 'occasional'].includes(j.frequency) ? j.frequency : 'occasional',
+    }));
   const inventory = {
     version: 1,
     screens,
     entities,
+    journeys,
     required_capabilities: requiredCapabilities,
     notes: String(doc.notes || ''),
   };

@@ -50,7 +50,7 @@ import {
   estimateConceptTurnTokens, estimateInventoryTokens,
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
-  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH,
+  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
 } from './concept-logic.js';
 import {
   projectHasDesign, buildDesignTemplate, mockupIdForImport, buildImportSeedMessage,
@@ -590,7 +590,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         });
       }
     };
-    const mockupCall = (budget) => {
+    const mockupCall = (budget, forceModel = null) => {
       streamedChars = 0;
       // A render is transcription of the brief onto the design system — pure
       // output. The lane default turns thinking OFF so the WHOLE budget goes
@@ -601,11 +601,16 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // the global thinking-off switch for THIS call only (design exploration
       // is exactly where the reasoning pays for itself). Theme turns keep the
       // fast lane defaults (pure transcription of the brief onto the theme).
+      // The render defaults to the STRONGEST model (mockupRenderModel — every
+      // build inherits the mockup's quality), with operator lane tuning still
+      // the last word; the caller falls back to the slot model if the
+      // connector rejects the preferred one.
+      const renderModel = mockupRenderModel(process.env, ready.mockup.model);
       const mockupTuned = explore
-        ? { model: ready.mockup.model, effort: 'high', thinking: null }
-        : applyLaneTuning({ model: ready.mockup.model, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
+        ? { model: renderModel, effort: 'high', thinking: null }
+        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
       return callModelTurn({
-        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: mockupTuned.model,
+        connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
         system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
         tools: [], transcript: [{ role: 'user', text: mockupTask, ...(mockupImages.length ? { images: mockupImages } : {}) }],
         maxTokens: budget,
@@ -618,18 +623,33 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
     let html = '';
     let failureDetail = null;
+    let activeModel = null; // stamped per successful call for accurate spend pricing
     try {
       // Generous budgets: with thinking off and the response streamed (no HTTP
       // timeout), the full budget is HTML — a whole multi-screen app mockup
       // (inline CSS + JS) is large, and under-budgeting is what truncated it
       // into a black screen. First 40k, retry 64k.
+      // Mirror mockupCall's model resolution (preferred model + lane tuning)
+      // so spend is priced on the model that actually served the call.
+      {
+        const pref = mockupRenderModel(process.env, ready.mockup.model);
+        activeModel = explore ? pref
+          : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
+      }
       let res = await mockupCall(40000);
       if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
         res = await mockupCall(40000);
       }
+      // Preferred-model fallback: an org whose key doesn't serve the preferred
+      // model gets the assigned slot model instead of a dead render.
+      if (!res.ok && activeModel !== ready.mockup.model && /model/i.test(String(res.error || '')) ) {
+        setJob(projectId, { phase: 'designing', message: `The preferred render model was rejected — falling back to the assigned mockup model (${ready.mockup.model})…`, kind: 'turn', cycleId: cycle.id });
+        activeModel = ready.mockup.model;
+        res = await mockupCall(40000, ready.mockup.model);
+      }
       if (res.ok) {
-        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: res.usage });
+        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
         html = extractMockupHtml(res.text).slice(0, MAX_MOCKUP_CHARS);
         if (!isPlausibleMockup(html)) {
           // Not a usable page (truncated on budget, or prose instead of HTML).
@@ -638,9 +658,9 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           // outcome in expectation.
           const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
-          const retry = await mockupCall(64000);
+          const retry = await mockupCall(64000, activeModel);
           if (retry.ok) {
-            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: ready.mockup.model, usage: retry.usage });
+            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage });
             const h2 = extractMockupHtml(retry.text).slice(0, MAX_MOCKUP_CHARS);
             if (isPlausibleMockup(h2)) html = h2;
             else failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';

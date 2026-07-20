@@ -120,7 +120,8 @@ async function runStep(page, step) {
 }
 
 // Log in as a role using the spec's login block + seeded test-fixture users.
-async function loginAs(page, baseUrl, login, role) {
+// Exported for the design-review pass (authenticated screenshots).
+export async function loginAs(page, baseUrl, login, role) {
   const user = login.users[role];
   await page.goto(new URL(login.path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   await page.locator(login.user_field).first().fill(user.username, { timeout: STEP_TIMEOUT_MS });

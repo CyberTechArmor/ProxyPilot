@@ -51,7 +51,7 @@ import {
   prepassEffort, formatBriefForTask, featureScaleNotice, PREPASS_MAX_TOKENS,
   normalizeSuggestMode,
 } from './prepass-logic.js';
-import { insertCycleEvent } from './cycle-events.js';
+import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
 import {
   insertAuthorization, listGrantedUnusedAuthorizations, markAuthorizationUsed, expireStaleAuthorizations,
 } from './authorizations.js';
@@ -66,7 +66,7 @@ import { raiseQueueItem, resolveQueueItem } from './queue.js';
 import { getProjectRemote, pushProjectRemote } from './git-connectors.js';
 import {
   RUNNER_TOOLS, runnerToolsForCycle, MAX_TURNS, MAX_TOOL_RESULT_CHARS, truncateToolResult, parseFrameworkSkills,
-  buildRunnerSystemPrompt, buildRunnerTask, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
+  buildRunnerSystemPrompt, buildRunnerTask, buildFeedbackSection, classifyTurn, describeRunnerStep, STALL_NUDGE, formatAcceptanceBlock,
   buildCompletionSummaryBody,
   softPauseReason, SOFT_PAUSE_TOKENS, SOFT_PAUSE_MS,
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
@@ -876,7 +876,11 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // verbatim instruction stays authoritative.
   let prepassBrief = '';
   try { prepassBrief = formatBriefForTask(parseRoutingJson(getCycle(cycle.id)?.routing_json)?.prepass); } catch { /* optional */ }
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  // Standing operator taste: recent thumbs-down notes ride every task so a
+  // flagged mistake is corrected once, not re-flagged build after build.
+  let feedbackSection = '';
+  try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { /* optional */ }
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

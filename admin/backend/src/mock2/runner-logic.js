@@ -400,7 +400,11 @@ screen with those tokens — the same colors, fonts, radii, and component stylin
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
-.btn, .badge, .stat, .field, table.list — all token-driven) and
+.btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
+.toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,
+.num tabular numerals, .bars mini charts, field .err/.hint validation — all
+token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
+empty-box, search, alert, check, inbox — use \`<svg><use href="/assets.svg#empty-box"/></svg>\`) and
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
 to the shell's header — never hand-roll a parallel layout or restyle the shell.
@@ -452,6 +456,29 @@ consume the app's first-admin bootstrap: do not create a real-domain account
 through the bootstrap/superadmin flow — the first real account belongs to the
 operator. If the users table was empty when your cycle started, it must hold
 only \`@fixture.invalid\` accounts (or nothing) when you finish.
+NO SAMPLE DATA IN THE LIVE APP (binding): realistic sample content belongs in
+the MOCKUP only (that is where design is judged). The deployed app starts
+EMPTY and its screens earn their look through designed empty states — never
+seed demo rows, placeholder records, or "example" content into the live
+database or ship hardcoded fake data in the UI. If a screen needs data to be
+meaningful, its empty state says how to create the first real record.
+INTERACTION COMPLETENESS (binding): professional apps imply mechanics beyond
+the literal ask. Lists that can exceed ~20 rows get search/filter and
+pagination (or explicit "showing N of M" + load more). Forms validate inline,
+keep the user's input on error, and disable double-submits. Destructive
+actions confirm (or offer undo). Every async action shows real progress and a
+retryable failure state. Every screen is reachable within two taps/clicks of
+its natural entry point, and the current location is visible (active nav
+state). Apply these without being asked wherever the domain implies them.
+ERROR MESSAGES (binding): every user-facing error says WHAT happened, WHY (as
+far as known), and WHAT TO DO NEXT, in plain language — "Couldn't save — the
+server didn't respond. Your entry is kept; tap Retry." Never surface raw
+exception text, status codes alone, or a bare "Error". Preserve the user's
+work through every failure.
+JOURNEYS DRIVE THE LAYOUT: when state/inventory.json carries a journeys list
+(name, steps, frequency), the FREQUENT journeys get the prominent navigation
+(e.g. the mobile bottom tab bar) and the fewest taps; rare/admin journeys go
+behind a menu. Do not give every screen equal navigational weight.
 
 # Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}
@@ -574,6 +601,18 @@ Make the change; call finish only when the gates are green, or halt if you are b
 // transcript shape is testable.
 export function buildRunnerTask(instruction) {
   return `Task: ${String(instruction || '').trim()}`;
+}
+
+// buildFeedbackSection — recent thumbs-DOWN notes the operator left on earlier
+// builds, distilled into the task turn as standing taste. Subordinate to the
+// instruction (same discipline as the pre-pass brief); empty input renders
+// nothing so old projects with no ratings pay zero tokens.
+export function buildFeedbackSection(notes = []) {
+  const items = (Array.isArray(notes) ? notes : [])
+    .map((n) => String(n || '').trim()).filter(Boolean).slice(0, 5)
+    .map((n) => n.slice(0, 400));
+  if (!items.length) return '';
+  return `\n\nRecurring operator feedback (from thumbs-down ratings on earlier builds — standing taste for THIS project; do not repeat these mistakes):\n- ${items.join('\n- ')}`;
 }
 
 // buildCompletionSummaryBody — the review summary posted into the BUILD CHAT
@@ -1014,7 +1053,11 @@ screen with those tokens — the same colors, fonts, radii, and component stylin
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
-.btn, .badge, .stat, .field, table.list — all token-driven) and
+.btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
+.toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,
+.num tabular numerals, .bars mini charts, field .err/.hint validation — all
+token-driven) and \`public/assets.svg\` (inline SVG symbols for empty states:
+empty-box, search, alert, check, inbox — use \`<svg><use href="/assets.svg#empty-box"/></svg>\`) and
 \`public/app-shell.html\` (the authenticated home served at /). BUILD SCREENS ON
 THIS SHELL: link /design.css + /base.css, reuse its classes, and add nav entries
 to the shell's header — never hand-roll a parallel layout or restyle the shell.
@@ -1066,6 +1109,29 @@ consume the app's first-admin bootstrap: do not create a real-domain account
 through the bootstrap/superadmin flow — the first real account belongs to the
 operator. If the users table was empty when your cycle started, it must hold
 only \`@fixture.invalid\` accounts (or nothing) when you finish.
+NO SAMPLE DATA IN THE LIVE APP (binding): realistic sample content belongs in
+the MOCKUP only (that is where design is judged). The deployed app starts
+EMPTY and its screens earn their look through designed empty states — never
+seed demo rows, placeholder records, or "example" content into the live
+database or ship hardcoded fake data in the UI. If a screen needs data to be
+meaningful, its empty state says how to create the first real record.
+INTERACTION COMPLETENESS (binding): professional apps imply mechanics beyond
+the literal ask. Lists that can exceed ~20 rows get search/filter and
+pagination (or explicit "showing N of M" + load more). Forms validate inline,
+keep the user's input on error, and disable double-submits. Destructive
+actions confirm (or offer undo). Every async action shows real progress and a
+retryable failure state. Every screen is reachable within two taps/clicks of
+its natural entry point, and the current location is visible (active nav
+state). Apply these without being asked wherever the domain implies them.
+ERROR MESSAGES (binding): every user-facing error says WHAT happened, WHY (as
+far as known), and WHAT TO DO NEXT, in plain language — "Couldn't save — the
+server didn't respond. Your entry is kept; tap Retry." Never surface raw
+exception text, status codes alone, or a bare "Error". Preserve the user's
+work through every failure.
+JOURNEYS DRIVE THE LAYOUT: when state/inventory.json carries a journeys list
+(name, steps, frequency), the FREQUENT journeys get the prominent navigation
+(e.g. the mobile bottom tab bar) and the fewest taps; rare/admin journeys go
+behind a menu. Do not give every screen equal navigational weight.
 
 ## Organizational constitution (pinned — this is binding, not advisory)
 ${constitution || '(placeholder constitution — real framework content is still owed, risk R8)'}

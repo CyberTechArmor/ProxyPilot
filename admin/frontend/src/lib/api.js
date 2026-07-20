@@ -1444,6 +1444,16 @@ export const api = {
   // Domain-suggestion handling: 'off' | 'ask' | 'auto'.
   mock2SetSuggestMode: (id, mode) =>
     request(`/mock2/projects/${id}/suggest-mode`, { method: 'PUT', body: JSON.stringify({ mode }) }),
+  // Design review: the Polish pass (screenshot + vision critique; apply=true
+  // also queues the fixes as a quick build) and the auto-review toggle.
+  mock2Polish: (id, { apply = false } = {}) =>
+    request(`/mock2/projects/${id}/polish`, { method: 'POST', body: JSON.stringify({ apply }) }),
+  mock2GetDesignReview: () => request('/mock2/settings/design-review'),
+  mock2SetDesignReview: (setting) =>
+    request('/mock2/settings/design-review', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // Live-app screenshot URL (feeds the annotate dialog's <img>).
+  mock2AppScreenshotUrl: (id, { path = '/', w = 390 } = {}) =>
+    `/api/mock2/projects/${id}/app-screenshot?path=${encodeURIComponent(path)}&w=${w}&t=${Date.now()}`,
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).
   mock2GetSmokeBrowser: () => request('/mock2/settings/smoke-browser'),
   mock2SetSmokeBrowser: (setting) =>

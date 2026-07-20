@@ -423,6 +423,23 @@ export async function onRequestClosed(requestRow) {
       const { drainBuildQueue } = await import('./build-queue.js');
       await drainBuildQueue(pid);
     } catch (e) { console.warn('[mock2] build queue drain failed:', e?.message); }
+    // Design review (the "look at the screen" pass): after a SUCCEEDED build
+    // whose queue is idle (so a back-to-back run isn't reviewed mid-stream),
+    // screenshot the deployed app and post a vision critique to the chat.
+    // Findings only — never a gate, never an auto-build; the dashboard toggle
+    // (settings design_review) turns it off. Fire-and-forget.
+    if (requestRow.status === 'succeeded') {
+      try {
+        const { listBuildQueue } = await import('./build-queue.js');
+        const pending = listBuildQueue(pid).some((q) => q.status === 'queued' || q.status === 'started');
+        if (!pending) {
+          const [{ maybeAutoDesignReview }, { getProject }] = await Promise.all([
+            import('./design-review.js'), import('./projects.js'),
+          ]);
+          void maybeAutoDesignReview(getProject(pid));
+        }
+      } catch (e) { console.warn('[mock2] auto design review hook failed:', e?.message); }
+    }
   }
 }
 

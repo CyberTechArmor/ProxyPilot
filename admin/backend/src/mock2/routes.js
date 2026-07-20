@@ -119,7 +119,7 @@ import {
   isBaseAppDeploying,
 } from './provision.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
@@ -1346,6 +1346,19 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_SETTING_SMOKE_BROWSER', 'mock2_setting', 0, { smoke_browser: value || '(env default)' }, req.ip);
     res.json({ setting: value });
   });
+  // Design review toggle — the after-build screenshot + vision critique pass.
+  // 'on' (default) posts findings to the chat after each succeeded build;
+  // 'off' silences the automatic pass (the manual Polish pass still works).
+  router.get('/settings/design-review', requireAdmin, (_req, res) => {
+    res.json({ setting: getDesignReviewSetting() });
+  });
+  router.post('/settings/design-review', requireAdmin, (req, res) => {
+    const parsed = z.object({ setting: z.enum(['on', 'off']) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "setting must be 'on' or 'off'" });
+    const value = setDesignReviewSetting(parsed.data.setting, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_DESIGN_REVIEW', 'mock2_setting', 0, { design_review: value }, req.ip);
+    res.json({ setting: value });
+  });
   // Global thinking switch — 'off' disables thinking for every lane at once
   // (overlays per-lane tuning at read time; the stored per-lane doc is kept).
   router.post('/settings/global-thinking', requireAdmin, (req, res) => {
@@ -2429,6 +2442,39 @@ export function createMock2Router() {
     drainBuildQueue(project.id).catch((e) => console.warn('[mock2] build-queue drain failed:', e?.message));
     logAudit(req.user.id, 'MOCK2_BUILD_GROUPS', 'mock2_project', project.id, { groups: groups.length }, req.ip);
     res.status(202).json({ queued: rows.length, queue: rows.map(publicQueueShape) });
+  });
+
+  // Design review — the "look at the screen" pass. POST runs it now (Polish
+  // pass): screenshots the deployed app, critiques it against the approved
+  // mockup + tokens (plus axe-core and a token-drift lint), posts findings to
+  // the chat, and with apply=true queues the fixes as a quick polish build.
+  // Runs in the background — findings arrive in the chat when done.
+  router.post('/projects/:id/polish', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project is not online.' });
+    const apply = req.body?.apply === true;
+    const { runDesignReview } = await import('./design-review.js');
+    void runDesignReview({ project, trigger: 'manual', apply, initiatedBy: req.user.id })
+      .then((r) => { if (!r.ok) insertMessage({ projectId: project.id, kind: 'system', body: `Design review could not run: ${r.error}` }); })
+      .catch((e) => console.warn('[mock2] polish run failed:', e?.message));
+    logAudit(req.user.id, 'MOCK2_POLISH_RUN', 'mock2_project', project.id, { apply }, req.ip);
+    res.status(202).json({ started: true, apply });
+  });
+
+  // A live screenshot of the deployed app (PNG) — feeds the annotate-on-
+  // screenshot dialog. Viewer-gated like the preview.
+  router.get('/projects/:id/app-screenshot', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project is not online.' });
+    const { captureOneScreenshot } = await import('./design-review.js');
+    const shot = await captureOneScreenshot({
+      containerName: project.container_name,
+      webPort: project.web_port || 3000,
+      path: String(req.query.path || '/'),
+      width: Number(req.query.w) || 390,
+    });
+    if (!shot.ok) return res.status(503).json({ error: shot.error });
+    res.set('Cache-Control', 'no-store').type('png').send(shot.buffer);
   });
 
   // How this project handles the pre-pass's domain suggestions:

@@ -15,7 +15,8 @@ import { api, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles } from 'lucide-react';
+import { Loader2, Zap, Hammer, HelpCircle, RefreshCw, StopCircle, X, Layers, Sparkles, MapPin } from 'lucide-react';
+import AnnotateApp from './AnnotateApp';
 import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import { toWireImages } from '@/lib/chat-images';
@@ -137,12 +138,13 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null } = {}) => {
-    const body = instruction.trim();
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null } = {}) => {
+    const body = (textOverride ?? instruction).trim();
     if (!body) return;
     setBusy(true);
     try {
-      const res = await api.mock2StartCycle(projectId, body, toWireImages(attach.images), buildMode, { skipSplit, skipSuggest, extras });
+      const images = [...toWireImages(attach.images), ...(extraImages || [])];
+      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras });
       if (res.split_proposal) {
         // Feature-scale ask that decomposes — show the grouping card; nothing
         // has started yet. Default: every part included, one group per part.
@@ -238,6 +240,14 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     await startBuild('quick', { skipSuggest: true, extras: extras.length ? extras : null });
   };
   const buildAsAsked = async () => { setSuggestPlan(null); await startBuild('quick', { skipSuggest: true }); };
+  // Annotate-on-screenshot: the dialog composes the pin list + burned-in image
+  // and this sends it straight as a Quick update (cards skipped — a pin list
+  // is already precise scope).
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+  const sendAnnotation = async ({ text, image }) => {
+    await startBuild('quick', { skipSplit: true, skipSuggest: true, textOverride: text, extraImages: [image] });
+  };
+
   const saveSuggestMode = async (m) => {
     if (m === suggestMode) return;
     const prev = suggestMode;
@@ -520,8 +530,18 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
                       Full build and the Production check live in the Build
                       panel on the left. */}
                   <Button
+                    variant="outline" size="icon"
+                    className="h-11 w-11 sm:h-10 sm:w-10 ml-auto"
+                    disabled={quickDisabled}
+                    onClick={() => setAnnotateOpen(true)}
+                    title="Annotate a live screenshot — tap the exact spots that should change"
+                    aria-label="Annotate the app on a screenshot"
+                  >
+                    <MapPin className="h-4 w-4" />
+                  </Button>
+                  <Button
                     variant="outline"
-                    className="h-11 sm:h-10 ml-auto"
+                    className="h-11 sm:h-10"
                     disabled={askDisabled || !instruction.trim()}
                     onClick={startAsk}
                     title="Ask a question or have the AI act on the running app — query or update data (e.g. add a user), run tests, call its APIs. No code changes."
@@ -601,6 +621,10 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           <p className="text-sm text-muted-foreground shrink-0">Viewers can follow the build; editors run cycles.</p>
         )}
       </CardContent>
+      {/* Tap-to-pin feedback on a live screenshot → a precise Quick update. */}
+      {canEdit ? (
+        <AnnotateApp projectId={projectId} open={annotateOpen} onOpenChange={setAnnotateOpen} onSend={sendAnnotation} />
+      ) : null}
     </Card>
   );
 }

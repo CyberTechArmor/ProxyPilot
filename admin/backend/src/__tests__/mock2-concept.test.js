@@ -130,10 +130,10 @@ test('inventoryCounts: totals screens, fields, actions', () => {
 
 // ---- chat → model transcript ----
 
-test('classifyConceptTurn: detects generate_mockup + pulls the brief', () => {
-  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form' });
-  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null });
-  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null });
+test('classifyConceptTurn: detects generate_mockup + pulls the brief (scope defaults full)', () => {
+  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form', scope: 'full' });
+  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full' });
+  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full' });
 });
 
 test('buildConceptTranscript: maps user/assistant, skips system, appends new user text', () => {
@@ -225,18 +225,68 @@ test('inventory extraction prompt asks for JSON-only, screen-complete output', (
   assert.match(task, /<html>/);
 });
 
-test('mockup prompt: senior design-craft bar with the emoji-iconography ban', async () => {
+test('mockup prompt: design-judgment craft bar (operator-validated language)', async () => {
   const { buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
   const p = buildMockupSystemPrompt({ designSystem: 'SYSTEM_TOKENS' });
-  // The junior tells the operator flagged (emoji icons, wrapping pill
-  // steppers, five loud badges a row, everything boxed) are each named.
+  // The operator's hand-written prompt produced strikingly better renders;
+  // its transferable structure is now the standing bar. Pin its load-bearing
+  // phrases: earned defaults, operating conditions, rationale comment,
+  // functional color, hard states, and the named anti-patterns.
   assert.match(p, /# Design craft/);
+  assert.match(p, /treat EVERY default as a decision you\s+must earn/);
+  assert.match(p, /REAL OPERATING CONDITIONS/);
+  assert.match(p, /DESIGN RATIONALE as an HTML comment/);
+  assert.match(p, /EVERY COLOR HAS A JOB/);
+  assert.match(p, /NEVER expose internal steps, state names, or data-model language/);
+  assert.match(p, /PROVE IT WITH THE HARD STATES/);
   assert.match(p, /NEVER use emoji as UI iconography/);
-  assert.match(p, /inline SVG\s+icons/i);
-  assert.match(p, /never a row of large pills that wraps/);
-  assert.match(p, /not every element needs a border/i);
-  assert.match(p, /ONE primary action per view/);
+  assert.match(p, /inline SVG icons/i);
+  assert.match(p, /ANTI-PATTERNS/);
+  assert.match(p, /generic-dashboard look/);
+  assert.match(p, /exactly four rows of\s+data/);
   // The craft section sits INSIDE the prompt, before the locked system.
   assert.ok(p.indexOf('# Design craft') < p.indexOf('# Locked design system'));
   assert.match(p, /SYSTEM_TOKENS/);
+});
+
+test('concept chat prompt: brief-enrichment — thorough passes through, simple gets domain-expert expansion', async () => {
+  const { buildConceptChatSystemPrompt } = await import('../mock2/concept-logic.js');
+  const p = buildConceptChatSystemPrompt({ designSystem: 'X', projectName: 'Clinic', mode: 'design' });
+  assert.match(p, /THE BRIEF YOU WRITE IS THE DESIGN'S CEILING/);
+  assert.match(p, /THOROUGH request .* passes through faithfully/s);
+  assert.match(p, /SIMPLE request .* gets EXPANDED/s);
+  assert.match(p, /Surfaces & audiences/);
+  assert.match(p, /Hard states the mockup must PROVE/);
+  assert.match(p, /as DIRECTIVES/);
+  assert.match(p, /1–2 DIRECTION questions FIRST only when a genuine\s+fork/);
+  assert.match(p, /NOTE the\s+defaults you chose/);
+  // Plan mode keeps its own block — no enrichment directives there.
+  const plan = buildConceptChatSystemPrompt({ designSystem: 'X', mode: 'plan' });
+  assert.ok(!plan.includes("THE BRIEF YOU WRITE IS THE DESIGN'S CEILING"));
+});
+
+test('mockup tweak mode: scope classification, edit parse/apply, fallback signals', async () => {
+  const { classifyConceptTurn, buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits } = await import('../mock2/concept-logic.js');
+  // Tool scope: tweak recognized; anything else (or absent) is a safe 'full'.
+  assert.equal(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: 'b', scope: 'tweak' } }]).scope, 'tweak');
+  assert.equal(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: 'b' } }]).scope, 'full');
+  assert.equal(classifyConceptTurn([]).scope, 'full');
+  assert.match(buildMockupEditSystemPrompt(), /FULL_RERENDER/);
+
+  const doc = '<h1>Riverside Clinic</h1>\n<p>Welcome</p>\n<p>Welcome</p>';
+  // Clean single-match edit applies.
+  const one = parseMockupEdits('<<<<SEARCH\n<h1>Riverside Clinic</h1>\n====\n<h1>Lakeside Clinic</h1>\n>>>>');
+  assert.equal(one.ok, true);
+  const applied = applyMockupEdits(doc, one.edits);
+  assert.equal(applied.ok, true);
+  assert.match(applied.html, /Lakeside Clinic/);
+  // Ambiguous search (two <p>Welcome</p>) refuses — half-applied mockups never ship.
+  const ambig = applyMockupEdits(doc, [{ search: '<p>Welcome</p>', replace: '<p>Hi</p>' }]);
+  assert.equal(ambig.ok, false);
+  assert.match(ambig.error, /more than once/);
+  // Missing search refuses; FULL_RERENDER is the model's structural escape.
+  assert.equal(applyMockupEdits(doc, [{ search: 'nope', replace: 'x' }]).ok, false);
+  assert.deepEqual(parseMockupEdits('FULL_RERENDER'), { ok: true, fullRerender: true, edits: [] });
+  // Prose without blocks is unusable (falls back to the full renderer).
+  assert.equal(parseMockupEdits('I changed the heading for you!').ok, false);
 });

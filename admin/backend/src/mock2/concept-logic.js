@@ -64,6 +64,11 @@ export const CONCEPT_CHAT_TOOLS = Object.freeze([
           type: 'string',
           description: 'Plain-language description of the screens, sections, fields, and actions the mockup should show, and what changed since the last version.',
         },
+        scope: {
+          type: 'string',
+          enum: ['tweak', 'full'],
+          description: 'Size of the change. "tweak": a SMALL revision to the existing mockup (copy/labels, a color, one element) — applied as surgical edits at a fraction of the cost. "full": new screens, layout/structure changes, or the first mockup. Default "full"; when unsure, use "full".',
+        },
       },
       required: ['brief'],
       additionalProperties: false,
@@ -105,7 +110,39 @@ What you do:
   separate design model renders the HTML from your brief and the locked design
   system below. ${hasMockup ? 'A mockup already exists; describe it as a revision of the current one.' : 'No mockup exists yet; the first substantive idea should produce one.'}
 - Always ALSO reply to the Builder in plain, warm language — say what you changed
-  or what you need, and remind them they can approve the design when it feels right.`;
+  or what you need, and remind them they can approve the design when it feels right.
+- COST-AWARE REVISIONS: for a SMALL change to the existing mockup — copy/label
+  edits, a color, one element — call generate_mockup with scope "tweak": it
+  applies surgical edits to the current file at a fraction of a re-render's
+  cost. Anything structural (new screens, layout changes, the first mockup)
+  uses scope "full". When unsure, "full".
+
+THE BRIEF YOU WRITE IS THE DESIGN'S CEILING — extrapolate it like a multi-step
+domain expert on the Builder's behalf:
+- A THOROUGH request (operating conditions, audiences, states, constraints
+  already spelled out) passes through faithfully — preserve its language, add
+  little.
+- A SIMPLE request ("a clinic check-in app") gets EXPANDED into a full design
+  brief before you render. Work through it as the domain expert the Builder
+  may not be:
+  1. Surfaces & audiences — who uses each surface, from what distance, under
+     what pressure (a waiting-room kiosk vs. a front-desk queue are different
+     designs); each surface's ONE core job.
+  2. Real operating conditions — stress, privacy (what must be masked or
+     cleared), interruptions, time pressure, accessibility; what the end user
+     must NEVER see (internal steps, status enums, data-model language).
+  3. Hard states the mockup must PROVE — empty, overloaded (12+ rows still
+     scan), over-threshold/escalated, mid-action, a validation slip handled
+     gracefully.
+  4. Domain rules an expert assumes — e.g. PHI masking, destructive actions
+     separated from primaries, an explicit escalation path.
+  5. Anti-patterns to name in the brief so the renderer avoids them.
+  Write the brief as DIRECTIVES ("the eye must land first on whoever waited
+  longest"), never as questions or options.
+- Ask the Builder at most 1–2 DIRECTION questions FIRST only when a genuine
+  fork changes the whole design (kiosk or phone? consumer or internal tool?
+  brand tone?). Otherwise choose expert defaults, render, and NOTE the
+  defaults you chose in your reply so the Builder can veto them.`;
   return `You are the Mock2 Concept-stage design partner. You help a Builder — who may be
 non-technical — turn an app idea into a clear, interactive mockup. This is Stage 1
 of four (Concept → Define → Build → Run); you are ONLY doing Concept.
@@ -125,6 +162,66 @@ forbids; honor the system and say so if a request conflicts with it:
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Keep replies short and concrete. Guide toward a design the Builder is happy to approve.`;
+}
+
+// ---- mockup TWEAK mode (surgical edits instead of a full re-render) ----
+// A one-line copy change used to re-output the ENTIRE document — output tokens
+// dominate render cost, so "change the heading" cost as much as the original
+// render (user report). Tweak mode asks for exact search/replace blocks against
+// the current HTML; the orchestrator applies them and falls back to the full
+// renderer whenever they don't apply cleanly.
+
+export const MOCKUP_EDIT_MAX_BLOCKS = 12;
+
+export function buildMockupEditSystemPrompt() {
+  return `You make a SMALL, TARGETED revision to an existing HTML mockup.
+Output ONLY edit blocks in exactly this format — no prose, no code fences:
+
+<<<<SEARCH
+exact text copied from the current file
+====
+replacement text
+>>>>
+
+Rules:
+- Each SEARCH must be copied EXACTLY from the current file (whitespace
+  included) and long enough to be UNIQUE in it — include surrounding lines
+  when needed.
+- Use the fewest, smallest edits that fulfil the request (at most ${MOCKUP_EDIT_MAX_BLOCKS} blocks).
+- The edited file must remain a complete, valid document: matching tags,
+  balanced braces, working script.
+- If the request actually needs new screens, layout restructuring, or more
+  change than a few edits can express, output exactly FULL_RERENDER (nothing
+  else) — the full renderer will run instead.`;
+}
+
+export function parseMockupEdits(text) {
+  const s = String(text || '').trim();
+  if (!s) return { ok: false, error: 'empty reply' };
+  if (/^FULL_RERENDER\b/.test(s)) return { ok: true, fullRerender: true, edits: [] };
+  const edits = [];
+  const re = /<<<<SEARCH\n([\s\S]*?)\n====\n([\s\S]*?)\n>>>>/g;
+  let m;
+  while ((m = re.exec(s)) !== null) edits.push({ search: m[1], replace: m[2] });
+  if (!edits.length) return { ok: false, error: 'no edit blocks found' };
+  if (edits.length > MOCKUP_EDIT_MAX_BLOCKS) return { ok: false, error: `too many edit blocks (max ${MOCKUP_EDIT_MAX_BLOCKS})` };
+  return { ok: true, fullRerender: false, edits };
+}
+
+// Apply sequentially; every search must match EXACTLY ONCE (absent or
+// ambiguous → the whole tweak fails and the caller falls back to a full
+// render — a half-applied mockup must never ship).
+export function applyMockupEdits(html, edits = []) {
+  let out = String(html || '');
+  for (let i = 0; i < edits.length; i++) {
+    const { search, replace } = edits[i];
+    if (!search) return { ok: false, error: `edit ${i + 1}: empty search` };
+    const first = out.indexOf(search);
+    if (first === -1) return { ok: false, error: `edit ${i + 1}: search text not found` };
+    if (out.indexOf(search, first + 1) !== -1) return { ok: false, error: `edit ${i + 1}: search text matches more than once` };
+    out = out.slice(0, first) + String(replace ?? '') + out.slice(first + search.length);
+  }
+  return { ok: true, html: out };
 }
 
 // buildMockupSystemPrompt — the mockup slot's system prompt. It renders a single
@@ -165,31 +262,55 @@ Hard requirements:
 - Output the COMPLETE document ending with </body></html>. Never stop partway —
   a truncated document renders as a blank page.
 
-# Design craft (the bar is a senior product designer at a top-tier SaaS)
-The mockup is the visual contract every build inherits — render at the quality
-of a designer's portfolio piece, not a wireframe. Within the locked design
-system:
-- NEVER use emoji as UI iconography (no 📅 in an option card, no 🚶 for
-  walk-in) — it is the single loudest "AI mockup" tell. Draw small inline SVG
-  icons (16–24px, stroke, currentColor) for options, actions, empty states,
-  and status.
-- HIERARCHY over boxes: not every element needs a border. Use spacing, surface
-  elevation (2–3 distinct surface tones from the system's palette), and type
-  scale to separate things; reserve borders for genuine boundaries.
-- ONE primary action per view, visually dominant; secondary actions are quiet
-  (ghost/tertiary). Never render a row of equally-heavy buttons — in repeated
-  cards (queue rows, lists), collapse secondary actions behind a compact menu
-  or icon buttons so the row stays scannable.
-- Step indicators/progress: a slim inline stepper (dots/segments + current
-  label), never a row of large pills that wraps to two lines on mobile.
-- Spacing SYSTEM: pick a rhythm (4/8px multiples) and hold it everywhere;
-  generous whitespace around headings; align numbers with tabular figures.
-- Data views read DENSE and calm: strong first column, muted metadata,
-  status as small color-coded dots/badges (one accent per meaning, reused
-  consistently), not five loud pills per row.
-- Touches that read senior: subtle elevation shadows, 150ms hover/press
-  transitions, focus rings, a designed empty state per key screen, realistic
-  fictional data with varied lengths.
+# Design craft (binding — the mockup is judged on design judgment, not mechanics)
+The mockup is the visual contract every build inherits. You will be judged
+purely on design judgment and craft, so treat EVERY default as a decision you
+must earn. Within the locked design system:
+
+DESIGN FOR THE REAL OPERATING CONDITIONS, not the happy path. Before laying
+anything out, decide: who uses each surface, from what distance, under what
+pressure, with what stakes? A public/kiosk surface is read from feet away by
+stressed or low-vision people — large type, one decision per screen, forgiving
+targets, calm tone. An operator surface is scanned under time pressure — the
+eye must land FIRST on whatever needs action; urgency is the loudest thing on
+screen. Density, spacing, and radius are decisions that DIFFER between a calm
+public surface and a dense operator surface — never one treatment everywhere.
+NEVER expose internal steps, state names, or data-model language to end
+users ("Info / Reason / Confirm" wizards, status enums); progress shown to the
+public is reassurance, not a form tracker.
+
+- Open the file with a one-paragraph DESIGN RATIONALE as an HTML comment:
+  the point of view you committed to and why. A restrained invented brand
+  beats a generic template.
+- A real TYPOGRAPHIC SCALE: a defined ramp with deliberate weight/size
+  contrast — hierarchy is built from type, not from boxes. Not everything at
+  one size.
+- EVERY COLOR HAS A JOB: define what each hue signifies and the single
+  escalation path for the domain's "too long / overdue / attention" state.
+  No color without a meaning; one accent per meaning, reused consistently.
+- HIERARCHY over boxes: use spacing, surface elevation (2–3 surface tones),
+  and type scale to separate things; reserve borders for genuine boundaries.
+- ONE primary action per view, visually dominant; secondary actions quiet;
+  the destructive action visually distinct and never adjacent to the primary.
+  In repeated rows/cards, collapse secondary actions behind a compact menu so
+  a real queue still scans.
+- NEVER use emoji as UI iconography — the loudest "AI mockup" tell. Draw
+  small inline SVG icons (16–24px, stroke, currentColor).
+- Step indicators: a slim inline stepper, never large pills that wrap.
+- Spacing rhythm (4/8px multiples) held everywhere; tabular figures for
+  numbers.
+- PROVE IT WITH THE HARD STATES, not just the default view: the empty state,
+  the overloaded state (a queue/list at 12+ rows must still scan), the
+  escalated/over-threshold state, a mid-action state, a gracefully handled
+  validation slip. Seed data rich and varied enough to exercise all of them.
+- Keyboard focus states and adequate contrast throughout; motion restrained
+  and functional (~150ms).
+
+ANTI-PATTERNS (their presence is a failure): emoji as icons · a wall of
+same-weight pills/badges · uniform boxed cards + a single accent color + one
+radius everywhere (the generic-dashboard look) · internal/model language shown
+to end users · a layout that only works because there are exactly four rows of
+data.
 
 # Locked design system (binding)
 ${designSystem || '(design system content is still owed — risk R8)'}
@@ -556,8 +677,17 @@ input, select, textarea { background: var(--app-bg); color: var(--app-text); bor
 export function classifyConceptTurn(toolCalls = []) {
   const calls = Array.isArray(toolCalls) ? toolCalls : [];
   const gen = calls.find((c) => c && c.name === 'generate_mockup');
-  if (gen) return { generateMockup: true, brief: String(gen.input?.brief || '').trim() };
-  return { generateMockup: false, brief: null };
+  if (gen) {
+    return {
+      generateMockup: true,
+      brief: String(gen.input?.brief || '').trim(),
+      // 'tweak' = surgical edits to the current mockup; anything else is a
+      // full render (safe default — a wrong 'full' costs money, a wrong
+      // 'tweak' falls back to full anyway).
+      scope: gen.input?.scope === 'tweak' ? 'tweak' : 'full',
+    };
+  }
+  return { generateMockup: false, brief: null, scope: 'full' };
 }
 
 // buildConceptTranscript — the neutral transcript (model-client.js turn shapes)

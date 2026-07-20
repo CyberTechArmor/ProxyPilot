@@ -51,6 +51,7 @@ import {
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
   renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
+  buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
 } from './concept-logic.js';
 import {
   projectHasDesign, buildDesignTemplate, mockupIdForImport, buildImportSeedMessage,
@@ -549,9 +550,15 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   let mockupSystemNote = null;  // posted after the reply, success or failure
   if (decision.generateMockup) {
     let currentHtml = null;
+    // Tweak mode edits the CURRENT file — only safe when we hold the COMPLETE
+    // document (a truncated read would corrupt anything past the cap).
+    let currentHtmlComplete = false;
     if (hasMockup) {
       const cur = await readWorkingFile(containerName, MOCKUP_CURRENT);
-      if (cur.ok) currentHtml = String(cur.content || '').slice(0, MAX_MOCKUP_FEEDBACK_CHARS);
+      if (cur.ok) {
+        currentHtmlComplete = String(cur.content || '').length <= MAX_MOCKUP_FEEDBACK_CHARS;
+        currentHtml = String(cur.content || '').slice(0, MAX_MOCKUP_FEEDBACK_CHARS);
+      }
     }
     const mockupTask = buildMockupTask({
       brief: decision.brief, currentHtml, projectName: project.name,
@@ -626,11 +633,47 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         onDelta: onMockupDelta,
       });
     };
-    const heartbeat = startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
     let html = '';
     let failureDetail = null;
     let activeModel = null; // stamped per successful call for accurate spend pricing
-    try {
+    // ---- tweak path (scope 'tweak' from the design partner) ----
+    // A one-line copy change used to re-output the ENTIRE document — output
+    // tokens dominate render cost, so "change the text" cost as much as the
+    // original render (user report). A tweak asks for surgical search/replace
+    // edits against the current HTML (tiny output) and falls back to the full
+    // renderer the moment anything doesn't apply cleanly.
+    let tweaked = false;
+    if (decision.scope === 'tweak' && currentHtml && currentHtmlComplete) {
+      setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
+      try {
+        const editModel = mockupRenderModel(process.env, ready.mockup.model);
+        const res = await callModelTurn({
+          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+          system: buildMockupEditSystemPrompt(),
+          tools: [],
+          transcript: [{ role: 'user', text: `Revision request:\n${decision.brief}\n\nCurrent mockup HTML:\n${currentHtml}` }],
+          maxTokens: 6000, timeoutMs: 300000, effort: 'low', thinking: 'off',
+        });
+        if (res.ok) {
+          recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: editModel, usage: res.usage });
+          const parsed = parseMockupEdits(res.text);
+          if (parsed.ok && !parsed.fullRerender) {
+            const applied = applyMockupEdits(currentHtml, parsed.edits);
+            if (applied.ok && isPlausibleMockup(applied.html)) {
+              html = applied.html.slice(0, MAX_MOCKUP_CHARS);
+              activeModel = editModel;
+              tweaked = true;
+            } else {
+              console.warn(`[mock2] mockup tweak did not apply cleanly (${applied.error || 'implausible result'}) — full render fallback`);
+            }
+          }
+          // parsed.fullRerender (the model judged it structural) falls through.
+        }
+      } catch (e) { console.warn('[mock2] mockup tweak failed — full render fallback:', e?.message); }
+      if (!tweaked) setJob(projectId, { phase: 'designing', message: 'The change needs the full renderer — rendering the mockup…', kind: 'turn', cycleId: cycle.id });
+    }
+    const heartbeat = tweaked ? null : startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
+    if (!tweaked) try {
       // Generous budgets: with thinking off and the response streamed (no HTTP
       // timeout), the full budget is HTML — a whole multi-screen app mockup
       // (inline CSS + JS) is large, and under-budgeting is what truncated it
@@ -678,7 +721,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         failureDetail = res.error;
       }
     } finally {
-      heartbeat.stop();
+      if (heartbeat) heartbeat.stop();
     }
 
     if (isPlausibleMockup(html)) {

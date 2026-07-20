@@ -419,3 +419,30 @@ test('mockupRenderBudget: sized from the current document, floor 40k, ceiling 64
   // Monotonic in document size up to the ceiling.
   assert.ok(mockupRenderBudget(150000) >= mockupRenderBudget(120000));
 });
+
+test('stitchContinuation: overlap removal, fence stripping, restart adoption (prefill-free continuation)', async () => {
+  const { stitchContinuation, buildContinuationInstruction } = await import('../mock2/concept-logic.js');
+  const doc = '<!doctype html><html><body><section data-screen="A"><div class="card"><p>alpha beta gamma delta';
+  // Clean continuation appends verbatim.
+  assert.equal(stitchContinuation(doc, ' epsilon</p></div></section></body></html>').html,
+    doc + ' epsilon</p></div></section></body></html>');
+  // The model repeated some tail context — the overlap is removed once.
+  const overlapped = '<p>alpha beta gamma delta epsilon</p></div></section></body></html>';
+  const s = stitchContinuation(doc, overlapped);
+  assert.equal(s.html, doc + ' epsilon</p></div></section></body></html>');
+  assert.equal((s.html.match(/alpha beta gamma delta/g) || []).length, 1);
+  // Fences around the continuation are stripped before stitching.
+  assert.equal(stitchContinuation(doc, '```html\n epsilon</p></body></html>\n```').html,
+    doc + ' epsilon</p></body></html>');
+  // A full restart (model re-emitted the document) REPLACES the partial.
+  const fresh = '<!doctype html><html><body><main>v2</main></body></html>';
+  const r = stitchContinuation(doc, fresh);
+  assert.equal(r.restarted, true);
+  assert.equal(r.html, fresh);
+  // Tiny/no overlap just concatenates (no false positives under 12 chars).
+  assert.equal(stitchContinuation('abc', 'def').html, 'abcdef');
+  // The instruction anchors on the document tail and forbids repetition.
+  const instr = buildContinuationInstruction(doc);
+  assert.match(instr, /NO repetition/);
+  assert.ok(instr.includes('alpha beta gamma delta'));
+});

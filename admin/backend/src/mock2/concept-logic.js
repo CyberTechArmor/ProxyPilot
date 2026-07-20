@@ -492,6 +492,40 @@ export function mockupRenderBudget(currentHtmlLen = 0) {
   return Math.min(64000, Math.max(40000, estimated));
 }
 
+// stitchContinuation — join a truncated document with its continuation
+// reply. Prefill would make this trivial, but the render model rejects
+// assistant prefill ("This model does not support assistant message
+// prefill" — operator-hit HTTP 400), so continuation is asked for with an
+// instruction and the reply must be STITCHED defensively:
+//   - code fences around the continuation are stripped;
+//   - if the model restarted the whole document (contains <!doctype), the
+//     continuation REPLACES the partial;
+//   - otherwise the longest overlap between the document's tail and the
+//     continuation's head is removed (models often repeat a little context
+//     despite instructions), then the remainder is appended.
+export function stitchContinuation(doc, continuation) {
+  const d = String(doc || '');
+  let cont = String(continuation || '');
+  // Strip a leading fence LINE (up to and including its newline — no
+  // further: the continuation's own leading whitespace is meaningful) and a
+  // trailing fence.
+  cont = cont.replace(/^\s*```[a-z]*\r?\n/i, '').replace(/\n?```\s*$/, '');
+  if (/<!doctype html|<html[\s>]/i.test(cont)) return { html: cont, restarted: true };
+  const window = Math.min(4000, d.length, cont.length);
+  let k = 0;
+  for (let n = window; n >= 12; n--) {
+    if (d.endsWith(cont.slice(0, n))) { k = n; break; }
+  }
+  return { html: d + cont.slice(k), restarted: false };
+}
+
+// The continuation user turn. The tail anchor lets the model align its
+// output to the exact cut point.
+export function buildContinuationInstruction(docTail) {
+  return `Your previous message was cut off by the output limit before the document finished. CONTINUE the HTML document EXACTLY from the cut point — output ONLY the remaining characters of the document (finishing through </body></html>), with NO preamble, NO code fences, and NO repetition of content already sent. For alignment, the document currently ends with:
+${String(docTail || '').slice(-300)}`;
+}
+
 export function mockupRenderModel(env = {}, slotModel = '') {
   const v = String(env?.MOCK2_MOCKUP_MODEL ?? '').trim();
   if (v.toLowerCase() === 'slot') return slotModel || MOCKUP_PREFERRED_MODEL;

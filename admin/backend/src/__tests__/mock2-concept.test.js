@@ -131,9 +131,9 @@ test('inventoryCounts: totals screens, fields, actions', () => {
 // ---- chat → model transcript ----
 
 test('classifyConceptTurn: detects generate_mockup + pulls the brief (scope defaults full)', () => {
-  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form', scope: 'full' });
-  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full' });
-  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full' });
+  assert.deepEqual(classifyConceptTurn([{ name: 'generate_mockup', input: { brief: '  a form  ' } }]), { generateMockup: true, brief: 'a form', scope: 'full', screen: null });
+  assert.deepEqual(classifyConceptTurn([]), { generateMockup: false, brief: null, scope: 'full', screen: null });
+  assert.deepEqual(classifyConceptTurn([{ name: 'other' }]), { generateMockup: false, brief: null, scope: 'full', screen: null });
 });
 
 test('buildConceptTranscript: maps user/assistant, skips system, appends new user text', () => {
@@ -289,4 +289,32 @@ test('mockup tweak mode: scope classification, edit parse/apply, fallback signal
   assert.deepEqual(parseMockupEdits('FULL_RERENDER'), { ok: true, fullRerender: true, edits: [] });
   // Prose without blocks is unusable (falls back to the full renderer).
   assert.equal(parseMockupEdits('I changed the heading for you!').ok, false);
+});
+
+test('screen sections: contract in the prompt, find/replace/extract helpers', async () => {
+  const { buildMockupSystemPrompt, listScreenSections, findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt, classifyConceptTurn } = await import('../mock2/concept-logic.js');
+  assert.match(buildMockupSystemPrompt({}), /SCREEN SECTIONS \(structural contract\)/);
+  assert.match(buildScreenRenderSystemPrompt({ designSystem: 'DS' }), /ONLY the replacement <section>/);
+  assert.match(buildScreenRenderSystemPrompt({}), /attributes EXACTLY/);
+
+  const doc = '<!doctype html><html><body>'
+    + '<section data-screen="Kiosk" class="scr on"><h1>Kiosk v1</h1></section>'
+    + '<section data-screen="Staff Queue" class="scr"><h1>Staff v1</h1></section>'
+    + '</body></html>';
+  assert.deepEqual(listScreenSections(doc), ['Kiosk', 'Staff Queue']);
+  const f = findScreenSection(doc, 'Staff Queue');
+  assert.equal(f.ok, true);
+  assert.match(f.section, /Staff v1/);
+  assert.equal(findScreenSection(doc, 'Missing').ok, false);
+  const swapped = replaceScreenSection(doc, 'Kiosk', '<section data-screen="Kiosk" class="scr on"><h1>Kiosk v2</h1></section>');
+  assert.equal(swapped.ok, true);
+  assert.match(swapped.html, /Kiosk v2/);
+  assert.match(swapped.html, /Staff v1/); // other screens untouched
+  // Reply extraction strips fences/prose; missing section → null (fallback).
+  assert.match(extractSectionHtml('Here:\n```html\n<section data-screen="Kiosk">new</section>\n```', 'Kiosk'), /^<section data-screen="Kiosk">new<\/section>$/);
+  assert.equal(extractSectionHtml('I could not do that.', 'Kiosk'), null);
+  // Tool scope: 'screen' recognized with its screen name.
+  const c = classifyConceptTurn([{ name: 'generate_mockup', input: { brief: 'b', scope: 'screen', screen: 'Kiosk' } }]);
+  assert.equal(c.scope, 'screen');
+  assert.equal(c.screen, 'Kiosk');
 });

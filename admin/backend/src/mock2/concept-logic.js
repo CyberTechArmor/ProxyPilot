@@ -66,8 +66,12 @@ export const CONCEPT_CHAT_TOOLS = Object.freeze([
         },
         scope: {
           type: 'string',
-          enum: ['tweak', 'full'],
-          description: 'Size of the change. "tweak": a SMALL revision to the existing mockup (copy/labels, a color, one element) — applied as surgical edits at a fraction of the cost. "full": new screens, layout/structure changes, or the first mockup. Default "full"; when unsure, use "full".',
+          enum: ['tweak', 'screen', 'full'],
+          description: 'Size of the change. "tweak": a SMALL revision (copy/labels, a color, one element) — applied as surgical edits at a fraction of the cost. "screen": redesign or substantially change ONE screen — only that screen\'s section re-renders (name it in "screen"). "full": changes across screens, structural/navigation changes, or the first mockup. Default "full"; when unsure, use "full".',
+        },
+        screen: {
+          type: 'string',
+          description: 'With scope "screen": the exact data-screen name of the one screen being changed (must match a <section data-screen="…"> in the current mockup).',
         },
       },
       required: ['brief'],
@@ -111,11 +115,13 @@ What you do:
   system below. ${hasMockup ? 'A mockup already exists; describe it as a revision of the current one.' : 'No mockup exists yet; the first substantive idea should produce one.'}
 - Always ALSO reply to the Builder in plain, warm language — say what you changed
   or what you need, and remind them they can approve the design when it feels right.
-- COST-AWARE REVISIONS: for a SMALL change to the existing mockup — copy/label
-  edits, a color, one element — call generate_mockup with scope "tweak": it
-  applies surgical edits to the current file at a fraction of a re-render's
-  cost. Anything structural (new screens, layout changes, the first mockup)
-  uses scope "full". When unsure, "full".
+- COST-AWARE REVISIONS — pick the smallest scope that truly fits:
+  scope "tweak" for a SMALL change (copy/labels, a color, one element):
+  surgical edits at a fraction of a re-render's cost. scope "screen" when ONE
+  screen changes substantially (redesign this screen, add a section to it):
+  pass the screen's data-screen name in "screen" — only that section
+  re-renders. scope "full" for changes across screens, navigation/structure
+  changes, or the first mockup. When unsure, "full".
 
 THE BRIEF YOU WRITE IS THE DESIGN'S CEILING — extrapolate it like a multi-step
 domain expert on the Builder's behalf:
@@ -224,6 +230,65 @@ export function applyMockupEdits(html, edits = []) {
   return { ok: true, html: out };
 }
 
+// ---- per-SCREEN sections (targeted screen re-render + the section contract) ----
+// Mockups wrap each screen in <section data-screen="Name"> (prompt contract
+// above), so a screen-scoped revision re-renders ONE section instead of the
+// whole document — faster and far cheaper, while "global" changes still run
+// the full renderer.
+
+export function listScreenSections(html) {
+  return [...String(html || '').matchAll(/<section\b[^>]*data-screen="([^"]+)"/gi)].map((m) => m[1]);
+}
+
+export function findScreenSection(html, name) {
+  const s = String(html || '');
+  const esc = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<section\\b[^>]*data-screen="${esc}"[^>]*>`, 'i');
+  const m = re.exec(s);
+  if (!m) return { ok: false, error: `no section with data-screen="${name}"` };
+  const close = s.indexOf('</section>', m.index);
+  if (close === -1) return { ok: false, error: 'unterminated section' };
+  return { ok: true, start: m.index, end: close + '</section>'.length, section: s.slice(m.index, close + '</section>'.length) };
+}
+
+export function replaceScreenSection(html, name, replacement) {
+  const f = findScreenSection(html, name);
+  if (!f.ok) return f;
+  return { ok: true, html: String(html).slice(0, f.start) + String(replacement) + String(html).slice(f.end) };
+}
+
+// Pull the replacement <section> out of a screen-render reply (fences and
+// prose stripped); null when the reply holds no such section.
+export function extractSectionHtml(text, name) {
+  let s = String(text || '').trim();
+  const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(s);
+  if (fence) s = fence[1].trim();
+  const f = findScreenSection(s, name);
+  return f.ok ? f.section : null;
+}
+
+export function buildScreenRenderSystemPrompt({ designSystem = '' } = {}) {
+  return `You redesign ONE screen of an existing HTML mockup. You receive the full
+current document for context and a revision brief for a single screen.
+
+Output ONLY the replacement <section> element for that screen — starting with
+its opening <section …> tag and ending with </section>. No prose, no code
+fences, nothing outside the section.
+
+Rules:
+- Keep the opening <section> tag's attributes EXACTLY as they are in the
+  current document (data-screen name, ids, classes — the page's navigation
+  depends on them). Redesign only the CONTENTS.
+- Reuse the document's existing CSS classes and design tokens; a small scoped
+  <style> INSIDE the section is allowed for styles this screen alone needs.
+  Do not restyle other screens.
+- The design-craft bar applies: real iconography (inline SVG, never emoji),
+  hierarchy over boxes, one dominant primary action, hard states shown,
+  realistic sample data.
+- Stay consistent with the locked design system:
+${designSystem || '(design system content is still owed — risk R8)'}`;
+}
+
 // buildMockupSystemPrompt — the mockup slot's system prompt. It renders a single
 // self-contained HTML file that OBEYS the pinned design system. It gets no tools
 // and no container access; the orchestrator writes its output to a fixed path.
@@ -254,6 +319,13 @@ Hard requirements:
   data density is judged. Also show at least one designed EMPTY state (an
   icon, one line, and the next action) so the built app's day-one look is part
   of the approved design.
+- SCREEN SECTIONS (structural contract): wrap every distinct screen/view in
+  <section data-screen="Screen Name"> … </section> at the top level of <body>,
+  with unique human-readable names and NO nested <section> elements. The
+  in-page navigation shows/hides these sections; the first is visible by
+  default. Targeted revisions later re-render ONE section, so keep each
+  screen's markup self-contained inside its section (shared styles stay in
+  the document <style>).
 - RENDER-ON-LOAD: the first/default screen must be VISIBLE immediately from the
   HTML + CSS alone, before any JavaScript runs. Do NOT hide the initial content
   with an inline style/attribute that a <script> later reveals — if the script
@@ -681,13 +753,14 @@ export function classifyConceptTurn(toolCalls = []) {
     return {
       generateMockup: true,
       brief: String(gen.input?.brief || '').trim(),
-      // 'tweak' = surgical edits to the current mockup; anything else is a
-      // full render (safe default — a wrong 'full' costs money, a wrong
-      // 'tweak' falls back to full anyway).
-      scope: gen.input?.scope === 'tweak' ? 'tweak' : 'full',
+      // 'tweak' = surgical edits; 'screen' = one section re-renders; anything
+      // else is a full render (safe default — a wrong 'full' costs money, a
+      // wrong smaller scope falls back to full anyway).
+      scope: ['tweak', 'screen'].includes(gen.input?.scope) ? gen.input.scope : 'full',
+      screen: String(gen.input?.screen || '').trim() || null,
     };
   }
-  return { generateMockup: false, brief: null, scope: 'full' };
+  return { generateMockup: false, brief: null, scope: 'full', screen: null };
 }
 
 // buildConceptTranscript — the neutral transcript (model-client.js turn shapes)

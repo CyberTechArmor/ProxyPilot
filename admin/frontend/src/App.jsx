@@ -69,9 +69,6 @@ function App() {
         path="/login"
         element={isAuthenticated ? <Navigate to="/" replace /> : <Login />}
       />
-      {/* Public self-service page — gated by a provisioning API key, not a
-          dashboard session, so it renders outside ProtectedRoute/Layout. */}
-      <Route path="/add-domain" element={<AddDomain />} />
       <Route
         path="/"
         element={
@@ -97,6 +94,10 @@ function App() {
         <Route path="housekeeping" element={<Housekeeping />} />
         <Route path="notifications" element={<Notifications />} />
         <Route path="domains" element={<DomainProvisioning />} />
+        {/* Admin-gated: the page renders inside the dashboard shell and the
+            backend requires an admin session (or a provisioning API key for
+            scripted clients) on every /api/domains/provision request. */}
+        <Route path="add-domain" element={<AddDomain />} />
         {/* Mock2 dev/build module. The page self-guards: on a disabled or
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}

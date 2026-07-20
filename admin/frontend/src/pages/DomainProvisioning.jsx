@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -136,11 +137,11 @@ export default function DomainProvisioning() {
             <Globe className="h-6 w-6" /> Domain Provisioning
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Self-service HTTPS domains on the proxy. Users provision at{' '}
-            <a href="/add-domain" target="_blank" rel="noreferrer" className="underline inline-flex items-center gap-1">
-              /add-domain <ExternalLink className="h-3 w-3" />
-            </a>{' '}
-            with an access API key from below.
+            HTTPS domains on the proxy. Admins provision at{' '}
+            <Link to="/add-domain" className="underline inline-flex items-center gap-1">
+              Add Domain <ExternalLink className="h-3 w-3" />
+            </Link>
+            ; the API keys below authenticate scripted/API clients on the same endpoints.
           </p>
         </div>
         <div className="flex flex-col gap-1 text-xs text-muted-foreground">
@@ -164,7 +165,8 @@ export default function DomainProvisioning() {
             <KeyRound className="h-4 w-4" /> Access API keys
           </CardTitle>
           <CardDescription>
-            Application-level keys that unlock the Add Domain page. Stored hashed — each key is shown exactly once at creation.
+            Application-level keys for provisioning domains over the API (send as X-API-Key) — the Add Domain page itself
+            uses your admin session. Stored hashed; each key is shown exactly once at creation.
             These are ProxyPilot credentials, not Cloudflare tokens.
           </CardDescription>
         </CardHeader>

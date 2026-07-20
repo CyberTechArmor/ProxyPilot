@@ -22,6 +22,7 @@
 // Nothing here is named "agent".
 
 import { parseAttachmentsJson, publicAttachmentShape } from './chat-image-logic.js';
+import { MOCKUP_BASE_CSS, MOCKUP_THEME_TOGGLE_JS } from './mockup-template.js';
 
 // ---- in-repo paths (03-data-model.md: the concept stage lives in the repo) ----
 
@@ -395,6 +396,24 @@ same-weight pills/badges · uniform boxed cards + a single accent color + one
 radius everywhere (the generic-dashboard look) · internal/model language shown
 to end users · a layout that only works because there are exactly four rows of
 data.
+
+# Base token stylesheet (structural contract — include VERBATIM)
+Ignore any pre-existing theme, brand colors, or prior mockup styling; the
+design-system tokens replace them entirely. Light is the reference theme;
+render light first. Start your <style> with the stylesheet below EXACTLY as
+given, then append the mockup's own rules after it. :root carries the light
+values; [data-theme="dark"] carries the dark values; ship a header
+.theme-toggle button wired to toggleTheme() so the dark theme flips every
+surface. When the brief or the project's base theme overrides the look,
+RE-VALUE the custom properties inside the ==tokens== blocks (same property
+names, new values, BOTH themes, kept AA ≥ 4.5:1 — adjust lightness within-hue
+if needed, especially --text-3 and stage-badge text on dark surfaces). Never
+bypass var(--…) and never hard-code a hex color outside the ==tokens== blocks.
+
+${MOCKUP_BASE_CSS}
+
+Theme toggle script (include it and wire the toolbar button to it):
+${MOCKUP_THEME_TOGGLE_JS}
 
 # PRECEDENCE — the brief outranks the locked system (read before the system below)
 When the brief EXPLICITLY specifies visual language — color tokens, a palette,

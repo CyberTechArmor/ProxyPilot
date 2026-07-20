@@ -370,3 +370,20 @@ test('part 1 guardrail removal: no "obey EXACTLY", restyle strips inherited styl
   const chat = buildConceptChatSystemPrompt({ designSystem: 'DS', mode: 'design' });
   assert.match(chat, /# Default design system \(the Builder's explicit spec above outranks it\)/);
 });
+
+test('part 2 wiring: the render prompt carries the base token stylesheet and the override line', async () => {
+  const { buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
+  const { MOCKUP_BASE_CSS } = await import('../mock2/mockup-template.js');
+  const p = buildMockupSystemPrompt({ designSystem: 'DS' });
+  assert.match(p, /# Base token stylesheet \(structural contract — include VERBATIM\)/);
+  assert.match(p, /Ignore any pre-existing theme, brand colors, or prior mockup styling/);
+  assert.match(p, /Light is the reference theme;\s*\n?render light first/);
+  assert.ok(p.includes(MOCKUP_BASE_CSS), 'base stylesheet embedded verbatim');
+  assert.match(p, /toggleTheme/);
+  // Overrides re-value the properties — never bypass them.
+  assert.match(p, /RE-VALUE the custom properties/);
+  // Ordering: structural contract, then PRECEDENCE, then the default system.
+  const precedenceHeading = '# PRECEDENCE — the brief outranks the locked system';
+  assert.ok(p.indexOf('# Base token stylesheet') < p.indexOf(precedenceHeading));
+  assert.ok(p.indexOf(precedenceHeading) < p.indexOf('# Locked design system'));
+});

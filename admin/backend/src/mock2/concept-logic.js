@@ -415,6 +415,44 @@ ${MOCKUP_BASE_CSS}
 Theme toggle script (include it and wire the toolbar button to it):
 ${MOCKUP_THEME_TOGGLE_JS}
 
+# Defect-class hardening (binding — each rule closes an observed failure)
+- LIST ROWS: every list/table row uses the canonical .list-row 5-column grid —
+  Stage badge | Identity | Headline metric | Position | Lead · Updated. The
+  Identity cell stacks a .title over a one-line .value-statement (never
+  concatenate title + description inline); truncation comes from the base CSS
+  (nowrap + ellipsis + min-width:0). Columns must never overlap at any
+  viewport ≥ 1280px.
+- ONE METRIC PER ROW/CARD: exactly one .metric per list row — the
+  stage-appropriate headline (Ideation → projected impact est.; MVP → sites
+  piloting; Testing → validation coverage; Iterating → adoption %; Rollout →
+  units live "n of m"; Maintenance → sustained coverage). Format
+  value → unit → descriptor as .num / .unit / .desc. More metrics belong on
+  the detail page. No per-card progress bars in lists.
+- BARS CARRY DATA: every .bar binds its fill to a sample-data value via an
+  inline style="--fill:NN%" and sibling bars have visibly different lengths.
+  A bar with no value behind it must not be rendered — never a wall of empty
+  uniform tracks.
+- DETAIL SCREENS: mark them <section data-screen="…" data-kind="detail"> and
+  include ALL THREE bands, each wrapped in its marker: ① data-band="canvas" —
+  the opportunity canvas plus audience impact .bar rows with varied fills;
+  ② data-band="metrics" — metric .stat-tile row; ③ data-band="ladder" — the
+  rollout ladder (Site → POD → Region → All org with per-level counts, the
+  current frontier level accent-emphasized, and exactly ONE .btn-primary
+  "Promote to next level" — the page's only filled button) plus a readiness
+  checklist rendered as quiet .check-quiet rows.
+- STAGE BADGES: always .stage-badge plus its stage class (.stage-ideation,
+  .stage-mvp, .stage-testing, .stage-iterating, .stage-rollout,
+  .stage-maintenance) — the palette is complete; no stage may fall back to a
+  neutral/default color.
+- SAMPLE-DATA INTEGRITY: each entity appears in exactly ONE lifecycle stage
+  with one consistent description across all screens; attention chips (e.g.
+  "Roller unassigned") only where semantically valid for that stage;
+  in-progress stages show PARTIAL completion (100% belongs only to a
+  completed/maintenance stage).
+- ICONS: every inline <svg> is either aria-hidden="true" next to a text
+  label or carries a <title>. Never an unlabeled icon-only control; never an
+  always-visible filter pill bank (filters collapse behind one quiet menu).
+
 # PRECEDENCE — the brief outranks the locked system (read before the system below)
 When the brief EXPLICITLY specifies visual language — color tokens, a palette,
 light/dark theme, typography, spacing, per-state hues — those instructions are

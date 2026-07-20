@@ -387,3 +387,20 @@ test('part 2 wiring: the render prompt carries the base token stylesheet and the
   assert.ok(p.indexOf('# Base token stylesheet') < p.indexOf(precedenceHeading));
   assert.ok(p.indexOf(precedenceHeading) < p.indexOf('# Locked design system'));
 });
+
+test('part 3 wiring: the render prompt carries the defect-class hardening rules', async () => {
+  const { buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
+  const p = buildMockupSystemPrompt({ designSystem: 'DS' });
+  assert.match(p, /# Defect-class hardening/);
+  assert.match(p, /canonical \.list-row 5-column grid/);
+  assert.match(p, /never overlap at any\s+viewport ≥ 1280px/);
+  assert.match(p, /ONE METRIC PER ROW\/CARD/);
+  assert.match(p, /BARS CARRY DATA/);
+  assert.match(p, /must not be rendered/);
+  assert.match(p, /data-kind="detail"/);
+  assert.match(p, /data-band="ladder"/);
+  assert.match(p, /Promote to next level/);
+  assert.match(p, /no stage may fall back to a\s+neutral\/default color/);
+  assert.match(p, /exactly ONE lifecycle stage/);
+  assert.match(p, /100% belongs only to a\s+completed\/maintenance stage/);
+});

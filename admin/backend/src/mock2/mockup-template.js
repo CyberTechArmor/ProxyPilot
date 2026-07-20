@@ -100,7 +100,65 @@ h2 { font-size: 16px; font-weight: 600; margin: 0; }
 .btn-quiet {
   min-height: 44px; padding: 0 14px; border-radius: 10px; cursor: pointer;
   border: 1px solid var(--hairline); background: transparent; color: var(--text-2); font: inherit;
-}`;
+}
+/* Canonical list row — Stage badge | Identity | Headline metric | Position | Lead · Updated.
+   Identity gets minmax(0,1fr) + min-width:0 so the value statement TRUNCATES
+   instead of overlapping the metric column (the worst observed defect). */
+.list-row {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr) 190px 140px 170px;
+  gap: 16px; align-items: center;
+  padding: 12px 16px; background: var(--surface-1);
+  border-bottom: 1px solid var(--hairline);
+}
+.list-row > * { min-width: 0; }
+.identity .title { font-size: 16px; font-weight: 600; }
+.identity .value-statement {
+  font-size: 13px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 639px) {
+  .list-row { grid-template-columns: max-content minmax(0, 1fr); row-gap: 6px; align-items: start; }
+}
+/* Data-carrying bar — the fill binds to a value via --fill; a bar with no
+   value behind it is not rendered at all. */
+.bar { position: relative; height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.bar::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0;
+  width: var(--fill, 0%); border-radius: inherit; background: var(--accent);
+}
+/* Stage badges — the complete map; every stage resolves to its own hue pair,
+   no stage falls through to a neutral default. */
+.stage-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.stage-ideation { background: var(--stage-ideation-bg); color: var(--stage-ideation-text); }
+.stage-mvp { background: var(--stage-mvp-bg); color: var(--stage-mvp-text); }
+.stage-testing { background: var(--stage-testing-bg); color: var(--stage-testing-text); }
+.stage-iterating { background: var(--stage-iterating-bg); color: var(--stage-iterating-text); }
+.stage-rollout { background: var(--stage-rollout-bg); color: var(--stage-rollout-text); }
+.stage-maintenance { background: var(--stage-maintenance-bg); color: var(--stage-maintenance-text); }
+/* One metric per item, formatted value → unit → descriptor. */
+.metric { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.metric .num { font-size: 16px; font-weight: 600; }
+.metric .unit { font-size: 12px; color: var(--text-2); }
+.metric .desc { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; }
+/* Detail-page building blocks: stat tiles, attention chips, rollout ladder. */
+.stat-tile { padding: 16px; border-radius: 12px; background: var(--surface-2); }
+.chip-warn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+  border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--surface-2); color: var(--warn);
+}
+.ladder-level {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+  padding: 12px 16px; border-radius: 10px; background: var(--surface-2);
+}
+.ladder-level.frontier { background: var(--surface-1); outline: 2px solid var(--accent); }
+.check-quiet { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.check-quiet svg { color: var(--ok); }`;
 
 // The theme toggle behavior — flips data-theme on <html>. Light is the
 // reference theme (no attribute); the toggle adds/removes "dark".

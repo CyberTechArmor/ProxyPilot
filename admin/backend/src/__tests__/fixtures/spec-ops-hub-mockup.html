@@ -1,0 +1,332 @@
+<!doctype html>
+<!-- DESIGN RATIONALE: Spec Ops Hub is an operator surface scanned under time
+pressure — a practice-rollout portfolio for clinical ops leads. The list is
+built to answer one question per row (the stage-appropriate headline metric);
+the detail page is built to answer "is this ready to promote". Light is the
+reference theme (ward offices, daylight); dark derives for overnight
+leads. One accent (clinical teal) carries every action; stage hues are
+status, never decoration. This fixture doubles as the acceptance-check proof
+artifact — every color routes through the token custom properties. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spec Ops Hub — mockup fixture</title>
+<style>
+/* ==tokens== (the only place hex colors may appear) */
+:root {
+  --bg: #F6F8F8;
+  --surface-1: #FFFFFF;
+  --surface-2: #EFF3F3;
+  --surface-3: #E6EDEC;
+  --text-1: #16201F;
+  --text-2: #3F4F4D;
+  --text-3: #5F716E;
+  --hairline: rgba(22,32,31,.12);
+  --accent: #0F766E;
+  --accent-on: #FFFFFF;
+  --danger: #B42318;
+  --warn: #9A5B00;
+  --ok: #067647;
+  --shadow-1: 0 1px 2px rgba(22,32,31,.06), 0 6px 20px rgba(22,32,31,.07);
+  --stage-ideation-bg: #E7EBF0;
+  --stage-ideation-text: #44546A;
+  --stage-mvp-bg: #E6E9F9;
+  --stage-mvp-text: #3F48A8;
+  --stage-testing-bg: #F6EDD9;
+  --stage-testing-text: #7A5A14;
+  --stage-iterating-bg: #F6E7D9;
+  --stage-iterating-text: #8A4A1F;
+  --stage-rollout-bg: #DFF0ED;
+  --stage-rollout-text: #0E5F58;
+  --stage-maintenance-bg: #E3F0E5;
+  --stage-maintenance-text: #2E6B3B;
+}
+[data-theme="dark"] {
+  --bg: #101617;
+  --surface-1: #161D1E;
+  --surface-2: #1D2627;
+  --surface-3: #243030;
+  --text-1: #E6EBEA;
+  --text-2: #AEBCB9;
+  --text-3: #8FA09D;
+  --hairline: rgba(230,235,234,.12);
+  --accent: #3FB8AC;
+  --accent-on: #06201D;
+  --danger: #E5756A;
+  --warn: #E0A64E;
+  --ok: #58B98A;
+  --shadow-1: 0 1px 2px rgba(0,0,0,.5), 0 6px 20px rgba(0,0,0,.35);
+  --stage-ideation-bg: #232B36;
+  --stage-ideation-text: #AAB9CC;
+  --stage-mvp-bg: #262A4A;
+  --stage-mvp-text: #AEB6F2;
+  --stage-testing-bg: #37301B;
+  --stage-testing-text: #D9BA6E;
+  --stage-iterating-bg: #382A1E;
+  --stage-iterating-text: #DCA97C;
+  --stage-rollout-bg: #1C3330;
+  --stage-rollout-text: #82CCC2;
+  --stage-maintenance-bg: #223026;
+  --stage-maintenance-text: #96CDA5;
+}
+/* ==/tokens== */
+html { background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--text-1);
+  font-family: Manrope, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.surface { background: var(--surface-1); box-shadow: var(--shadow-1); border-radius: 12px; }
+.hairline { border-bottom: 1px solid var(--hairline); }
+h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+h2 { font-size: 16px; font-weight: 600; margin: 0; }
+.t-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); }
+.t-quiet { color: var(--text-2); }
+.t-faint { color: var(--text-3); }
+.num { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-toggle {
+  min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: 10px;
+  border: 1px solid var(--hairline); background: var(--surface-2);
+  color: var(--text-2); cursor: pointer; font: inherit;
+}
+.btn-primary {
+  min-height: 44px; padding: 0 18px; border: 0; border-radius: 10px;
+  background: var(--accent); color: var(--accent-on);
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+.btn-quiet {
+  min-height: 44px; padding: 0 14px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--hairline); background: transparent; color: var(--text-2); font: inherit;
+}
+/* Canonical list row — Stage badge | Identity | Headline metric | Position | Lead · Updated.
+   Identity gets minmax(0,1fr) + min-width:0 so the value statement TRUNCATES
+   instead of overlapping the metric column (the worst observed defect). */
+.list-row {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr) 190px 140px 170px;
+  gap: 16px; align-items: center;
+  padding: 12px 16px; background: var(--surface-1);
+  border-bottom: 1px solid var(--hairline);
+}
+.list-row > * { min-width: 0; }
+.identity .title { font-size: 16px; font-weight: 600; }
+.identity .value-statement {
+  font-size: 13px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 639px) {
+  .list-row { grid-template-columns: max-content minmax(0, 1fr); row-gap: 6px; align-items: start; }
+}
+/* Data-carrying bar — the fill binds to a value via --fill; a bar with no
+   value behind it is not rendered at all. */
+.bar { position: relative; height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.bar::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0;
+  width: var(--fill, 0%); border-radius: inherit; background: var(--accent);
+}
+/* Stage badges — the complete map; every stage resolves to its own hue pair,
+   no stage falls through to a neutral default. */
+.stage-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.stage-ideation { background: var(--stage-ideation-bg); color: var(--stage-ideation-text); }
+.stage-mvp { background: var(--stage-mvp-bg); color: var(--stage-mvp-text); }
+.stage-testing { background: var(--stage-testing-bg); color: var(--stage-testing-text); }
+.stage-iterating { background: var(--stage-iterating-bg); color: var(--stage-iterating-text); }
+.stage-rollout { background: var(--stage-rollout-bg); color: var(--stage-rollout-text); }
+.stage-maintenance { background: var(--stage-maintenance-bg); color: var(--stage-maintenance-text); }
+/* One metric per item, formatted value → unit → descriptor. */
+.metric { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.metric .num { font-size: 16px; font-weight: 600; }
+.metric .unit { font-size: 12px; color: var(--text-2); }
+.metric .desc { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; }
+/* Detail-page building blocks: stat tiles, attention chips, rollout ladder. */
+.stat-tile { padding: 16px; border-radius: 12px; background: var(--surface-2); }
+.chip-warn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+  border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--surface-2); color: var(--warn);
+}
+.ladder-level {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+  padding: 12px 16px; border-radius: 10px; background: var(--surface-2);
+}
+.ladder-level.frontier { background: var(--surface-1); outline: 2px solid var(--accent); }
+.check-quiet { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.check-quiet svg { color: var(--ok); }
+/* fixture-local layout — tokens only, zero hex */
+.wrap { max-width: 1120px; margin: 0 auto; padding: 24px 16px 48px; }
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 24px; }
+.toolbar h1 { margin-right: auto; }
+.list { border-radius: 12px; overflow: hidden; }
+.detail-grid { display: grid; grid-template-columns: 1fr; gap: 24px; }
+.band { padding: 20px; border-radius: 12px; }
+.impact-row { display: grid; grid-template-columns: 96px 1fr 48px; gap: 12px; align-items: center; margin-top: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.ladder { display: grid; gap: 8px; margin-top: 12px; }
+.checks { display: grid; gap: 8px; margin-top: 16px; }
+.detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+section[data-screen] { display: none; }
+section[data-screen].on { display: block; }
+@media (max-width: 639px) { .tiles { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="toolbar surface">
+    <h1>Spec Ops Hub</h1>
+    <button class="btn-quiet" id="nav-list" onclick="showScreen('Initiatives')">Initiatives</button>
+    <button class="btn-quiet" id="nav-detail" onclick="showScreen('Initiative detail')">Detail</button>
+    <button class="theme-toggle" onclick="toggleTheme()">Theme</button>
+  </header>
+
+  <section data-screen="Initiatives" class="on">
+    <div class="list surface">
+      <div class="list-row">
+        <span class="stage-badge stage-ideation">Ideation</span>
+        <div class="identity">
+          <div class="title">Async intake triage</div>
+          <div class="value-statement">Cut phone-tag on routine refill requests before they queue</div>
+        </div>
+        <span class="metric"><b class="num">42</b><span class="unit">hrs/wk</span><span class="desc">staff time reclaimed (proj.)</span></span>
+        <span class="t-quiet num">Site · Northgate</span>
+        <span class="t-faint">M. Okafor · 2d</span>
+      </div>
+      <div class="list-row">
+        <span class="stage-badge stage-mvp">MVP</span>
+        <div class="identity">
+          <div class="title">Barcode med checks</div>
+          <div class="value-statement">Scan-verify against the MAR at bedside before administration</div>
+        </div>
+        <span class="metric"><b class="num">3</b><span class="unit">sites</span><span class="desc">piloting</span></span>
+        <span class="t-quiet num">POD · North</span>
+        <span class="t-faint">J. Reyes · 5h</span>
+      </div>
+      <div class="list-row">
+        <span class="stage-badge stage-testing">Testing</span>
+        <div class="identity">
+          <div class="title">Shift-handoff scripts</div>
+          <div class="value-statement">Structured handoffs so nothing rides on memory at 7am</div>
+        </div>
+        <span class="metric"><b class="num">78</b><span class="unit">%</span><span class="desc">handoffs using script</span></span>
+        <span class="t-quiet num">POD · Central</span>
+        <span class="t-faint">A. Whitfield · 1d</span>
+      </div>
+      <div class="list-row">
+        <span class="stage-badge stage-iterating">Iterating</span>
+        <div class="identity">
+          <div class="title">Fall-risk rounding</div>
+          <div class="value-statement">Hourly rounding tuned to each unit's actual fall pattern</div>
+        </div>
+        <span class="metric"><b class="num">61</b><span class="unit">%</span><span class="desc">rooms rounded on time</span></span>
+        <span class="t-quiet num">Region · East</span>
+        <span class="t-faint">K. Tanaka · 3h</span>
+      </div>
+      <div class="list-row">
+        <span class="stage-badge stage-rollout">Rollout</span>
+        <div class="identity">
+          <div class="title">Rapid-response huddles <span class="chip-warn">Roller unassigned</span></div>
+          <div class="value-statement">Two-minute huddle when early-warning scores trip</div>
+        </div>
+        <span class="metric"><b class="num">8 of 12</b><span class="unit">PODs</span><span class="desc">live</span></span>
+        <span class="t-quiet num">Region · East</span>
+        <span class="t-faint">6d</span>
+      </div>
+      <div class="list-row">
+        <span class="stage-badge stage-maintenance">Maintenance</span>
+        <div class="identity">
+          <div class="title">Hand-hygiene audits</div>
+          <div class="value-statement">Passive audit loop keeping compliance from drifting</div>
+        </div>
+        <span class="metric"><b class="num">100</b><span class="unit">%</span><span class="desc">coverage sustained</span></span>
+        <span class="t-quiet num">All org</span>
+        <span class="t-faint">S. Adeyemi · 12d</span>
+      </div>
+    </div>
+  </section>
+
+  <section data-screen="Initiative detail" data-kind="detail">
+    <div class="detail-head" style="margin-bottom: 16px">
+      <span class="stage-badge stage-rollout">Rollout</span>
+      <h1>Rapid-response huddles</h1>
+      <span class="chip-warn">Roller unassigned</span>
+    </div>
+    <div class="detail-grid">
+      <div class="band surface" data-band="canvas">
+        <h2>Opportunity canvas</h2>
+        <p class="t-quiet">Two-minute huddle when early-warning scores trip — cut the distance between "the numbers moved" and "someone came".</p>
+        <div class="t-label" style="margin-top: 16px">Audience impact</div>
+          <div class="impact-row">
+            <span class="t-quiet">Nurses</span>
+            <div class="bar" style="--fill:82%"></div>
+            <span class="num t-faint">82%</span>
+          </div>
+          <div class="impact-row">
+            <span class="t-quiet">Physicians</span>
+            <div class="bar" style="--fill:54%"></div>
+            <span class="num t-faint">54%</span>
+          </div>
+          <div class="impact-row">
+            <span class="t-quiet">Techs</span>
+            <div class="bar" style="--fill:37%"></div>
+            <span class="num t-faint">37%</span>
+          </div>
+      </div>
+      <div class="band surface" data-band="metrics">
+        <h2>Outcomes so far</h2>
+        <div class="tiles">
+          <div class="stat-tile"><span class="metric"><b class="num">4.2</b><span class="unit">min</span><span class="desc">median response</span></span></div>
+          <div class="stat-tile"><span class="metric"><b class="num">31</b><span class="unit">%</span><span class="desc">fewer code events</span></span></div>
+          <div class="stat-tile"><span class="metric"><b class="num">12 of 12</b><span class="unit">PODs</span><span class="desc">trained</span></span></div>
+        </div>
+      </div>
+      <div class="band surface" data-band="ladder">
+        <h2>Rollout ladder</h2>
+        <div class="ladder">
+          <div class="ladder-level">
+            <span><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg> Site</span>
+            <span class="num t-quiet">1 of 1</span>
+          </div>
+          <div class="ladder-level frontier">
+            <span>POD</span>
+            <span class="num t-quiet">8 of 12</span>
+          </div>
+          <div class="ladder-level">
+            <span>Region</span>
+            <span class="num t-quiet">0 of 4</span>
+          </div>
+          <div class="ladder-level">
+            <span>All org</span>
+            <span class="num t-quiet">0 of 1</span>
+          </div>
+        </div>
+        <div class="checks">
+          <div class="check-quiet"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg> Training complete across the frontier PODs</div>
+          <div class="check-quiet"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg> Supplies staged at every station</div>
+          <div class="check-quiet"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg> Escalation path signed off by the region lead</div>
+        </div>
+        <div style="margin-top: 16px">
+          <button class="btn-primary">Promote to next level</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+function toggleTheme() {
+  var r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'dark' ? '' : 'dark';
+}
+function showScreen(name) {
+  document.querySelectorAll('section[data-screen]').forEach(function (s) {
+    s.classList.toggle('on', s.dataset.screen === name);
+  });
+}
+</script>
+</body>
+</html>

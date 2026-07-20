@@ -59,6 +59,7 @@ import {
   designImportRecord, parseDesignImport, buildInitialBuildInstruction,
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
+import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
@@ -811,6 +812,13 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         updateProject(projectId, { current_mockup_id: mockupId, last_activity_at: nowIso() });
         mockupNote = 'Updated the mockup — it is live in the preview.';
         mockupSystemNote = `${mockupNote}${sha ? ` (checkpoint ${sha.slice(0, 8)})` : ''}`;
+        // Acceptance-check lint (design-system §7) — ADVISORY: findings ride
+        // the system note so regressions surface before a human reviews, but
+        // a flagged mockup still saves (the Builder judges the design).
+        try {
+          const checksLine = mockupChecksNote(runMockupChecks(html));
+          if (checksLine) mockupSystemNote += ` ${checksLine}`;
+        } catch { /* lint must never break a save */ }
       } else {
         mockupSystemNote = `The mockup couldn't be saved: ${w1.error || w2.error}`;
       }

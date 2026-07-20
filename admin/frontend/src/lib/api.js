@@ -1427,6 +1427,21 @@ export const api = {
   // Skip the mockup — lock the design stage empty and build on the base app.
   mock2SkipDesign: (id) =>
     request(`/mock2/projects/${id}/design/skip`, { method: 'POST' }),
+  // Fire-and-forget: queue a design action while the project is provisioning;
+  // it runs automatically the moment provisioning completes.
+  mock2QueueDesign: (id, { kind, message = '', mode = null, design = null, images = null }) =>
+    request(`/mock2/projects/${id}/design-queue`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind,
+        ...(message ? { message } : {}),
+        ...(mode ? { mode } : {}),
+        ...(design ? { design } : {}),
+        ...(images?.length ? { images } : {}),
+      }),
+    }),
+  mock2CancelQueuedDesign: (id) =>
+    request(`/mock2/projects/${id}/design-queue`, { method: 'DELETE' }),
   // Retry the provision-time base-app deploy (repairs missing component deps
   // first). Used when the base app failed to deploy and no build cycle exists
   // to retry-deploy from.

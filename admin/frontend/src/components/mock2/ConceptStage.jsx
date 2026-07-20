@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import {
   Loader2, Send, CheckCircle2, Sparkles, Lock, ClipboardList, Download, FileUp, FolderGit2,
-  ChevronDown, ChevronUp, Rocket,
+  ChevronDown, ChevronUp, Rocket, X, Clock3,
 } from 'lucide-react';
 import { ChatBubble, RuleQuestion, StreamingBubble } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
@@ -359,6 +359,52 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // provisions or the model works, and press Send once it unlocks.
   const sendDisabled = busy || jobActive || !online || approved;
 
+  // ---- fire-and-forget while provisioning ----
+  // Offline pre-approval, both actions QUEUE instead of being dead: the queued
+  // action runs server-side the moment provisioning completes (design_send →
+  // the first concept turn; skip_mockup → design locked + the typed brief runs
+  // as the first quick build). queuedLocal gives instant feedback; the parent's
+  // project poll replaces it with the server's pending_design.
+  const canQueue = editable && !online && !approved;
+  const [queuedLocal, setQueuedLocal] = useState(null);
+  const pendingDesign = project?.pending_design || queuedLocal;
+  const queueAction = async (kind) => {
+    const text = message.trim();
+    if (kind === 'design_send' && !text) return;
+    setBusy(true);
+    try {
+      const res = await api.mock2QueueDesign(projectId, {
+        kind, message: text,
+        mode: kind === 'design_send' ? mode : null,
+        design: kind === 'design_send' && mode === 'design' ? designDirection : null,
+        images: toWireImages(attach.images),
+      });
+      setQueuedLocal(res.pending || { kind, text_preview: text.slice(0, 140) });
+      setMessage('');
+      attach.clear();
+      toast({
+        title: 'Queued — fire and forget',
+        description: kind === 'skip_mockup'
+          ? (text ? 'When provisioning finishes: the mockup is skipped and your request builds as the first Quick update. You can leave.' : 'When provisioning finishes, the mockup is skipped — the base app is yours. You can leave.')
+          : 'Your design message sends itself the moment provisioning finishes — you can leave.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not queue', description: err.message });
+    } finally { setBusy(false); }
+  };
+  const cancelQueuedDesign = async () => {
+    try {
+      await api.mock2CancelQueuedDesign(projectId);
+      setQueuedLocal(null);
+      toast({ title: 'Queued action cancelled' });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not cancel', description: err.message });
+    }
+  };
+  // Once online the server has consumed (run) the pending action — drop the
+  // local echo so the strip doesn't linger.
+  useEffect(() => { if (online) setQueuedLocal(null); }, [online]);
+
   return (
     // Archived (Details tab): the card SIZES TO ITS CONTENT — the conversation
     // box below owns the height and scroll, so nothing spills into the page.
@@ -509,6 +555,22 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
         {/* Composer (editors, online, before approval) */}
         {editable && !approved ? (
           <div className="space-y-2 shrink-0">
+            {/* Fire-and-forget strip: the action queued while provisioning. */}
+            {!online && pendingDesign ? (
+              <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 p-2.5 text-xs">
+                <Clock3 className="h-4 w-4 shrink-0 text-primary" />
+                <span className="min-w-0 flex-1 break-words">
+                  Runs the moment provisioning finishes:{' '}
+                  {pendingDesign.kind === 'skip_mockup'
+                    ? (pendingDesign.text_preview ? <>skip the mockup, then build “{pendingDesign.text_preview}” as the first Quick update</> : 'skip the mockup')
+                    : <>send “{pendingDesign.text_preview}” to the design partner</>}
+                  {' '}— you can close this page.
+                </span>
+                <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-red-500" onClick={cancelQueuedDesign} aria-label="Cancel the queued action">
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : null}
             <textarea
               className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
               placeholder={online
@@ -517,7 +579,10 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               value={message}
               onChange={(e) => { setMessage(e.target.value); onTyping(); }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  if (canQueue) queueAction('design_send'); else send();
+                }
               }}
               onPaste={attach.handlePaste}
               onDrop={attach.handleDrop}
@@ -581,15 +646,28 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
                   <Rocket className="h-4 w-4 mr-1" /> Skip mockup
                 </Button>
               ) : null}
+              {canQueue ? (
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  disabled={busy}
+                  title="Fire and forget: when provisioning finishes, the mockup is skipped — and anything typed above builds as the first Quick update"
+                  onClick={() => queueAction('skip_mockup')}
+                >
+                  <Rocket className="h-4 w-4 mr-1" /> Queue skip
+                </Button>
+              ) : null}
               <span className="text-[11px] text-muted-foreground hidden sm:block ml-auto">⌘/Ctrl+Enter to send</span>
               <Button
                 className="h-11 sm:h-10 ml-auto sm:ml-0"
-                disabled={sendDisabled || !message.trim()}
-                title={!online ? 'Sending unlocks when the project is online' : undefined}
-                onClick={send}
+                disabled={(canQueue ? busy : sendDisabled) || !message.trim()}
+                title={!online
+                  ? (canQueue ? 'Queues now, sends itself the moment provisioning finishes — fire and forget' : 'Sending unlocks when the project is online')
+                  : undefined}
+                onClick={canQueue ? () => queueAction('design_send') : send}
               >
-                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
-                Send
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : (canQueue ? <Clock3 className="h-4 w-4 mr-1" /> : <Send className="h-4 w-4 mr-1" />)}
+                {canQueue ? 'Queue send' : 'Send'}
               </Button>
             </div>
           </div>

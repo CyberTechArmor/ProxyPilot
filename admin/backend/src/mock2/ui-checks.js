@@ -157,7 +157,9 @@ export async function runUiChecks({ baseUrl, spec, checks }) {
           if (msg.type() !== 'error') return;
           const src = String(msg.location()?.url || '');
           if (/failed to load resource/i.test(msg.text()) && /favicon\.ico(\?|$)/i.test(src)) return;
-          result.consoleErrors.push(msg.text().slice(0, 300));
+          // Carry the failing URL — "Failed to load resource: 404" without the
+          // resource is undiagnosable (req: a smoke failure nobody could act on).
+          result.consoleErrors.push(`${msg.text()}${src ? ` [${src}]` : ''}`.slice(0, 300));
         });
         page.on('pageerror', (err) => { result.consoleErrors.push(String(err?.message || err).slice(0, 300)); });
 

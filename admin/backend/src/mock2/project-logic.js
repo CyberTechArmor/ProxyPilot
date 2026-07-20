@@ -256,6 +256,20 @@ export function publicProjectShape(project, extra = {}) {
     // Domain-suggestion handling ('off'|'ask'|'auto', migration 539); rows
     // predating the column normalize to the 'ask' default.
     suggest_mode: ['off', 'ask', 'auto'].includes(project.suggest_mode) ? project.suggest_mode : 'ask',
+    // The design action queued during provisioning (migration 540) — compact
+    // preview only; consumed server-side the moment provisioning completes.
+    pending_design: (() => {
+      try {
+        const d = project.pending_design_json ? JSON.parse(project.pending_design_json) : null;
+        return d ? {
+          kind: d.kind,
+          mode: d.mode || 'design',
+          text_preview: String(d.text || '').slice(0, 140),
+          has_images: (d.attachments || []).length > 0,
+          created_at: d.created_at || null,
+        } : null;
+      } catch { return null; }
+    })(),
     // M7 concept stage: the persistent stage indicator (Concept → Define →
     // Build → Run), the design-approval sign-off, and the live mockup preview
     // URL (the dashboard's own /mockup-preview route). preview_url is null

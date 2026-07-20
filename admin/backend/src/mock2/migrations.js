@@ -1459,4 +1459,17 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Fire-and-forget project start: the design action (send the brief /
+    // skip the mockup) queued WHILE the project is still provisioning, run
+    // automatically the moment provisioning completes. One pending action per
+    // project (the latest wins); consumed on execution.
+    version: 540,
+    name: 'mock2_projects_pending_design',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN pending_design_json TEXT;
+      `);
+    },
+  },
 ];

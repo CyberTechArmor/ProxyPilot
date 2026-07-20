@@ -32,14 +32,21 @@ dashboard's **Domains** page (`/domains`). Keys are scoped
 2. **Let's Encrypt via Cloudflare DNS-01 (opt-in)** — for wildcards and
    geo-blocked/firewalled domains. DNS validation makes **no inbound HTTP
    request** to the origin. Requires:
-   * Caddy built with the Cloudflare provider:
-     `caddy add-package github.com/caddy-dns/cloudflare`
-     (the stock binary lacks it; ProxyPilot checks and refuses DNS-01
-     provisioning with that exact instruction until it's present).
+   * Caddy built with the Cloudflare provider — install it with one click
+     on the Domains page (Cloudflare connection → **Install plugin**; runs
+     `caddy add-package github.com/caddy-dns/cloudflare` on the host and
+     restarts Caddy). A marker file
+     (`/var/lib/proxypilot/caddy-cloudflare-plugin.enabled`) makes
+     `update.sh` RE-install the plugin automatically after caddy package
+     upgrades, which replace the binary and drop add-on packages; site
+     files using `dns cloudflare` also trigger the re-install (covers a
+     restore onto a fresh host).
    * A Cloudflare token scoped **Zone → DNS → Edit** + **Zone → Zone →
-     Read** for the relevant zone(s) — either the server-wide
-     `CLOUDFLARE_API_TOKEN` env var (global default) or a per-domain token
-     entered on the form (stored per-domain, for zones in other accounts).
+     Read** for the relevant zone(s). Save the global token on the Domains
+     page (Cloudflare connection card — stored encrypted, write-only); the
+     `CLOUDFLARE_API_TOKEN` env var remains as a fallback. A per-domain
+     token on the Add Domain form overrides both (for zones in other
+     accounts).
 
 ### Method selection (resolved per submission, in this order)
 

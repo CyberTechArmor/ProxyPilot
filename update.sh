@@ -314,6 +314,35 @@ sync_mock2_infra() {
     ensure_mock2_infra "$deployed"
 }
 
+# ensure_caddy_cloudflare_plugin: keep the Caddy Cloudflare DNS provider
+# installed on hosts that use it. Wanted when the dashboard wrote the marker
+# (installing it from the Domains page does that) OR any managed site file
+# already references `dns cloudflare`. Idempotent: no-op when the module is
+# already compiled in, when caddy is absent, or when nothing wants it.
+ensure_caddy_cloudflare_plugin() {
+    command -v caddy >/dev/null 2>&1 || return 0
+    local marker="/var/lib/proxypilot/caddy-cloudflare-plugin.enabled"
+    local wanted=""
+    [ -f "$marker" ] && wanted="marker"
+    if [ -z "$wanted" ] && grep -rqs 'dns cloudflare' /etc/caddy/sites /etc/caddy/custom 2>/dev/null; then
+        wanted="site files"
+    fi
+    [ -n "$wanted" ] || return 0
+    if caddy list-modules 2>/dev/null | grep -q 'dns\.providers\.cloudflare'; then
+        log_verbose "Caddy Cloudflare DNS plugin already installed"
+        return 0
+    fi
+    log "${BLUE}Installing the Caddy Cloudflare DNS plugin (wanted by ${wanted}; a caddy upgrade removes add-on packages)...${NC}"
+    if caddy add-package github.com/caddy-dns/cloudflare >/dev/null 2>&1; then
+        systemctl restart caddy 2>/dev/null || true
+        log "${GREEN}Caddy Cloudflare DNS plugin installed and Caddy restarted.${NC}"
+    else
+        log "${YELLOW}Could not install the Caddy Cloudflare DNS plugin automatically.${NC}"
+        log "${YELLOW}DNS-01 certificate issuance/renewal will fail until it is installed:${NC}"
+        log "${YELLOW}  caddy add-package github.com/caddy-dns/cloudflare && systemctl restart caddy${NC}"
+    fi
+}
+
 # retrofit_smoke_browser: make the Mock2 browser smoke connector RUNNABLE and
 # re-enable it. Historically SMOKE_BROWSER_ENABLED got set to 0/false because
 # the connector could never run (playwright wasn't a dependency and no Chromium
@@ -776,6 +805,13 @@ sync_mock2_infra
 # dashboard toggle (Admin queue → Browser verification) is the operator's
 # switch from here on and overrides the env either way.
 retrofit_smoke_browser
+# Caddy Cloudflare DNS plugin (domain provisioning, DNS-01 method): a caddy
+# package upgrade replaces the binary and silently DROPS add-on packages, so
+# re-install it whenever this host wants it — the marker file is written when
+# the plugin is installed from the dashboard (Domains page), and any existing
+# site file using `dns cloudflare` proves it is load-bearing even without the
+# marker (e.g. a restore onto a fresh host).
+ensure_caddy_cloudflare_plugin
 
 # Get new version
 NEW_VERSION=$($NODE_CMD -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")

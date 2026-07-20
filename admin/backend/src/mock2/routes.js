@@ -955,6 +955,15 @@ export function createMock2Router() {
 
   router.get('/projects/:id', requireMock2Role('viewer'), (req, res) => {
     const project = req.mock2Project;
+    // Self-heal: an ACTIVE project still carrying a queued design action means
+    // the provision-tail hook never ran (backend restarted mid-provision — an
+    // update.sh deploy kills the in-flight function). Fire it now; the runner
+    // consumes-first and holds an in-process guard, so polls can't double-run.
+    if (project.lifecycle === 'active' && project.pending_design_json) {
+      import('./pending-design.js')
+        .then((m) => m.runPendingDesignSafe(project.id))
+        .catch((e) => console.warn('[mock2] pending-design sweep failed:', e?.message));
+    }
     const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
     shaped.members = listMembers(project.id).map((m) => {
       const u = lookupUser(m.user_id);

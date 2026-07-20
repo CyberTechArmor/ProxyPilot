@@ -372,8 +372,8 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   // the typed brief as the first quick build). Best-effort; every outcome
   // lands in the chat.
   try {
-    const { runPendingDesign } = await import('./pending-design.js');
-    await runPendingDesign(projectId);
+    const { runPendingDesignSafe } = await import('./pending-design.js');
+    await runPendingDesignSafe(projectId);
   } catch (e) { console.warn('[mock2] pending design action failed:', e?.message); }
   scheduleCleanup(projectId);
 }

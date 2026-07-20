@@ -157,9 +157,18 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
     }
   };
 
-  // Keep the newest message in view (including the streaming reply as it grows).
+  // Land on the TOP of the newest message, not its end — a long reply read
+  // from the bottom means scrolling back up to find its start (user report).
+  // While a reply streams this keeps its first line pinned in view.
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    // Skip trailing status rows ("Thinking…") — the target is the newest real
+    // message (or the streaming bubble), read from its first line.
+    const kids = [...el.children].filter((k) => !k.hasAttribute('data-scroll-skip'));
+    const last = kids[kids.length - 1];
+    if (!last) return;
+    el.scrollTop = Math.max(0, last.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 8);
   }, [data?.messages?.length, data?.job?.phase, data?.job?.partial?.length]);
 
   const stage = data?.stage || project?.stage;
@@ -511,7 +520,12 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
         <div
           ref={scrollRef}
           className={`space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3 ${
-            archived ? (archiveExpanded ? 'h-[40rem]' : 'h-[20rem]') : 'flex-1 min-h-0'
+            archived
+              ? (archiveExpanded ? 'h-[40rem]' : 'h-[20rem]')
+              // ONE size: the box fills its column but never grows past ~60vh —
+              // long conversations scroll INSIDE it instead of stretching the
+              // page (user report: the chat kept resizing as replies landed).
+              : 'flex-1 min-h-[16rem] max-h-[60vh]'
           }`}
         >
           {shownMessages.length === 0 ? (
@@ -556,7 +570,7 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               design…") still matters even while the reply text is visible. */}
           {!archived && jobPartial ? <StreamingBubble text={jobPartial} /> : null}
           {!archived && (jobActive || auditActive) ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
+            <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               {data?.job?.message || auditJob?.message || 'Working…'}
             </div>

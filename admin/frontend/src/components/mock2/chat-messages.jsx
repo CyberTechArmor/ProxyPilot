@@ -232,7 +232,10 @@ export function ChatMessageList({
   return (
     <div
       ref={scrollRef}
-      className="flex-1 min-h-0 space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
+      // ONE size: fills its column but never grows past ~60vh on small screens
+      // (the lg build layout is already height-constrained) — long chats
+      // scroll inside the box, not the page.
+      className="flex-1 min-h-[16rem] max-h-[60vh] lg:max-h-none space-y-2 overflow-y-auto rounded-lg border bg-background/40 p-3"
     >
       {messages.length === 0 && !partialText ? (
         <p className="text-sm text-muted-foreground text-center py-6">{emptyLabel}</p>
@@ -245,7 +248,7 @@ export function ChatMessageList({
       )}
       {working && partialText ? <StreamingBubble text={partialText} /> : null}
       {working && !partialText ? (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
+        <div data-scroll-skip className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           {workingLabel}
         </div>

@@ -140,7 +140,7 @@ function findValidLoginLink(token) {
   const link = db.prepare('SELECT * FROM user_login_links WHERE token_hash = ?').get(tokenHash);
   if (!link || link.completed_at) return null;
   if (new Date(link.expires_at).getTime() < Date.now()) return null;
-  const user = db.prepare("SELECT id, username, auth_source FROM users WHERE id = ?").get(link.user_id);
+  const user = db.prepare("SELECT id, username, display_name, auth_source FROM users WHERE id = ?").get(link.user_id);
   if (!user || (user.auth_source || 'local') !== 'local') return null;
   return { link, user };
 }
@@ -150,7 +150,9 @@ function findValidLoginLink(token) {
 authRouter.get('/link/status', (req, res) => {
   try {
     const hit = findValidLoginLink(String(req.query.token || ''));
-    res.json(hit ? { valid: true, username: hit.user.username } : { valid: false });
+    res.json(hit
+      ? { valid: true, username: hit.user.username, displayName: hit.user.display_name || null }
+      : { valid: false });
   } catch (error) {
     console.error('Error checking sign-in link:', error);
     res.status(500).json({ error: 'Failed to check the sign-in link' });

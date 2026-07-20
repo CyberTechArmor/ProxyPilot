@@ -241,6 +241,14 @@ export function listMembers(projectId) {
     .all(projectId);
 }
 
+// Every project membership one USER holds — the dashboard's Access Control
+// dialog lists projects alongside services.
+export function listUserMemberships(userId) {
+  return getMock2Db()
+    .prepare(`SELECT project_id, role FROM mock2_project_members WHERE user_id = ?`)
+    .all(String(userId));
+}
+
 export function getMembership(projectId, userId) {
   return getMock2Db()
     .prepare(`SELECT * FROM mock2_project_members WHERE project_id = ? AND user_id = ?`)

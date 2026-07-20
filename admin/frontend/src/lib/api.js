@@ -1142,6 +1142,8 @@ export const api = {
   // Mock2 projects (Phase M2). Create is admin-gated + provisions async
   // (202 → poll provision-status); delete requires sudo.
   mock2ListProjects: () => request('/mock2/projects'),
+  // One user's memberships across all projects (Access Control dialog).
+  mock2UserMemberships: (userId) => request(`/mock2/user-memberships/${userId}`),
   mock2GetProject: (id) => request(`/mock2/projects/${id}`),
   // Curated base-design presets for the new-project picker.
   mock2DesignPresets: () => request('/mock2/design-presets'),

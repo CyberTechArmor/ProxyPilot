@@ -89,3 +89,33 @@ test('askCommandAllowed: runs tests/curl/queries and operational actions, refuse
   assert.equal(askCommandAllowed('psql -c "DROP TABLE users"').ok, false);
   assert.equal(askCommandAllowed('psql -c "truncate table sessions"').ok, false);
 });
+
+test('ask context block: recent conversation rides the first turn; drafting rule present', async () => {
+  const { buildAskContextBlock, buildAskSystemPrompt, ASK_CONTEXT_MAX_MESSAGES } = await import('../mock2/ask-logic.js');
+  // The user report: "write the prompt for all of that" answered "there's no
+  // prior request in our conversation" because every ask started blank.
+  const block = buildAskContextBlock([
+    { kind: 'user', body: 'what would round out the timesheet feature?' },
+    { kind: 'assistant', body: '1. Multiple shifts per day 2. PTO 3. Export CSV' },
+    { kind: 'rule_question', body: 'never included' },
+    { kind: 'system', body: 'Build finished.' },
+  ]);
+  assert.match(block, /Recent build-chat conversation/);
+  assert.match(block, /User: what would round out/);
+  assert.match(block, /Assistant \(you\): 1\. Multiple shifts/);
+  assert.match(block, /System: Build finished\./);
+  assert.ok(!block.includes('never included'), 'non-conversation kinds excluded');
+  // Empty history renders nothing (older projects pay zero tokens).
+  assert.equal(buildAskContextBlock([]), '');
+  assert.equal(buildAskContextBlock(null), '');
+  // Bounded: a flood of messages keeps only the newest window.
+  const many = buildAskContextBlock(Array.from({ length: 40 }, (_, i) => ({ kind: 'user', body: `msg ${i}` })));
+  assert.ok(!many.includes('msg 0'));
+  assert.ok(many.includes(`msg 39`));
+  assert.ok(ASK_CONTEXT_MAX_MESSAGES >= 8);
+  // The prompt now allows drafting prompts/specs (the refusal in the user's
+  // screenshot) while still forbidding code changes.
+  const sys = buildAskSystemPrompt({ projectName: 'x' });
+  assert.match(sys, /DRAFTING TEXT IS ALWAYS FINE/);
+  assert.match(sys, /Do NOT modify the CODE/);
+});

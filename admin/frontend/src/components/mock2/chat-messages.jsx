@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, CheckCircle2, HelpCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, HelpCircle, Zap } from 'lucide-react';
 import ExplainThis from './ExplainThis';
 import Markdown from './Markdown';
 import { chatImageUrl } from '@/lib/chat-images';
@@ -124,13 +124,36 @@ function AttachmentThumbs({ m, projectId, mine }) {
   );
 }
 
-export function ChatBubble({ m, projectId = null }) {
+// The "turn this message into a build" chip: distills the message into a
+// well-formed prompt server-side and runs it through the normal quick lane.
+function QuickUpdateChip({ m, onQuickUpdate, busyId }) {
+  if (!onQuickUpdate) return null;
+  const thisBusy = busyId === m.id;
+  return (
+    <button
+      type="button"
+      className="mt-1.5 inline-flex h-9 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-[11px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
+      disabled={busyId != null}
+      onClick={() => onQuickUpdate(m)}
+      title="Turn this message into a well-formed prompt and run it as a Quick update"
+    >
+      {thisBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+      {thisBusy ? 'Composing the prompt…' : 'Build this as a Quick update'}
+    </button>
+  );
+}
+
+export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null }) {
   if (m.kind === 'system') {
+    // Long system messages (a design review's findings, a split plan) are
+    // buildable too; short status pills ("Screen built…") stay button-free.
+    const buildable = onQuickUpdate && String(m.body || '').length >= 120;
     return (
-      <div className="flex justify-center">
+      <div className="flex flex-col items-center">
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
           {m.body}
         </p>
+        {buildable ? <QuickUpdateChip m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} /> : null}
       </div>
     );
   }
@@ -148,7 +171,7 @@ export function ChatBubble({ m, projectId = null }) {
   }
   const mine = m.kind === 'user';
   return (
-    <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
       <div
         className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm break-words ${
           mine ? 'whitespace-pre-wrap bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm'
@@ -171,6 +194,12 @@ export function ChatBubble({ m, projectId = null }) {
           </span>
         ) : null}
       </div>
+      {/* Assistant answers (improvement lists, plans, specs) can become builds
+          in one tap — the distiller writes the prompt the user was composing
+          by hand ("please write the prompt for all of that"). */}
+      {!mine && m.kind === 'assistant' ? (
+        <QuickUpdateChip m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} />
+      ) : null}
     </div>
   );
 }
@@ -197,7 +226,7 @@ export function StreamingBubble({ text }) {
 export function ChatMessageList({
   scrollRef, messages = [], openIds, canEdit, answering, onAnswer,
   working = false, workingLabel = 'Working…', emptyLabel, projectId = null,
-  partialText = null,
+  partialText = null, onQuickUpdate = null, quickBusyId = null,
 }) {
   const open = openIds instanceof Set ? openIds : new Set(openIds || []);
   return (
@@ -211,7 +240,7 @@ export function ChatMessageList({
         messages.map((m) => (
           m.kind === 'rule_question'
             ? <RuleQuestion key={m.id} m={m} open={open.has(m.question_id)} canEdit={canEdit} busy={answering} onAnswer={onAnswer} projectId={projectId} />
-            : <ChatBubble key={m.id} m={m} projectId={projectId} />
+            : <ChatBubble key={m.id} m={m} projectId={projectId} onQuickUpdate={onQuickUpdate} quickBusyId={quickBusyId} />
         ))
       )}
       {working && partialText ? <StreamingBubble text={partialText} /> : null}

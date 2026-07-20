@@ -581,6 +581,11 @@ export const api = {
     body: '{}',
   }),
 
+  // One-time sign-in link: the user opens it, sets their own password, signs in.
+  createUserLoginLink: (id) => request(`/user/users/${id}/login-link`, { method: 'POST' }),
+  authLinkStatus: (token) => request(`/auth/link/status?token=${encodeURIComponent(token)}`),
+  authLinkComplete: (token, newPassword) =>
+    request('/auth/link/complete', { method: 'POST', body: JSON.stringify({ token, newPassword }) }),
   getUserAccess: (id) => request(`/user/users/${id}/access`),
 
   updateUserAccess: (id, access) => request(`/user/users/${id}/access`, {

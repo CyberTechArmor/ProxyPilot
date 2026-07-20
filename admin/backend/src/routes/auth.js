@@ -131,6 +131,61 @@ function clearAuthCookies(res) {
 
 export const authRouter = Router();
 
+// ---- One-time sign-in links (issued from User Management, migration 603) ----
+
+function findValidLoginLink(token) {
+  if (!token || String(token).length < 10) return null;
+  const db = getDb();
+  const tokenHash = crypto.createHash('sha256').update(String(token)).digest('hex');
+  const link = db.prepare('SELECT * FROM user_login_links WHERE token_hash = ?').get(tokenHash);
+  if (!link || link.completed_at) return null;
+  if (new Date(link.expires_at).getTime() < Date.now()) return null;
+  const user = db.prepare("SELECT id, username, auth_source FROM users WHERE id = ?").get(link.user_id);
+  if (!user || (user.auth_source || 'local') !== 'local') return null;
+  return { link, user };
+}
+
+// NON-consuming by design: email/SMS link previewers prefetch URLs, so a GET
+// must never spend the link — it is consumed only when the password is set.
+authRouter.get('/link/status', (req, res) => {
+  try {
+    const hit = findValidLoginLink(String(req.query.token || ''));
+    res.json(hit ? { valid: true, username: hit.user.username } : { valid: false });
+  } catch (error) {
+    console.error('Error checking sign-in link:', error);
+    res.status(500).json({ error: 'Failed to check the sign-in link' });
+  }
+});
+
+// The token is the sole credential: sets the user's chosen password (their
+// forced password change, by construction), voids every open link for the
+// account, and hands back the username so the login page signs them in
+// through the NORMAL flow (TOTP enrollment still runs at first sign-in).
+authRouter.post('/link/complete', async (req, res) => {
+  try {
+    const body = z.object({
+      token: z.string().min(10),
+      newPassword: z.string().min(12, 'Password must be at least 12 characters'),
+    }).parse(req.body);
+    const hit = findValidLoginLink(body.token);
+    if (!hit) return res.status(404).json({ error: 'This sign-in link has expired or was already used — ask an administrator for a new one.' });
+    const db = getDb();
+    const passwordHash = await bcrypt.hash(body.newPassword, 12);
+    db.prepare('UPDATE users SET password_hash = ?, password_change_required = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(passwordHash, hit.user.id);
+    db.prepare('UPDATE user_login_links SET completed_at = CURRENT_TIMESTAMP WHERE user_id = ? AND completed_at IS NULL')
+      .run(hit.user.id);
+    logAudit(hit.user.id, 'USER_LOGIN_LINK_COMPLETED', 'user', hit.user.id, { username: hit.user.username }, req.ip);
+    res.json({ success: true, username: hit.user.username });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+    console.error('Error completing sign-in link:', error);
+    res.status(500).json({ error: 'Failed to complete the sign-in link' });
+  }
+});
+
 // Generate a device fingerprint from request headers
 function generateDeviceFingerprint(req) {
   const components = [

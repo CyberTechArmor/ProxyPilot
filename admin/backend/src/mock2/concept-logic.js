@@ -480,6 +480,18 @@ Return the full HTML document and nothing else.`;
 // the preferred one is rejected by the connector (older keys/orgs).
 export const MOCKUP_PREFERRED_MODEL = 'claude-fable-5';
 
+// mockupRenderBudget — output-token budget for a FULL render, sized from the
+// document being revised. The old flat 40k truncated large multi-screen
+// documents by construction (operator lost two paid renders to "exceeded its
+// output budget twice"): a revision must be able to re-emit the whole
+// current document plus growth. ~3.2 chars/token for dense HTML, 1.35×
+// headroom, +6k slack (restyles rewrite all CSS); floor 40k, ceiling 64k —
+// past the ceiling the truncation-continuation path finishes the document.
+export function mockupRenderBudget(currentHtmlLen = 0) {
+  const estimated = Math.ceil((Number(currentHtmlLen) || 0) / 3.2 * 1.35) + 6000;
+  return Math.min(64000, Math.max(40000, estimated));
+}
+
 export function mockupRenderModel(env = {}, slotModel = '') {
   const v = String(env?.MOCK2_MOCKUP_MODEL ?? '').trim();
   if (v.toLowerCase() === 'slot') return slotModel || MOCKUP_PREFERRED_MODEL;

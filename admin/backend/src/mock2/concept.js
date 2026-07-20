@@ -50,7 +50,7 @@ import {
   estimateConceptTurnTokens, estimateInventoryTokens,
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
-  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
+  renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel, mockupRenderBudget,
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
   findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt,
 } from './concept-logic.js';
@@ -749,11 +749,55 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       if (!tweaked) setJob(projectId, { phase: 'designing', message: `The "${decision.screen}" change needs the full renderer — rendering the mockup…`, kind: 'turn', cycleId: cycle.id });
     }
     const heartbeat = tweaked ? null : startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
+    // A render that hits its output ceiling is CONTINUED via assistant
+    // prefill (Anthropic: a trailing assistant turn is resumed verbatim) —
+    // the paid partial becomes the start of the reply and the model appends
+    // the rest. Discarding truncated output burned two full renders for the
+    // operator ($: "exceeded its output budget twice" with nothing saved).
+    // Up to 2 hops; thinking must be OFF (prefill and thinking are mutually
+    // exclusive) and this turn's images are not re-sent (the written HTML
+    // already pins the design; re-sending only re-bills input tokens).
+    const continueTruncatedRender = async (partialText) => {
+      let doc = String(partialText || '').replace(/\s+$/, '');
+      for (let hop = 0; hop < 2; hop++) {
+        setJob(projectId, { phase: 'designing', message: `The render hit its output limit — continuing where it stopped (${Math.round(doc.length / 1000)}k characters so far)…`, kind: 'turn', cycleId: cycle.id });
+        const res = await callModelTurn({
+          connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: activeModel,
+          system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
+          tools: [],
+          transcript: [
+            { role: 'user', text: mockupTask },
+            { role: 'assistant', text: doc },
+          ],
+          maxTokens: 30000, timeoutMs: 600000, effort: 'low', thinking: 'off',
+          onDelta: onMockupDelta,
+        });
+        if (!res.ok) return { ok: false, error: res.error };
+        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
+        doc += res.text;
+        if (res.stopReason !== 'max_tokens') return { ok: true, text: doc };
+        doc = doc.replace(/\s+$/, '');
+      }
+      return { ok: false, error: 'the document is too large to finish even with continuation — ask for the change on ONE screen at a time (screen-scoped renders have no such limit)' };
+    };
+    // Complete a call's text: continue through truncation where the provider
+    // supports prefill; otherwise hand back what arrived (the plausibility
+    // check + bigger-budget retry below still apply).
+    const completeRenderText = async (res) => {
+      if (res.stopReason === 'max_tokens' && ready.mockup.connector?.provider === 'anthropic') {
+        const cont = await continueTruncatedRender(res.text);
+        if (cont.ok) return cont.text;
+        console.warn('[mock2] render continuation failed:', cont.error);
+        failureDetail = cont.error;
+      }
+      return res.text;
+    };
     if (!tweaked) try {
-      // Generous budgets: with thinking off and the response streamed (no HTTP
-      // timeout), the full budget is HTML — a whole multi-screen app mockup
-      // (inline CSS + JS) is large, and under-budgeting is what truncated it
-      // into a black screen. First 40k, retry 64k.
+      // Budgets are sized from the CURRENT document (a revision must be able
+      // to re-emit the whole thing plus growth — the old flat 40k truncated
+      // large multi-screen documents by construction), streamed so there is
+      // no HTTP timeout, and finished via continuation when they still hit
+      // the ceiling.
       // Mirror mockupCall's model resolution (preferred model + lane tuning)
       // so spend is priced on the model that actually served the call.
       {
@@ -761,37 +805,40 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         activeModel = (explore || !currentHtml || restyleBrief) ? pref
           : applyLaneTuning({ model: pref, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')).model;
       }
-      let res = await mockupCall(40000);
+      const renderBudget = mockupRenderBudget(currentHtml ? currentHtml.length : 0);
+      let res = await mockupCall(renderBudget);
       if (!res.ok && res.timedOut) {
         setJob(projectId, { phase: 'designing', message: 'The first render attempt timed out — retrying once…', kind: 'turn', cycleId: cycle.id });
-        res = await mockupCall(40000);
+        res = await mockupCall(renderBudget);
       }
       // Preferred-model fallback: an org whose key doesn't serve the preferred
       // model gets the assigned slot model instead of a dead render.
       if (!res.ok && activeModel !== ready.mockup.model && /model/i.test(String(res.error || '')) ) {
         setJob(projectId, { phase: 'designing', message: `The preferred render model was rejected — falling back to the assigned mockup model (${ready.mockup.model})…`, kind: 'turn', cycleId: cycle.id });
         activeModel = ready.mockup.model;
-        res = await mockupCall(40000, ready.mockup.model);
+        res = await mockupCall(renderBudget, ready.mockup.model);
       }
       if (res.ok) {
         recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
-        html = extractMockupHtml(res.text).slice(0, MAX_MOCKUP_CHARS);
+        html = extractMockupHtml(await completeRenderText(res)).slice(0, MAX_MOCKUP_CHARS);
         if (!isPlausibleMockup(html)) {
-          // Not a usable page (truncated on budget, or prose instead of HTML).
-          // ONE automatic retry with a bigger budget before giving up — a
-          // failed render wastes the whole turn, so the retry is the cheaper
-          // outcome in expectation.
+          // Not a usable page (prose instead of HTML, or truncation on a
+          // provider without prefill continuation). ONE automatic retry with
+          // a bigger budget before giving up — a failed render wastes the
+          // whole turn, so the retry is the cheaper outcome in expectation.
           const why = res.stopReason === 'max_tokens' ? 'it ran out of output budget' : 'it was not a complete HTML page';
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
-          const retry = await mockupCall(64000, activeModel);
+          const retry = await mockupCall(Math.max(64000, renderBudget), activeModel);
           if (retry.ok) {
             recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage });
-            const h2 = extractMockupHtml(retry.text).slice(0, MAX_MOCKUP_CHARS);
-            if (isPlausibleMockup(h2)) html = h2;
-            else failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
+            const h2 = extractMockupHtml(await completeRenderText(retry)).slice(0, MAX_MOCKUP_CHARS);
+            if (isPlausibleMockup(h2)) { html = h2; failureDetail = null; }
+            else if (!failureDetail) failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
           } else {
             failureDetail = retry.error;
           }
+        } else {
+          failureDetail = null;
         }
       } else {
         failureDetail = res.error;

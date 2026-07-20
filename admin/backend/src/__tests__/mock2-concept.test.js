@@ -340,3 +340,33 @@ test('precedence: the brief outranks the locked design system (theme-guardrail r
   assert.match(chat, /VERBATIM/);
   assert.match(chat, /prevent drift, not to veto the Builder/);
 });
+
+test('part 1 guardrail removal: no "obey EXACTLY", restyle strips inherited styles, screen renders honor the brief', async () => {
+  const { buildMockupSystemPrompt, buildMockupTask, stripInheritedStyles, buildScreenRenderSystemPrompt, buildConceptChatSystemPrompt } = await import('../mock2/concept-logic.js');
+  // The hard-requirements bullet that beat the PRECEDENCE section is gone:
+  // tokens are resolved by precedence, the default system is a fallback.
+  const p = buildMockupSystemPrompt({ designSystem: 'DS' });
+  assert.doesNotMatch(p, /Obey the locked design system below EXACTLY/);
+  assert.match(p, /resolved by precedence/);
+  assert.match(p, /a fallback,\s+never a veto/);
+  // Restyle iterations forward the prior markup WITHOUT its stylesheet — the
+  // incumbent palette is not context.
+  const cur = '<!doctype html><html><head><style>body{background:#070b11;color:#22c55e}</style></head><body><h1>App</h1></body></html>';
+  const stripped = stripInheritedStyles(cur);
+  assert.doesNotMatch(stripped, /#070b11|#22c55e/);
+  assert.match(stripped, /inherited styling removed/);
+  const task = buildMockupTask({ brief: 'teal light theme, tokens: --accent:#0F766E', currentHtml: cur, restyle: true });
+  assert.doesNotMatch(task, /#070b11/);
+  assert.match(task, /stylesheet REMOVED/);
+  assert.match(task, /rebuild ALL styling from the brief's spec/);
+  // Non-restyle iterations keep the full document (stability wording intact).
+  assert.match(buildMockupTask({ brief: 'fix the header copy', currentHtml: cur }), /#070b11/);
+  // Screen-scope re-renders: an explicit visual spec in the brief wins over
+  // the document's incumbent styling too.
+  const sp = buildScreenRenderSystemPrompt({ designSystem: 'DS' });
+  assert.match(sp, /the brief WINS over/);
+  assert.doesNotMatch(sp, /Stay consistent with the locked design system/);
+  // The design partner's system label is a default, not a veto.
+  const chat = buildConceptChatSystemPrompt({ designSystem: 'DS', mode: 'design' });
+  assert.match(chat, /# Default design system \(the Builder's explicit spec above outranks it\)/);
+});

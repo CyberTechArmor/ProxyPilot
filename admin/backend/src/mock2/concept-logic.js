@@ -168,7 +168,7 @@ tables included) at the TOP of the brief, and never water it down to fit the
 system. The locked system is the DEFAULT look for turns that don't specify
 one — it exists to prevent drift, not to veto the Builder:
 
-# Locked design system (pinned — binding, not advisory)
+# Default design system (the Builder's explicit spec above outranks it)
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Keep replies short and concrete. Guide toward a design the Builder is happy to approve.`;
@@ -283,13 +283,18 @@ Rules:
 - Keep the opening <section> tag's attributes EXACTLY as they are in the
   current document (data-screen name, ids, classes — the page's navigation
   depends on them). Redesign only the CONTENTS.
-- Reuse the document's existing CSS classes and design tokens; a small scoped
-  <style> INSIDE the section is allowed for styles this screen alone needs.
-  Do not restyle other screens.
+- PRECEDENCE: if the revision brief EXPLICITLY respecifies visual language
+  (color tokens, a palette, light/dark theme, typography), the brief WINS over
+  the document's existing styling and the design system below — style this
+  section to the brief's spec, never keep the incumbent look out of
+  "consistency".
+- Otherwise reuse the document's existing CSS classes and design tokens; a
+  small scoped <style> INSIDE the section is allowed for styles this screen
+  alone needs. Do not restyle other screens.
 - The design-craft bar applies: real iconography (inline SVG, never emoji),
   hierarchy over boxes, one dominant primary action, hard states shown,
   realistic sample data.
-- Stay consistent with the locked design system:
+- Default design system (applies where the brief and the document are silent):
 ${designSystem || '(design system content is still owed — risk R8)'}`;
 }
 
@@ -307,9 +312,12 @@ Hard requirements:
 - A SINGLE file: all CSS in a <style> tag and all JS in a <script> tag inline. No
   external hosts, fonts, scripts, stylesheets, or images — embed any image as a
   data: URI. The page must render with no network access.
-- Obey the locked design system below EXACTLY: its color tokens, one type family,
-  spacing rhythm, corner radii, and rules. Do not introduce other colors, fonts,
-  or gradients-as-decoration.
+- Style through DESIGN TOKENS, resolved by precedence (the # PRECEDENCE section
+  below): the brief's explicit spec first, then the project's chosen base theme,
+  then the default design system at the bottom — the defaults are a fallback,
+  never a veto. Whatever the source, define the values ONCE as CSS custom
+  properties and route every component style through var(--…); no ad-hoc
+  colors, stray fonts, or gradients-as-decoration scattered in component rules.
 - Mobile-first: every screen renders cleanly in a single column at 360–375px; any
   multi-column layout collapses to one column on small viewports. Tappable controls
   are at least 44×44px.
@@ -421,13 +429,30 @@ export function mockupRenderModel(env = {}, slotModel = '') {
   return v || MOCKUP_PREFERRED_MODEL;
 }
 
+// stripInheritedStyles — blank every <style> body in a forwarded mockup. Used
+// when a RESTYLE brief rides an iteration: the prior document's stylesheet IS
+// the incumbent palette, and passing it as "context" is how the old theme
+// survived an explicit token spec (geometry obeyed, color ignored — operator
+// review). The markup still rides (structure/content context); the styling
+// must be rebuilt from the brief's spec.
+export function stripInheritedStyles(html) {
+  return String(html || '').replace(
+    /(<style\b[^>]*>)[\s\S]*?(<\/style>)/gi,
+    "$1/* inherited styling removed — the brief's token spec replaces it */$2",
+  );
+}
+
 // The mockup slot's user turn: the brief + the current mockup (to iterate on) +
 // a short recap of the conversation so the render reflects the whole idea.
-export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '' } = {}) {
+// restyle: the brief respecifies the visual language — the forwarded HTML's
+// <style> content is stripped so the incumbent palette cannot ride along.
+export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '', restyle = false } = {}) {
   const parts = [`Project: ${projectName}`];
   if (conversation) parts.push(`Conversation so far (for context):\n${conversation}`);
   parts.push(`Design brief for this mockup:\n${String(brief || '').trim() || '(no brief — infer from the conversation)'}`);
-  if (currentHtml) {
+  if (currentHtml && restyle) {
+    parts.push(`The brief RESTYLES the design, so the current mockup is below with its stylesheet REMOVED — its old palette is not a reference and must not be reconstructed. Keep the screens, content, and structure it shows; rebuild ALL styling from the brief's spec (falling back to the design system only where the brief is silent):\n\n${stripInheritedStyles(currentHtml)}`);
+  } else if (currentHtml) {
     parts.push(`The CURRENT mockup HTML is below — revise it to satisfy the brief, keeping everything the brief does not touch stable. EXCEPTION: if the brief RESTYLES the design (new tokens, palette, theme, light/dark), restyle the ENTIRE document to the new spec — visual stability never applies to styling the brief replaces, and the current mockup's palette must not survive into the revision:\n\n${currentHtml}`);
   } else {
     parts.push('There is no existing mockup — create the first version.');

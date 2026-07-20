@@ -11,7 +11,7 @@
 // MOBILE_FIRST: full-screen dialog below sm; 44px touch targets; the
 // screenshot itself is the tap surface.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -22,19 +22,47 @@ const MAX_PINS = 8;
 
 export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   const [path, setPath] = useState('/');
-  // The screenshot URL is STATE (not derived) — it carries a cache-buster, so
-  // recomputing it per render would re-shoot the app on every keystroke.
-  const [src, setSrc] = useState(() => api.mock2AppScreenshotUrl(projectId, { path: '/' }));
-  const [imgState, setImgState] = useState('loading'); // loading | ready | error
+  // The screenshot is FETCHED (not <img src>): an <img> error is mute, but the
+  // route's failure body says exactly why ("playwright not installed", "app
+  // offline", a browser error) — show that instead of a generic guess.
+  const [imgUrl, setImgUrl] = useState(null); // object URL of the fetched PNG
+  const [imgState, setImgState] = useState('idle'); // idle | loading | ready | error
+  const [errMsg, setErrMsg] = useState('');
   const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the image
   const [sending, setSending] = useState(false);
   const imgRef = useRef(null);
 
-  const reload = useCallback(() => {
+  const load = useCallback(async (p) => {
     setPins([]);
     setImgState('loading');
-    setSrc(api.mock2AppScreenshotUrl(projectId, { path }));
-  }, [projectId, path]);
+    setErrMsg('');
+    try {
+      const res = await fetch(api.mock2AppScreenshotUrl(projectId, { path: p }), { credentials: 'same-origin' });
+      if (!res.ok) {
+        let msg = `the server answered ${res.status}`;
+        try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep status */ }
+        setErrMsg(msg);
+        setImgState('error');
+        return;
+      }
+      const blob = await res.blob();
+      setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
+      setImgState('ready');
+    } catch (e) {
+      setErrMsg(e?.message || 'network error');
+      setImgState('error');
+    }
+  }, [projectId]);
+  const reload = useCallback(() => load(path), [load, path]);
+  // Shoot when the dialog OPENS (not on mount — the server spins up a real
+  // browser). Re-shoot on reopen after a failure; a ready shot is kept until
+  // the user hits Refresh. The ref gates to the open TRANSITION so an error
+  // can't retry-loop.
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpen.current && imgState !== 'ready') load(path);
+    wasOpen.current = open;
+  }, [open, imgState, load, path]);
 
   const addPin = (e) => {
     if (pins.length >= MAX_PINS || imgState !== 'ready') return;
@@ -132,15 +160,14 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
               aria-label="Tap to add an annotation pin"
               tabIndex={0}
             >
-              <img
-                key={src}
-                ref={imgRef}
-                src={src}
-                alt={`Screenshot of ${path}`}
-                className={`block w-full ${imgState === 'ready' ? '' : 'min-h-[140px] opacity-0'}`}
-                onLoad={() => setImgState('ready')}
-                onError={() => setImgState('error')}
-              />
+              {imgUrl ? (
+                <img
+                  ref={imgRef}
+                  src={imgUrl}
+                  alt={`Screenshot of ${path}`}
+                  className={`block w-full ${imgState === 'ready' ? '' : 'min-h-[140px] opacity-0'}`}
+                />
+              ) : <div className="min-h-[140px]" />}
               {imgState === 'ready' ? pins.map((p, i) => (
                 <span
                   key={i}
@@ -157,8 +184,10 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
               </div>
             ) : null}
             {imgState === 'error' ? (
-              <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-muted-foreground">
-                Couldn&apos;t screenshot the app — it may be offline or mid-deploy. Try Refresh in a moment.
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 p-6 text-center text-sm text-muted-foreground">
+                <span>Couldn&apos;t screenshot the app{errMsg ? ':' : ' — it may be offline or mid-deploy.'}</span>
+                {errMsg ? <span className="text-xs break-words max-w-full">{errMsg}</span> : null}
+                <span className="text-xs">Try Refresh in a moment.</span>
               </div>
             ) : null}
           </div>

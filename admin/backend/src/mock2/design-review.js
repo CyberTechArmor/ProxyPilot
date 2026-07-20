@@ -40,6 +40,31 @@ const MOBILE = { width: 390, height: 780 };
 const DESKTOP = { width: 1280, height: 800 };
 const MAX_PATHS = 4; // × (mobile + desktop on the first two) ≤ 6 shots per review
 const NAV_TIMEOUT_MS = 20000;
+const LOGIN_TIMEOUT_MS = 12000;
+const SETTLE_MS = 700;
+
+// Navigate for a screenshot. waitUntil 'networkidle' looked right but HANGS on
+// apps that poll (a ticking TimeClock fetching /api/dashboard every second
+// never goes idle) — domcontentloaded + a short settle is what actually
+// finishes everywhere.
+async function gotoSettled(page, url) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+  await page.waitForTimeout(SETTLE_MS);
+}
+
+// Best-effort login, bounded — fixture users may have been deleted (New-6's
+// users table was wiped and re-bootstrapped); an unauthenticated shot of the
+// login page is still useful, so never let a dead login stall the capture.
+async function tryLogin(page, baseUrl, spec) {
+  if (!spec?.login || !Object.keys(spec.login.users || {}).length) return;
+  const role = spec.login.users.admin ? 'admin' : Object.keys(spec.login.users)[0];
+  try {
+    await Promise.race([
+      loginAs(page, baseUrl, spec.login, role),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('login timed out')), LOGIN_TIMEOUT_MS)),
+    ]);
+  } catch { /* unauth shots still useful */ }
+}
 
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
@@ -94,15 +119,12 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
     const page = await context.newPage();
     // Authenticated pages need a session — log in with the spec's first fixture
     // role when one exists; without a spec the login/bootstrap pages still shoot.
-    if (spec?.login && Object.keys(spec.login.users || {}).length) {
-      const role = spec.login.users.admin ? 'admin' : Object.keys(spec.login.users)[0];
-      try { await loginAs(page, baseUrl, spec.login, role); } catch { /* unauth shots still useful */ }
-    }
+    await tryLogin(page, baseUrl, spec);
     for (let i = 0; i < targets.length; i++) {
       const path = targets[i];
       try {
         await page.setViewportSize(MOBILE);
-        await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'networkidle', timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+        await gotoSettled(page, new URL(path, baseUrl).toString());
         const mobileShot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
         shots.push({ path, width: MOBILE.width, media_type: 'image/jpeg', data: mobileShot.toString('base64') });
         if (axeSource) {
@@ -150,16 +172,14 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
     browser = await chromium.launch(launchOptions());
     const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
-    if (spec?.login && Object.keys(spec.login.users || {}).length) {
-      const role = spec.login.users.admin ? 'admin' : Object.keys(spec.login.users)[0];
-      try { await loginAs(page, baseUrl, spec.login, role); } catch { /* unauth shot */ }
-    }
+    await tryLogin(page, baseUrl, spec);
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
-    await page.goto(new URL(safePath, baseUrl).toString(), { waitUntil: 'networkidle', timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+    await gotoSettled(page, new URL(safePath, baseUrl).toString());
     const buf = await page.screenshot({ type: 'png', fullPage: true });
     return { ok: true, buffer: buf };
   } catch (err) {
+    console.warn(`[mock2] app screenshot failed (${containerName} ${path}):`, err?.message);
     return { ok: false, error: String(err?.message || err).slice(0, 300) };
   } finally {
     try { if (browser) await browser.close(); } catch { /* ignore */ }

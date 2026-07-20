@@ -201,3 +201,11 @@ test('pickContainerIp: first non-loopback IPv4 from ip/hostname output (req-76: 
   assert.equal(pickContainerIp(''), null);
   assert.equal(pickContainerIp(null), null);
 });
+
+test('pickContainerIp: incus list -c4 csv shapes parse (interface note stripped by caller)', () => {
+  // resolveBrowserTarget cleans `10.163.220.42 (eth0)` → `10.163.220.42  eth0 `
+  assert.equal(pickContainerIp('10.163.220.42  eth0 '), '10.163.220.42');
+  // Multiple addresses: first global wins.
+  assert.equal(pickContainerIp('10.163.220.42  eth0  10.99.0.7  docker0 '), '10.163.220.42');
+  assert.equal(pickContainerIp('  '), null);
+});

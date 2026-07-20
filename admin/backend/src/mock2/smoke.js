@@ -108,6 +108,16 @@ async function httpSmoke(containerName, webPort) {
 // last resort stays loopback so a resolution hiccup degrades to the old
 // behavior instead of throwing.
 export async function resolveBrowserTarget(containerName, webPort) {
+  // Host-side first: `incus list -c4` knows the address regardless of what
+  // userland the container ships (no ip/hostname binaries needed inside).
+  const safeName = String(containerName || '').replace(/[^a-zA-Z0-9_.-]/g, '');
+  try {
+    const r = await sh(`incus list '${safeName}' -c 4 --format csv`, { timeoutMs: 15000 });
+    // csv cell looks like "10.163.220.42 (eth0)" — strip the interface note.
+    const ip = pickContainerIp(String(r.stdout || '').replace(/\([^)]*\)/g, ' ').replace(/[",]/g, ' '));
+    if (ip) return `http://${ip}:${webPort}/`;
+  } catch { /* fall through */ }
+  // In-container probes as backup (host command shape differs on some installs).
   try {
     const r = await containerSh(
       containerName,

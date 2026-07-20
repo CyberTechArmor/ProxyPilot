@@ -160,8 +160,11 @@ async function readWorkingFile(containerName, relPath) {
 }
 
 async function writeWorkingFile(containerName, relPath, content) {
-  const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; printf '%s' '${b64(content)}' | base64 -d > "$d" && echo ok`;
-  const r = await containerSh(containerName, script);
+  // Payload over STDIN, script b64 in argv (shell-safe charset): embedding
+  // content in the command string hits Linux's 128KiB argv-entry cap
+  // (spawn E2BIG) once a document grows past ~96KB.
+  const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d" && echo ok`;
+  const r = await sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(script)} | base64 -d)"'`, { timeoutMs: 120000, input: b64(content) });
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || 'write failed').trim().slice(-300) };
   return { ok: true };
 }

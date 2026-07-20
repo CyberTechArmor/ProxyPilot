@@ -1796,8 +1796,12 @@ export async function readFileInContainer(containerName, path) {
 export async function writeFileInContainer(containerName, path, content) {
   const rel = safeRel(path);
   if (!rel) return { ok: false, error: 'path must be relative and inside the app dir' };
-  const script = `p=$(printf '%s' '${b64(rel)}' | base64 -d); d="${APP_DIR}/$p"; mkdir -p "$(dirname "$d")"; printf '%s' '${b64(content)}' | base64 -d > "$d" && echo ok`;
-  const r = await containerSh(containerName, script);
+  // Payload over STDIN, script b64 in argv (shell-safe charset — the
+  // model-supplied path stays b64-wrapped inside it): embedding content in
+  // the command string hits Linux's 128KiB argv-entry cap (spawn E2BIG)
+  // once a file grows past ~96KB.
+  const script = `p=$(printf '%s' '${b64(rel)}' | base64 -d); d="${APP_DIR}/$p"; mkdir -p "$(dirname "$d")"; base64 -d > "$d" && echo ok`;
+  const r = await sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(script)} | base64 -d)"'`, { timeoutMs: 120000, input: b64(content) });
   if (r.code !== 0) return { ok: false, error: (r.stderr || 'write failed').trim().slice(-300) };
   return { ok: true };
 }

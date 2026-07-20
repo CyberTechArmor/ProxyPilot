@@ -590,6 +590,83 @@ table.list tr:last-child td{border-bottom:none}
 /* ---------- Progress ---------- */
 .prog{height:8px;background:var(--app-bg,#eef2f7);border-radius:20px;overflow:hidden}
 .prog>i{display:block;height:100%;background:linear-gradient(90deg,var(--app-primary,#1466b8),var(--app-accent,#12a3a3));border-radius:20px}
+
+/* ---------- Component kit (build screens FROM these — don't hand-roll) ---------- */
+/* Form validation: add .err to .field for the error look; .hint/.err-msg lines. */
+.field .hint{font-size:12px;color:var(--app-muted,#5a6b81);margin-top:5px}
+.field .err-msg{font-size:12px;color:var(--app-danger,#d24545);margin-top:5px;font-weight:600}
+.field.err input,.field.err select,.field.err textarea{border-color:var(--app-danger,#d24545)}
+.field.err input:focus,.field.err select:focus,.field.err textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--app-danger,#d24545) 15%,#fff)}
+
+/* Tabs */
+.tabs{display:flex;gap:2px;border-bottom:2px solid var(--app-border,#e2e8f1);overflow-x:auto}
+.tabs .tab{border:none;background:transparent;font-weight:600;font-size:14px;color:var(--app-muted,#5a6b81);padding:11px 16px;min-height:44px;border-bottom:2px solid transparent;margin-bottom:-2px;white-space:nowrap}
+.tabs .tab.active{color:var(--app-primary,#1466b8);border-bottom-color:var(--app-primary,#1466b8)}
+
+/* Modal + drawer (backdrop closes; content stops propagation) */
+.modal-backdrop{position:fixed;inset:0;background:rgba(9,22,38,.45);z-index:90;display:flex;align-items:flex-end;justify-content:center}
+@media(min-width:640px){.modal-backdrop{align-items:center}}
+.modal{background:var(--app-surface,#fff);border-radius:var(--app-radius-lg,12px) var(--app-radius-lg,12px) 0 0;width:100%;max-width:480px;max-height:88vh;overflow-y:auto;padding:20px}
+@media(min-width:640px){.modal{border-radius:var(--app-radius-lg,12px)}}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,92vw);background:var(--app-surface,#fff);border-left:1px solid var(--app-border,#e2e8f1);z-index:95;overflow-y:auto;padding:20px;box-shadow:-8px 0 24px rgba(16,42,72,.12)}
+
+/* Toasts (aria-live container the app appends into) */
+.toasts{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:8px;width:min(420px,calc(100vw - 24px))}
+.toast{background:var(--app-text,#12263f);color:#fff;border-radius:var(--app-radius-md,9px);padding:12px 16px;font-size:13.5px;box-shadow:0 6px 18px rgba(16,42,72,.25);display:flex;align-items:center;gap:10px}
+.toast.ok{background:var(--app-success,#1f9d57)}
+.toast.bad{background:var(--app-danger,#d24545)}
+
+/* Dropdown menu */
+.menu-wrap{position:relative;display:inline-block}
+.menu{position:absolute;right:0;top:calc(100% + 6px);background:var(--app-surface,#fff);border:1px solid var(--app-border,#e2e8f1);border-radius:var(--app-radius-md,9px);box-shadow:0 8px 24px rgba(16,42,72,.14);min-width:180px;z-index:80;padding:6px;display:flex;flex-direction:column}
+.menu button,.menu a{border:none;background:transparent;text-align:left;font-size:14px;color:var(--app-text,#12263f);padding:10px 12px;border-radius:7px;min-height:44px;display:flex;align-items:center;gap:8px}
+.menu button:hover,.menu a:hover{background:var(--app-bg,#eef2f7)}
+.menu .danger{color:var(--app-danger,#d24545)}
+
+/* Pagination */
+.pager{display:flex;align-items:center;gap:8px;justify-content:flex-end;padding-top:12px;font-size:13px;color:var(--app-muted,#5a6b81);flex-wrap:wrap}
+.pager button{border:1px solid var(--app-border,#e2e8f1);background:var(--app-surface,#fff);border-radius:8px;padding:8px 12px;font-size:13px;min-height:40px}
+.pager button:disabled{opacity:.45;cursor:default}
+
+/* Skeleton loading shimmer */
+.skel{background:linear-gradient(90deg,var(--app-bg,#eef2f7) 25%,color-mix(in srgb,var(--app-bg,#eef2f7) 50%,#fff) 50%,var(--app-bg,#eef2f7) 75%);background-size:200% 100%;animation:skel 1.2s infinite;border-radius:8px;min-height:14px}
+@keyframes skel{to{background-position:-200% 0}}
+
+/* Designed empty state: icon (assets.svg symbol), one line, the next action. */
+.empty{text-align:center;padding:40px 20px;color:var(--app-muted,#5a6b81)}
+.empty svg{width:44px;height:44px;color:var(--app-muted,#5a6b81);opacity:.7;margin-bottom:10px}
+.empty h4{color:var(--app-text,#12263f);font-size:15px;margin-bottom:4px}
+.empty p{font-size:13.5px;margin:0 0 14px}
+
+/* Toggle switch (checkbox-based) */
+.switch{position:relative;display:inline-block;width:44px;height:26px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch i{position:absolute;inset:0;background:var(--app-border,#cdd8e6);border-radius:26px;transition:.15s}
+.switch i::before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.switch input:checked+i{background:var(--app-primary,#1466b8)}
+.switch input:checked+i::before{transform:translateX(18px)}
+
+/* Numeric alignment (money, hours, counts — use on td/spans) */
+.num{font-variant-numeric:tabular-nums;text-align:right}
+
+/* Mini bar chart (flex columns; set each bar's height inline) */
+.bars{display:flex;align-items:flex-end;gap:6px;height:120px}
+.bars i{flex:1;background:color-mix(in srgb,var(--app-primary,#1466b8) 75%,#fff);border-radius:4px 4px 0 0;min-height:3px}
+.bars i.hot{background:var(--app-primary,#1466b8)}
+`;
+}
+
+// public/assets.svg — a tiny inline-SVG symbol set for designed empty states
+// and status blocks (referenced as <use href="/assets.svg#id">). currentColor
+// strokes so the tokens color them.
+function assetsSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <symbol id="empty-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v10"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></symbol>
+  <symbol id="alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></symbol>
+  <symbol id="inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.5-6.9A2 2 0 0016.7 4H7.3a2 2 0 00-1.8 1.1z"/></symbol>
+</svg>
 `;
 }
 
@@ -676,6 +753,7 @@ export function buildScaffoldFiles(project) {
     // The shared app shell (generalized from the operator's portal base) —
     // screens reuse these classes; the chosen design preset restyles them.
     { path: 'public/base.css', content: baseCss() },
+    { path: 'public/assets.svg', content: assetsSvg() },
     { path: 'public/app-shell.html', content: appShellHtml(project) },
   ];
 }

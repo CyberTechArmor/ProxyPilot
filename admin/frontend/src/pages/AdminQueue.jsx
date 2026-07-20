@@ -307,6 +307,31 @@ export default function AdminQueue() {
     } finally { setSavingSmoke(false); }
   };
 
+  // Design review (the after-build screenshot + critique pass) toggle.
+  const [designReview, setDesignReview] = useState(null);
+  const [savingReview, setSavingReview] = useState(false);
+  useEffect(() => {
+    if (gate !== 'enabled') return;
+    api.mock2GetDesignReview()
+      .then((r) => setDesignReview(r.setting))
+      .catch((err) => { if (!(err instanceof ApiError)) console.error('load design-review failed:', err); });
+  }, [gate]);
+  const saveDesignReview = async (setting) => {
+    setSavingReview(true);
+    try {
+      const r = await api.mock2SetDesignReview(setting);
+      setDesignReview(r.setting);
+      toast({
+        title: 'Design review updated',
+        description: setting === 'off'
+          ? 'No automatic critique after builds — the manual Polish pass still works per project.'
+          : 'After each successful build, the app is screenshotted and critiqued against its design; findings land in the build chat.',
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not save', description: err.message });
+    } finally { setSavingReview(false); }
+  };
+
   // Save one lane's patch; on failure re-fetch to resync (edits are per-field).
   const saveLaneTuning = async (lane, patch) => {
     setLaneTuning((cur) => cur && ({ ...cur, lanes: { ...cur.lanes, [lane]: { ...cur.lanes[lane], ...patch } } }));
@@ -612,6 +637,37 @@ export default function AdminQueue() {
                 visibly rather than pretending it was checked.
               </p>
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Design review — after-build screenshot + vision critique (findings
+          only; never a gate). The per-project Polish pass ignores this toggle. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Design review</CardTitle>
+          <CardDescription>
+            After each successful build, the deployed app is screenshotted (mobile + desktop) and
+            critiqued against its approved mockup and design tokens — plus accessibility (axe-core)
+            and token-drift checks. Findings post to the build chat; nothing is blocked or auto-changed.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {designReview == null ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <div className="space-y-1 max-w-md">
+              <label className="text-xs text-muted-foreground" htmlFor="design-review-setting">After-build critique</label>
+              <Select value={designReview} disabled={savingReview} onValueChange={saveDesignReview}>
+                <SelectTrigger id="design-review-setting" className="h-11 sm:h-10"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="on">On (recommended) — critique every successful build</SelectItem>
+                  <SelectItem value="off">Off — review only via the manual Polish pass</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           )}
         </CardContent>
       </Card>

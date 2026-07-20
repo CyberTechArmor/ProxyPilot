@@ -92,6 +92,27 @@ export function recordCycleFeedback({ projectId, cycleId, rating, note = null, u
   return getCycleFeedback(cycleId);
 }
 
+// The most recent thumbs-DOWN notes for a project (deduped, newest first) —
+// distilled into every build task as standing operator taste ("stop repeating
+// what I already flagged"). Up-rated builds carry no note and are skipped.
+export function listRecentDownNotes(projectId, limit = 5) {
+  const rows = getMock2Db()
+    .prepare(`SELECT content, meta_json FROM mock2_cycle_events
+              WHERE project_id = ? AND kind = 'feedback' AND content IS NOT NULL AND content != ''
+              ORDER BY id DESC LIMIT 40`)
+    .all(Number(projectId));
+  const notes = [];
+  for (const r of rows) {
+    let rating = null;
+    try { rating = JSON.parse(r.meta_json || '{}').rating; } catch { continue; }
+    if (rating !== 'down') continue;
+    const t = String(r.content).trim();
+    if (t && !notes.includes(t)) notes.push(t);
+    if (notes.length >= limit) break;
+  }
+  return notes;
+}
+
 export function getCycleFeedback(cycleId) {
   const row = getMock2Db()
     .prepare(`SELECT * FROM mock2_cycle_events WHERE cycle_id = ? AND kind = 'feedback' ORDER BY seq DESC LIMIT 1`)

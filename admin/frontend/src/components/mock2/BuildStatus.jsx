@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   Hammer, RefreshCw, Loader2, Square, RotateCcw, ShieldAlert, ShieldCheck, Clock, GitBranch,
-  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package,
+  CheckCircle2, Ban, PauseCircle, Play, ThumbsUp, ThumbsDown, Wrench, Package, Wand2,
 } from 'lucide-react';
 import BuildTaskList from './BuildTaskList';
 import ChangeHistory from './ChangeHistory';
@@ -168,6 +168,21 @@ export default function BuildStatus({
     } catch (err) {
       toast({ variant: 'destructive', title: 'Could not start the full build', description: err.message });
     } finally { setFullBusy(false); }
+  };
+
+  // Polish pass: screenshot the deployed app, vision-critique it against the
+  // approved mockup + tokens (with axe-core and token-drift checks riding
+  // along), post findings to the chat, and queue the fixes as a quick build.
+  const [polishBusy, setPolishBusy] = useState(false);
+  const polishPass = async () => {
+    setPolishBusy(true);
+    try {
+      await api.mock2Polish(projectId, { apply: true });
+      toast({ title: 'Polish pass running', description: 'Screenshotting the app and reviewing it against the design — findings land in the chat, and the fixes queue as a quick build.' });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not start the polish pass', description: err.message });
+    } finally { setPolishBusy(false); }
   };
 
   const productionCheck = async () => {
@@ -1052,6 +1067,15 @@ export default function BuildStatus({
               >
                 {checkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ShieldCheck className="h-4 w-4 mr-1" />}
                 Production check
+              </Button>
+              <Button
+                variant="outline" className="min-h-[44px] flex-1"
+                disabled={polishBusy}
+                onClick={polishPass}
+                title="Screenshot the live app, critique it against the approved design (plus accessibility + token-drift checks), and queue the visual fixes as a quick build. No new features."
+              >
+                {polishBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Wand2 className="h-4 w-4 mr-1" />}
+                Polish pass
               </Button>
             </div>
           </div>

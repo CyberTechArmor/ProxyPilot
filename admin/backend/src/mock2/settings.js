@@ -162,6 +162,24 @@ export function smokeEnv(env = process.env) {
   return { ...env, SMOKE_BROWSER_ENABLED: v === 'on' ? 'true' : '0' };
 }
 
+// ---- design review (the after-build "look at the screen" pass) toggle ----
+// 'on' (default): every succeeded build request is followed by a screenshot +
+// vision critique posted to the chat (findings only — never a gate, never an
+// auto-build). 'off' turns the automatic pass off; the manual Polish pass
+// button keeps working either way (it is an explicit operator action).
+export const DESIGN_REVIEW_KEY = 'design_review';
+
+export function getDesignReviewSetting() {
+  const v = String(getMock2Setting(DESIGN_REVIEW_KEY, '') || '').trim().toLowerCase();
+  return v === 'off' ? 'off' : 'on';
+}
+
+export function setDesignReviewSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(DESIGN_REVIEW_KEY, v === 'off' ? 'off' : 'on', updatedBy);
+  return getDesignReviewSetting();
+}
+
 // ---- Global thinking switch (kill thinking everywhere at once) ----
 export const GLOBAL_THINKING_KEY = 'global_thinking';
 

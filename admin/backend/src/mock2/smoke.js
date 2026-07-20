@@ -107,7 +107,7 @@ async function httpSmoke(containerName, webPort) {
 // http://127.0.0.1:3000/). Resolve the container's bridge IPv4 and target that;
 // last resort stays loopback so a resolution hiccup degrades to the old
 // behavior instead of throwing.
-async function resolveBrowserTarget(containerName, webPort) {
+export async function resolveBrowserTarget(containerName, webPort) {
   try {
     const r = await containerSh(
       containerName,

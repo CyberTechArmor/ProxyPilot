@@ -489,7 +489,8 @@ function adminJs() {
           '<td><span class="badge ' + (u.isActive ? 'b-ok' : 'b-warn') + '">' + (u.isActive ? 'active' : 'disabled') + '</span></td>' +
           '<td>' + esc(u.provider || 'local') + '</td>' +
           '<td>' + (u.lastLoginAt ? esc(String(u.lastLoginAt).slice(0, 16).replace('T', ' ')) : '—') + '</td>' +
-          '<td><button class="btn subtle sm toggle-active" data-user="' + u.id + '" data-next="' + (u.isActive ? 'false' : 'true') + '">' + (u.isActive ? 'Deactivate' : 'Activate') + '</button></td>' +
+          '<td><button class="btn subtle sm toggle-active" data-user="' + u.id + '" data-next="' + (u.isActive ? 'false' : 'true') + '">' + (u.isActive ? 'Deactivate' : 'Activate') + '</button> ' +
+          '<button class="btn subtle sm signin-link" data-user="' + u.id + '" title="One-time sign-in link: the user clicks it, chooses a password, and is signed in. Consumed when the password is set (link previews never spend it); expires in 7 days.">Sign-in link</button></td>' +
           '</tr>';
       }).join('');
     });
@@ -508,6 +509,25 @@ function adminJs() {
     if (!btn.classList.contains('toggle-active')) return;
     api('/api/admin/users/' + btn.dataset.user + '/status', { method: 'PATCH', body: { isActive: btn.dataset.next === 'true' } })
       .then(function () { note('users-note', 'Status updated.'); return loadUsers(); })
+      .catch(function (err) { note('users-note', err.message, true); });
+  });
+
+  // One-time sign-in link: no temporary passwords — the user clicks the link,
+  // chooses a password, and is signed in. Consumed on password set (mail/SMS
+  // previews never spend it); reissuing voids nothing until one is used.
+  document.getElementById('users-body').addEventListener('click', function (ev) {
+    var lbtn = ev.target;
+    if (!lbtn.classList.contains('signin-link')) return;
+    api('/api/admin/users/' + lbtn.dataset.user + '/login-link', { method: 'POST', body: {} })
+      .then(function (r) {
+        var url = window.location.origin + r.path;
+        var copy = navigator.clipboard && navigator.clipboard.writeText
+          ? navigator.clipboard.writeText(url)
+          : Promise.reject(new Error('no clipboard'));
+        return copy
+          .then(function () { note('users-note', 'One-time sign-in link copied — send it to the user (chat, email, or SMS). They set a password and are signed in; valid 7 days or until used.'); })
+          .catch(function () { window.prompt('One-time sign-in link — copy and send it to the user:', url); note('users-note', 'Sign-in link generated.'); });
+      })
       .catch(function (err) { note('users-note', err.message, true); });
   });
 
@@ -871,6 +891,9 @@ const WIRED_HISTORY = new Map([
     // The component-shipped centered-card sign-in page (installer-written, no
     // human edits) — safe to upgrade to the wired split-layout page below.
     '7ca8c72fafbcbd8ef3995ce4da1e480bbf7fc5d1f2deae52c6a463f8ea542a33',
+  ]],
+  ['public/admin.js', [
+    '4123ff0a11d3adf2bdb1b245bcc496f1f04ef165faed35a4fbffdb967346d4f8', // v1: pre sign-in-link button
   ]],
 ]);
 

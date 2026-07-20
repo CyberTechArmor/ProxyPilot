@@ -33,12 +33,6 @@ const CSRF_EXEMPT_PREFIXES = [
   // double-submit check has nothing to protect (git clients also cannot
   // echo a CSRF header).
   '/api/mock2/git/',
-  // Domain provisioning: auth is the X-API-Key provisioning key — no
-  // ambient cookies are involved, so a cross-site request can't ride a
-  // session and the double-submit check has nothing to protect. The
-  // /api/domains/admin/* endpoints use cookie sessions and are NOT under
-  // this prefix — they keep full CSRF protection.
-  '/api/domains/provision',
 ];
 
 export function csrfProtection(req, res, next) {
@@ -52,6 +46,15 @@ export function csrfProtection(req, res, next) {
   // on a path prefix is unaffected by them.)
   for (const prefix of CSRF_EXEMPT_PREFIXES) {
     if (req.originalUrl.startsWith(prefix)) return next();
+  }
+
+  // Domain provisioning is dual-auth: an X-API-Key request carries no
+  // ambient cookies (the key header is the binding token — same rationale
+  // as the mock2 git endpoints), so it is exempt ONLY when that header is
+  // actually present. The admin cookie-session path through the very same
+  // endpoints keeps full double-submit protection below.
+  if (req.originalUrl.startsWith('/api/domains/provision') && req.headers['x-api-key']) {
+    return next();
   }
 
   const cookieValue = req.cookies?.pp_csrf;

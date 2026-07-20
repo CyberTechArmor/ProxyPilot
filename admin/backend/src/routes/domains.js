@@ -132,18 +132,30 @@ function requireProvisionKey(req, res, next) {
   next();
 }
 
-// ---- provisioning endpoints (X-API-Key) ----
+// requireProvisionAccess — dual auth for the provisioning endpoints.
+// The /add-domain page is ADMIN-GATED: browser requests ride the normal
+// cookie session (admin role required; CSRF enforced by the global
+// middleware, whose exemption applies only when X-API-Key is present).
+// Scripted/API clients authenticate with a provisioning API key instead.
+function requireProvisionAccess(req, res, next) {
+  if (String(req.headers['x-api-key'] || '').trim()) {
+    return requireProvisionKey(req, res, next);
+  }
+  return authenticateToken(req, res, () => requireAdmin(req, res, next));
+}
 
-// The page's unlock step. Returns non-secret context the form needs:
-// whether a global Cloudflare token exists (so the CF field's helper text
-// is accurate) — never the token itself.
-router.post('/provision/verify-key', requireProvisionKey, (req, res) => {
-  res.json({ ok: true, keyName: req.provisionKey.name, globalTokenAvailable: !!globalCfToken() });
+// ---- provisioning endpoints (admin session OR X-API-Key) ----
+
+// Access probe. Returns non-secret context the form needs: whether a
+// global Cloudflare token exists (so the CF field's helper text is
+// accurate) — never the token itself.
+router.post('/provision/verify-key', requireProvisionAccess, (req, res) => {
+  res.json({ ok: true, keyName: req.provisionKey?.name || null, globalTokenAvailable: !!globalCfToken() });
 });
 
 // Live method-resolution preview: the form calls this as the user types so
 // the resolved method (and any blocking problem) is visible BEFORE submit.
-router.post('/provision/resolve', requireProvisionKey, (req, res) => {
+router.post('/provision/resolve', requireProvisionAccess, (req, res) => {
   const v = validateProvisionInput(req.body || {});
   if (!v.ok) return res.status(400).json({ errors: v.errors });
   const { domain, method, wildcard, cfToken } = v.value;
@@ -170,7 +182,7 @@ const provisionSchema = z.object({
   cfToken: z.string().optional().default(''),
 });
 
-router.post('/provision', requireProvisionKey, async (req, res) => {
+router.post('/provision', requireProvisionAccess, async (req, res) => {
   const parsed = provisionSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: 'Invalid request body.', errors: parsed.error.issues.map((i) => i.message) });
   const v = validateProvisionInput(parsed.data);
@@ -224,7 +236,7 @@ router.post('/provision', requireProvisionKey, async (req, res) => {
       // DNS-01 only: encrypted at rest so the token can be re-materialized
       // (restore, host rebuild). HTTP-01 domains store no token at all.
       effectiveToken ? encryptSecret(effectiveToken) : null,
-      tokenSource, req.provisionKey.id,
+      tokenSource, req.provisionKey?.id ?? null,
     );
     recordId = info.lastInsertRowid;
 
@@ -254,8 +266,9 @@ router.post('/provision', requireProvisionKey, async (req, res) => {
       return res.status(502).json({ error: `Caddy reload failed — nothing was applied: ${String(e.stderr || e.message || '').slice(0, 400)}` });
     }
 
-    logAudit(null, 'DOMAIN_PROVISIONED', 'domain', String(recordId), {
-      domain, upstream, method: resolved.method, wildcard, apiKey: req.provisionKey.name,
+    logAudit(req.user?.id ?? null, 'DOMAIN_PROVISIONED', 'domain', String(recordId), {
+      domain, upstream, method: resolved.method, wildcard,
+      via: req.provisionKey ? `api-key:${req.provisionKey.name}` : 'admin-session',
     }, req.ip);
 
     res.json({
@@ -280,7 +293,7 @@ router.post('/provision', requireProvisionKey, async (req, res) => {
 // recent Caddy logs for a classified ACME failure so the user gets an
 // actionable reason instead of an endless spinner. Caddy keeps retrying
 // with backoff, so "failed" here is a diagnosis, not a terminal state.
-router.get('/provision/:domain/status', requireProvisionKey, (req, res) => {
+router.get('/provision/:domain/status', requireProvisionAccess, (req, res) => {
   const domain = String(req.params.domain || '').trim().toLowerCase();
   const row = getDb().prepare(`SELECT * FROM provisioned_domains WHERE domain = ?`).get(domain);
   if (!row) return res.status(404).json({ error: 'Domain not found.' });

@@ -86,10 +86,7 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
       throw new ApiError(data.error || 'Authentication step required', 401, data);
     }
     // Don't redirect if already on login page (prevents "Session expired" on bad credentials)
-    // or on a public page that doesn't use dashboard sessions at all —
-    // /add-domain is gated by its own provisioning API key, and the
-    // AuthContext's boot-time verify() 401 is EXPECTED for its visitors.
-    if (window.location.pathname === '/login' || window.location.pathname === '/add-domain') {
+    if (window.location.pathname === '/login') {
       throw new ApiError(data.error || 'Invalid credentials', 401, data);
     }
     // Cookie was rejected/expired — clear cached user metadata and
@@ -1752,10 +1749,17 @@ export const api = {
   notificationChannelTest: (kind) =>
     request(`/notifications/channels/${encodeURIComponent(kind)}/test`, { method: 'POST' }),
 
-  // Domain provisioning — ADMIN management surface (cookie session).
-  // The public /add-domain page does NOT use this client: it talks to
-  // /api/domains/provision/* directly with the X-API-Key header and no
-  // cookies (see pages/AddDomain.jsx).
+  // Domain provisioning — admin-gated. The Add Domain page and the Domains
+  // management page both ride the admin cookie session through this
+  // client; provisioning API keys exist for scripted/API clients hitting
+  // the same /provision endpoints with an X-API-Key header instead.
+  domainProvisionAccess: () => request('/domains/provision/verify-key', { method: 'POST', body: '{}' }),
+  domainProvisionResolve: (data) =>
+    request('/domains/provision/resolve', { method: 'POST', body: JSON.stringify(data) }),
+  domainProvision: (data) =>
+    request('/domains/provision', { method: 'POST', body: JSON.stringify(data) }),
+  domainProvisionIssuance: (domain) =>
+    request(`/domains/provision/${encodeURIComponent(domain)}/status`),
   domainProvisionStatus: () => request('/domains/admin/status'),
   domainProvisionKeys: () => request('/domains/admin/keys'),
   domainProvisionKeyCreate: (name) =>

@@ -1,16 +1,18 @@
-# Domain provisioning — the self-service "Add Domain" page
+# Domain provisioning — the "Add Domain" page
 
-A public page at **`/add-domain`** lets a user provision a domain on the
-Caddy reverse proxy with an automatic Let's Encrypt certificate: fill a
-short form, ProxyPilot writes the Caddy config, reloads Caddy, and the
-certificate is issued and **renewed automatically forever** — no cron, no
-scripts, no further action.
+An **admin-gated** dashboard page at **`/add-domain`** provisions a domain
+on the Caddy reverse proxy with an automatic Let's Encrypt certificate:
+fill a short form, ProxyPilot writes the Caddy config, reloads Caddy, and
+the certificate is issued and **renewed automatically forever** — no cron,
+no scripts, no further action. The page requires an administrator session;
+the same `/api/domains/provision/*` endpoints also accept a provisioning
+API key (`X-API-Key`) for scripted/API clients.
 
 ## The two credentials (never conflated)
 
 | | ProxyPilot access API key | Cloudflare API token |
 |---|---|---|
-| Purpose | Unlocks the page and authorizes provisioning requests | Lets Caddy write `_acme-challenge` TXT records for DNS-01 |
+| Purpose | Authorizes scripted/API provisioning requests (the page itself uses the admin session) | Lets Caddy write `_acme-challenge` TXT records for DNS-01 |
 | Needed for | **Both** certificate methods | DNS-01 only |
 | Sent as | `X-API-Key` header on every provisioning request | Never sent by the browser after submit |
 | Storage | sha256 hash only (`provision_api_keys`); raw key shown once at creation | AES-256-GCM in the DB (`TOTP_ENCRYPTION_KEY`) + a `0640 root:caddy` file under `/etc/caddy/pp-secrets/` that Caddy reads |
@@ -101,7 +103,9 @@ re-issuance rate limits after restarts.
 * Deprovisioning (Domains page) removes the site file, token file, and
   record, then reloads; the issued cert stays cached in Caddy's storage
   so re-adding the domain doesn't burn a rate-limited re-issue.
-* Endpoints under `/api/domains/provision` are CSRF-exempt (no ambient
-  cookies — the API key header is the binding token, same rationale as
-  the mock2 git endpoints); `/api/domains/admin/*` uses cookie sessions,
-  admin role, sudo for mutations, and full CSRF.
+* `/api/domains/provision/*` is dual-auth: an admin cookie session (full
+  CSRF protection) or an `X-API-Key` provisioning key. The CSRF exemption
+  applies ONLY when the key header is present (no ambient cookies — the
+  key is the binding token, same rationale as the mock2 git endpoints).
+  `/api/domains/admin/*` uses cookie sessions, admin role, sudo for
+  mutations, and full CSRF.

@@ -1566,6 +1566,46 @@ export function initDatabase() {
     `);
   });
 
+  // Version 604: self-service domain provisioning ("Add Domain" page).
+  // Two credentials, kept structurally separate: provision_api_keys holds
+  // sha256 hashes of ProxyPilot access API keys (page/endpoint auth, both
+  // cert methods); provisioned_domains.cf_token_encrypted holds the
+  // per-domain Cloudflare API token (DNS-01 only), AES-256-GCM via
+  // lib/secrets.js — never returned to any client. The operator's DNS-01
+  // specified-domain list lives in app_settings ('dns01_domains').
+  runMigration(db, 604, 'domain_provisioning', (d) => {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS provision_api_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        scope TEXT NOT NULL DEFAULT 'domains:provision',
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_used_at TEXT,
+        revoked_at TEXT
+      )
+    `);
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS provisioned_domains (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT NOT NULL UNIQUE,
+        upstream TEXT NOT NULL,
+        method_requested TEXT NOT NULL DEFAULT 'auto',
+        method_resolved TEXT NOT NULL,
+        wildcard INTEGER NOT NULL DEFAULT 0,
+        acme_email TEXT NOT NULL,
+        cf_token_encrypted TEXT,
+        cf_token_source TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        api_key_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  });
+
   // Create file versions table for version control
   db.exec(`
     CREATE TABLE IF NOT EXISTS file_versions (

@@ -86,7 +86,10 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
       throw new ApiError(data.error || 'Authentication step required', 401, data);
     }
     // Don't redirect if already on login page (prevents "Session expired" on bad credentials)
-    if (window.location.pathname === '/login') {
+    // or on a public page that doesn't use dashboard sessions at all —
+    // /add-domain is gated by its own provisioning API key, and the
+    // AuthContext's boot-time verify() 401 is EXPECTED for its visitors.
+    if (window.location.pathname === '/login' || window.location.pathname === '/add-domain') {
       throw new ApiError(data.error || 'Invalid credentials', 401, data);
     }
     // Cookie was rejected/expired — clear cached user metadata and
@@ -1748,6 +1751,23 @@ export const api = {
     request(`/notifications/channels/${encodeURIComponent(kind)}`, { method: 'DELETE' }),
   notificationChannelTest: (kind) =>
     request(`/notifications/channels/${encodeURIComponent(kind)}/test`, { method: 'POST' }),
+
+  // Domain provisioning — ADMIN management surface (cookie session).
+  // The public /add-domain page does NOT use this client: it talks to
+  // /api/domains/provision/* directly with the X-API-Key header and no
+  // cookies (see pages/AddDomain.jsx).
+  domainProvisionStatus: () => request('/domains/admin/status'),
+  domainProvisionKeys: () => request('/domains/admin/keys'),
+  domainProvisionKeyCreate: (name) =>
+    request('/domains/admin/keys', { method: 'POST', body: JSON.stringify({ name }) }),
+  domainProvisionKeyRevoke: (id) =>
+    request(`/domains/admin/keys/${id}/revoke`, { method: 'POST' }),
+  domainProvisionDns01List: () => request('/domains/admin/dns01-list'),
+  domainProvisionDns01Save: (list) =>
+    request('/domains/admin/dns01-list', { method: 'PUT', body: JSON.stringify({ list }) }),
+  domainProvisionDomains: () => request('/domains/admin/domains'),
+  domainProvisionDomainDelete: (id) =>
+    request(`/domains/admin/domains/${id}`, { method: 'DELETE' }),
 
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');

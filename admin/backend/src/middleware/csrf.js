@@ -33,6 +33,12 @@ const CSRF_EXEMPT_PREFIXES = [
   // double-submit check has nothing to protect (git clients also cannot
   // echo a CSRF header).
   '/api/mock2/git/',
+  // Domain provisioning: auth is the X-API-Key provisioning key — no
+  // ambient cookies are involved, so a cross-site request can't ride a
+  // session and the double-submit check has nothing to protect. The
+  // /api/domains/admin/* endpoints use cookie sessions and are NOT under
+  // this prefix — they keep full CSRF protection.
+  '/api/domains/provision',
 ];
 
 export function csrfProtection(req, res, next) {

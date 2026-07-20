@@ -29,7 +29,7 @@ import { writeFile, unlink, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { getDb, logAudit, getSetting, setSetting } from '../db.js';
 import { authenticateToken, requireAdmin, requireSudo } from '../middleware/auth.js';
-import { encryptSecret } from '../lib/secrets.js';
+import { encryptSecret, decryptSecret } from '../lib/secrets.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { resolveCertDir } from '../lib/caddy-cert.js';
 import { spawnHostSync } from '../lib/host-exec.js';
@@ -37,7 +37,7 @@ import {
   validateProvisionInput, resolveCertMethod, parseDns01List,
   buildSiteBlock, provisionFileName, tokenFilePath, PP_SECRETS_DIR,
   generateApiKey, hashApiKey, PROVISION_SCOPE, publicDomainShape,
-  classifyAcmeError,
+  classifyAcmeError, CF_TOKEN_RE,
 } from '../lib/domain-provision-logic.js';
 
 const CADDY_SITES_DIR = process.env.CADDY_SITES_DIR || '/etc/caddy/sites';
@@ -47,9 +47,29 @@ const router = domainsRouter;
 
 // ---- helpers ----
 
+// The global Cloudflare token: the value saved from the Domains page
+// (app_settings, encrypted at rest) wins; the CLOUDFLARE_API_TOKEN env var
+// is the fallback for operators who prefer config files. Decrypted only at
+// the moment Caddy needs it — never returned to any client.
+const CF_GLOBAL_TOKEN_SETTING = 'cloudflare_global_token';
+
 function globalCfToken() {
+  try {
+    const stored = getSetting(CF_GLOBAL_TOKEN_SETTING);
+    if (stored) {
+      const t = String(decryptSecret(stored) || '').trim();
+      if (t) return t;
+    }
+  } catch (e) {
+    console.error('[domains] could not decrypt the stored global Cloudflare token:', e?.message);
+  }
   const t = String(process.env.CLOUDFLARE_API_TOKEN || '').trim();
   return t || null;
+}
+
+function globalCfTokenSource() {
+  try { if (getSetting(CF_GLOBAL_TOKEN_SETTING)) return 'ui'; } catch { /* fall through */ }
+  return String(process.env.CLOUDFLARE_API_TOKEN || '').trim() ? 'env' : null;
 }
 
 function dns01List() {
@@ -336,8 +356,59 @@ router.get('/provision/:domain/status', requireProvisionAccess, (req, res) => {
 router.get('/admin/status', authenticateToken, requireAdmin, (req, res) => {
   res.json({
     globalTokenAvailable: !!globalCfToken(),
+    globalTokenSource: globalCfTokenSource(), // 'ui' | 'env' | null
     cloudflarePlugin: cloudflarePluginPresent(), // true | false | null (unknown)
   });
+});
+
+// Save the global Cloudflare token from the UI. Write-only: stored
+// encrypted (lib/secrets.js), never echoed back, never logged. Takes
+// precedence over the CLOUDFLARE_API_TOKEN env var.
+router.put('/admin/cloudflare-token', authenticateToken, requireAdmin, requireSudo, (req, res) => {
+  const token = String(req.body?.token || '').trim();
+  if (!CF_TOKEN_RE.test(token)) {
+    return res.status(400).json({ error: 'That does not look like a Cloudflare API token. Create one in Cloudflare with Zone → DNS → Edit and Zone → Zone → Read scopes and paste it here.' });
+  }
+  setSetting(CF_GLOBAL_TOKEN_SETTING, encryptSecret(token));
+  logAudit(req.user.id, 'CLOUDFLARE_GLOBAL_TOKEN_SET', 'app_settings', CF_GLOBAL_TOKEN_SETTING, {}, req.ip);
+  res.json({ ok: true, globalTokenAvailable: true, globalTokenSource: 'ui' });
+});
+
+// Clear the UI-stored token. Existing DNS-01 domains are unaffected: their
+// effective token was materialized to the per-domain credential file Caddy
+// renews with. The env fallback (if configured) becomes active again.
+router.delete('/admin/cloudflare-token', authenticateToken, requireAdmin, requireSudo, (req, res) => {
+  setSetting(CF_GLOBAL_TOKEN_SETTING, '');
+  logAudit(req.user.id, 'CLOUDFLARE_GLOBAL_TOKEN_CLEARED', 'app_settings', CF_GLOBAL_TOKEN_SETTING, {}, req.ip);
+  res.json({ ok: true, globalTokenAvailable: !!globalCfToken(), globalTokenSource: globalCfTokenSource() });
+});
+
+// Install the Caddy Cloudflare DNS provider from the dashboard:
+// `caddy add-package` on the host, then a Caddy restart (brief — reload
+// cannot swap the binary). Writes the marker file update.sh checks so the
+// plugin is RE-installed automatically after caddy package upgrades
+// (which replace the binary and drop add-on packages).
+const PLUGIN_MARKER = '/var/lib/proxypilot/caddy-cloudflare-plugin.enabled';
+
+router.post('/admin/cloudflare-plugin/install', authenticateToken, requireAdmin, requireSudo, (req, res) => {
+  if (cloudflarePluginPresent() === true) {
+    try { spawnHostSync('sh', ['-c', `mkdir -p /var/lib/proxypilot && touch ${PLUGIN_MARKER}`], { timeout: 10000 }); } catch { /* marker is a nicety */ }
+    return res.json({ ok: true, cloudflarePlugin: true, message: 'The Cloudflare DNS plugin is already installed.' });
+  }
+  const add = spawnHostSync('caddy', ['add-package', 'github.com/caddy-dns/cloudflare'], { encoding: 'utf8', timeout: 180000 });
+  if (add.error || add.status !== 0) {
+    const detail = String(add.stderr || add.stdout || add.error?.message || 'unknown error').slice(0, 400);
+    return res.status(502).json({ error: `Could not install the plugin: ${detail}` });
+  }
+  // add-package replaced the binary — restart the service so the running
+  // Caddy actually has the module (reload keeps the old process).
+  const restart = spawnHostSync('systemctl', ['restart', 'caddy'], { encoding: 'utf8', timeout: 60000 });
+  if (restart.error || restart.status !== 0) {
+    return res.status(502).json({ error: `The plugin installed but Caddy did not restart cleanly: ${String(restart.stderr || restart.error?.message || '').slice(0, 300)}. Check \`systemctl status caddy\` on the host.` });
+  }
+  try { spawnHostSync('sh', ['-c', `mkdir -p /var/lib/proxypilot && touch ${PLUGIN_MARKER}`], { timeout: 10000 }); } catch { /* update.sh also detects via site files */ }
+  logAudit(req.user.id, 'CADDY_CLOUDFLARE_PLUGIN_INSTALLED', 'caddy', 'cloudflare', {}, req.ip);
+  res.json({ ok: true, cloudflarePlugin: cloudflarePluginPresent(), message: 'Cloudflare DNS plugin installed; Caddy restarted.' });
 });
 
 router.get('/admin/keys', authenticateToken, requireAdmin, (req, res) => {

@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { useToast } from '@/hooks/use-toast';
 import {
   Globe, KeyRound, Loader2, Plus, Trash2, Copy, Check, ShieldCheck,
-  AlertTriangle, ExternalLink, ListChecks,
+  AlertTriangle, ExternalLink, ListChecks, Cloud, Eye, EyeOff, Download,
 } from 'lucide-react';
 
 // Admin management for the self-service "Add Domain" page (/add-domain):
@@ -33,6 +33,11 @@ export default function DomainProvisioning() {
   const [dnsList, setDnsList] = useState('');
   const [dnsSaved, setDnsSaved] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  const [cfTokenInput, setCfTokenInput] = useState('');
+  const [showCfToken, setShowCfToken] = useState(false);
+  const [savingCfToken, setSavingCfToken] = useState(false);
+  const [installingPlugin, setInstallingPlugin] = useState(false);
 
   const [newKeyName, setNewKeyName] = useState('');
   const [creatingKey, setCreatingKey] = useState(false);
@@ -61,6 +66,46 @@ export default function DomainProvisioning() {
   }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  const saveCfToken = async (e) => {
+    e.preventDefault();
+    if (!cfTokenInput.trim()) return;
+    setSavingCfToken(true);
+    try {
+      const r = await api.domainCloudflareTokenSave(cfTokenInput.trim());
+      setCfTokenInput('');
+      setStatus((s) => ({ ...s, globalTokenAvailable: r.globalTokenAvailable, globalTokenSource: r.globalTokenSource }));
+      toast({ title: 'Cloudflare connected', description: 'The global token is saved (encrypted) and will be used for every DNS-01 domain.' });
+    } catch (err) {
+      toast({ title: 'Could not save the token', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingCfToken(false);
+    }
+  };
+
+  const clearCfToken = async () => {
+    if (!window.confirm('Remove the saved global Cloudflare token? Already-provisioned domains keep renewing (their credential is stored per-domain), but new DNS-01 domains will need a token again.')) return;
+    try {
+      const r = await api.domainCloudflareTokenClear();
+      setStatus((s) => ({ ...s, globalTokenAvailable: r.globalTokenAvailable, globalTokenSource: r.globalTokenSource }));
+      toast({ title: 'Global Cloudflare token removed' });
+    } catch (err) {
+      toast({ title: 'Could not remove the token', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const installPlugin = async () => {
+    setInstallingPlugin(true);
+    try {
+      const r = await api.domainCloudflarePluginInstall();
+      setStatus((s) => ({ ...s, cloudflarePlugin: r.cloudflarePlugin }));
+      toast({ title: 'Cloudflare DNS plugin ready', description: r.message });
+    } catch (err) {
+      toast({ title: 'Plugin install failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setInstallingPlugin(false);
+    }
+  };
 
   const createKey = async (e) => {
     e.preventDefault();
@@ -144,19 +189,75 @@ export default function DomainProvisioning() {
             ; the API keys below authenticate scripted/API clients on the same endpoints.
           </p>
         </div>
-        <div className="flex flex-col gap-1 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            {status?.globalTokenAvailable
-              ? <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> Global Cloudflare token configured</>
-              : <><AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> No global Cloudflare token (CLOUDFLARE_API_TOKEN) — DNS-01 needs per-domain tokens</>}
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            {status?.cloudflarePlugin === true && <><ShieldCheck className="h-3.5 w-3.5 text-green-500" /> Caddy Cloudflare DNS plugin installed</>}
-            {status?.cloudflarePlugin === false && <><AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> Caddy lacks the Cloudflare plugin — run `caddy add-package github.com/caddy-dns/cloudflare`</>}
-            {status?.cloudflarePlugin == null && <><AlertTriangle className="h-3.5 w-3.5 text-muted-foreground" /> Could not check the Caddy Cloudflare plugin</>}
-          </span>
-        </div>
       </div>
+
+      {/* Cloudflare connection — everything needed for DNS-01, from here */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Cloud className="h-4 w-4" /> Cloudflare connection
+          </CardTitle>
+          <CardDescription>
+            Needed only for the DNS-01 method (wildcards, geo-blocked domains, the DNS-01 list below).
+            Create a token in Cloudflare (My Profile → API Tokens → &quot;Edit zone DNS&quot; template) with{' '}
+            <span className="font-mono">Zone → DNS → Edit</span> and <span className="font-mono">Zone → Zone → Read</span>{' '}
+            on your zone, and paste it here — it is stored encrypted and never shown again.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start gap-2 text-sm">
+            {status?.globalTokenAvailable
+              ? <><ShieldCheck className="h-4 w-4 mt-0.5 shrink-0 text-green-500" /><span>Global token configured{status?.globalTokenSource === 'env' ? ' (via the server .env — saving one here overrides it)' : ''}. All DNS-01 domains use it unless a per-domain token is entered on the Add Domain form.</span></>
+              : <><AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-500" /><span>No global token yet — DNS-01 domains will each need their own token until one is saved.</span></>}
+          </div>
+          <form onSubmit={saveCfToken} className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Label htmlFor="cf-global-token" className="sr-only">Cloudflare API token</Label>
+              <Input
+                id="cf-global-token"
+                type={showCfToken ? 'text' : 'password'}
+                autoComplete="off"
+                value={cfTokenInput}
+                onChange={(e) => setCfTokenInput(e.target.value)}
+                placeholder={status?.globalTokenAvailable ? 'Paste a new token to replace the saved one' : 'Paste your Cloudflare API token'}
+                className="pr-11 min-h-[44px]"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCfToken((v) => !v)}
+                className="absolute right-0 top-0 flex h-full w-11 items-center justify-center text-muted-foreground"
+                aria-label={showCfToken ? 'Hide token' : 'Show token'}
+              >
+                {showCfToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <Button type="submit" disabled={savingCfToken || !cfTokenInput.trim()} className="min-h-[44px] flex-1 sm:flex-none">
+                {savingCfToken ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                <span className="ml-2">Save token</span>
+              </Button>
+              {status?.globalTokenSource === 'ui' && (
+                <Button type="button" variant="outline" onClick={clearCfToken} className="min-h-[44px]">
+                  <Trash2 className="h-4 w-4 sm:mr-1" /><span className="hidden sm:inline">Remove</span>
+                </Button>
+              )}
+            </div>
+          </form>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 rounded-lg border p-3">
+            <div className="flex items-start gap-2 text-sm min-w-0 flex-1">
+              {status?.cloudflarePlugin === true && <><ShieldCheck className="h-4 w-4 mt-0.5 shrink-0 text-green-500" /><span>Caddy&apos;s Cloudflare DNS plugin is installed — DNS-01 issuance is ready.</span></>}
+              {status?.cloudflarePlugin === false && <><AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-500" /><span>Caddy is missing the Cloudflare DNS plugin. Install it to enable DNS-01 — Caddy restarts briefly (a couple of seconds).</span></>}
+              {status?.cloudflarePlugin == null && <><AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" /><span>Could not check the Caddy Cloudflare plugin from here.</span></>}
+            </div>
+            {status?.cloudflarePlugin !== true && (
+              <Button onClick={installPlugin} disabled={installingPlugin} className="min-h-[44px]">
+                {installingPlugin ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                <span className="ml-2">{installingPlugin ? 'Installing…' : 'Install plugin'}</span>
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Access API keys */}
       <Card>

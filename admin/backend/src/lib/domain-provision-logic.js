@@ -31,6 +31,11 @@ export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export const CERT_METHODS = Object.freeze(['auto', 'http01', 'dns01']);
 
+// Shape check for a Cloudflare API token (per-domain field AND the global
+// token saved from the Domains page) — a sanity net, not real validation:
+// Cloudflare judges the token when Caddy first uses it.
+export const CF_TOKEN_RE = /^[\w.\-]{20,300}$/;
+
 export function validateProvisionInput({ domain, upstream, method = 'auto', wildcard = false, acmeEmail, cfToken = '' } = {}) {
   const errors = [];
   const d = String(domain || '').trim().toLowerCase();
@@ -46,7 +51,7 @@ export function validateProvisionInput({ domain, upstream, method = 'auto', wild
   if (!EMAIL_RE.test(e) || e.length > 254) errors.push('ACME contact email must be a valid email address.');
   if (!CERT_METHODS.includes(m)) errors.push('Certificate method must be auto, http01, or dns01.');
   const t = String(cfToken || '').trim();
-  if (t && !/^[\w.\-]{20,300}$/.test(t)) errors.push('That does not look like a Cloudflare API token.');
+  if (t && !CF_TOKEN_RE.test(t)) errors.push('That does not look like a Cloudflare API token.');
   return {
     ok: errors.length === 0,
     errors,

@@ -1772,6 +1772,14 @@ export const api = {
   domainProvisionDomains: () => request('/domains/admin/domains'),
   domainProvisionDomainDelete: (id) =>
     request(`/domains/admin/domains/${id}`, { method: 'DELETE' }),
+  // Global Cloudflare token (write-only — the server never echoes it) and
+  // the Caddy Cloudflare DNS plugin installer.
+  domainCloudflareTokenSave: (token) =>
+    request('/domains/admin/cloudflare-token', { method: 'PUT', body: JSON.stringify({ token }) }),
+  domainCloudflareTokenClear: () =>
+    request('/domains/admin/cloudflare-token', { method: 'DELETE' }),
+  domainCloudflarePluginInstall: () =>
+    request('/domains/admin/cloudflare-plugin/install', { method: 'POST' }),
 
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');

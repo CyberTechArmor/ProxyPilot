@@ -146,6 +146,46 @@ their territory, leave a visibly disabled control with a "Not built yet" badge, 
     'STATE items are conditions to handle when they genuinely occur — never fabricate artificial ones.' + later;
 }
 
+// ---- chat message → build prompt distillation ----
+// The "Build this as a Quick update" button on a chat bubble: an Ask answer
+// listing improvements (or a review's findings) becomes ONE well-formed
+// quick-update instruction — the step the operator was doing by hand with
+// "please write the prompt for all of that".
+
+export function buildDistillSystemPrompt() {
+  return `You turn a message from a build chat into ONE well-formed build instruction
+for an AI app builder's quick-update lane. The message is usually an assistant
+answer — a list of suggested improvements, a review's findings, or a plan.
+Write the instruction a skilled operator would send to get ALL of its concrete,
+definite items built.
+Rules:
+- Imperative voice, addressed to the builder ("Add …", "Record …", "Show …").
+- Preserve EVERY concrete deliverable the message contains; merge duplicates.
+- Keep specific details: field names, endpoints, states, edge cases, acceptance
+  criteria. Number the deliverables when there are several.
+- Skip pure questions, rejected alternatives, and meta-commentary.
+- Do NOT invent anything the message does not contain.
+- Output ONLY the instruction text — no preamble, no quotes, no code fences,
+  never "Here's the prompt".`;
+}
+
+export function buildDistillUserTurn({ body = '', precedingUser = '' } = {}) {
+  const ctx = String(precedingUser || '').trim()
+    ? `For context, the user message that prompted it:\n"""\n${String(precedingUser).trim().slice(0, 2000)}\n"""\n\n`
+    : '';
+  return `${ctx}The chat message to convert into a build instruction:\n"""\n${String(body).trim().slice(0, 24000)}\n"""`;
+}
+
+// Strip fences/preambles the model might add anyway; null when unusable.
+export function cleanDistilledInstruction(text) {
+  let s = String(text || '').trim();
+  const fence = /```(?:\w+)?\s*([\s\S]*?)```/.exec(s);
+  if (fence) s = fence[1].trim();
+  s = s.replace(/^(?:here(?:'|’)s[^\n:]*|the (?:build )?instruction[^\n:]*|prompt)\s*:\s*/i, '').trim();
+  if (s.length < 10) return null;
+  return s.slice(0, 6000);
+}
+
 // One effort notch up for requests that turned out bigger than the lane
 // assumes. Bounded by the scale — 'max' stays 'max'.
 export function bumpEffort(effort) {

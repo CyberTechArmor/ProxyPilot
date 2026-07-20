@@ -50,6 +50,7 @@ import {
   prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
   prepassEffort, formatBriefForTask, featureScaleNotice, PREPASS_MAX_TOKENS,
   normalizeSuggestMode,
+  buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from './prepass-logic.js';
 import { insertCycleEvent, listRecentDownNotes } from './cycle-events.js';
 import {
@@ -272,6 +273,27 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
   const parsed = parsePrepassReply(res.text);
   if (!parsed) return null;
   return parsed; // { scope, brief, split|null }
+}
+
+// distillChatPrompt — the "Build this as a Quick update" button's model call:
+// one cheap turn converting a chat message (an Ask answer's improvement list, a
+// review's findings) into a well-formed quick-update instruction. Bounded and
+// fail-open like probeSplitProposal: null on error/timeout/unusable output.
+export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 25000 } = {}) {
+  const ready = buildRunnerReady();
+  if (!ready.ok) return null;
+  const call = callModelTurn({
+    connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
+    system: buildDistillSystemPrompt(), tools: [],
+    transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
+    maxTokens: 1600, effort: 'low', thinking: 'off',
+  });
+  const res = await Promise.race([
+    call,
+    new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+  if (!res || !res.ok) return null;
+  return cleanDistilledInstruction(res.text);
 }
 
 // startCycle — the cycle-start sequence (04-phased-plan §M6):

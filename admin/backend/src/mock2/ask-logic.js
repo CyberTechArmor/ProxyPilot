@@ -125,6 +125,13 @@ HARD RULES — this is not a build:
   or config CHANGE, briefly say what it would involve and tell them to run it
   as a Quick update or build — the build lane audits, gates, and checkpoints
   changes; this lane must not.
+- DRAFTING TEXT IS ALWAYS FINE: writing a prompt, spec, or plan is chat text,
+  not a code change — never refuse it. When the user says "write the prompt
+  for that" (often referring to your own previous answer — see the
+  conversation context above), produce ONE ready-to-send quick-update
+  instruction: imperative, self-contained, every concrete item preserved.
+  They can paste it into the composer, or use a message's "Build this as a
+  Quick update" button to run it directly.
 - Operational data changes are allowed ONLY when the user explicitly asked for
   them, and prefer the app's own API over raw SQL (the API enforces the app's
   validation and hashing — e.g. create a user through the admin endpoint, not
@@ -146,6 +153,37 @@ helps. When you have the answer, reply with it directly — no preamble.`;
 // The first user turn.
 export function buildAskTask(question) {
   return String(question || '').trim().slice(0, ASK_MAX_QUESTION_CHARS);
+}
+
+// ---- conversation context ----
+// Every ask used to start a BLANK transcript, so "write the prompt for all of
+// that" had no referent and the model honestly answered "there's no prior
+// request in our conversation" (user report). A compact recap of the recent
+// chat now rides the first turn: newest messages kept whole-ish, clipped per
+// message and bounded overall, oldest dropped first.
+export const ASK_CONTEXT_MAX_MESSAGES = 12;
+export const ASK_CONTEXT_MAX_CHARS = 9000;
+const ASK_CONTEXT_PER_MESSAGE_CHARS = 1800;
+
+export function buildAskContextBlock(messages = []) {
+  const rows = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && ['user', 'assistant', 'system'].includes(m.kind) && String(m.body || '').trim())
+    .slice(-ASK_CONTEXT_MAX_MESSAGES);
+  if (!rows.length) return '';
+  // Walk newest → oldest so the budget keeps the most recent exchange.
+  const kept = [];
+  let budget = ASK_CONTEXT_MAX_CHARS;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i];
+    const who = m.kind === 'user' ? 'User' : m.kind === 'assistant' ? 'Assistant (you)' : 'System';
+    const text = String(m.body).trim().slice(0, ASK_CONTEXT_PER_MESSAGE_CHARS);
+    const line = `${who}: ${text}`;
+    if (line.length > budget) break;
+    kept.unshift(line);
+    budget -= line.length;
+  }
+  if (!kept.length) return '';
+  return `# Recent build-chat conversation (context — "that"/"it" in the message below refers here)\n${kept.join('\n---\n')}`;
 }
 
 // Commands the ask lane refuses to run even if asked — the cheap, obvious

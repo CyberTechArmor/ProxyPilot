@@ -240,6 +240,24 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     await startBuild('quick', { skipSuggest: true, extras: extras.length ? extras : null });
   };
   const buildAsAsked = async () => { setSuggestPlan(null); await startBuild('quick', { skipSuggest: true }); };
+  // "Build this as a Quick update" on a chat bubble: the backend distills the
+  // message into a well-formed prompt, the composer shows it, and it runs
+  // through the NORMAL quick lane — split/suggestion cards and the queue all
+  // apply to the composed prompt exactly as if the user typed it.
+  const [distillingId, setDistillingId] = useState(null);
+  const quickUpdateFromMessage = async (m) => {
+    if (busy || distillingId) return;
+    setDistillingId(m.id);
+    try {
+      const r = await api.mock2DistillPrompt(projectId, m.id);
+      setInstruction(r.instruction);
+      toast({ title: 'Prompt composed from the chat', description: 'Sending it as a Quick update…' });
+      await startBuild('quick', { textOverride: r.instruction });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not turn the message into a prompt', description: err.message });
+    } finally { setDistillingId(null); }
+  };
+
   // Annotate-on-screenshot: the dialog composes the pin list + burned-in image
   // and this sends it straight as a Quick update (cards skipped — a pin list
   // is already precise scope).
@@ -355,6 +373,8 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           working={active || askActive}
           workingLabel={askActive ? (askJob?.message || 'Answering…') : (job?.message || 'Building…')}
           partialText={askPartial}
+          onQuickUpdate={canEdit && online && !needsFeedback && !resumeMode ? quickUpdateFromMessage : null}
+          quickBusyId={distillingId}
           emptyLabel={online
             ? 'Describe a change below and send it as a Quick update, or Ask a question / request an action (run a test, add a user). Rule questions and build events appear here.'
             : 'Bring the project online to run a build.'}

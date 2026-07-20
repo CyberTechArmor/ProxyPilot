@@ -30,7 +30,7 @@ import { applyLaneTuning } from './lane-tuning-logic.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { acquireLock, releaseLock, touchLock } from './locks.js';
-import { insertMessage, getOrCreateChat } from './chats.js';
+import { insertMessage, getOrCreateChat, listMessages } from './chats.js';
 import { saveChatImages, hydrateAttachments } from './chat-images.js';
 import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
@@ -45,6 +45,7 @@ import { formatComponentForModel, parseContractJson, buildInstalledComponentsSec
 import {
   ASK_TOOLS, ASK_MAX_TURNS, ASK_MAX_TOKENS, estimateAskTokens,
   buildAskSystemPrompt, buildAskTask, askCommandAllowed, webSearchServerTools,
+  buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES,
 } from './ask-logic.js';
 
 const nowIso = () => new Date().toISOString();
@@ -117,12 +118,16 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   if (!lock.ok) return { status: 'error', error: lock.reason || 'A build is running — ask again when it finishes.' };
 
   getOrCreateChat(projectId);
+  // Snapshot the recent conversation BEFORE inserting this question — the ask
+  // transcript is otherwise blank and "that/it" references dangle.
+  let contextMessages = [];
+  try { contextMessages = listMessages(projectId).slice(-ASK_CONTEXT_MAX_MESSAGES); } catch { contextMessages = []; }
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] ask image save failed:', e?.message); }
   insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q, attachments });
   setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0 });
 
-  runAsk({ project, projectId, holder, ready, question: q, attachments })
+  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages })
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -136,7 +141,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   return { status: 'started' };
 }
 
-async function runAsk({ project, projectId, holder, ready, question, attachments = [] }) {
+async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [] }) {
   const containerName = project.container_name || containerNameForProject(projectId);
 
   // The installed-components section rides along so questions about auth /
@@ -157,7 +162,11 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   // The question's image attachments ride the first turn (an ask is a fresh
   // transcript, so this is the only place they're paid for).
   const askImages = hydrateAttachments(projectId, attachments);
-  const transcript = [{ role: 'user', text: question, ...(askImages.length ? { images: askImages } : {}) }];
+  const contextBlock = buildAskContextBlock(contextMessages);
+  const firstTurn = contextBlock
+    ? `${contextBlock}\n\n# The user's message NOW (answer this)\n${question}`
+    : question;
+  const transcript = [{ role: 'user', text: firstTurn, ...(askImages.length ? { images: askImages } : {}) }];
 
   // Streaming (where the provider supports it — Anthropic): visible text
   // accumulates on the job as `partial` across the tool turns, so the user

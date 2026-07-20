@@ -1451,6 +1451,9 @@ export const api = {
   mock2GetDesignReview: () => request('/mock2/settings/design-review'),
   mock2SetDesignReview: (setting) =>
     request('/mock2/settings/design-review', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // Turn a chat message into a well-formed quick-update instruction.
+  mock2DistillPrompt: (id, messageId) =>
+    request(`/mock2/projects/${id}/chat-messages/${messageId}/distill-prompt`, { method: 'POST' }),
   // Live-app screenshot URL (feeds the annotate dialog's <img>).
   mock2AppScreenshotUrl: (id, { path = '/', w = 390 } = {}) =>
     `/api/mock2/projects/${id}/app-screenshot?path=${encodeURIComponent(path)}&w=${w}&t=${Date.now()}`,

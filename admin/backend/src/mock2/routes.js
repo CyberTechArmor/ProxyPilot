@@ -198,7 +198,7 @@ import { getCycleJobStatus, stopAllCycles, retryCycle, retryDeploy, acceptPendin
 import { mintConnectToken, listConnectTokens, getConnectToken, revokeConnectToken } from './connect.js';
 import { enqueueBuild, listBuildQueue, cancelQueuedBuild, drainBuildQueue, publicQueueShape } from './build-queue.js';
 import { buildGroupInstruction, composeWithAdditions, normalizeSuggestMode, SUGGEST_MODES } from './prepass-logic.js';
-import { probeSplitProposal } from './runner.js';
+import { probeSplitProposal, distillChatPrompt } from './runner.js';
 import { cloneUrlFor, cloneUrlWithCreds, vscodeCloneLink, shapeConnectToken } from './connect-logic.js';
 import {
   getAuthorization, listOpenAuthorizations, listAuthorizationsForCycle,
@@ -231,7 +231,7 @@ import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestore
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
-import { listMessages } from './chats.js';
+import { listMessages, getMessage, getChat } from './chats.js';
 import {
   startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
   exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
@@ -2442,6 +2442,37 @@ export function createMock2Router() {
     drainBuildQueue(project.id).catch((e) => console.warn('[mock2] build-queue drain failed:', e?.message));
     logAudit(req.user.id, 'MOCK2_BUILD_GROUPS', 'mock2_project', project.id, { groups: groups.length }, req.ip);
     res.status(202).json({ queued: rows.length, queue: rows.map(publicQueueShape) });
+  });
+
+  // Turn a chat message into a well-formed quick-update instruction (the
+  // bubble's "Build this as a Quick update" button). One cheap model call
+  // distills the message — an Ask answer's improvement list, a review's
+  // findings — into the prompt the operator was writing by hand; the frontend
+  // then sends it through the NORMAL quick lane (split/suggestions cards and
+  // the queue all apply).
+  router.post('/projects/:id/chat-messages/:mid/distill-prompt', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+    const project = req.mock2Project;
+    const msg = getMessage(Number(req.params.mid));
+    const chat = getChat(project.id);
+    if (!msg || !chat || Number(msg.chat_id) !== Number(chat.id)) {
+      return res.status(404).json({ error: 'No such chat message on this project' });
+    }
+    if (!String(msg.body || '').trim()) return res.status(400).json({ error: 'That message has no text to turn into a prompt' });
+    // The nearest preceding USER message gives the distiller the "what was
+    // asked" context (an answer to "what's missing?" reads differently from
+    // an unprompted plan).
+    let precedingUser = '';
+    const all = listMessages(project.id);
+    const idx = all.findIndex((m) => Number(m.id) === Number(msg.id));
+    for (let i = idx - 1; i >= 0; i--) {
+      if (all[i].kind === 'user' && String(all[i].body || '').trim()) { precedingUser = all[i].body; break; }
+    }
+    const instruction = await distillChatPrompt({ body: msg.body, precedingUser });
+    if (!instruction) {
+      return res.status(503).json({ error: 'Could not compose a prompt from that message (model unavailable or the message has nothing buildable) — try again, or write the update by hand.' });
+    }
+    logAudit(req.user.id, 'MOCK2_CHAT_DISTILL_PROMPT', 'mock2_project', project.id, { message_id: msg.id }, req.ip);
+    res.json({ instruction });
   });
 
   // Design review — the "look at the screen" pass. POST runs it now (Polish

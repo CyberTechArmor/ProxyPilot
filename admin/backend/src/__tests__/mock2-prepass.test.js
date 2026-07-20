@@ -9,6 +9,7 @@ import {
   prepassEffort, bumpEffort, formatBriefForTask, featureScaleNotice,
   PREPASS_DEFAULT_MODEL, PREPASS_SCOPES,
   SUGGEST_MODES, normalizeSuggestMode, composeWithAdditions,
+  buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from '../mock2/prepass-logic.js';
 import { typicalDurationMs } from '../mock2/cycle-logic.js';
 
@@ -135,4 +136,21 @@ test('suggest mode: normalize defaults to ask; confirmed additions compose as bi
   // Clamped to six items.
   const many = composeWithAdditions('x', Array.from({ length: 9 }, (_, i) => `item ${i}`));
   assert.equal((many.match(/^- /gm) || []).length, 6);
+});
+
+test('distill: chat message → build prompt (contract, parse, context turn)', () => {
+  const sys = buildDistillSystemPrompt();
+  assert.match(sys, /ONE well-formed build instruction/);
+  assert.match(sys, /Do NOT invent/);
+  assert.match(sys, /Output ONLY the instruction text/);
+  const turn = buildDistillUserTurn({ body: '1. PTO 2. Export CSV', precedingUser: 'what is missing?' });
+  assert.match(turn, /user message that prompted it/);
+  assert.match(turn, /what is missing\?/);
+  assert.match(turn, /1\. PTO 2\. Export CSV/);
+  assert.ok(!buildDistillUserTurn({ body: 'x' }).includes('prompted it'), 'no context block without a preceding user turn');
+  // Cleaner strips fences and "here's the prompt" preambles; junk → null.
+  assert.equal(cleanDistilledInstruction('```\nAdd PTO tracking and CSV export.\n```'), 'Add PTO tracking and CSV export.');
+  assert.equal(cleanDistilledInstruction("Here's the prompt: Add PTO tracking to the timesheet."), 'Add PTO tracking to the timesheet.');
+  assert.equal(cleanDistilledInstruction('ok'), null);
+  assert.equal(cleanDistilledInstruction(''), null);
 });

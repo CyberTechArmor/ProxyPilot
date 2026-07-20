@@ -225,18 +225,42 @@ test('inventory extraction prompt asks for JSON-only, screen-complete output', (
   assert.match(task, /<html>/);
 });
 
-test('mockup prompt: senior design-craft bar with the emoji-iconography ban', async () => {
+test('mockup prompt: design-judgment craft bar (operator-validated language)', async () => {
   const { buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
   const p = buildMockupSystemPrompt({ designSystem: 'SYSTEM_TOKENS' });
-  // The junior tells the operator flagged (emoji icons, wrapping pill
-  // steppers, five loud badges a row, everything boxed) are each named.
+  // The operator's hand-written prompt produced strikingly better renders;
+  // its transferable structure is now the standing bar. Pin its load-bearing
+  // phrases: earned defaults, operating conditions, rationale comment,
+  // functional color, hard states, and the named anti-patterns.
   assert.match(p, /# Design craft/);
+  assert.match(p, /treat EVERY default as a decision you\s+must earn/);
+  assert.match(p, /REAL OPERATING CONDITIONS/);
+  assert.match(p, /DESIGN RATIONALE as an HTML comment/);
+  assert.match(p, /EVERY COLOR HAS A JOB/);
+  assert.match(p, /NEVER expose internal steps, state names, or data-model language/);
+  assert.match(p, /PROVE IT WITH THE HARD STATES/);
   assert.match(p, /NEVER use emoji as UI iconography/);
-  assert.match(p, /inline SVG\s+icons/i);
-  assert.match(p, /never a row of large pills that wraps/);
-  assert.match(p, /not every element needs a border/i);
-  assert.match(p, /ONE primary action per view/);
+  assert.match(p, /inline SVG icons/i);
+  assert.match(p, /ANTI-PATTERNS/);
+  assert.match(p, /generic-dashboard look/);
+  assert.match(p, /exactly four rows of data/);
   // The craft section sits INSIDE the prompt, before the locked system.
   assert.ok(p.indexOf('# Design craft') < p.indexOf('# Locked design system'));
   assert.match(p, /SYSTEM_TOKENS/);
+});
+
+test('concept chat prompt: brief-enrichment — thorough passes through, simple gets domain-expert expansion', async () => {
+  const { buildConceptChatSystemPrompt } = await import('../mock2/concept-logic.js');
+  const p = buildConceptChatSystemPrompt({ designSystem: 'X', projectName: 'Clinic', mode: 'design' });
+  assert.match(p, /THE BRIEF YOU WRITE IS THE DESIGN'S CEILING/);
+  assert.match(p, /THOROUGH request .* passes through faithfully/s);
+  assert.match(p, /SIMPLE request .* gets EXPANDED/s);
+  assert.match(p, /Surfaces & audiences/);
+  assert.match(p, /Hard states the mockup must PROVE/);
+  assert.match(p, /as DIRECTIVES/);
+  assert.match(p, /1–2 DIRECTION questions FIRST only when a genuine\s+fork/);
+  assert.match(p, /NOTE the\s+defaults you chose/);
+  // Plan mode keeps its own block — no enrichment directives there.
+  const plan = buildConceptChatSystemPrompt({ designSystem: 'X', mode: 'plan' });
+  assert.ok(!plan.includes("THE BRIEF YOU WRITE IS THE DESIGN'S CEILING"));
 });

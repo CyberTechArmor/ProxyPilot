@@ -161,8 +161,12 @@ What you CANNOT do (this is structural, not a preference):
   not run it. If asked to "build it" or "make it work", explain that the mockup
   comes first and Build is a later stage that unlocks after they approve the design.
 
-The mockup is CONSTRAINED to this locked design system — never propose a look it
-forbids; honor the system and say so if a request conflicts with it:
+THE BUILDER OWNS THE LOOK: when the Builder explicitly specifies colors,
+tokens, a theme (light/dark), typography, or a palette, their spec OVERRIDES
+the locked design system below — carry it into the brief VERBATIM (token
+tables included) at the TOP of the brief, and never water it down to fit the
+system. The locked system is the DEFAULT look for turns that don't specify
+one — it exists to prevent drift, not to veto the Builder:
 
 # Locked design system (pinned — binding, not advisory)
 ${designSystem || '(design system content is still owed — risk R8)'}
@@ -384,7 +388,19 @@ radius everywhere (the generic-dashboard look) · internal/model language shown
 to end users · a layout that only works because there are exactly four rows of
 data.
 
-# Locked design system (binding)
+# PRECEDENCE — the brief outranks the locked system (read before the system below)
+When the brief EXPLICITLY specifies visual language — color tokens, a palette,
+light/dark theme, typography, spacing, per-state hues — those instructions are
+BINDING and OVERRIDE the locked design system below and any prior mockup's
+styling for everything they cover. The locked system governs only where the
+brief is silent. Concretely: a brief that provides token tables gets THOSE
+tokens, not the system's brand colors; a requested light theme must never
+render dark; a stage/status palette in the brief replaces a single-hue badge
+scheme; "no neon" means the brand accent goes too. Never resolve a conflict by
+keeping the incumbent look — the Builder's explicit spec wins, everywhere,
+including on revision turns.
+
+# Locked design system (defaults — applies where the brief is silent)
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Return the full HTML document and nothing else.`;
@@ -412,7 +428,7 @@ export function buildMockupTask({ brief = '', currentHtml = null, projectName = 
   if (conversation) parts.push(`Conversation so far (for context):\n${conversation}`);
   parts.push(`Design brief for this mockup:\n${String(brief || '').trim() || '(no brief — infer from the conversation)'}`);
   if (currentHtml) {
-    parts.push(`The CURRENT mockup HTML is below — revise it to satisfy the brief, keeping everything else stable:\n\n${currentHtml}`);
+    parts.push(`The CURRENT mockup HTML is below — revise it to satisfy the brief, keeping everything the brief does not touch stable. EXCEPTION: if the brief RESTYLES the design (new tokens, palette, theme, light/dark), restyle the ENTIRE document to the new spec — visual stability never applies to styling the brief replaces, and the current mockup's palette must not survive into the revision:\n\n${currentHtml}`);
   } else {
     parts.push('There is no existing mockup — create the first version.');
   }

@@ -60,9 +60,23 @@ export function clearPendingDesign(projectId) {
   updateProject(Number(projectId), { pending_design_json: null });
 }
 
+// Re-entrancy guard: the sweep below can be kicked from several places (end
+// of provisioning + the project GET reconcile); consume-first plus this set
+// makes double-fire impossible even under concurrent kicks.
+const running = new Set();
+export async function runPendingDesignSafe(projectId) {
+  const pid = Number(projectId);
+  if (running.has(pid)) return;
+  running.add(pid);
+  try { await runPendingDesign(pid); } finally { running.delete(pid); }
+}
+
 // Execute the queued action. Called at the END of provisioning (project is
-// active; the base app deploy has been attempted). Never throws; every
-// outcome lands in the chat so the fire-and-forget user sees what happened.
+// active; the base app deploy has been attempted) AND from the project GET
+// reconcile — a backend restart mid-provision (an update.sh deploy) kills the
+// in-flight provision function, so the tail hook alone left the queued action
+// stored but never executed ("I had it queued, then it just disappeared").
+// Never throws; every outcome lands in the chat.
 export async function runPendingDesign(projectId) {
   const project = getProject(Number(projectId));
   const doc = getPendingDesign(project);

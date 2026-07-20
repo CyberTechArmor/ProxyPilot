@@ -1035,7 +1035,21 @@ export function createMock2Router() {
     res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups allow-modals; frame-ancestors 'self'");
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Cache-Control', 'no-store');
-    res.type('html').send(r.content);
+    // LIVE RENDER: while a design turn is streaming, the served document (the
+    // placeholder, then each partial) reloads ITSELF every few seconds — the
+    // page navigates in place, so newly rendered screens appear on their own.
+    // The dashboard used to remount the iframe on a timer instead, which
+    // flashed the frame every 10s without guaranteeing fresh content (user
+    // report). Once the render finishes, the snippet stops being injected and
+    // the document is served untouched.
+    let html = r.content;
+    try {
+      const job = getConceptJobStatus(project.id);
+      if (job && job.kind === 'turn' && job.phase === 'designing') {
+        html += '\n<script>setTimeout(function () { location.reload(); }, 6000);</script>';
+      }
+    } catch { /* serve as-is */ }
+    res.type('html').send(html);
   });
 
   // Rotate the slug: new slug, 1h grace on the old one, old slug 404s after and

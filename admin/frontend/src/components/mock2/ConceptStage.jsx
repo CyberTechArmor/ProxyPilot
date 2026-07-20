@@ -414,15 +414,16 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // local echo so the strip doesn't linger.
   useEffect(() => { if (online) setQueuedLocal(null); }, [online]);
 
-  // LIVE PREVIEW while a mockup renders: the orchestrator streams the partial
-  // document into the preview file (first render), so refreshing the iframe
-  // every ~10s lets the Builder watch screens appear instead of waiting out
-  // the whole generation.
+  // LIVE PREVIEW while a mockup renders: the SERVED document reloads itself
+  // (the preview route injects a reload snippet during the render), so no
+  // outer iframe remounting is needed — remounting flashed the whole frame
+  // every 10s (user report). One nudge when the render STARTS makes sure the
+  // iframe is pointed at the self-refreshing placeholder.
   const designing = jobActive && data?.job?.phase === 'designing';
+  const wasDesigning = useRef(false);
   useEffect(() => {
-    if (!designing || !onMockupChanged) return undefined;
-    const t = setInterval(() => onMockupChanged('live-partial'), 10000);
-    return () => clearInterval(t);
+    if (designing && !wasDesigning.current && onMockupChanged) onMockupChanged('render-start');
+    wasDesigning.current = designing;
   }, [designing, onMockupChanged]);
 
   return (

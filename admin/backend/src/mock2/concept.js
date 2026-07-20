@@ -59,6 +59,7 @@ import {
   designImportRecord, parseDesignImport, buildInitialBuildInstruction,
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
+import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
 import { applyLaneTuning } from './lane-tuning-logic.js';
@@ -561,9 +562,17 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         currentHtml = String(cur.content || '').slice(0, MAX_MOCKUP_FEEDBACK_CHARS);
       }
     }
+    // A brief that RESPECIFIES the visual language (tokens, palette, theme) is
+    // design work, not transcription — it must run at full depth even on an
+    // "On theme" revision turn, and the prior document's stylesheet must NOT
+    // ride along as context (that is how the incumbent palette survived an
+    // explicit token spec: geometry obeyed, color ignored — operator review).
+    const restyleBrief = /\b(themes?|palettes?|design tokens?|tokens?|color scheme|light mode|dark mode|rebrand|restyl\w+)\b/i.test(String(decision.brief || ''))
+      || /#[0-9a-fA-F]{3,8}\b/.test(String(decision.brief || ''));
     const mockupTask = buildMockupTask({
       brief: decision.brief, currentHtml, projectName: project.name,
       conversation: conversationRecap(listMessages(projectId)),
+      restyle: restyleBrief,
     });
     // A full mockup is a LONG single generation (several minutes). Give it a
     // proportionate window and narrate progress via the heartbeat. The token
@@ -584,14 +593,6 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // The chunks are NOT surfaced as chat text (the HTML isn't a chat reply) —
     // onDelta only exists to flip the client into streaming mode + drive the
     // heartbeat. The 15-min AbortController still bounds total wall-clock.
-    // A brief that RESPECIFIES the visual language (tokens, palette, theme) is
-    // design work, not transcription — it must run at full depth even on an
-    // "On theme" revision turn. The low-effort/thinking-off iteration lane is
-    // exactly where the locked-system guardrail ate an explicit token spec:
-    // geometry obeyed, color ignored (operator review).
-    const restyleBrief = /\b(themes?|palettes?|design tokens?|tokens?|color scheme|light mode|dark mode|rebrand|restyl\w+)\b/i.test(String(decision.brief || ''))
-      || /#[0-9a-fA-F]{3,8}\b/.test(String(decision.brief || ''));
-
     let streamedChars = 0;
     let lastStreamPush = 0;
     // LIVE PARTIAL PREVIEW (first render only): browsers render incomplete
@@ -811,6 +812,13 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         updateProject(projectId, { current_mockup_id: mockupId, last_activity_at: nowIso() });
         mockupNote = 'Updated the mockup — it is live in the preview.';
         mockupSystemNote = `${mockupNote}${sha ? ` (checkpoint ${sha.slice(0, 8)})` : ''}`;
+        // Acceptance-check lint (design-system §7) — ADVISORY: findings ride
+        // the system note so regressions surface before a human reviews, but
+        // a flagged mockup still saves (the Builder judges the design).
+        try {
+          const checksLine = mockupChecksNote(runMockupChecks(html));
+          if (checksLine) mockupSystemNote += ` ${checksLine}`;
+        } catch { /* lint must never break a save */ }
       } else {
         mockupSystemNote = `The mockup couldn't be saved: ${w1.error || w2.error}`;
       }

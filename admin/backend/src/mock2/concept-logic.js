@@ -22,6 +22,7 @@
 // Nothing here is named "agent".
 
 import { parseAttachmentsJson, publicAttachmentShape } from './chat-image-logic.js';
+import { MOCKUP_BASE_CSS, MOCKUP_THEME_TOGGLE_JS } from './mockup-template.js';
 
 // ---- in-repo paths (03-data-model.md: the concept stage lives in the repo) ----
 
@@ -168,7 +169,7 @@ tables included) at the TOP of the brief, and never water it down to fit the
 system. The locked system is the DEFAULT look for turns that don't specify
 one — it exists to prevent drift, not to veto the Builder:
 
-# Locked design system (pinned — binding, not advisory)
+# Default design system (the Builder's explicit spec above outranks it)
 ${designSystem || '(design system content is still owed — risk R8)'}
 
 Keep replies short and concrete. Guide toward a design the Builder is happy to approve.`;
@@ -283,13 +284,18 @@ Rules:
 - Keep the opening <section> tag's attributes EXACTLY as they are in the
   current document (data-screen name, ids, classes — the page's navigation
   depends on them). Redesign only the CONTENTS.
-- Reuse the document's existing CSS classes and design tokens; a small scoped
-  <style> INSIDE the section is allowed for styles this screen alone needs.
-  Do not restyle other screens.
+- PRECEDENCE: if the revision brief EXPLICITLY respecifies visual language
+  (color tokens, a palette, light/dark theme, typography), the brief WINS over
+  the document's existing styling and the design system below — style this
+  section to the brief's spec, never keep the incumbent look out of
+  "consistency".
+- Otherwise reuse the document's existing CSS classes and design tokens; a
+  small scoped <style> INSIDE the section is allowed for styles this screen
+  alone needs. Do not restyle other screens.
 - The design-craft bar applies: real iconography (inline SVG, never emoji),
   hierarchy over boxes, one dominant primary action, hard states shown,
   realistic sample data.
-- Stay consistent with the locked design system:
+- Default design system (applies where the brief and the document are silent):
 ${designSystem || '(design system content is still owed — risk R8)'}`;
 }
 
@@ -307,9 +313,12 @@ Hard requirements:
 - A SINGLE file: all CSS in a <style> tag and all JS in a <script> tag inline. No
   external hosts, fonts, scripts, stylesheets, or images — embed any image as a
   data: URI. The page must render with no network access.
-- Obey the locked design system below EXACTLY: its color tokens, one type family,
-  spacing rhythm, corner radii, and rules. Do not introduce other colors, fonts,
-  or gradients-as-decoration.
+- Style through DESIGN TOKENS, resolved by precedence (the # PRECEDENCE section
+  below): the brief's explicit spec first, then the project's chosen base theme,
+  then the default design system at the bottom — the defaults are a fallback,
+  never a veto. Whatever the source, define the values ONCE as CSS custom
+  properties and route every component style through var(--…); no ad-hoc
+  colors, stray fonts, or gradients-as-decoration scattered in component rules.
 - Mobile-first: every screen renders cleanly in a single column at 360–375px; any
   multi-column layout collapses to one column on small viewports. Tappable controls
   are at least 44×44px.
@@ -388,6 +397,62 @@ radius everywhere (the generic-dashboard look) · internal/model language shown
 to end users · a layout that only works because there are exactly four rows of
 data.
 
+# Base token stylesheet (structural contract — include VERBATIM)
+Ignore any pre-existing theme, brand colors, or prior mockup styling; the
+design-system tokens replace them entirely. Light is the reference theme;
+render light first. Start your <style> with the stylesheet below EXACTLY as
+given, then append the mockup's own rules after it. :root carries the light
+values; [data-theme="dark"] carries the dark values; ship a header
+.theme-toggle button wired to toggleTheme() so the dark theme flips every
+surface. When the brief or the project's base theme overrides the look,
+RE-VALUE the custom properties inside the ==tokens== blocks (same property
+names, new values, BOTH themes, kept AA ≥ 4.5:1 — adjust lightness within-hue
+if needed, especially --text-3 and stage-badge text on dark surfaces). Never
+bypass var(--…) and never hard-code a hex color outside the ==tokens== blocks.
+
+${MOCKUP_BASE_CSS}
+
+Theme toggle script (include it and wire the toolbar button to it):
+${MOCKUP_THEME_TOGGLE_JS}
+
+# Defect-class hardening (binding — each rule closes an observed failure)
+- LIST ROWS: every list/table row uses the canonical .list-row 5-column grid —
+  Stage badge | Identity | Headline metric | Position | Lead · Updated. The
+  Identity cell stacks a .title over a one-line .value-statement (never
+  concatenate title + description inline); truncation comes from the base CSS
+  (nowrap + ellipsis + min-width:0). Columns must never overlap at any
+  viewport ≥ 1280px.
+- ONE METRIC PER ROW/CARD: exactly one .metric per list row — the
+  stage-appropriate headline (Ideation → projected impact est.; MVP → sites
+  piloting; Testing → validation coverage; Iterating → adoption %; Rollout →
+  units live "n of m"; Maintenance → sustained coverage). Format
+  value → unit → descriptor as .num / .unit / .desc. More metrics belong on
+  the detail page. No per-card progress bars in lists.
+- BARS CARRY DATA: every .bar binds its fill to a sample-data value via an
+  inline style="--fill:NN%" and sibling bars have visibly different lengths.
+  A bar with no value behind it must not be rendered — never a wall of empty
+  uniform tracks.
+- DETAIL SCREENS: mark them <section data-screen="…" data-kind="detail"> and
+  include ALL THREE bands, each wrapped in its marker: ① data-band="canvas" —
+  the opportunity canvas plus audience impact .bar rows with varied fills;
+  ② data-band="metrics" — metric .stat-tile row; ③ data-band="ladder" — the
+  rollout ladder (Site → POD → Region → All org with per-level counts, the
+  current frontier level accent-emphasized, and exactly ONE .btn-primary
+  "Promote to next level" — the page's only filled button) plus a readiness
+  checklist rendered as quiet .check-quiet rows.
+- STAGE BADGES: always .stage-badge plus its stage class (.stage-ideation,
+  .stage-mvp, .stage-testing, .stage-iterating, .stage-rollout,
+  .stage-maintenance) — the palette is complete; no stage may fall back to a
+  neutral/default color.
+- SAMPLE-DATA INTEGRITY: each entity appears in exactly ONE lifecycle stage
+  with one consistent description across all screens; attention chips (e.g.
+  "Roller unassigned") only where semantically valid for that stage;
+  in-progress stages show PARTIAL completion (100% belongs only to a
+  completed/maintenance stage).
+- ICONS: every inline <svg> is either aria-hidden="true" next to a text
+  label or carries a <title>. Never an unlabeled icon-only control; never an
+  always-visible filter pill bank (filters collapse behind one quiet menu).
+
 # PRECEDENCE — the brief outranks the locked system (read before the system below)
 When the brief EXPLICITLY specifies visual language — color tokens, a palette,
 light/dark theme, typography, spacing, per-state hues — those instructions are
@@ -421,13 +486,30 @@ export function mockupRenderModel(env = {}, slotModel = '') {
   return v || MOCKUP_PREFERRED_MODEL;
 }
 
+// stripInheritedStyles — blank every <style> body in a forwarded mockup. Used
+// when a RESTYLE brief rides an iteration: the prior document's stylesheet IS
+// the incumbent palette, and passing it as "context" is how the old theme
+// survived an explicit token spec (geometry obeyed, color ignored — operator
+// review). The markup still rides (structure/content context); the styling
+// must be rebuilt from the brief's spec.
+export function stripInheritedStyles(html) {
+  return String(html || '').replace(
+    /(<style\b[^>]*>)[\s\S]*?(<\/style>)/gi,
+    "$1/* inherited styling removed — the brief's token spec replaces it */$2",
+  );
+}
+
 // The mockup slot's user turn: the brief + the current mockup (to iterate on) +
 // a short recap of the conversation so the render reflects the whole idea.
-export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '' } = {}) {
+// restyle: the brief respecifies the visual language — the forwarded HTML's
+// <style> content is stripped so the incumbent palette cannot ride along.
+export function buildMockupTask({ brief = '', currentHtml = null, projectName = 'the app', conversation = '', restyle = false } = {}) {
   const parts = [`Project: ${projectName}`];
   if (conversation) parts.push(`Conversation so far (for context):\n${conversation}`);
   parts.push(`Design brief for this mockup:\n${String(brief || '').trim() || '(no brief — infer from the conversation)'}`);
-  if (currentHtml) {
+  if (currentHtml && restyle) {
+    parts.push(`The brief RESTYLES the design, so the current mockup is below with its stylesheet REMOVED — its old palette is not a reference and must not be reconstructed. Keep the screens, content, and structure it shows; rebuild ALL styling from the brief's spec (falling back to the design system only where the brief is silent):\n\n${stripInheritedStyles(currentHtml)}`);
+  } else if (currentHtml) {
     parts.push(`The CURRENT mockup HTML is below — revise it to satisfy the brief, keeping everything the brief does not touch stable. EXCEPTION: if the brief RESTYLES the design (new tokens, palette, theme, light/dark), restyle the ENTIRE document to the new spec — visual stability never applies to styling the brief replaces, and the current mockup's palette must not survive into the revision:\n\n${currentHtml}`);
   } else {
     parts.push('There is no existing mockup — create the first version.');

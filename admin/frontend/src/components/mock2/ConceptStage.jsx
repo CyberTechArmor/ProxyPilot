@@ -405,6 +405,17 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
   // local echo so the strip doesn't linger.
   useEffect(() => { if (online) setQueuedLocal(null); }, [online]);
 
+  // LIVE PREVIEW while a mockup renders: the orchestrator streams the partial
+  // document into the preview file (first render), so refreshing the iframe
+  // every ~10s lets the Builder watch screens appear instead of waiting out
+  // the whole generation.
+  const designing = jobActive && data?.job?.phase === 'designing';
+  useEffect(() => {
+    if (!designing || !onMockupChanged) return undefined;
+    const t = setInterval(() => onMockupChanged('live-partial'), 10000);
+    return () => clearInterval(t);
+  }, [designing, onMockupChanged]);
+
   return (
     // Archived (Details tab): the card SIZES TO ITS CONTENT — the conversation
     // box below owns the height and scroll, so nothing spills into the page.
@@ -555,6 +566,14 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
         {/* Composer (editors, online, before approval) */}
         {editable && !approved ? (
           <div className="space-y-2 shrink-0">
+            {/* Empty chat: draw the eye to the composer so a new Builder knows
+                to just start typing. The highlight drops the moment they do. */}
+            {shownMessages.length === 0 && !message ? (
+              <p className="flex items-center gap-1.5 text-xs font-medium text-primary">
+                <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+                Start here — describe what you want to build, in your own words.
+              </p>
+            ) : null}
             {/* Fire-and-forget strip: the action queued while provisioning. */}
             {!online && pendingDesign ? (
               <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 p-2.5 text-xs">
@@ -572,7 +591,11 @@ export default function ConceptStage({ projectId, project, canEdit, onApproved, 
               </div>
             ) : null}
             <textarea
-              className="flex min-h-[56px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+              className={`flex min-h-[56px] w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
+                shownMessages.length === 0 && !message
+                  ? 'border-primary/70 ring-2 ring-primary/30 shadow-primary/20 shadow-lg'
+                  : 'border-input'
+              }`}
               placeholder={online
                 ? (mode === 'plan' ? 'Think through what you want to build…' : 'Describe a screen, a change, or ask a question…')
                 : 'Draft your prompt while the project comes online — Send unlocks when it’s ready.'}

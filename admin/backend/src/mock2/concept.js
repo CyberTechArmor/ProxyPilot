@@ -52,6 +52,7 @@ import {
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
   renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel,
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
+  findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt,
 } from './concept-logic.js';
 import {
   projectHasDesign, buildDesignTemplate, mockupIdForImport, buildImportSeedMessage,
@@ -585,16 +586,31 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // heartbeat. The 15-min AbortController still bounds total wall-clock.
     let streamedChars = 0;
     let lastStreamPush = 0;
+    // LIVE PARTIAL PREVIEW (first render only): browsers render incomplete
+    // HTML progressively, so writing the accumulated stream to the preview
+    // path every few seconds lets the Builder watch screens appear instead of
+    // staring at "Designing… (29k characters)" for minutes. Iterations never
+    // stream partials — a half-written doc must not clobber a good mockup.
+    let streamBuf = '';
+    let lastPartialWrite = 0;
     const onMockupDelta = (t) => {
       streamedChars += t.length;
+      streamBuf += t;
       const now = Date.now();
       if (now - lastStreamPush > 1500) {
         lastStreamPush = now;
         setJob(projectId, {
           phase: 'designing',
-          message: `${currentHtml ? 'Updating' : 'Designing'} the mockup… (${Math.round(streamedChars / 1000)}k characters)`,
+          message: `${currentHtml ? 'Updating' : 'Designing'} the mockup… (${Math.round(streamedChars / 1000)}k characters${currentHtml ? '' : ' — the preview fills in live'})`,
           kind: 'turn', cycleId: cycle.id,
         });
+      }
+      if (!currentHtml && now - lastPartialWrite > 8000) {
+        const idx = streamBuf.search(/<!doctype html/i);
+        if (idx !== -1 && streamBuf.length - idx > 2000) {
+          lastPartialWrite = now;
+          void writeWorkingFile(containerName, MOCKUP_CURRENT, streamBuf.slice(idx)).catch(() => undefined);
+        }
       }
     };
     const mockupCall = (budget, forceModel = null) => {
@@ -643,6 +659,18 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
     // edits against the current HTML (tiny output) and falls back to the full
     // renderer the moment anything doesn't apply cleanly.
     let tweaked = false;
+    // First render: stamp the mockup id + a designed placeholder NOW so the
+    // preview URL exists immediately and the live partial writes above have
+    // somewhere visible to land (the dashboard preview refreshes while the
+    // job runs). The id is deterministic (mockupIdForCycle), so the success
+    // path finalizes the very same id.
+    if (!currentHtml) {
+      try {
+        const placeholder = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{height:100%;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1524;color:#dbe6f5}main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}.dot{width:34px;height:34px;border-radius:50%;border:3px solid #2c4a76;border-top-color:#6ea8ff;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(1turn)}}p{margin:0;font-size:14px;color:#8fa5c4}</style></head><body><main><div class="dot"></div><h1 style="margin:0;font-size:18px">Designing your mockup…</h1><p>Screens appear here as they render — this preview refreshes on its own.</p></main></body></html>';
+        await writeWorkingFile(containerName, MOCKUP_CURRENT, placeholder);
+        updateProject(projectId, { current_mockup_id: mockupIdForCycle(cycle.id) });
+      } catch { /* preview-only nicety */ }
+    }
     if (decision.scope === 'tweak' && currentHtml && currentHtmlComplete) {
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       try {
@@ -671,6 +699,45 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         }
       } catch (e) { console.warn('[mock2] mockup tweak failed — full render fallback:', e?.message); }
       if (!tweaked) setJob(projectId, { phase: 'designing', message: 'The change needs the full renderer — rendering the mockup…', kind: 'turn', cycleId: cycle.id });
+    }
+    // ---- screen path (scope 'screen'): re-render ONE section ----
+    // A single-screen redesign re-renders only that screen's <section> (the
+    // structural contract every mockup follows) — output is one screen, not
+    // the whole document, so it lands in a fraction of the time and cost.
+    // Global changes still run the full renderer. Any miss (unknown screen
+    // name, unusable reply) falls back to the full renderer.
+    if (!tweaked && decision.scope === 'screen' && decision.screen && currentHtml && currentHtmlComplete) {
+      const found = findScreenSection(currentHtml, decision.screen);
+      if (found.ok) {
+        setJob(projectId, { phase: 'designing', message: `Re-rendering the "${decision.screen}" screen…`, kind: 'turn', cycleId: cycle.id });
+        try {
+          const secModel = mockupRenderModel(process.env, ready.mockup.model);
+          const res = await callModelTurn({
+            connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: secModel,
+            system: buildScreenRenderSystemPrompt({ designSystem: boundDesignSystem }),
+            tools: [],
+            transcript: [{
+              role: 'user',
+              text: `Screen to re-render: "${decision.screen}"\n\nRevision brief:\n${decision.brief}\n\nCurrent FULL mockup document (context — its styles, navigation, and the other screens stay untouched):\n${currentHtml}`,
+              ...(mockupImages.length ? { images: mockupImages } : {}),
+            }],
+            maxTokens: 20000, timeoutMs: 600000, effort: 'high', thinking: null,
+          });
+          if (res.ok) {
+            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: secModel, usage: res.usage });
+            const section = extractSectionHtml(res.text, decision.screen);
+            if (section) {
+              const swapped = replaceScreenSection(currentHtml, decision.screen, section);
+              if (swapped.ok && isPlausibleMockup(swapped.html)) {
+                html = swapped.html.slice(0, MAX_MOCKUP_CHARS);
+                activeModel = secModel;
+                tweaked = true;
+              }
+            }
+          }
+        } catch (e) { console.warn('[mock2] screen re-render failed — full render fallback:', e?.message); }
+      }
+      if (!tweaked) setJob(projectId, { phase: 'designing', message: `The "${decision.screen}" change needs the full renderer — rendering the mockup…`, kind: 'turn', cycleId: cycle.id });
     }
     const heartbeat = tweaked ? null : startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
     if (!tweaked) try {

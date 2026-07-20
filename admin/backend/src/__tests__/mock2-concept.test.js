@@ -404,3 +404,18 @@ test('part 3 wiring: the render prompt carries the defect-class hardening rules'
   assert.match(p, /exactly ONE lifecycle stage/);
   assert.match(p, /100% belongs only to a\s+completed\/maintenance stage/);
 });
+
+test('mockupRenderBudget: sized from the current document, floor 40k, ceiling 64k', async () => {
+  const { mockupRenderBudget } = await import('../mock2/concept-logic.js');
+  // First render / small docs get the floor.
+  assert.equal(mockupRenderBudget(0), 40000);
+  assert.equal(mockupRenderBudget(50000), 40000);
+  // A large multi-screen document raises the budget so a full revision can
+  // re-emit it (the flat 40k truncated these by construction).
+  const big = mockupRenderBudget(120000);
+  assert.ok(big > 40000 && big <= 64000, `budget ${big} for 120k chars`);
+  // Ceiling: past 64k output the continuation path finishes the document.
+  assert.equal(mockupRenderBudget(1000000), 64000);
+  // Monotonic in document size up to the ceiling.
+  assert.ok(mockupRenderBudget(150000) >= mockupRenderBudget(120000));
+});

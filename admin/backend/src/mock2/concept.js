@@ -51,6 +51,7 @@ import {
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
   buildDesignTokenExtractionPrompt, buildDesignTokenExtractionTask, parseDesignTokens,
   renderDesignTokensCss, DESIGN_TOKENS_PATH, DESIGN_CSS_PATH, mockupRenderModel, mockupRenderBudget,
+  stitchContinuation, buildContinuationInstruction,
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
   findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt,
 } from './concept-logic.js';
@@ -759,16 +760,19 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       if (!tweaked) setJob(projectId, { phase: 'designing', message: `The "${decision.screen}" change needs the full renderer — rendering the mockup…`, kind: 'turn', cycleId: cycle.id });
     }
     const heartbeat = tweaked ? null : startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
-    // A render that hits its output ceiling is CONTINUED via assistant
-    // prefill (Anthropic: a trailing assistant turn is resumed verbatim) —
-    // the paid partial becomes the start of the reply and the model appends
-    // the rest. Discarding truncated output burned two full renders for the
-    // operator ($: "exceeded its output budget twice" with nothing saved).
-    // Up to 2 hops; thinking must be OFF (prefill and thinking are mutually
-    // exclusive) and this turn's images are not re-sent (the written HTML
+    // A render that hits its output ceiling is CONTINUED, never discarded
+    // (discarding truncated output burned two paid renders for the
+    // operator). NOT via assistant prefill — the render model rejects it
+    // ("This model does not support assistant message prefill", HTTP 400,
+    // which itself cost a turn) — but via an explicit continuation turn:
+    // the partial rides the transcript as an assistant message, a user turn
+    // asks for ONLY the remainder (anchored on the tail), and the reply is
+    // stitched defensively (fences stripped, repeated overlap removed, a
+    // full restart detected and adopted). Works on every provider. Up to 2
+    // hops; thinking off, this turn's images not re-sent (the written HTML
     // already pins the design; re-sending only re-bills input tokens).
     const continueTruncatedRender = async (partialText) => {
-      let doc = String(partialText || '').replace(/\s+$/, '');
+      let doc = String(partialText || '');
       for (let hop = 0; hop < 2; hop++) {
         setJob(projectId, { phase: 'designing', message: `The render hit its output limit — continuing where it stopped (${Math.round(doc.length / 1000)}k characters so far)…`, kind: 'turn', cycleId: cycle.id });
         const res = await callModelTurn({
@@ -778,23 +782,23 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           transcript: [
             { role: 'user', text: mockupTask },
             { role: 'assistant', text: doc },
+            { role: 'user', text: buildContinuationInstruction(doc) },
           ],
           maxTokens: 30000, timeoutMs: 600000, effort: 'low', thinking: 'off',
           onDelta: onMockupDelta,
         });
         if (!res.ok) return { ok: false, error: res.error };
         recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
-        doc += res.text;
+        doc = stitchContinuation(doc, res.text).html;
         if (res.stopReason !== 'max_tokens') return { ok: true, text: doc };
-        doc = doc.replace(/\s+$/, '');
       }
       return { ok: false, error: 'the document is too large to finish even with continuation — ask for the change on ONE screen at a time (screen-scoped renders have no such limit)' };
     };
-    // Complete a call's text: continue through truncation where the provider
-    // supports prefill; otherwise hand back what arrived (the plausibility
-    // check + bigger-budget retry below still apply).
+    // Complete a call's text: continue through truncation; otherwise hand
+    // back what arrived (the plausibility check + bigger-budget retry below
+    // still apply).
     const completeRenderText = async (res) => {
-      if (res.stopReason === 'max_tokens' && ready.mockup.connector?.provider === 'anthropic') {
+      if (res.stopReason === 'max_tokens') {
         const cont = await continueTruncatedRender(res.text);
         if (cont.ok) return cont.text;
         console.warn('[mock2] render continuation failed:', cont.error);

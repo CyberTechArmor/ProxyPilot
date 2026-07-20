@@ -25,7 +25,16 @@ export function runHost(bin, args, { input = null, timeoutMs = 120000 } = {}) {
     // EOF — this matches that. (Confirmed by reproduction: ['pipe',…] hangs,
     // ['ignore',…] returns in ~0.5s.)
     const stdinMode = input != null ? 'pipe' : 'ignore';
-    const child = spawnHost(bin, args, { stdio: [stdinMode, 'pipe', 'pipe'] });
+    // spawn can throw SYNCHRONOUSLY (E2BIG when an argv entry exceeds the
+    // 128KiB kernel cap, EMFILE, …) — honor the "always resolves" contract
+    // instead of crashing the caller's whole turn.
+    let child;
+    try {
+      child = spawnHost(bin, args, { stdio: [stdinMode, 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ code: null, stdout: '', stderr: `spawn failed: ${err.message}` });
+      return;
+    }
     let stdout = '';
     let stderr = '';
     let done = false;

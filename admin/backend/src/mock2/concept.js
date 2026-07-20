@@ -252,12 +252,22 @@ function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
-// Write a FIXED-path file into the working tree (base64-streamed — no quoting
-// hazard from model-authored HTML). relPath is an orchestrator constant (a mockup
-// under state/mockups or state/inventory.json), never a model-supplied path.
+// Run a script with a PAYLOAD on stdin. The script rides argv base64-encoded
+// (b64 is a shell-safe charset, so no quoting hazard and it stays tiny);
+// stdin is left free for the payload. This exists because embedding content
+// in the command string hits Linux's 128KiB-per-argv-entry cap — a large
+// mockup failed to SAVE with `spawn E2BIG` once renders could exceed ~96KB.
+function containerShWithStdin(containerName, script, input, { timeoutMs = 120000 } = {}) {
+  return sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(script)} | base64 -d)"'`, { timeoutMs, input });
+}
+
+// Write a FIXED-path file into the working tree (payload base64-streamed over
+// STDIN — no quoting hazard from model-authored HTML and no argv size limit).
+// relPath is an orchestrator constant (a mockup under state/mockups or
+// state/inventory.json), never a model-supplied path.
 async function writeWorkingFile(containerName, relPath, content) {
-  const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; printf '%s' '${b64(content)}' | base64 -d > "$d" && echo ok`;
-  const r = await containerSh(containerName, script);
+  const script = `d="${APP_DIR}/${relPath}"; mkdir -p "$(dirname "$d")"; base64 -d > "$d" && echo ok`;
+  const r = await containerShWithStdin(containerName, script, b64(content));
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || 'write failed').trim().slice(-300) };
   return { ok: true };
 }

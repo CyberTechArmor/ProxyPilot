@@ -309,46 +309,55 @@ router.post('/provision', requireProvisionAccess, async (req, res) => {
   }
 });
 
-// Issuance status: certificate present on disk → issued; otherwise scan
-// recent Caddy logs for a classified ACME failure so the user gets an
-// actionable reason instead of an endless spinner. Caddy keeps retrying
-// with backoff, so "failed" here is a diagnosis, not a terminal state.
-router.get('/provision/:domain/status', requireProvisionAccess, (req, res) => {
-  const domain = String(req.params.domain || '').trim().toLowerCase();
-  const row = getDb().prepare(`SELECT * FROM provisioned_domains WHERE domain = ?`).get(domain);
-  if (!row) return res.status(404).json({ error: 'Domain not found.' });
-
-  const apex = resolveCertDir(domain);
-  const wild = row.wildcard ? resolveCertDir(`wildcard_.${domain}`) : null;
+// refreshDomainStatus — re-derive one domain's issuance state from the
+// ground truth: certificate present in Caddy's storage → issued; otherwise
+// scan the Caddy journal (24h window — retries back off, so the telling
+// line can be hours old) for a classified ACME failure. Persists any state
+// change. Caddy keeps retrying, so "failed" is a diagnosis, not terminal —
+// a later successful issuance flips the row back to issued on the next
+// look. Returns { status, issuer?, error?, detail?, code? }.
+function refreshDomainStatus(row) {
+  const apex = resolveCertDir(row.domain);
+  const wild = row.wildcard ? resolveCertDir(`wildcard_.${row.domain}`) : null;
   const issued = !!apex && (!row.wildcard || !!wild);
   if (issued) {
     if (row.status !== 'issued') {
       getDb().prepare(`UPDATE provisioned_domains SET status = 'issued', last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(row.id);
     }
-    return res.json({ status: 'issued', method: row.method_resolved, wildcard: !!row.wildcard, issuer: apex.issuer });
+    return { status: 'issued', issuer: apex.issuer };
   }
-
-  // Pending: after a grace period, look for the failure in Caddy's journal.
+  // No cert yet: after a short grace period, look for the reason.
   const ageMs = Date.now() - new Date(`${row.created_at}Z`).getTime();
   let diagnosis = null;
   if (ageMs > 45000) {
     try {
       const r = spawnHostSync('sh', ['-c',
-        `journalctl -u caddy --since '-30 min' --no-pager 2>/dev/null | grep -F '${domain}' | grep -iE 'error|fail' | tail -5`,
+        `journalctl -u caddy --since '-24 hours' --no-pager 2>/dev/null | grep -F '${row.domain}' | grep -iE 'error|fail' | tail -8`,
       ], { encoding: 'utf8', timeout: 10000 });
       const lines = String(r.stdout || '').trim().split('\n').filter(Boolean);
       for (const line of lines.reverse()) {
         const c = classifyAcmeError(line);
         if (c) { diagnosis = { ...c, detail: line.slice(0, 300) }; break; }
       }
-    } catch { /* status stays pending */ }
+    } catch { /* stored status stands */ }
   }
   if (diagnosis) {
     getDb().prepare(`UPDATE provisioned_domains SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .run(`${diagnosis.code}: ${diagnosis.hint}`, row.id);
-    return res.json({ status: 'failed', method: row.method_resolved, wildcard: !!row.wildcard, error: diagnosis.hint, detail: diagnosis.detail, code: diagnosis.code });
+    return { status: 'failed', error: diagnosis.hint, detail: diagnosis.detail, code: diagnosis.code };
   }
-  res.json({ status: 'pending', method: row.method_resolved, wildcard: !!row.wildcard });
+  // No cert and no classified line — report what the record already knows.
+  if (row.status === 'failed' && row.last_error) return { status: 'failed', error: row.last_error };
+  return { status: 'pending' };
+}
+
+// Issuance status (polled by the Add Domain page after submit).
+router.get('/provision/:domain/status', requireProvisionAccess, (req, res) => {
+  const domain = String(req.params.domain || '').trim().toLowerCase();
+  const row = getDb().prepare(`SELECT * FROM provisioned_domains WHERE domain = ?`).get(domain);
+  if (!row) return res.status(404).json({ error: 'Domain not found.' });
+  const s = refreshDomainStatus(row);
+  res.json({ ...s, method: row.method_resolved, wildcard: !!row.wildcard });
 });
 
 // ---- admin endpoints (cookie session + admin; mutations need sudo) ----
@@ -447,7 +456,16 @@ router.put('/admin/dns01-list', authenticateToken, requireAdmin, requireSudo, (r
 
 router.get('/admin/domains', authenticateToken, requireAdmin, (req, res) => {
   const rows = getDb().prepare(`SELECT * FROM provisioned_domains ORDER BY created_at DESC`).all();
-  res.json({ domains: rows.map(publicDomainShape) });
+  // Refresh non-issued rows against the ground truth (cert storage + the
+  // Caddy journal) so the card shows the real state and the REASON — not a
+  // stale "pending" from whenever the Add Domain page was last open.
+  // Issued rows are final for this view (renewal is Caddy's job).
+  const domains = rows.map((row) => {
+    if (row.status === 'issued') return publicDomainShape(row);
+    const s = refreshDomainStatus(row);
+    return { ...publicDomainShape(row), status: s.status, last_error: s.error || (s.status === 'issued' ? null : row.last_error), detail: s.detail || null };
+  });
+  res.json({ domains });
 });
 
 // Deprovision: remove the site file + token file + record, then reload.

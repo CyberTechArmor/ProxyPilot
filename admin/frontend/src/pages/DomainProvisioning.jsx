@@ -367,6 +367,12 @@ export default function DomainProvisioning() {
                     {d.status === 'failed' && d.last_error && (
                       <p className="text-xs text-red-500 mt-1 break-words">{d.last_error}</p>
                     )}
+                    {d.status === 'failed' && d.detail && (
+                      <p className="text-xs font-mono text-muted-foreground/80 mt-1 break-all">{d.detail}</p>
+                    )}
+                    {d.status === 'pending' && (
+                      <p className="text-xs text-amber-500/90 mt-1">Certificate not issued yet — Caddy is retrying. Reload this page to re-check.</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     <span className={`text-xs font-medium capitalize ${STATUS_TONE[d.status] || ''}`}>{d.status}</span>

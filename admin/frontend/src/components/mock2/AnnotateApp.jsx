@@ -83,6 +83,13 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
             setImgState('error');
             return;
           }
+          const ctype = res.headers.get('content-type') || '';
+          if (!ctype.startsWith('image/')) {
+            const text = await res.text().catch(() => '');
+            setErrMsg(`the image endpoint returned ${ctype || 'no content-type'}${text ? `: ${text.slice(0, 200)}` : ''}`);
+            setImgState('error');
+            return;
+          }
           const blob = await res.blob();
           setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
           setImgState('ready');

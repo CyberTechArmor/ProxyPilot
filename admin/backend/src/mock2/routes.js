@@ -2673,8 +2673,11 @@ export function createMock2Router() {
   // records this user initiated with the external-push summary) — they
   // consume no AI credits themselves; AI spend always happens in-platform.
   router.get('/users/:uid/ai-usage', requireAdmin, (req, res) => {
-    const uid = Number(req.params.uid);
-    if (!Number.isFinite(uid)) return res.status(400).json({ error: 'bad user id' });
+    // Platform user ids are TEXT UUIDs (users.id TEXT PRIMARY KEY) — accept
+    // the string verbatim; SQLite compares it against the stored values in
+    // the (affinity-typed) initiated_by/user_id columns directly.
+    const uid = String(req.params.uid || '').trim();
+    if (!uid || uid.length > 100) return res.status(400).json({ error: 'bad user id' });
     const db = getMock2Db();
     const attributed = `COALESCE(l.user_id, c.initiated_by)`;
     const totals = db.prepare(`

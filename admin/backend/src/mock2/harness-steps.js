@@ -14,8 +14,11 @@ import { getMock2Db } from './db.js';
 import { getMock2Setting, setMock2Setting } from './settings.js';
 import { callModelTurn } from './model-client.js';
 import { normalizeStepTuning, normalizeStepOverride, resolveStepTuning, getHarnessStep } from './harness-steps-logic.js';
+import { STEP_PROMPT_SPECS, STEP_PROMPT_MAX_LENGTH, promptOwnerStepId, normalizeStepPrompts, substitutePromptPlaceholders } from './harness-prompts-logic.js';
+import { modelMaxOutputTokens } from './routing-logic.js';
 
 export const HARNESS_STEP_TUNING_KEY = 'harness_step_tuning';
+export const HARNESS_STEP_PROMPTS_KEY = 'harness_step_prompts';
 
 // The whole stored doc, normalized ({ [stepId]: {model, effort, thinking} }).
 // Parse-safe like its lane-tuning neighbor; no caching (a prepared SELECT per
@@ -35,6 +38,47 @@ export function setHarnessStepOverride(stepId, patch, updatedBy = null) {
   else delete doc[stepId];
   setMock2Setting(HARNESS_STEP_TUNING_KEY, JSON.stringify(doc), updatedBy);
   return doc;
+}
+
+// ---- per-step system prompt overrides ----
+
+// The stored prompt-override doc ({ [stepId]: text }), normalized: unknown
+// ids, shared ids (edits belong on the owning step), and empty strings drop.
+export function getHarnessStepPrompts() {
+  return normalizeStepPrompts(getMock2Setting(HARNESS_STEP_PROMPTS_KEY, null));
+}
+
+// Store one step's prompt override; empty/whitespace content clears it and
+// the step falls back to the shipped prompt. Shared-prompt steps are edited
+// through their owner (mockup-continuation → mockup-render).
+export function setHarnessStepPrompt(stepId, content, updatedBy = null) {
+  const spec = STEP_PROMPT_SPECS[stepId];
+  if (!spec) throw new Error(`unknown step: ${stepId}`);
+  if (spec.sharesPromptOf) throw new Error(`step ${stepId} shares its prompt with ${spec.sharesPromptOf} — edit that step`);
+  const doc = getHarnessStepPrompts();
+  const text = String(content ?? '');
+  if (text.trim() === '') delete doc[stepId];
+  else doc[stepId] = text.slice(0, STEP_PROMPT_MAX_LENGTH);
+  setMock2Setting(HARNESS_STEP_PROMPTS_KEY, JSON.stringify(doc), updatedBy);
+  return doc;
+}
+
+// Call-time application: the shipped prompt (already fully built by the call
+// site) unless the operator stored an override for the step, in which case
+// the override is used with {{PLACEHOLDER}} markers substituted from the
+// SAME values the shipped prompt embeds. Back-compat: no override → the
+// default text is returned untouched.
+export function stepSystemPrompt(stepId, defaultText, params = {}) {
+  try {
+    const owner = promptOwnerStepId(stepId) || stepId;
+    const doc = getHarnessStepPrompts();
+    const override = doc[owner];
+    if (!override) return defaultText;
+    return substitutePromptPlaceholders(override, params);
+  } catch (e) {
+    console.warn(`[mock2] step prompt override read failed (${stepId}):`, e?.message);
+    return defaultText;
+  }
 }
 
 // 7-day per-step spend rollup for the Harness page ({ [stepId]: { cents,
@@ -76,19 +120,24 @@ export function harnessStepSpend7d() {
 export async function callStepTurn(stepId, args, { onFallback } = {}) {
   const overrides = getHarnessStepTuning();
   const entry = overrides[stepId];
+  // Per-step output budgets are gone (operator decision): a turn runs free
+  // within the serving model's own ability. Callers may still pin maxTokens
+  // (the runner honors MOCK2_RUNNER_MAX_TOKENS); otherwise the cap is the
+  // model's ceiling. Spend stays governed by the platform/project/people
+  // quotas, never per-call budgets.
   if (!entry) {
-    const res = await callModelTurn(args);
+    const res = await callModelTurn({ ...args, maxTokens: args.maxTokens ?? modelMaxOutputTokens(args.model) });
     if (res && typeof res === 'object') res.modelUsed = args.model;
     return res;
   }
   const base = { model: args.model, effort: args.effort ?? null, thinking: args.thinking ?? null };
   const tuned = resolveStepTuning(stepId, base, overrides);
-  let res = await callModelTurn({ ...args, model: tuned.model, effort: tuned.effort, thinking: tuned.thinking });
+  let res = await callModelTurn({ ...args, model: tuned.model, effort: tuned.effort, thinking: tuned.thinking, maxTokens: args.maxTokens ?? modelMaxOutputTokens(tuned.model) });
   const overrodeModel = tuned.model !== base.model;
   if (res && !res.ok && overrodeModel && /model/i.test(String(res.error || ''))) {
     console.warn(`[mock2] step override fallback: ${stepId} ${tuned.model} rejected — using default (${base.model})`);
     try { onFallback?.({ rejected: tuned.model, fallback: base.model }); } catch { /* advisory */ }
-    res = await callModelTurn({ ...args, effort: tuned.effort, thinking: tuned.thinking });
+    res = await callModelTurn({ ...args, effort: tuned.effort, thinking: tuned.thinking, maxTokens: args.maxTokens ?? modelMaxOutputTokens(base.model) });
     if (res && typeof res === 'object') res.modelUsed = base.model;
     return res;
   }

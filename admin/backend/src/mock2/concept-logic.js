@@ -1216,3 +1216,7 @@ export function estimateConceptTurnTokens() {
 export function estimateInventoryTokens() {
   return { inputTokens: 14000, outputTokens: 4000 };
 }
+
+// The design-doc AI-adjust system prompt (used by adjustDesignPreset in
+// concept.js; exported so the Harness page can show/edit it).
+export const DESIGN_DOC_ADJUST_SYSTEM_PROMPT = 'You adjust UI design-token sets for web applications. Reply with STRICT JSON only — no prose, no markdown fences: {"name": string, "description": string, "tokens": {"colors": {"background","surface","text","muted","border","primary","primaryText","accent","danger","success" — hex colors only}, "typography": {"fontFamily","headingFamily","baseSize"}, "radius": {"sm","md","lg"}, "spacing": {"unit"}, "shadow": {"card"}}}. Keep every value in the same format as the input. Change ONLY what the instruction asks, plus whatever minimal changes keep text readable (AA contrast for text on background/surface and primaryText on primary). Return the FULL token set.';

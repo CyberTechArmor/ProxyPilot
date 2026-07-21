@@ -36,14 +36,14 @@ import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { countRunningCycles } from './cycles.js';
-import { callStepTurn } from './harness-steps.js';
+import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
   buildRunnerReady, execInContainer, readFileInContainer,
 } from './runner.js';
 import { getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import { formatComponentForModel, parseContractJson, buildInstalledComponentsSection } from './component-logic.js';
 import {
-  ASK_TOOLS, ASK_MAX_TURNS, ASK_MAX_TOKENS, estimateAskTokens,
+  ASK_TOOLS, ASK_MAX_TURNS, estimateAskTokens,
   buildAskSystemPrompt, buildAskTask, askCommandAllowed, webSearchServerTools,
   buildAskContextBlock, ASK_CONTEXT_MAX_MESSAGES,
 } from './ask-logic.js';
@@ -155,10 +155,10 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   } catch { installedSection = ''; }
 
   const serverTools = webSearchServerTools({ provider: ready.connector.provider, env: process.env, defaultOn: true });
-  const system = buildAskSystemPrompt({
+  const system = stepSystemPrompt('ask', buildAskSystemPrompt({
     projectName: project.name, webPort: project.web_port || 3000,
     webSearch: serverTools.length > 0, installedComponentsSection: installedSection,
-  });
+  }), { PROJECT_NAME: project.name, WEB_PORT: project.web_port || 3000, COMPONENTS: installedSection });
   // The question's image attachments ride the first turn (an ask is a fresh
   // transcript, so this is the only place they're paid for).
   const askImages = hydrateAttachments(projectId, attachments);
@@ -200,7 +200,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
     const askTuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('ask'));
     const res = await callStepTurn('ask', {
       connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
-      system, tools: ASK_TOOLS, serverTools, transcript, maxTokens: ASK_MAX_TOKENS,
+      system, tools: ASK_TOOLS, serverTools, transcript,
       effort: askTuned.effort, thinking: askTuned.thinking,
       onDelta,
     });

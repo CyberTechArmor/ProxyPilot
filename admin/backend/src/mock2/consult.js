@@ -14,6 +14,8 @@ import { getSlot, getConnector, decryptConnectorKey, effectivePrice } from './co
 import { parseCapabilities, isCloudProvider } from './connector-logic.js';
 import { costCentsForUsage, defaultModelPrice } from './quota-logic.js';
 import { callModelTurn } from './model-client.js';
+import { modelMaxOutputTokens } from './routing-logic.js';
+import { stepSystemPrompt } from './harness-steps.js';
 import {
   CONSULT_MODEL, CONSULT_SYSTEM_PROMPT, CONSULT_OUTPUT_TOKEN_CAP,
   buildConsultDigest, parseConsultOutput,
@@ -52,9 +54,9 @@ export async function runConsult({ projectId, requestId = null, cycleId = null, 
   try {
     res = await callModelTurn({
       connector: ready.connector, apiKey: ready.apiKey, model: CONSULT_MODEL,
-      system: CONSULT_SYSTEM_PROMPT, tools: [],
+      system: stepSystemPrompt('consult', CONSULT_SYSTEM_PROMPT, {}), tools: [],
       transcript: [{ role: 'user', text: digest }],
-      maxTokens: CONSULT_OUTPUT_TOKEN_CAP,
+      maxTokens: modelMaxOutputTokens(CONSULT_MODEL),
     });
   } catch (err) {
     return { ok: false, error: `the consult call failed: ${err?.message || String(err)}` };

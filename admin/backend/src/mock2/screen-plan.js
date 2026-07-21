@@ -460,16 +460,16 @@ async function checklistPostPass(requestRow) {
   const { buildRunnerReady } = await import('./runner.js');
   const ready = buildRunnerReady();
   if (!ready?.ok) return;
-  const { callStepTurn } = await import('./harness-steps.js');
+  const { callStepTurn, stepSystemPrompt } = await import('./harness-steps.js');
   const byScreen = screens.map((s) => ({
     name: s.name, status: s.status,
     items: items.filter((i) => i.screen_id === s.id).map((i) => ({ id: i.id, status: i.status, kind: i.kind, name: i.name })),
   }));
   const res = await callStepTurn('checklist-postpass', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
-    system: buildChecklistPostPassPrompt(), tools: [],
+    system: stepSystemPrompt('checklist-postpass', buildChecklistPostPassPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildChecklistPostPassTask({ instruction: requestRow.instruction, summary: requestChangeSummary(requestRow), screens: byScreen }) }],
-    maxTokens: 900, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'low', thinking: 'off',
   });
   if (!res.ok) return;
   const parsed = parseChecklistPostPassReply(res.text);

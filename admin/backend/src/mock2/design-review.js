@@ -27,7 +27,7 @@ import {
   buildReviewPrompt, parseReviewReply, rogueCssColors, reviewChatMessage, composePolishInstruction,
 } from './design-review-logic.js';
 import { MOCKUP_CURRENT } from './concept-logic.js';
-import { callStepTurn } from './harness-steps.js';
+import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import { buildRunnerReady } from './runner.js';
 import { insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage, effectivePrice } from './usage-logic.js';
@@ -248,9 +248,9 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   ].join('\n\n');
   const res = await callStepTurn('design-review', {
     connector: ready.connector, apiKey: ready.apiKey, model,
-    system: buildReviewPrompt(), tools: [],
+    system: stepSystemPrompt('design-review', buildReviewPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: userText, images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })) }],
-    maxTokens: 2500, effort: 'high', thinking: null, timeoutMs: 240000,
+    effort: 'high', thinking: null, timeoutMs: 240000,
   });
   if (!res.ok) return { ok: false, error: `review model call failed: ${res.error || 'unknown'}` };
   try {

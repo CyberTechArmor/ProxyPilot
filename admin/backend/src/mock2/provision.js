@@ -44,7 +44,7 @@ import {
 } from './network.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { runPortDriftCheck } from './port-check.js';
-import { deployProject } from './deploy.js';
+import { deployProject, stampDeployedCommit } from './deploy.js';
 import { parseDeclaredEgress } from './egress-logic.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { projectHasBeenDeployed } from './cycles.js';
@@ -518,6 +518,7 @@ async function deployBaseAppInner(project, projectId, { reason }) {
       setStatus(projectId, { phase: 'ready', message: 'Project online — the base app is live (create the first administrator on its URL).' });
       try { updateProject(projectId, { base_app_deployed_at: new Date().toISOString() }); } catch { /* best effort */ }
       try { resolveQueueItem(`mock2-base-app:${projectId}`); } catch { /* best effort */ }
+      await stampDeployedCommit(projectId, project.container_name, APP_DIR);
       await say('The base app is live on your project URL — open it to create the first administrator and sign in. It ships with the full admin area: users, roles & permissions, directory sign-in (LDAPS), and self-signup live at /admin, and every account has /profile. From here you can mock up a design and apply it, or skip the mockup and start making quick updates to the running app.');
       console.log(`[mock2] project ${projectId} base app deployed (${reason})`);
       return { ok: true };

@@ -29,7 +29,7 @@ import { getOrCreateChat, insertMessage } from './chats.js';
 import { insertChangeRecord } from './change-records.js';
 import { getCurrentFrameworkVersion } from './framework.js';
 import { acquireLock, releaseLock } from './locks.js';
-import { deployProject } from './deploy.js';
+import { deployProject, stampDeployedCommit } from './deploy.js';
 import { sh } from './host.js';
 import { containerSh } from './runner.js';
 import { repoPathForProject } from './provision.js';
@@ -255,7 +255,10 @@ async function handleExternalPush({ project, user, oldHead }) {
       containerName: project.container_name, appDir: APP_DIR,
       webPort: project.web_port || DEFAULT_WEB_PORT,
     });
-    if (result.ok) say('Deployed — the pushed changes are live on the project URL.');
+    if (result.ok) {
+      await stampDeployedCommit(project.id, project.container_name, APP_DIR);
+      say('Deployed — the pushed changes are live on the project URL.');
+    }
     else say(`Deploy of the pushed changes failed at "${result.step}": ${String(result.error || '').slice(0, 400)} — fix and push again, or press "Redeploy app" in the Build panel.`);
   } catch (e) {
     say(`Deploy of the pushed changes errored: ${String(e?.message || e).slice(0, 300)}`);

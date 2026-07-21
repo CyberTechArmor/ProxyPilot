@@ -11,10 +11,12 @@ File references are the implementation anchors, not reading assignments.
 
 ## 0. How a step's model is resolved (four layers, later wins)
 
-1. **Slot** — the operator assigns connectors+models to three slots
-   (Projects → Connectors): `build_runner`, `audit`, `summary`. Concept
-   chat and mockup rendering ride the same connector pool with their own
-   resolution (below).
+1. **Slot** — the operator assigns connectors+models to FIVE slots
+   (Projects → Connectors): `concept_chat` (design partner, inventory +
+   token extraction), `mockup` (render baseline; the preferred-model env
+   override sits on top), `build_runner` (the builder, Ask, design
+   review), `audit` (rule interview; also the consult's connector), and
+   `summary` (Explain cards).
 2. **Hard defaults / env overrides** — per-step constants:
    `MOCK2_FAST_MODEL` (build fast-path model; default `claude-sonnet-5`,
    typically overridden to `claude-opus-4-8`), `MOCK2_MOCKUP_MODEL`
@@ -34,14 +36,14 @@ File references are the implementation anchors, not reading assignments.
 
 | Step | Trigger | What it does | Model | Effort / thinking | Output budget | Intended outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Concept chat turn** (`concept.js` ~539) | Every design-chat message | Design-partner conversation; expands simple asks into domain-expert briefs; decides tweak/screen/full scope via the `generate_mockup` tool | Chat slot model, lane `chat` | Lane default (adaptive) | 16k | A brief that is the design's ceiling; right scope chosen so revisions cost the minimum |
+| **Concept chat turn** (`concept.js` ~539) | Every design-chat message | Design-partner conversation; expands simple asks into domain-expert briefs; decides tweak/screen/full scope via the `generate_mockup` tool | `concept_chat` slot, lane `chat` | Lane default (adaptive) | 16k | A brief that is the design's ceiling; right scope chosen so revisions cost the minimum |
 | **Mockup render — full** (`concept.js` ~779) | First render, explore, restyle brief | One self-contained multi-screen HTML mockup obeying token precedence (brief > preset > design system) | `claude-fable-5` (`MOCK2_MOCKUP_MODEL`; falls back to slot model if rejected), lane `mockup` | Deep renders (first/explore/restyle): high + adaptive thinking. On-theme iterations: low, thinking off | Sized from current doc (40–64k) + truncation continuation (2×30k hops) | The visual contract every build inherits — worth the strongest model once |
 | **Mockup tweak** (`concept.js` ~662) | Small copy/style change | Search/replace edit blocks against current HTML (falls back to full render if they don't apply) | Same as render | low / off | 6k | A one-line change costs cents, not a re-render |
 | **Mockup screen re-render** (`concept.js` ~699) | One screen changes substantially | Re-renders ONE `<section data-screen>`; swap-in | Same as render | high / adaptive | 20k | Screen-scale change without whole-document cost or size ceiling |
 | **Render continuation** (`concept.js` ~736 area) | Render stopped at max_tokens | Instruction-turn continuation + defensive stitching (no prefill — model rejects it) | Same as render | low / off | 30k per hop (≤2) | Paid partial output is finished, never discarded |
-| **Design-doc AI adjust** (`concept.js` ~181) | Operator asks AI to adjust a design preset | Proposes sanitized token JSON (cannot inject CSS) | Chat slot, lane `chat` | lane default | small | A valid `proxypilot-design@1` proposal |
-| **Inventory extraction** (`concept.js` ~1071) | Design approval | Mockup HTML → structured inventory (screens, fields, actions incl. MUTATION COVERAGE, states + `default_state`, journeys, capabilities); then `mergeVariantScreens` + `completeInventoryCrud` + `lintInventory` post-process it (pure, free) | Chat slot | thinking off (JSON) | generous, 1 retry | The build contract: complete CRUD, variants folded, defaults explicit |
-| **Design-token extraction** (`concept.js` ~1130) | Design approval (after inventory) | Mockup → `state/design-tokens.json` + rendered `design.css` | Chat slot | thinking off | 8k | The approved LOOK carried into the build; falls back to framework defaults |
+| **Design-doc AI adjust** (`concept.js` ~181) | Operator asks AI to adjust a design preset | Proposes sanitized token JSON (cannot inject CSS) | `concept_chat` slot, lane `chat` | lane default | small | A valid `proxypilot-design@1` proposal |
+| **Inventory extraction** (`concept.js` ~1071) | Design approval | Mockup HTML → structured inventory (screens, fields, actions incl. MUTATION COVERAGE, states + `default_state`, journeys, capabilities); then `mergeVariantScreens` + `completeInventoryCrud` + `lintInventory` post-process it (pure, free) | `concept_chat` slot | thinking off (JSON) | generous, 1 retry | The build contract: complete CRUD, variants folded, defaults explicit |
+| **Design-token extraction** (`concept.js` ~1130) | Design approval (after inventory) | Mockup → `state/design-tokens.json` + rendered `design.css` | `concept_chat` slot | thinking off | 8k | The approved LOOK carried into the build; falls back to framework defaults |
 
 ## 2. Build request — Define segment
 
@@ -58,7 +60,7 @@ File references are the implementation anchors, not reading assignments.
 | **Quick-lane pre-pass** (`runner.js` ~218) | Quick/MVP cycle start | Classifies scope, writes the working brief (+ suggest-mode additions) stamped into routing | Haiku 4.5 | low / off | tiny | The cheap model does the thinking scaffold; the big model builds |
 | **Chat→prompt distill** (`runner.js` ~287) | "Build this as a Quick update" button | Converts a chat message into a well-formed instruction | Haiku 4.5 | low / off | 1.6k | One tap from conversation to build |
 | **Build runner loop** (`runner.js` ~1070) | Every build cycle | THE builder: reads mockup/inventory/rules, edits code in the fenced container via tools, runs gates, finishes | `build_runner` slot; fast modes use `MOCK2_FAST_MODEL` (operator: opus-4-8). Full: high (routing). MVP: high. Quick: **medium** default (`MOCK2_QUICK_EFFORT`), lane `build`/`mvp` | 64k/turn (`MOCK2_RUNNER_MAX_TOKENS`) | Working, contract-complete code. **This is where ~80–90% of a request's cost lives — cost scales with TURNS, so everything that reduces round-trips (precise briefs, checklists, one-shot gates) is a cost lever** |
-| **Consult (second opinion)** (`consult.js`) | Operator asks on a halted/blocked cycle | Digest of the failure → one advisory diagnosis | `claude-fable-5` (fixed) | — | 16k | Unblocks a stuck cycle with senior eyes; advisory only |
+| **Consult (second opinion)** (`consult.js`) | Operator asks on a halted/blocked cycle | Digest of the failure → one advisory diagnosis | `claude-fable-5` (fixed, on the audit/build connector) | — | 16k | Unblocks a stuck cycle with senior eyes; advisory only |
 | **Explain card / follow-up** (`explain.js`) | Operator taps Explain | Plain-language rewrite of a halt/authorization card | `summary` slot | — | 4k | Non-technical operator understands the decision |
 
 ## 4. Finish, verification, deploy (the free half)
@@ -82,7 +84,7 @@ All deterministic — zero model cost:
 | --- | --- | --- | --- | --- |
 | **Checklist post-pass** (`screen-plan.js` ~468) | Request close | Haiku 4.5 | 0.9k | Screens/features checklist stays truthful |
 | **Design review / Polish pass** (`design-review.js` ~249) | Button or auto after request close (toggle) | `MOCK2_REVIEW_MODEL` or build slot | 2.5k, effort high | Screenshot-based critique + deterministic overflow/axe/rogue-color findings → auto-fix queue |
-| **Ask** (`ask.js` ~201) | Build-chat Ask | Build slot, lane `ask` | 16k | Answers/drafts with conversation context; can act via tools |
+| **Ask** (`ask.js` ~201) | Build-chat Ask | `build_runner` slot, lane `ask` | 16k | Answers/drafts with conversation context; can act via tools |
 
 ## 6. Where the money goes (and the Sonnet/Opus point)
 

@@ -261,3 +261,60 @@ export function acceptanceRecord({
       : true,
   };
 }
+
+// ---- action-parity gate (harness ratchet 3, project-32 finding 1) ----
+// The inventory is the build contract, but nothing diffed its actions
+// against what actually shipped — project 32's inventory-driven build
+// implemented create flows and silently dropped nothing it was given...
+// because the inventory itself was incomplete. Now that CRUD completion
+// puts mutations INTO the inventory, this gate makes silently dropping
+// them impossible: every mutation action must either appear in the app's
+// UI source (its label is user-visible — implemented or explicitly badged
+// "Not built yet") or the finish is rejected with the missing list.
+
+const MUTATION_LABEL_RE = /^(?:\+\s*)?(?:new|add|create|edit|update|rename|delete|remove|archive|change|mark|complete|reopen|promote|assign|unblock|resolve)\b/i;
+
+// Normalize an inventory label to a greppable literal: parentheticals and
+// bracket placeholders stripped, whitespace collapsed. Returns '' when the
+// remainder is too short to match meaningfully.
+export function normalizeActionLabel(label) {
+  const s = String(label || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/^\s*\+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length >= 4 ? s : '';
+}
+
+// The subset of inventory actions the parity gate enforces: mutations.
+// Navigation/expand/filter labels are often descriptions ("Card click"),
+// not button text — enforcing them would be noise. Mutations are the class
+// that silently vanished. Returns [{ label, screen }], deduped by label.
+export function mutationActions(inventory) {
+  const out = [];
+  const seen = new Set();
+  for (const sc of inventory?.screens || []) {
+    for (const a of sc.actions || []) {
+      if (!MUTATION_LABEL_RE.test(String(a.label || ''))) continue;
+      const label = normalizeActionLabel(a.label);
+      if (!label || seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      out.push({ label, screen: sc.name });
+    }
+  }
+  return out;
+}
+
+// Classify against the labels actually found in UI source (case-insensitive
+// set from the orchestrator's container grep). A label present in the UI is
+// surfaced either way — working control or a visible "Not built yet" badge;
+// a label present NOWHERE is silently missing, which fails the gate.
+export function actionParityReport(actions = [], foundLabelsLower = new Set()) {
+  const present = [];
+  const missing = [];
+  for (const a of actions) {
+    (foundLabelsLower.has(a.label.toLowerCase()) ? present : missing).push(a);
+  }
+  return { ok: missing.length === 0, present, missing };
+}

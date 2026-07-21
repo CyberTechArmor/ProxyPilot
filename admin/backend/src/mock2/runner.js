@@ -91,6 +91,7 @@ import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smo
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
+  mutationActions, actionParityReport,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -992,6 +993,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // carry before finish is accepted.
   const taskKind = classifyTaskKind(cycle.instruction);
   let redTestObserved = false;
+  // Action-parity gate state (ratchet 3): reject a finish at most once for
+  // silently-missing inventory mutations — a second finish proceeds with a
+  // loud note instead of looping.
+  let parityRejected = false;
   // An enforced reproduce-first waiver carried on the resume context (admin-
   // granted upstream). Applied at the acceptance verdict — the real enforcement
   // layer — and stamped into the acceptance record, never merely narrated.
@@ -1304,6 +1309,43 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
           return scheduleJobCleanup(cycle.id);
         }
         continue;
+      }
+      // ACTION PARITY (ratchet 3): on the inventory-implementation build,
+      // every mutation action in the contract must be SURFACED in the app's
+      // UI source — working control or a visible "Not built yet" badge both
+      // put the label in the source; a label found NOWHERE is silently
+      // missing and rejects the finish once (with the list). Deterministic:
+      // one container grep per label over src/ + public/.
+      if (/approved design inventory/i.test(String(cycle.instruction || ''))) {
+        try {
+          const invRead = await readFileInContainer(containerName, 'state/inventory.json');
+          const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
+          const actions = inventory && !inventory.skipped ? mutationActions(inventory) : [];
+          if (actions.length) {
+            const script = ['cd "' + APP_DIR + '"']
+              .concat(actions.map((a) => `l=$(printf '%s' '${b64(a.label)}' | base64 -d); if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"; fi`))
+              .join('\n');
+            const gr = await containerSh(containerName, script, { timeoutMs: 60000 });
+            const found = new Set(String(gr.stdout || '').split('\n').filter((x) => x.startsWith('FOUND\t')).map((x) => x.slice(6).trim().toLowerCase()));
+            const parity = actionParityReport(actions, found);
+            if (!parity.ok && !parityRejected) {
+              parityRejected = true;
+              const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
+              transcript.push({
+                role: 'tool', toolCallId: termId, name: termName,
+                content: `Not finished — action parity: these inventory mutation actions are in the approved contract but appear NOWHERE in the app's UI source: ${list}. Implement each one, or render its control disabled with a visible "Not built yet" badge — never silently drop a contract action. Then re-call finish.`,
+              });
+              logEvent('note', { role: 'system', content: `Finish rejected — action parity: silently missing: ${list}` });
+              touchLock(projectId, holder);
+              continue;
+            }
+            if (!parity.ok) {
+              logEvent('note', { role: 'system', content: `Action parity: still missing after rejection (accepted with warning): ${parity.missing.map((a) => a.label).join(', ')}` });
+            } else if (parity.present.length) {
+              logEvent('note', { role: 'system', content: `Action parity: all ${parity.present.length} inventory mutation actions surfaced in the UI source.` });
+            }
+          }
+        } catch (e) { console.warn('[mock2] action-parity gate failed open:', e?.message); }
       }
       // Stamp the machine-readable acceptance state (migration 517) so "gates
       // green" and "acceptance demonstrated" are distinguishable in the record —

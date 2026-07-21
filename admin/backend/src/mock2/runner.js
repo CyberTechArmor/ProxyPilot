@@ -1538,9 +1538,29 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // terminal: nothing changed, so re-running install/build/restart adds risk
       // and time for zero benefit — the existing deploy keeps serving.
       const noOpCycle = codeChanged.length === 0;
+      // ANOMALY TRIPWIRE — BEFORE deploy (ratchet 6; it used to fire as a
+      // post-deploy note, i.e. after the under-verified change was live).
+      // A bug-fix that closed at a fraction of its estimate with no red
+      // test and no test file touched now HOLDS the deploy: the cycle
+      // still succeeds (work + record kept, gates already green), the flag
+      // is raised for review, and the operator releases it with the
+      // existing Deploy action once satisfied. Conservative option: hold,
+      // never auto-rollback; the previous deploy keeps serving.
+      let anomalyHold = null;
+      try {
+        const preAnomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: changedThisCycle, redTestObserved });
+        if (preAnomaly.flag && !noOpCycle) anomalyHold = preAnomaly;
+      } catch { /* tripwire must not break the finish path */ }
+      if (anomalyHold) {
+        const detail = `${project.name}: cycle ${cycle.id} looks under-verified — ${anomalyHold.reasons.join('; ')}. Deploy is HELD: review the change record, then press Deploy to release it.`;
+        safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly-hold:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
+        logEvent('note', { role: 'system', content: `Anomaly tripwire — deploy HELD for human review (was: post-deploy note): ${anomalyHold.reasons.join('; ')}`, meta: { anomaly: anomalyHold.reasons, held: true } });
+      }
       const deployed = noOpCycle
         ? { ok: true, skipped: true, noop: true }
-        : await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+        : anomalyHold
+          ? { ok: true, skipped: true, held: true }
+          : await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
         logEvent('deploy', { role: 'system', content: deployed.error || 'deploy failed', meta: { ok: false } });
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });
@@ -1643,7 +1663,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         // to the spec's chore/feature kind, so a legitimate no-op is not nagged as
         // an under-verified bug fix on every run.
         const anomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: commitFiles, redTestObserved });
-        if (anomaly.flag) {
+        if (anomaly.flag && !anomalyHold) {
           const detail = `${project.name}: cycle ${cycle.id} succeeded but looks under-verified — ${anomaly.reasons.join('; ')}. Review the change record and the live behavior.`;
           safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
           logEvent('note', { role: 'system', content: `Anomaly tripwire raised for human review: ${anomaly.reasons.join('; ')}`, meta: { anomaly: anomaly.reasons } });
@@ -1655,9 +1675,11 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         phase: deployed.skipped ? 'succeeded' : 'serving',
         message: deployed.noop
           ? 'Nothing left to do — the work is already complete and verified; the existing deploy keeps serving.'
-          : deployed.skipped
-            ? 'Change complete — gates green, checkpoint recorded.'
-            : 'Deployed — gates green and the app is live on its URL.',
+          : deployed.held
+            ? 'Change complete but deploy HELD — the anomaly tripwire wants a human look (under-verified change). Review the change record, then press Deploy to release it; the previous deploy keeps serving.'
+            : deployed.skipped
+              ? 'Change complete — gates green, checkpoint recorded.'
+              : 'Deployed — gates green and the app is live on its URL.',
         commit: record?.commit_sha || null,
       });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });

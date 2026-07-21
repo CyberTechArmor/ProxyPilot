@@ -70,8 +70,8 @@ function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
   return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
 }
 
-async function readContainerFile(containerName, relPath) {
-  const r = await containerSh(containerName, `cat '${APP_DIR}/${relPath}' 2>/dev/null`);
+async function readContainerFile(containerName, relPath, { timeoutMs = 60000 } = {}) {
+  const r = await containerSh(containerName, `cat '${APP_DIR}/${relPath}' 2>/dev/null`, { timeoutMs });
   return r.code === 0 ? (r.stdout || '') : '';
 }
 
@@ -181,27 +181,37 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 }
 
 // One screenshot for the annotate dialog. Returns { ok, buffer, error }.
-// Hard ceiling for one annotate screenshot end-to-end (target resolution +
-// spec read + browser launch + login + navigation + shot). Without it the
-// serial worst case ran minutes and the dialog spun forever (user report).
-const CAPTURE_DEADLINE_MS = 60000;
+// Hard ceiling for one annotate screenshot end-to-end. The independent legs
+// (app address, login fixtures, browser launch) run in PARALLEL, so the
+// worst case is max(30s launch, 15s reads) + login 12s + nav 20s + shot 20s
+// — the 90s ceiling only fires when a step genuinely wedges, and the error
+// then NAMES the stage so a stuck install can be diagnosed from the dialog.
+const CAPTURE_DEADLINE_MS = 90000;
 
 export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390 }) {
   const chromium = await loadChromium();
   if (!chromium) return { ok: false, error: 'playwright-core is not installed (rerun update.sh / npm install)' };
   let browser = null;
+  let stage = 'starting';
   const work = (async () => {
-    const baseUrl = await resolveBrowserTarget(containerName, webPort);
-    const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
+    stage = 'resolving the app address + launching the browser';
+    const [baseUrl, specText, launched] = await Promise.all([
+      resolveBrowserTarget(containerName, webPort),
+      readContainerFile(containerName, UI_CHECKS_PATH, { timeoutMs: 15000 }).catch(() => ''),
+      chromium.launch(launchOptions()),
+    ]);
+    browser = launched;
     const parsed = specText ? parseUiChecks(specText) : { ok: false };
     const spec = parsed.ok ? parsed.spec : null;
     const w = Math.min(1600, Math.max(320, Number(width) || 390));
-    browser = await chromium.launch(launchOptions());
+    stage = 'opening a page';
     const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
+    stage = 'signing in with the fixture login';
     await tryLogin(page, baseUrl, spec);
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
+    stage = `loading ${safePath}`;
     await gotoSettled(page, new URL(safePath, baseUrl).toString());
     // Signed-out detection: the auth gate redirects page navigations to
     // /login, and fixture logins only exist once a full build has written
@@ -212,6 +222,7 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
       signedOut = /\/login(?:[/?#]|$)/.test(page.url())
         || (safePath !== '/login' && (await page.locator('input[type="password"]').count()) > 0);
     } catch { signedOut = false; }
+    stage = 'capturing the page';
     const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 20000 });
     return { ok: true, buffer: buf, signedOut };
   })();
@@ -220,7 +231,7 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
     result = await Promise.race([
       work,
       new Promise((_, reject) => setTimeout(
-        () => reject(new Error(`the screenshot timed out after ${Math.round(CAPTURE_DEADLINE_MS / 1000)}s — the app or container may be busy; try Refresh`)),
+        () => reject(new Error(`the screenshot timed out after ${Math.round(CAPTURE_DEADLINE_MS / 1000)}s while ${stage} — the app or container may be busy; try Refresh`)),
         CAPTURE_DEADLINE_MS,
       )),
     ]);

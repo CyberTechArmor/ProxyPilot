@@ -30,6 +30,8 @@ const WIRED_HELPERS = [
   'insertLedgerEntry',
   'costCentsForUsage',
   'effectivePrice',
+  'insertMessage',
+  'stampDeployedCommit',
 ];
 
 function importedNames(src) {
@@ -41,8 +43,10 @@ function importedNames(src) {
       if (n) names.add(n);
     }
   }
-  // Dynamic destructured imports: const { a, b } = await import('...')
-  for (const m of src.matchAll(/\{([^}]*)\}\s*=\s*await import\(/g)) {
+  // Dynamic destructured imports: const { a, b } = await import('...').
+  // [^{}] keeps an enclosing block brace (try {, if {) from swallowing the
+  // destructure group and garbling the captured names.
+  for (const m of src.matchAll(/\{([^{}]*)\}\s*=\s*await import\(/g)) {
     for (const part of m[1].split(',')) {
       const n = part.trim().split(':').pop().trim();
       if (n) names.add(n);

@@ -38,6 +38,19 @@ breakers (soft pause, turn backstop, no-progress breaker) are unchanged.
 Budget figures quoted in the step sections below describe the historical
 shipped caps and now read as sizing context only.
 
+**Deploy honesty (2026-07):** the finish path's verified-no-op deploy skip
+now compares HEAD against the **actually-deployed commit** (stamped by every
+successful deploy — build, external push, base app). Checkpointed-but-never-
+deployed work (paused/resumed segments, mid-cycle commits) can no longer
+strand the placeholder behind a "succeeded" cycle — the manual Redeploy
+button is for recovery, not routine. Related: every project repo now ships
+`WORKING-COPY.md` + `.vscode/settings.json` (commit → auto-push → the
+platform's push handler syncs and **auto-redeploys**), the design specs
+(`state/design-tokens.json`, `design.css`, `mockups/current.html`) are
+documented as the reference for external editors, and the scaffold is an
+installable **PWA** (manifest + service worker + install prompt; the runner
+prompt binds builds to preserving them).
+
 **Shipped per-step defaults were raised** (operator decision, 2026-07): the
 concept/define/utility steps now default to **Claude Opus 4.8 at high
 effort** (concept chat, design-doc adjust, design-token extraction,

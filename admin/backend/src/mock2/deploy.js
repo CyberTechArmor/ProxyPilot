@@ -26,6 +26,7 @@ import {
   freeWebPortScript, portHoldersReportScript,
 } from './deploy-logic.js';
 import { parseDeclaredEgress } from './egress-logic.js';
+import { updateProject } from './projects.js';
 
 const UNIT_PATH = '/etc/systemd/system/mock2-dev.service';
 
@@ -229,4 +230,15 @@ async function deployProjectUnqueued({
   }
 
   return { ok: true, step: 'serving' };
+}
+
+// Record the commit the app is now SERVING (best-effort). Every successful
+// deploy path calls this; the runner's verified-no-op deploy skip compares it
+// to HEAD so committed-but-undeployed work always deploys.
+export async function stampDeployedCommit(projectId, containerName, appDir) {
+  try {
+    const r = await containerSh(containerName, `git -C '${appDir}' rev-parse HEAD 2>/dev/null\n`, { timeoutMs: 30000 });
+    const sha = String(r.stdout || '').trim().split('\n').pop().trim();
+    if (/^[0-9a-f]{40}$/.test(sha)) updateProject(projectId, { deployed_commit: sha });
+  } catch { /* the stamp is advisory; a miss only costs one redundant deploy */ }
 }

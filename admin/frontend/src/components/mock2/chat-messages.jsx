@@ -145,15 +145,13 @@ function QuickUpdateChip({ m, onQuickUpdate, busyId }) {
 
 export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null }) {
   if (m.kind === 'system') {
-    // Long system messages (a design review's findings, a split plan) are
-    // buildable too; short status pills ("Screen built…") stay button-free.
-    const buildable = onQuickUpdate && String(m.body || '').length >= 120;
+    // System messages are status, never asks — no build chip (operator
+    // decision: the chip belongs to genuine Ask answers only).
     return (
       <div className="flex flex-col items-center">
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
           {m.body}
         </p>
-        {buildable ? <QuickUpdateChip m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} /> : null}
       </div>
     );
   }
@@ -194,10 +192,11 @@ export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBus
           </span>
         ) : null}
       </div>
-      {/* Assistant answers (improvement lists, plans, specs) can become builds
-          in one tap — the distiller writes the prompt the user was composing
-          by hand ("please write the prompt for all of that"). */}
-      {!mine && m.kind === 'assistant' ? (
+      {/* Ask answers (improvement lists, plans, specs) can become builds in
+          one tap — the distiller writes the prompt the user was composing by
+          hand. Ask-only: an Ask answer is an assistant row with no cycle_id;
+          build completion summaries (assistant + cycle_id) are status. */}
+      {!mine && m.kind === 'assistant' && m.cycle_id == null ? (
         <QuickUpdateChip m={m} onQuickUpdate={onQuickUpdate} busyId={quickBusyId} />
       ) : null}
     </div>

@@ -1487,4 +1487,20 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // The commit the live app is actually SERVING (stamped after every
+    // successful deploy: build deployStage, external-push deploy, base-app
+    // deploy). The finish path's verified-no-op deploy skip keys off it:
+    // an empty segment diff only skips deploy when HEAD == deployed_commit,
+    // so checkpointed-but-never-deployed work (pause/resume segments,
+    // mid-cycle commits, silent git failures) can no longer strand the
+    // placeholder/old build behind a "succeeded" cycle.
+    version: 542,
+    name: 'mock2_projects_deployed_commit',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_projects ADD COLUMN deployed_commit TEXT;
+      `);
+    },
+  },
 ];

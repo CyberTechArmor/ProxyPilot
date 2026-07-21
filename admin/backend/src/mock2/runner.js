@@ -84,7 +84,7 @@ import { logAudit } from '../db.js';
 import {
   budgetMode, budgetPauseReasonCents, budgetCentsForTokenLegacy, dollars, USAGE_SCHEMA_VERSION,
 } from './usage-logic.js';
-import { deployProject, readRunContract, readDeclaredEgress } from './deploy.js';
+import { deployProject, readRunContract, readDeclaredEgress, stampDeployedCommit } from './deploy.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { reconcileMock2Firewall } from './firewall.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
@@ -1553,9 +1553,22 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // success). The live URL then serves the real app (the CycleCard reloads
       // the preview on success via onBuilt).
       // A verified NO-OP cycle (no code change) advances straight to its
-      // terminal: nothing changed, so re-running install/build/restart adds risk
-      // and time for zero benefit — the existing deploy keeps serving.
-      const noOpCycle = codeChanged.length === 0;
+      // terminal — but ONLY when the live app is actually serving current
+      // HEAD. "This segment's diff is empty" is not proof of that: paused/
+      // resumed segments checkpoint work without deploying, the builder can
+      // commit mid-cycle, and a silent git failure reads as an empty diff.
+      // Each of those stranded committed code behind a "succeeded" cycle
+      // until the operator pressed Redeploy (user report). deployed_commit
+      // (migration 542) is stamped by every successful deploy; no stamp or
+      // a mismatch means deploy runs.
+      let appCurrent = false;
+      try {
+        const hs = await execInContainer(containerName, `git rev-parse HEAD 2>/dev/null`);
+        const headSha = String(hs.stdout || '').trim().split('\n').pop().trim();
+        const deployedSha = getProject(projectId)?.deployed_commit || null;
+        appCurrent = /^[0-9a-f]{40}$/.test(headSha) && !!deployedSha && deployedSha === headSha;
+      } catch { appCurrent = false; }
+      const noOpCycle = codeChanged.length === 0 && appCurrent;
       // ANOMALY TRIPWIRE — BEFORE deploy (ratchet 6; it used to fire as a
       // post-deploy note, i.e. after the under-verified change was live).
       // A bug-fix that closed at a fraction of its estimate with no red
@@ -2082,6 +2095,7 @@ export async function deployStage({ cycle, project, containerName, holder }) {
     return { ok: false, error: `Deploy failed at "${result.step}" — ${result.error}` };
   }
   updateCycle(cycle.id, { deploy_status: 'serving' });
+  await stampDeployedCommit(projectId, containerName, APP_DIR);
   touchLock(projectId, holder);
   return { ok: true };
 }

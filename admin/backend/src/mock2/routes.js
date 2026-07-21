@@ -237,7 +237,7 @@ import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestore
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback } from './cycle-events.js';
 // ---- M7: Stage 1 (Concept) — chat, mockup, design approval ----
-import { listMessages, getMessage, getChat } from './chats.js';
+import { listMessages, getMessage, getChat, insertMessage } from './chats.js';
 import {
   startConceptTurn, startDesignApproval, skipDesign, getConceptJobStatus, conceptReady,
   exportDesignTemplate, importDesignTemplate, adjustDesignPreset,
@@ -2518,6 +2518,11 @@ export function createMock2Router() {
       const busy = cur && ['queued', 'estimating', 'running', 'awaiting_user', 'awaiting_admin'].includes(cur.status);
       if (busy) {
         const row = enqueueBuild({ projectId: project.id, instruction, buildMode: 'quick', initiatedBy: req.user.id });
+        // Echo the queued request as the operator's chat message now — the
+        // drain's later "Queued build started" note is the status, not the ask.
+        try {
+          insertMessage({ projectId: project.id, authorUserId: req.user.id, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0, kind: 'user', body: instruction });
+        } catch { /* chat echo is best-effort */ }
         logAudit(req.user.id, 'MOCK2_BUILD_QUEUED', 'mock2_project', project.id, { queue_id: row.id }, req.ip);
         return res.status(202).json({ queued: true, queue: publicQueueShape(row) });
       }
@@ -2531,6 +2536,7 @@ export function createMock2Router() {
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
         buildMode: mode,
+        echoToChat: true,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the build: ${err?.message || 'unknown error'}` });
@@ -2584,6 +2590,11 @@ export function createMock2Router() {
       return res.status(404).json({ error: 'No such chat message on this project' });
     }
     if (!String(msg.body || '').trim()) return res.status(400).json({ error: 'That message has no text to turn into a prompt' });
+    // Only genuine Ask answers become build prompts (assistant rows with no
+    // cycle) — system notes and build summaries are status, not asks.
+    if (msg.kind !== 'assistant' || msg.cycle_id != null) {
+      return res.status(400).json({ error: 'Only Ask answers can be turned into a build prompt' });
+    }
     // The nearest preceding USER message gives the distiller the "what was
     // asked" context (an answer to "what's missing?" reads differently from
     // an unprompted plan).

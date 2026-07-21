@@ -693,6 +693,11 @@ function appShellHtml(project) {
 <title>${name}</title>
 <link rel="stylesheet" href="/design.css">
 <link rel="stylesheet" href="/base.css">
+<meta name="theme-color" content="#0d1524">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<script src="/install.js" defer></script>
 </head>
 <body>
 <header class="app">
@@ -737,6 +742,101 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 // buildScaffoldFiles(project) → the TS/Express/Drizzle project files (everything
 // except mock2.yaml / .env.example / serve.py / public/index.html / state/*,
 // which template.js composes around this). PURE.
+
+// ---- PWA (installable app) ----
+// The scaffold ships as a Progressive Web App: a manifest, a conservative
+// service worker (network-first; caches only same-origin pages/styles/
+// scripts/images — never /api responses), and an install bootstrap that
+// surfaces the browser's install prompt as a small in-app button.
+
+function pwaManifest(project) {
+  const name = String(project?.name || 'Application').slice(0, 60);
+  return `${JSON.stringify({
+    name,
+    short_name: name.length > 12 ? name.slice(0, 12).trim() : name,
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    background_color: '#0d1524',
+    theme_color: '#0d1524',
+    icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }],
+  }, null, 2)}\n`;
+}
+
+function pwaIconSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<rect width="128" height="128" rx="26" fill="#1466b8"/>
+<circle cx="64" cy="64" r="30" fill="none" stroke="#ffffff" stroke-width="10"/>
+<circle cx="64" cy="64" r="9" fill="#ffffff"/>
+</svg>\n`;
+}
+
+function pwaServiceWorkerJs() {
+  return `// Conservative PWA service worker: network-first, cache fallback.
+// Caches ONLY same-origin navigations, styles, scripts, and images — never
+// /api responses, so live data is always live. Bump CACHE to invalidate.
+const CACHE = 'app-shell-v1';
+self.addEventListener('install', () => { self.skipWaiting(); });
+self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  let url;
+  try { url = new URL(req.url); } catch { return; }
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
+  const cacheable = req.mode === 'navigate' ||
+    ['style', 'script', 'image', 'manifest'].includes(req.destination);
+  if (!cacheable) return;
+  e.respondWith(
+    fetch(req).then((res) => {
+      if (res && res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(req).then((hit) => hit || Response.error()))
+  );
+});
+`;
+}
+
+function pwaInstallJs() {
+  return `// PWA bootstrap: register the service worker and surface the browser's
+// install prompt as a small in-app button (44px target, token-styled).
+(() => {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+  let deferred = null;
+  const BTN_ID = 'pwa-install-btn';
+  const removeBtn = () => { const b = document.getElementById(BTN_ID); if (b) b.remove(); };
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferred = e;
+    if (document.getElementById(BTN_ID)) return;
+    const btn = document.createElement('button');
+    btn.id = BTN_ID;
+    btn.type = 'button';
+    btn.textContent = 'Install app';
+    btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;' +
+      'min-height:44px;padding:10px 16px;border-radius:999px;border:0;cursor:pointer;' +
+      'background:var(--app-primary,#1466b8);color:var(--app-primary-text,#fff);' +
+      'font:inherit;box-shadow:0 2px 10px rgba(0,0,0,.3)';
+    btn.addEventListener('click', async () => {
+      if (!deferred) return removeBtn();
+      deferred.prompt();
+      try { await deferred.userChoice; } finally { deferred = null; removeBtn(); }
+    });
+    document.body.appendChild(btn);
+  });
+  window.addEventListener('appinstalled', removeBtn);
+})();
+`;
+}
+
 export function buildScaffoldFiles(project) {
   return [
     { path: 'package.json', content: packageJson(project) },
@@ -761,5 +861,11 @@ export function buildScaffoldFiles(project) {
     { path: 'public/base.css', content: baseCss() },
     { path: 'public/assets.svg', content: assetsSvg() },
     { path: 'public/app-shell.html', content: appShellHtml(project) },
+    // PWA: the app is installable from day one (manifest + service worker +
+    // install prompt); every page head links the manifest and install.js.
+    { path: 'public/manifest.webmanifest', content: pwaManifest(project) },
+    { path: 'public/icon.svg', content: pwaIconSvg() },
+    { path: 'public/sw.js', content: pwaServiceWorkerJs() },
+    { path: 'public/install.js', content: pwaInstallJs() },
   ];
 }

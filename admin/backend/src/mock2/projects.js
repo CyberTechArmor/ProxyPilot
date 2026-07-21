@@ -125,6 +125,8 @@ const WRITABLE = new Set([
   // design-import record (519) carries an imported template's original brief.
   'design_approved_at', 'design_inventory_seq', 'current_mockup_id', 'mockup_archived_id',
   'design_import_json',
+  // Migration 542: the commit the live app is serving (deploy stamps it).
+  'deployed_commit',
   // The base design preset chosen at creation (migration 530); NULL/'ai' = none.
   'design_preset',
   // Domain-suggestion handling: 'off' | 'ask' | 'auto' (migration 539).

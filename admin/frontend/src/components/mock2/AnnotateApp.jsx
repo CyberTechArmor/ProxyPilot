@@ -16,7 +16,7 @@ import { api } from '@/lib/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, RefreshCw, MapPin, X, Send } from 'lucide-react';
+import { Loader2, RefreshCw, MapPin, X, Send, ImagePlus } from 'lucide-react';
 
 const MAX_PINS = 8;
 
@@ -33,6 +33,25 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   // only — sent with the start request, never stored anywhere).
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  // 'live' = server-captured; 'upload' = the operator's own screenshot
+  // (navigate the real app yourself, screenshot, paste/upload here).
+  const [source, setSource] = useState('live');
+  const fileInputRef = useRef(null);
+
+  const useOwnImage = useCallback((file) => {
+    if (!file || !String(file.type || '').startsWith('image/')) return;
+    setPins([]);
+    setSignedOut(false);
+    setErrMsg('');
+    setSource('upload');
+    setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(file); });
+    setImgState('ready');
+  }, []);
+
+  const onPaste = useCallback((e) => {
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type?.startsWith('image/'));
+    if (item) { e.preventDefault(); useOwnImage(item.getAsFile()); }
+  }, [useOwnImage]);
   const [errMsg, setErrMsg] = useState('');
   const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the image
   const [sending, setSending] = useState(false);
@@ -40,6 +59,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
 
   const load = useCallback(async (p) => {
     setPins([]);
+    setSource('live');
     setImgState('loading');
     setErrMsg('');
     setSignedOut(false);
@@ -171,9 +191,10 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     const image = annotatedImage();
     if (!image) return;
     const lines = pins
-      .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of ${path}): ${p.note.trim()}` : null))
+      .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of ${source === 'upload' ? 'the screenshot' : path}): ${p.note.trim()}` : null))
       .filter(Boolean);
-    const text = `Annotated screenshot of ${path} attached — the numbered red pins mark the exact spots.\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
+    const where = source === 'upload' ? 'the app (operator-provided screenshot)' : path;
+    const text = `Annotated screenshot of ${where} attached — the numbered red pins mark the exact spots.\n${lines.join('\n')}\nApply exactly these changes at the marked spots; change nothing else.`;
     setSending(true);
     try {
       await onSend({ text, image });
@@ -186,7 +207,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!sending) onOpenChange(o); }}>
-      <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg">
+      <DialogContent onPaste={onPaste} className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><MapPin className="h-4 w-4" /> Annotate the app</DialogTitle>
           <DialogDescription>
@@ -207,7 +228,28 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
             <Button variant="outline" className="h-11 sm:h-10 shrink-0" onClick={reload} disabled={imgState === 'loading'} aria-label="Refresh the screenshot">
               <RefreshCw className="h-4 w-4" />
             </Button>
+            <Button
+              variant="outline"
+              className="h-11 sm:h-10 shrink-0"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={imgState === 'loading'}
+              title="Use your own screenshot — navigate the app yourself, screenshot it, then upload or paste (Ctrl+V) here"
+              aria-label="Upload your own screenshot to annotate"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => { useOwnImage(e.target.files?.[0]); e.target.value = ''; }}
+            />
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            Tip: you can also navigate the app yourself (signed in, any screen), take a screenshot, and paste it here
+            with Ctrl+V — pins work the same on your own image.
+          </p>
           <div className="relative rounded-md border overflow-hidden bg-muted/30">
             {/* The tap surface — the img stays mounted so onLoad/onError fire;
                 a spinner/error overlay covers it until it's ready. Same-origin
@@ -275,9 +317,9 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
           {imgState === 'ready' && signedOut && (
             <div className="space-y-2">
               <p className="text-xs text-amber-500">
-                The app asked for a sign-in, so this shows its sign-in page. Enter your app account below to retake
-                the screenshot signed in (used once for the capture, never stored) — or annotate the sign-in page
-                as-is. Full builds create fixture logins that sign screenshots in automatically.
+                {loginEmail.trim()
+                  ? 'The sign-in didn\u2019t take (check the email/password — or the app may use a non-standard login flow). Easiest alternative: sign in to the app yourself, screenshot the screen you want, and paste (Ctrl+V) or upload it here — pins work the same.'
+                  : 'The app asked for a sign-in, so this shows its sign-in page. Enter your app account below to retake the screenshot signed in (used once for the capture, never stored), annotate the sign-in page as-is, or paste/upload your own screenshot of any screen. Full builds create fixture logins that sign screenshots in automatically.'}
               </p>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Input

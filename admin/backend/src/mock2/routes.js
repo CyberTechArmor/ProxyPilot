@@ -122,6 +122,7 @@ import {
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
+import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, listScreenItemHistory, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
@@ -1414,6 +1415,20 @@ export function createMock2Router() {
     const lanes = setLaneTuning(lane, patch, req.user.id);
     logAudit(req.user.id, 'MOCK2_SETTING_LANE_TUNING', 'mock2_setting', 0, { lane, ...patch }, req.ip);
     res.json({ lanes });
+  });
+  // Harness guide — the operator-editable document that explains every
+  // pipeline step (models, prompts, effort, classifiers, gates). The shipped
+  // text lives with the code and follows upgrades; an operator edit is stored
+  // in mock2_settings and wins until cleared (empty content = reset).
+  router.get('/settings/harness-guide', requireAdmin, (_req, res) => {
+    res.json(getHarnessGuide());
+  });
+  router.post('/settings/harness-guide', requireAdmin, (req, res) => {
+    const parsed = z.object({ content: z.string().max(HARNESS_GUIDE_MAX_LENGTH) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid content' });
+    const doc = setHarnessGuide(parsed.data.content, req.user.id);
+    logAudit(req.user.id, 'MOCK2_SETTING_HARNESS_GUIDE', 'mock2_setting', 0, { edited: doc.edited, length: doc.content.length }, req.ip);
+    res.json(doc);
   });
 
   // Egress traffic log — what this project's container actually reached, as the

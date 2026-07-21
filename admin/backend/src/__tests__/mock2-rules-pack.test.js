@@ -34,3 +34,17 @@ test('executable acceptance (ratchet 7): finish carries acceptance_ids into clas
   assert.ok(finishTool.input_schema.properties.acceptance_ids);
   assert.match(finishTool.input_schema.properties.acceptance_ids.description, /hard smoke failure/);
 });
+
+test('transient model errors are classified for the auto-retry (dropped stream, overload — not timeouts/4xx)', async () => {
+  const { isTransientModelError } = await import('../mock2/model-client.js');
+  assert.equal(isTransientModelError('model call failed: terminated'), true);
+  assert.equal(isTransientModelError('model call failed: fetch failed'), true);
+  assert.equal(isTransientModelError('read ECONNRESET'), true);
+  assert.equal(isTransientModelError('anthropic HTTP 529: overloaded_error'), true);
+  assert.equal(isTransientModelError('anthropic HTTP 500: internal'), true);
+  assert.equal(isTransientModelError('anthropic HTTP 429: rate limited'), true);
+  assert.equal(isTransientModelError('anthropic HTTP 400: invalid_request_error'), false);
+  assert.equal(isTransientModelError('timed out after 300s waiting for the model response (the request was cancelled server-side)'), false);
+  assert.equal(isTransientModelError('unsupported provider "x"'), false);
+  assert.equal(isTransientModelError(''), false);
+});

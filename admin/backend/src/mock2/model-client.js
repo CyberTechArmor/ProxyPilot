@@ -57,7 +57,32 @@ function openAiBase(provider, baseUrl) {
 // and the final return value is byte-identical in shape to the non-streaming
 // call (including the replayable `raw` content array). Providers without a
 // streaming path here simply ignore the callback — same result, one delivery.
-export async function callModelTurn({
+// isTransientModelError — network/stream-level failures and provider-side
+// overload that a fresh attempt genuinely can fix. NOT timeouts (the caller
+// owns those), NOT 4xx (the request itself is wrong). "terminated" is the
+// undici error for a connection dropped mid-response — a live chat turn died
+// on exactly that with no retry (operator report).
+export function isTransientModelError(message) {
+  const m = String(message || '');
+  if (/timed out|aborted/i.test(m)) return false;
+  return /terminated|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|other side closed|UND_ERR|premature close|network error|HTTP (?:429|5\d\d)\b|overloaded/i.test(m);
+}
+
+export async function callModelTurn(args) {
+  // One automatic retry on TRANSIENT failures (dropped connection, provider
+  // overload) — every lane shares this, so a network blip no longer kills a
+  // whole turn. A retried STREAMING call restarts its deltas from the top;
+  // callers' partial previews may briefly show stale text, but the returned
+  // result is always the successful attempt's alone.
+  for (let attempt = 1; ; attempt++) {
+    const res = await callModelOnce(args);
+    if (res.ok || res.timedOut || attempt >= 2 || !isTransientModelError(res.error)) return res;
+    console.warn(`[mock2] transient model error — retrying once: ${String(res.error).slice(0, 160)}`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+async function callModelOnce({
   connector, apiKey = null, model, system, tools = [], transcript = [], maxTokens = 8000, timeoutMs = null, serverTools = [], effort = null, onDelta = null, thinking = null,
 }) {
   const provider = connector?.provider;

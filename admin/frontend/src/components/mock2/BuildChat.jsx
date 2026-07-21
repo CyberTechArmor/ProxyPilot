@@ -267,6 +267,21 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
   // and this sends it straight as a Quick update (cards skipped — a pin list
   // is already precise scope).
   const [annotateOpen, setAnnotateOpen] = useState(false);
+  // Annotating a composer ATTACHMENT (tap its thumbnail): index into
+  // attach.images; the dialog hands back the pinned image + notes.
+  const [annotateAttachIdx, setAnnotateAttachIdx] = useState(null);
+  const applyAnnotation = ({ text, image }) => {
+    const idx = annotateAttachIdx;
+    setAnnotateAttachIdx(null);
+    if (idx == null) return;
+    try {
+      const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
+      const file = new File([bytes], image.name || 'annotated.png', { type: image.media_type || 'image/png' });
+      attach.remove(idx);
+      attach.addFiles([file]);
+    } catch { /* keep the original attachment on a decode failure */ }
+    setInstruction((cur) => (cur && cur.trim() ? `${cur}\n${text}` : text));
+  };
   const sendAnnotation = async ({ text, image }) => {
     await startBuild('quick', { skipSplit: true, skipSuggest: true, textOverride: text, extraImages: [image] });
   };
@@ -521,6 +536,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
               <ImageAttachmentBar
                 images={attach.images} busy={attach.busy} disabled={busy}
                 onPickFiles={attach.addFiles} onRemove={attach.remove}
+                onAnnotate={(i) => setAnnotateAttachIdx(i)}
               />
             ) : null}
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -648,7 +664,16 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
       </CardContent>
       {/* Tap-to-pin feedback on a live screenshot → a precise Quick update. */}
       {canEdit ? (
-        <AnnotateApp projectId={projectId} open={annotateOpen} onOpenChange={setAnnotateOpen} onSend={sendAnnotation} />
+        <AnnotateApp
+          projectId={projectId}
+          open={annotateOpen || annotateAttachIdx != null}
+          onOpenChange={(o) => { if (!o) { setAnnotateOpen(false); setAnnotateAttachIdx(null); } }}
+          onSend={sendAnnotation}
+          attachImage={annotateAttachIdx != null && attach.images[annotateAttachIdx]
+            ? { url: attach.images[annotateAttachIdx].previewUrl, name: attach.images[annotateAttachIdx].name }
+            : null}
+          onApply={applyAnnotation}
+        />
       ) : null}
     </Card>
   );

@@ -66,26 +66,34 @@ export function useChatImages({ onError } = {}) {
 
 // The thumbnails row + "+" picker rendered under a composer. Renders nothing
 // when there are no images and the picker is disabled.
-export function ImageAttachmentBar({ images = [], busy = false, disabled = false, onPickFiles, onRemove }) {
+export function ImageAttachmentBar({ images = [], busy = false, disabled = false, onPickFiles, onRemove, onAnnotate = null }) {
   const inputRef = useRef(null);
   return (
     <div className="flex flex-wrap items-center gap-2">
       {images.map((img, i) => (
-        // The whole thumbnail is the remove target (≥44px), with an X badge as
-        // the affordance — no tiny corner button to miss on a phone.
-        <button
-          key={`${img.bytes}-${i}`}
-          type="button"
-          aria-label={`Remove image ${i + 1}${img.name ? ` (${img.name})` : ''}`}
-          title="Tap to remove"
-          onClick={() => onRemove(i)}
-          className="group relative h-14 w-14 shrink-0 rounded-md border overflow-hidden"
-        >
-          <img src={img.previewUrl} alt="" className="h-full w-full object-cover" />
-          <span className="pointer-events-none absolute right-0.5 top-0.5 rounded-full bg-background/90 border p-0.5 text-muted-foreground group-hover:text-foreground">
-            <X className="h-3 w-3" />
-          </span>
-        </button>
+        // With onAnnotate wired, tapping the IMAGE opens the pin/comment
+        // editor and the corner X removes (user request); without it the
+        // whole tile removes, as before.
+        <div key={`${img.bytes}-${i}`} className="relative h-16 w-16 shrink-0">
+          <button
+            type="button"
+            aria-label={onAnnotate ? `Annotate image ${i + 1}${img.name ? ` (${img.name})` : ''}` : `Remove image ${i + 1}`}
+            title={onAnnotate ? 'Tap to drop pins + comments on this image' : 'Tap to remove'}
+            onClick={() => (onAnnotate ? onAnnotate(i) : onRemove(i))}
+            className="h-full w-full rounded-md border overflow-hidden"
+          >
+            <img src={img.previewUrl} alt="" className="h-full w-full object-cover" />
+          </button>
+          <button
+            type="button"
+            aria-label={`Remove image ${i + 1}`}
+            title="Remove"
+            onClick={(e) => { e.stopPropagation(); onRemove(i); }}
+            className="absolute -right-1.5 -top-1.5 rounded-full bg-background border p-1.5 text-muted-foreground hover:text-foreground shadow-sm"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       ))}
       <button
         type="button"

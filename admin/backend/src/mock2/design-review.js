@@ -194,9 +194,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
         console.warn(`[mock2] design-review screenshot failed for ${path}:`, err?.message);
       }
     }
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null, hasLogin: !!(spec?.login && Object.keys(spec.login.users || {}).length) };
   } catch (err) {
-    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}` };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}`, hasLogin: !!(spec?.login && Object.keys(spec.login.users || {}).length) };
   } finally {
     try { if (browser) await browser.close(); } catch { /* ignore */ }
   }
@@ -344,7 +344,15 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };
-  const message = reviewChatMessage({ review, axe: capture.axe, rogue, trigger, screenshotCount: capture.shots.length });
+  let message = reviewChatMessage({ review, axe: capture.axe, rogue, trigger, screenshotCount: capture.shots.length });
+  // Honesty: with no fixture logins the capture only ever sees the sign-in
+  // gate — say so up front, or the findings read as "the entire app is
+  // missing" (user report). A Full build creates the fixture logins.
+  if (!capture.hasLogin) {
+    message = `Heads-up: no fixture logins exist yet (a Full build creates them), so this review could only see the SIGN-IN page — the findings below describe the sign-in gate, not the app's screens.
+
+${message}`;
+  }
   try { insertMessage({ projectId: project.id, kind: 'system', body: message }); } catch { /* best effort */ }
 
   let queued = null;

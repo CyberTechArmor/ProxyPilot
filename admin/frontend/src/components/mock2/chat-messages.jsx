@@ -143,17 +143,45 @@ function QuickUpdateChip({ m, onQuickUpdate, busyId }) {
   );
 }
 
-export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null }) {
-  if (m.kind === 'system') {
-    // System messages are status, never asks — no build chip (operator
-    // decision: the chip belongs to genuine Ask answers only).
+const LONG_SYSTEM_NOTE_CHARS = 400;
+
+function SystemNote({ body }) {
+  const [expanded, setExpanded] = useState(false);
+  if (body.length <= LONG_SYSTEM_NOTE_CHARS) {
     return (
       <div className="flex flex-col items-center">
         <p className="text-[11px] text-muted-foreground bg-muted/60 rounded-full px-3 py-1 max-w-[90%] text-center">
-          {m.body}
+          {body}
         </p>
       </div>
     );
+  }
+  return (
+    <div className="flex justify-center">
+      <div className="w-full max-w-[95%] rounded-md border bg-muted/40 px-3 py-2">
+        <div className={expanded ? '' : 'max-h-32 overflow-hidden relative'}>
+          <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{body}</p>
+          {!expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/90 to-transparent" />}
+        </div>
+        <button
+          type="button"
+          className="mt-1 min-h-[32px] text-[11px] font-medium text-primary underline underline-offset-2"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Show less' : `Show all (${Math.round(body.length / 100) / 10}k chars)`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function ChatBubble({ m, projectId = null, onQuickUpdate = null, quickBusyId = null }) {
+  if (m.kind === 'system') {
+    // System messages are status, never asks — no build chip (operator
+    // decision: the chip belongs to genuine Ask answers only). Long notes
+    // (a design review's findings) render as a collapsible left-aligned
+    // card — a giant centered pill was unreadable (user report).
+    return <SystemNote body={String(m.body || '')} />;
   }
   if (m.kind === 'rule_answer') {
     return (

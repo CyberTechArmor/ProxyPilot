@@ -20,7 +20,7 @@ import { Loader2, RefreshCw, MapPin, X, Send, ImagePlus } from 'lucide-react';
 
 const MAX_PINS = 8;
 
-export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
+export default function AnnotateApp({ projectId, open, onOpenChange, onSend, attachImage = null, onApply = null }) {
   const [path, setPath] = useState('/');
   // The screenshot is FETCHED (not <img src>): an <img> error is mute, but the
   // route's failure body says exactly why ("playwright not installed", "app
@@ -139,9 +139,20 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   // can't retry-loop.
   const wasOpen = useRef(false);
   useEffect(() => {
-    if (open && !wasOpen.current && imgState !== 'ready') load(path);
+    // Attach mode: the image came from the chat composer — load it directly,
+    // never fire the live capture.
+    if (open && !wasOpen.current && attachImage?.url) {
+      setPins([]);
+      setSignedOut(false);
+      setErrMsg('');
+      setSource('upload');
+      setImgUrl(attachImage.url); // data: URL from the composer — nothing to revoke
+      setImgState('ready');
+    } else if (open && !wasOpen.current && imgState !== 'ready' && !attachImage) {
+      load(path);
+    }
     wasOpen.current = open;
-  }, [open, imgState, load, path]);
+  }, [open, imgState, load, path, attachImage]);
 
   const addPin = (e) => {
     if (pins.length >= MAX_PINS || imgState !== 'ready') return;
@@ -190,6 +201,20 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     if (!noted.length) return;
     const image = annotatedImage();
     if (!image) return;
+    // Attach mode: hand the annotated image + pin notes back to the composer
+    // (the operator finishes the message and picks Ask / Quick update).
+    if (onApply && attachImage) {
+      const applyLines = pins
+        .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of the screenshot): ${p.note.trim()}` : null))
+        .filter(Boolean);
+      onApply({
+        text: `Annotated screenshot attached — the numbered red pins mark the exact spots:\n${applyLines.join('\n')}`,
+        image,
+      });
+      setPins([]);
+      onOpenChange(false);
+      return;
+    }
     const lines = pins
       .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of ${source === 'upload' ? 'the screenshot' : path}): ${p.note.trim()}` : null))
       .filter(Boolean);
@@ -216,6 +241,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
+          {attachImage ? null : (
           <div className="flex gap-2">
             <Input
               className="h-11 sm:h-10 flex-1 font-mono text-xs"
@@ -246,10 +272,13 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
               onChange={(e) => { useOwnImage(e.target.files?.[0]); e.target.value = ''; }}
             />
           </div>
+          )}
+          {attachImage ? null : (
           <p className="text-[11px] text-muted-foreground">
             Tip: you can also navigate the app yourself (signed in, any screen), take a screenshot, and paste it here
             with Ctrl+V — pins work the same on your own image.
           </p>
+          )}
           <div className="relative rounded-md border overflow-hidden bg-muted/30">
             {/* The tap surface — the img stays mounted so onLoad/onError fire;
                 a spinner/error overlay covers it until it's ready. Same-origin
@@ -352,7 +381,9 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button className="min-h-[44px] flex-1" disabled={sending || !notedCount} onClick={send}>
               {sending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />}
-              Send {notedCount || ''} change{notedCount === 1 ? '' : 's'} as Quick update
+              {onApply && attachImage
+                ? `Apply ${notedCount || ''} pin${notedCount === 1 ? '' : 's'} to the message`
+                : `Send ${notedCount || ''} change${notedCount === 1 ? '' : 's'} as Quick update`}
             </Button>
             <Button variant="ghost" className="min-h-[44px]" disabled={sending} onClick={() => onOpenChange(false)}>
               Cancel

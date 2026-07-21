@@ -16,6 +16,15 @@ Companion references: the condensed step table lives in
 `docs/core/harness-steps.md`; slot assignment is on **Projects → Connectors**;
 per-lane tuning is on the **Routing** tab of the Admin queue.
 
+**This page's Controls tab is live**: every step listed here has a
+model/effort/thinking control that writes the **step-override layer** — the
+topmost precedence (step override → lane tuning → env override →
+slot/shipped default), applied on the step's very next model call. A rejected
+override model falls back to the step's default on the same call and logs it.
+Prompts and budgets are deliberately not editable: prompt contracts change in
+code review, and a mis-set budget causes truncation failures that don't look
+like a settings mistake.
+
 ---
 
 ## The pipeline at a glance

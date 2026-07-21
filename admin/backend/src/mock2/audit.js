@@ -58,7 +58,7 @@ import {
 import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
@@ -136,14 +136,14 @@ function quotaVerdict(projectId, estCostCents) {
   return { verdict, quota };
 }
 
-function recordSpend({ projectId, cycleId, connector, model, usage }) {
+function recordSpend({ projectId, cycleId, connector, model, usage, step = null }) {
   const cacheRead = usage.cacheReadInputTokens || 0;
   const cacheWrite = usage.cacheCreationInputTokens || 0;
   const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, effectivePrice(connector.id, model));
   // Cost is cache-aware; the token count is fresh input + output (see runner.js).
   addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0), costCents: cents });
   try {
-    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
+    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0, step });
   } catch (e) { console.warn('[mock2] audit ledger write failed:', e?.message); }
 }
 
@@ -389,7 +389,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   // Operator lane tuning (admin settings) over the lane default: a bounded
   // classification/reasoning task — medium effort unless tuned otherwise.
   const auditTuned = applyLaneTuning({ model: ready.model, effort: 'medium', thinking: null }, getLaneTuning('audit'));
-  const auditRes = await callModelTurn({
+  const auditRes = await callStepTurn('rule-audit', {
     connector: ready.connector, apiKey: ready.apiKey, model: auditTuned.model,
     system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
     tools: [],
@@ -398,7 +398,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
     effort: auditTuned.effort,
     thinking: auditTuned.thinking,
   });
-  if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: ready.model, usage: auditRes.usage });
+  if (auditRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.connector, model: auditRes.modelUsed || ready.model, usage: auditRes.usage, step: 'rule-audit' });
   const parsed = auditRes.ok ? parseAuditQuestions(auditRes.text) : { ok: false, error: auditRes.error, questions: [] };
   if (!parsed.ok) {
     finishCycle(cycle.id, { status: 'failed', error: `audit failed: ${parsed.error}` });

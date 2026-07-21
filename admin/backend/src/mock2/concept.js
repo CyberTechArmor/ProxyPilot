@@ -61,6 +61,8 @@ import {
   designImportRecord, parseDesignImport, buildInitialBuildInstruction,
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
+import { callStepTurn, getHarnessStepTuning } from './harness-steps.js';
+import { resolveStepTuning } from './harness-steps-logic.js';
 import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
@@ -178,7 +180,7 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   // Transcript turns use `text` (anthropicMessages reads turn.text — a
   // `content` key maps to an EMPTY text block, which the API rejects when the
   // cache breakpoint lands on it).
-  const res = await callModelTurn({
+  const res = await callStepTurn('design-doc-adjust', {
     connector: ready.connector, apiKey: ready.apiKey, model: tuned.model,
     system, tools: [], transcript: [{ role: 'user', text: user }], maxTokens: 4000,
     effort: tuned.effort, thinking: tuned.thinking,
@@ -236,7 +238,7 @@ function quotaVerdict(projectId, estCostCents) {
 
 // Ledger + cycle usage after a model call. Cache read/write tokens are counted
 // and priced too (they're separate from usage.inputTokens).
-function recordSpend({ projectId, cycleId, connector, model, usage }) {
+function recordSpend({ projectId, cycleId, connector, model, usage, step = null }) {
   const cacheRead = usage.cacheReadInputTokens || 0;
   const cacheWrite = usage.cacheCreationInputTokens || 0;
   const cents = costCentsForUsage({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }, effectivePrice(connector.id, model));
@@ -244,7 +246,7 @@ function recordSpend({ projectId, cycleId, connector, model, usage }) {
   // would inflate it — see runner.js).
   addCycleUsage(cycleId, { tokens: (usage.inputTokens || 0) + (usage.outputTokens || 0), costCents: cents });
   try {
-    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
+    insertLedgerEntry({ projectId, cycleId, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0, step });
   } catch (e) { console.warn('[mock2] concept ledger write failed:', e?.message); }
 }
 
@@ -536,7 +538,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
   const chatTuned = applyLaneTuning({ model: ready.chat.model, effort: null, thinking: null }, getLaneTuning('chat'));
-  const chatRes = await callModelTurn({
+  const chatRes = await callStepTurn('concept-chat', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 16000,
     effort: chatTuned.effort, thinking: chatTuned.thinking,
@@ -551,7 +553,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // NOTE: `partial` stays on the job through a mockup render (the streamed
   // reply remains visible while the design generates) and is cleared exactly
   // when the durable assistant message lands below.
-  recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: chatRes.usage });
+  recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: chatRes.modelUsed || ready.chat.model, usage: chatRes.usage, step: 'concept-chat' });
   const decision = classifyConceptTurn(chatRes.toolCalls);
 
   // 2) If the model asked for a mockup, render it on the mockup slot and write it
@@ -656,9 +658,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // keep the fast lane defaults (they really are transcription).
       const renderModel = mockupRenderModel(process.env, ready.mockup.model);
       const deepRender = explore || !currentHtml || restyleBrief;
-      const mockupTuned = deepRender
+      // Step override applied to the tuned baseline, not the call: forceModel
+      // (the slot-model fallback retry) must stay the last word, and the
+      // existing /model/i fallback below IS this step's bad-override guard.
+      const mockupTuned = resolveStepTuning('mockup-render', deepRender
         ? { model: renderModel, effort: 'high', thinking: null }
-        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
+        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
         system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
@@ -696,7 +701,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       try {
         const editModel = mockupRenderModel(process.env, ready.mockup.model);
-        const res = await callModelTurn({
+        const res = await callStepTurn('mockup-tweak', {
           connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
           system: buildMockupEditSystemPrompt(),
           tools: [],
@@ -704,7 +709,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           maxTokens: 6000, timeoutMs: 300000, effort: 'low', thinking: 'off',
         });
         if (res.ok) {
-          recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: editModel, usage: res.usage });
+          recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
           const parsed = parseMockupEdits(res.text);
           if (parsed.ok && !parsed.fullRerender) {
             const applied = applyMockupEdits(currentHtml, parsed.edits);
@@ -733,7 +738,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         setJob(projectId, { phase: 'designing', message: `Re-rendering the "${decision.screen}" screen…`, kind: 'turn', cycleId: cycle.id });
         try {
           const secModel = mockupRenderModel(process.env, ready.mockup.model);
-          const res = await callModelTurn({
+          const res = await callStepTurn('mockup-screen', {
             connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: secModel,
             system: buildScreenRenderSystemPrompt({ designSystem: boundDesignSystem }),
             tools: [],
@@ -745,7 +750,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
             maxTokens: 20000, timeoutMs: 600000, effort: 'high', thinking: null,
           });
           if (res.ok) {
-            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: secModel, usage: res.usage });
+            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || secModel, usage: res.usage, step: 'mockup-screen' });
             const section = extractSectionHtml(res.text, decision.screen);
             if (section) {
               const swapped = replaceScreenSection(currentHtml, decision.screen, section);
@@ -776,7 +781,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       let doc = String(partialText || '');
       for (let hop = 0; hop < 2; hop++) {
         setJob(projectId, { phase: 'designing', message: `The render hit its output limit — continuing where it stopped (${Math.round(doc.length / 1000)}k characters so far)…`, kind: 'turn', cycleId: cycle.id });
-        const res = await callModelTurn({
+        const res = await callStepTurn('mockup-continuation', {
           connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: activeModel,
           system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
           tools: [],
@@ -789,7 +794,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           onDelta: onMockupDelta,
         });
         if (!res.ok) return { ok: false, error: res.error };
-        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
+        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || activeModel, usage: res.usage, step: 'mockup-continuation' });
         doc = stitchContinuation(doc, res.text).html;
         if (res.stopReason !== 'max_tokens') return { ok: true, text: doc };
       }
@@ -834,7 +839,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         res = await mockupCall(renderBudget, ready.mockup.model);
       }
       if (res.ok) {
-        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage });
+        recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: res.usage, step: 'mockup-render' });
         html = extractMockupHtml(await completeRenderText(res)).slice(0, MAX_MOCKUP_CHARS);
         if (!isPlausibleMockup(html)) {
           // Not a usable page (prose instead of HTML, or truncation on a
@@ -845,7 +850,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           setJob(projectId, { phase: 'designing', message: `The first render was unusable (${why}) — retrying once with a larger budget…`, kind: 'turn', cycleId: cycle.id });
           const retry = await mockupCall(Math.max(64000, renderBudget), activeModel);
           if (retry.ok) {
-            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage });
+            recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: activeModel, usage: retry.usage, step: 'mockup-render' });
             const h2 = extractMockupHtml(await completeRenderText(retry)).slice(0, MAX_MOCKUP_CHARS);
             if (isPlausibleMockup(h2)) { html = h2; failureDetail = null; }
             else if (!failureDetail) failureDetail = retry.stopReason === 'max_tokens' ? 'the render exceeded its output budget twice' : 'the model did not return a complete HTML page';
@@ -1068,7 +1073,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // HTML input would otherwise risk a transport timeout too), and — because
   // approval is a hard gate — ONE automatic retry on a parse failure before we
   // make the Builder redo it.
-  const extractCall = () => callModelTurn({
+  const extractCall = () => callStepTurn('inventory-extraction', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
     system: buildInventoryExtractionPrompt(), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
@@ -1078,12 +1083,12 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   let parsed;
   try {
     let extractRes = await extractCall();
-    if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
+    if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: extractRes.modelUsed || ready.chat.model, usage: extractRes.usage, step: 'inventory-extraction' });
     parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
     if (!parsed.ok) {
       setJob(projectId, { phase: 'approving', message: 'The inventory came back malformed — extracting once more…', kind: 'approval', cycleId: cycle.id });
       extractRes = await extractCall();
-      if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: extractRes.usage });
+      if (extractRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: extractRes.modelUsed || ready.chat.model, usage: extractRes.usage, step: 'inventory-extraction' });
       parsed = extractRes.ok ? parseInventory(extractRes.text) : { ok: false, error: extractRes.error };
     }
   } finally {
@@ -1127,7 +1132,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // to the framework defaults (parseDesignTokens always returns a safe token set),
   // so this never blocks approval.
   try {
-    const tokRes = await callModelTurn({
+    const tokRes = await callStepTurn('design-token-extraction', {
       connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
       system: buildDesignTokenExtractionPrompt(), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
@@ -1137,7 +1142,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
       // framework defaults on any failure, so this never blocks approval).
       thinking: 'off',
     });
-    if (tokRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: ready.chat.model, usage: tokRes.usage });
+    if (tokRes.ok) recordSpend({ projectId, cycleId: cycle.id, connector: ready.chat.connector, model: tokRes.modelUsed || ready.chat.model, usage: tokRes.usage, step: 'design-token-extraction' });
     const { tokens } = parseDesignTokens(tokRes.ok ? tokRes.text : '');
     await writeWorkingFile(containerName, DESIGN_TOKENS_PATH, JSON.stringify(tokens, null, 2));
     await writeWorkingFile(containerName, DESIGN_CSS_PATH, renderDesignTokensCss(tokens));

@@ -27,7 +27,7 @@ import {
   buildReviewPrompt, parseReviewReply, rogueCssColors, reviewChatMessage, composePolishInstruction,
 } from './design-review-logic.js';
 import { MOCKUP_CURRENT } from './concept-logic.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import { buildRunnerReady } from './runner.js';
 import { insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage, effectivePrice } from './usage-logic.js';
@@ -246,7 +246,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     tokensJson ? `Design tokens:\n${tokensJson.slice(0, 4000)}` : 'No design tokens file.',
     mockupHtml ? `Approved mockup HTML (the visual contract):\n${mockupHtml.slice(0, 120000)}` : 'No approved mockup — judge craft and consistency on their own.',
   ].join('\n\n');
-  const res = await callModelTurn({
+  const res = await callStepTurn('design-review', {
     connector: ready.connector, apiKey: ready.apiKey, model,
     system: buildReviewPrompt(), tools: [],
     transcript: [{ role: 'user', text: userText, images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })) }],
@@ -259,7 +259,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
       inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
       cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
     }, effectivePrice(ready.connector.id, model));
-    insertLedgerEntry({ projectId: project.id, cycleId: null, connectorId: ready.connector.id, model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0 });
+    insertLedgerEntry({ projectId: project.id, cycleId: null, connectorId: ready.connector.id, model: res.modelUsed || model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'design-review' });
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };

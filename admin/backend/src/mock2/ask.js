@@ -36,7 +36,7 @@ import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { countRunningCycles } from './cycles.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import {
   buildRunnerReady, execInContainer, readFileInContainer,
 } from './runner.js';
@@ -70,13 +70,13 @@ function askJobActive(projectId) {
   return !!j && !['done', 'failed'].includes(j.phase);
 }
 
-function recordSpend({ projectId, connector, model, usage }) {
+function recordSpend({ projectId, connector, model, usage, step = null }) {
   const cents = costCentsForUsage({
     inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0,
     cacheReadTokens: usage.cacheReadInputTokens || 0, cacheWriteTokens: usage.cacheCreationInputTokens || 0,
   }, effectivePrice(connector.id, model));
   try {
-    insertLedgerEntry({ projectId, cycleId: null, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0 });
+    insertLedgerEntry({ projectId, cycleId: null, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0, step });
   } catch (e) { console.warn('[mock2] ask ledger write failed:', e?.message); }
   return cents;
 }
@@ -198,7 +198,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
     turnStreamed = false;
     const askTuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('ask'));
-    const res = await callModelTurn({
+    const res = await callStepTurn('ask', {
       connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
       system, tools: ASK_TOOLS, serverTools, transcript, maxTokens: ASK_MAX_TOKENS,
       effort: askTuned.effort, thinking: askTuned.thinking,
@@ -209,7 +209,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
       setJob(projectId, { phase: 'failed', message: res.error, partial: null });
       return scheduleJobCleanup(projectId);
     }
-    totalCents += recordSpend({ projectId, connector: ready.connector, model: ready.model, usage: res.usage });
+    totalCents += recordSpend({ projectId, connector: ready.connector, model: res.modelUsed || ready.model, usage: res.usage, step: 'ask' });
     totalTokens += (res.usage.inputTokens || 0) + (res.usage.outputTokens || 0);
     touchLock(projectId, holder);
 

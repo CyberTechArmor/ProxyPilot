@@ -27,7 +27,7 @@ import {
   buildReviewPrompt, parseReviewReply, rogueCssColors, reviewChatMessage, composePolishInstruction,
 } from './design-review-logic.js';
 import { MOCKUP_CURRENT } from './concept-logic.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import { buildRunnerReady } from './runner.js';
 import { insertLedgerEntry } from './quotas.js';
 import { costCentsForUsage, effectivePrice } from './usage-logic.js';
@@ -246,7 +246,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
     tokensJson ? `Design tokens:\n${tokensJson.slice(0, 4000)}` : 'No design tokens file.',
     mockupHtml ? `Approved mockup HTML (the visual contract):\n${mockupHtml.slice(0, 120000)}` : 'No approved mockup — judge craft and consistency on their own.',
   ].join('\n\n');
-  const res = await callModelTurn({
+  const res = await callStepTurn('design-review', {
     connector: ready.connector, apiKey: ready.apiKey, model,
     system: buildReviewPrompt(), tools: [],
     transcript: [{ role: 'user', text: userText, images: capture.shots.map((s) => ({ media_type: s.media_type, data: s.data })) }],

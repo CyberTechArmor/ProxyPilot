@@ -36,7 +36,7 @@ import { effectivePrice } from './connectors.js';
 import { getApplicableQuota, periodUsage, insertLedgerEntry } from './quotas.js';
 import { canStartCycle, costCentsForUsage } from './quota-logic.js';
 import { countRunningCycles } from './cycles.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import {
   buildRunnerReady, execInContainer, readFileInContainer,
 } from './runner.js';
@@ -198,7 +198,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
     turnStreamed = false;
     const askTuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('ask'));
-    const res = await callModelTurn({
+    const res = await callStepTurn('ask', {
       connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
       system, tools: ASK_TOOLS, serverTools, transcript, maxTokens: ASK_MAX_TOKENS,
       effort: askTuned.effort, thinking: askTuned.thinking,

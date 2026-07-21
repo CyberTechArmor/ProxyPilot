@@ -12,7 +12,7 @@
 
 import { getSlot, getConnector, decryptConnectorKey } from './connectors.js';
 import { parseCapabilities, slotAssignmentError, isCloudProvider } from './connector-logic.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import {
   EXPLAIN_SYSTEM_PROMPT, buildExplainTranscript, parseExplanation,
   EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, buildFollowupTranscript, parseFollowupAnswer,
@@ -45,7 +45,7 @@ export async function explainCard({ text, title = '', status = '', kind = '' }) 
 
   let res;
   try {
-    res = await callModelTurn({
+    res = await callStepTurn('explain-card', {
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: EXPLAIN_SYSTEM_PROMPT, tools: [],
       transcript: buildExplainTranscript({ text, title, status, kind }),
@@ -68,7 +68,7 @@ export async function explainFollowup({ text, title = '', status = '', kind = ''
 
   let res;
   try {
-    res = await callModelTurn({
+    res = await callStepTurn('explain-followup', {
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, tools: [],
       transcript: buildFollowupTranscript({ text, title, status, kind, prior, question }),

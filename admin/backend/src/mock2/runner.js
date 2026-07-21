@@ -73,7 +73,7 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
   formatComponentForModel, parseFilesJson, safeComponentPath, buildComponentManifest,
@@ -215,7 +215,7 @@ function quotaVerdict(projectId, estCostCents) {
 // pre-pass" and run unchanged.
 async function runQuickPrepass({ project, cycle, ready, routing }) {
   const model = prepassModel(routingEnv());
-  const res = await callModelTurn({
+  const res = await callStepTurn('quick-prepass', {
     connector: ready.connector, apiKey: ready.apiKey, model,
     system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
     maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
@@ -262,7 +262,7 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
   if (!prepassEnabled(routingEnv())) return null;
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
-  const call = callModelTurn({
+  const call = callStepTurn('split-probe', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
     system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
     maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
@@ -284,7 +284,7 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
 export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 25000 } = {}) {
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
-  const call = callModelTurn({
+  const call = callStepTurn('chat-distill', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
     system: buildDistillSystemPrompt(), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
@@ -1067,7 +1067,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     // Web search rides along ONLY when the operator opted the build lane in
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
-    const result = await callModelTurn({
+    const result = await callStepTurn('build-runner', {
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: runnerToolsForCycle({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,

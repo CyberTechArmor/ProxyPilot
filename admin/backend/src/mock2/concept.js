@@ -61,6 +61,8 @@ import {
   designImportRecord, parseDesignImport, buildInitialBuildInstruction,
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
+import { callStepTurn, getHarnessStepTuning } from './harness-steps.js';
+import { resolveStepTuning } from './harness-steps-logic.js';
 import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
 import { getLaneTuning } from './settings.js';
@@ -178,7 +180,7 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   // Transcript turns use `text` (anthropicMessages reads turn.text — a
   // `content` key maps to an EMPTY text block, which the API rejects when the
   // cache breakpoint lands on it).
-  const res = await callModelTurn({
+  const res = await callStepTurn('design-doc-adjust', {
     connector: ready.connector, apiKey: ready.apiKey, model: tuned.model,
     system, tools: [], transcript: [{ role: 'user', text: user }], maxTokens: 4000,
     effort: tuned.effort, thinking: tuned.thinking,
@@ -536,7 +538,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
   const chatTuned = applyLaneTuning({ model: ready.chat.model, effort: null, thinking: null }, getLaneTuning('chat'));
-  const chatRes = await callModelTurn({
+  const chatRes = await callStepTurn('concept-chat', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript, maxTokens: 16000,
     effort: chatTuned.effort, thinking: chatTuned.thinking,
@@ -656,9 +658,12 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       // keep the fast lane defaults (they really are transcription).
       const renderModel = mockupRenderModel(process.env, ready.mockup.model);
       const deepRender = explore || !currentHtml || restyleBrief;
-      const mockupTuned = deepRender
+      // Step override applied to the tuned baseline, not the call: forceModel
+      // (the slot-model fallback retry) must stay the last word, and the
+      // existing /model/i fallback below IS this step's bad-override guard.
+      const mockupTuned = resolveStepTuning('mockup-render', deepRender
         ? { model: renderModel, effort: 'high', thinking: null }
-        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup'));
+        : applyLaneTuning({ model: renderModel, effort: 'low', thinking: 'off' }, getLaneTuning('mockup')), getHarnessStepTuning());
       return callModelTurn({
         connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: forceModel || mockupTuned.model,
         system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
@@ -696,7 +701,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
       try {
         const editModel = mockupRenderModel(process.env, ready.mockup.model);
-        const res = await callModelTurn({
+        const res = await callStepTurn('mockup-tweak', {
           connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
           system: buildMockupEditSystemPrompt(),
           tools: [],
@@ -733,7 +738,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         setJob(projectId, { phase: 'designing', message: `Re-rendering the "${decision.screen}" screen…`, kind: 'turn', cycleId: cycle.id });
         try {
           const secModel = mockupRenderModel(process.env, ready.mockup.model);
-          const res = await callModelTurn({
+          const res = await callStepTurn('mockup-screen', {
             connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: secModel,
             system: buildScreenRenderSystemPrompt({ designSystem: boundDesignSystem }),
             tools: [],
@@ -776,7 +781,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
       let doc = String(partialText || '');
       for (let hop = 0; hop < 2; hop++) {
         setJob(projectId, { phase: 'designing', message: `The render hit its output limit — continuing where it stopped (${Math.round(doc.length / 1000)}k characters so far)…`, kind: 'turn', cycleId: cycle.id });
-        const res = await callModelTurn({
+        const res = await callStepTurn('mockup-continuation', {
           connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: activeModel,
           system: buildMockupSystemPrompt({ designSystem: boundDesignSystem }),
           tools: [],
@@ -1068,7 +1073,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // HTML input would otherwise risk a transport timeout too), and — because
   // approval is a hard gate — ONE automatic retry on a parse failure before we
   // make the Builder redo it.
-  const extractCall = () => callModelTurn({
+  const extractCall = () => callStepTurn('inventory-extraction', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
     system: buildInventoryExtractionPrompt(), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
@@ -1127,7 +1132,7 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // to the framework defaults (parseDesignTokens always returns a safe token set),
   // so this never blocks approval.
   try {
-    const tokRes = await callModelTurn({
+    const tokRes = await callStepTurn('design-token-extraction', {
       connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
       system: buildDesignTokenExtractionPrompt(), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],

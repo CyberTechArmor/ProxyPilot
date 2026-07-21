@@ -58,7 +58,7 @@ import {
 import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
-import { callModelTurn } from './model-client.js';
+import { callStepTurn } from './harness-steps.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
@@ -389,7 +389,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   // Operator lane tuning (admin settings) over the lane default: a bounded
   // classification/reasoning task — medium effort unless tuned otherwise.
   const auditTuned = applyLaneTuning({ model: ready.model, effort: 'medium', thinking: null }, getLaneTuning('audit'));
-  const auditRes = await callModelTurn({
+  const auditRes = await callStepTurn('rule-audit', {
     connector: ready.connector, apiKey: ready.apiKey, model: auditTuned.model,
     system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
     tools: [],

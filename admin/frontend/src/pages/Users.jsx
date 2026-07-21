@@ -27,31 +27,59 @@ import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Setti
 import { Navigate } from 'react-router-dom';
 import LdapConnections from '@/components/LdapConnections';
 
-// Per-user AI-usage drill-down (admin): totals, per-project spend with a
-// per-step breakdown, and VS Code (external push) activity. Data comes from
-// the mock2 spend ledger; a host without the Projects module 404s and the
-// dialog says so instead of guessing.
+// Per-user AI-usage drill-down (admin), master-detail: a PAGINATED project
+// list on the left (this user's spend per project), and on the right the
+// selected project's detail — that USER's slice only, never project totals:
+// per-step and per-model breakdowns with first/last activity. VS Code push
+// activity sits below. MOBILE_FIRST: the panes stack below sm.
+const AI_USAGE_PAGE_SIZE = 8;
+
 function AiUsageDialog({ user, open, onOpenChange }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
+  const [page, setPage] = useState(0);
+  const [selected, setSelected] = useState(null); // project_id
+  const [detail, setDetail] = useState(null);
+  const [detailErr, setDetailErr] = useState('');
+  const dollars = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;
+
   useEffect(() => {
     if (!open || !user) return;
     setData(null);
     setErr('');
+    setPage(0);
+    setSelected(null);
+    setDetail(null);
     api.mock2UserAiUsage(user.id)
-      .then(setData)
+      .then((d) => {
+        setData(d);
+        if (d.projects?.length) setSelected(d.projects[0].project_id);
+      })
       .catch((e) => setErr(e?.message || 'Could not load AI usage (is the Projects module enabled on this host?)'));
   }, [open, user]);
-  const dollars = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;
+
+  useEffect(() => {
+    if (!open || !user || selected == null) return;
+    setDetail(null);
+    setDetailErr('');
+    api.mock2UserAiUsageProject(user.id, selected)
+      .then(setDetail)
+      .catch((e) => setDetailErr(e?.message || 'Could not load the project detail'));
+  }, [open, user, selected]);
+
+  const projects = data?.projects || [];
+  const pages = Math.max(1, Math.ceil(projects.length / AI_USAGE_PAGE_SIZE));
+  const pageRows = projects.slice(page * AI_USAGE_PAGE_SIZE, (page + 1) * AI_USAGE_PAGE_SIZE);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg">
+      <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-4xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Coins className="h-4 w-4" /> AI usage — {user?.username}
           </DialogTitle>
           <DialogDescription>
-            All AI credits this user has spent, by project and step, plus their VS Code push activity.
+            AI credits this user has spent — pick a project on the left for their per-project detail.
           </DialogDescription>
         </DialogHeader>
         {err ? (
@@ -74,41 +102,130 @@ function AiUsageDialog({ user, open, onOpenChange }) {
                 <p className="text-lg font-semibold tabular-nums">{Number(data.totals?.tokens || 0).toLocaleString()}</p>
               </div>
             </div>
-            <div>
-              <p className="mb-1 text-sm font-medium">By project (in-platform AI spend)</p>
-              {data.projects?.length ? (
-                <div className="overflow-x-auto rounded-md border">
-                  <table className="w-full border-collapse text-xs sm:text-sm">
-                    <thead>
-                      <tr>
-                        <th className="border-b bg-muted/50 px-2 py-1.5 text-left font-medium">Project</th>
-                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Spend</th>
-                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Calls</th>
-                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Tokens</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.projects.map((row) => (
-                        <tr key={row.project_id}>
-                          <td className="border-b px-2 py-1.5 align-top">
-                            <span className="font-medium">{row.name || `project ${row.project_id}`}</span>
-                            {row.steps?.length ? (
-                              <span className="block text-[11px] text-muted-foreground">
-                                {row.steps.slice(0, 4).map((s) => `${s.step} ${dollars(s.cents)}`).join(' · ')}
-                                {row.steps.length > 4 ? ` · +${row.steps.length - 4} more` : ''}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{dollars(row.cents)}</td>
-                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{Number(row.calls).toLocaleString()}</td>
-                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{Number(row.tokens).toLocaleString()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+
+            {projects.length ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[260px,1fr]">
+                {/* Left: paginated project list (this user's spend) */}
+                <div className="rounded-md border">
+                  <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
+                    Projects ({projects.length})
+                  </div>
+                  <div className="divide-y">
+                    {pageRows.map((row) => (
+                      <button
+                        key={row.project_id}
+                        type="button"
+                        onClick={() => setSelected(row.project_id)}
+                        className={`flex min-h-[44px] w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40 ${
+                          selected === row.project_id ? 'bg-primary/10 border-l-2 border-l-primary' : ''
+                        }`}
+                      >
+                        <span className="truncate font-medium">{row.name || `project ${row.project_id}`}</span>
+                        <span className="shrink-0 tabular-nums text-muted-foreground">{dollars(row.cents)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {pages > 1 && (
+                    <div className="flex items-center justify-between border-t px-2 py-1.5">
+                      <Button variant="ghost" size="sm" className="h-9 px-2 text-xs" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+                        ← Prev
+                      </Button>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">{page + 1} / {pages}</span>
+                      <Button variant="ghost" size="sm" className="h-9 px-2 text-xs" disabled={page >= pages - 1} onClick={() => setPage((p) => p + 1)}>
+                        Next →
+                      </Button>
+                    </div>
+                  )}
                 </div>
-              ) : <p className="text-sm text-muted-foreground">No AI spend attributed to this user yet.</p>}
-            </div>
+
+                {/* Right: the selected project's detail — this user's slice only */}
+                <div className="rounded-md border p-3">
+                  {detailErr ? (
+                    <p className="text-sm text-muted-foreground">{detailErr}</p>
+                  ) : !detail ? (
+                    <p className="text-sm text-muted-foreground">Loading project detail…</p>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <p className="font-semibold">{detail.project?.name || `project ${detail.project?.id}`}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {user?.username}’s spend only
+                          {detail.totals?.first_at ? ` · ${new Date(detail.totals.first_at).toLocaleDateString()} – ${new Date(detail.totals.last_at).toLocaleDateString()}` : ''}
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="rounded-md bg-muted/40 p-2">
+                          <p className="text-[11px] text-muted-foreground">Spend</p>
+                          <p className="text-sm font-semibold tabular-nums">{dollars(detail.totals?.cents)}</p>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-2">
+                          <p className="text-[11px] text-muted-foreground">Calls</p>
+                          <p className="text-sm font-semibold tabular-nums">{Number(detail.totals?.calls || 0).toLocaleString()}</p>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-2">
+                          <p className="text-[11px] text-muted-foreground">Tokens</p>
+                          <p className="text-sm font-semibold tabular-nums">{Number(detail.totals?.tokens || 0).toLocaleString()}</p>
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">By step</p>
+                        <div className="overflow-x-auto rounded-md border">
+                          <table className="w-full border-collapse text-xs">
+                            <thead>
+                              <tr>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-left font-medium">Step</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Spend</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Calls</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Tokens</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(detail.steps || []).map((s) => (
+                                <tr key={s.step}>
+                                  <td className="border-b px-2 py-1">{s.step}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{dollars(s.cents)}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{Number(s.calls).toLocaleString()}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{Number(s.tokens).toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                          “unattributed” rows predate per-step spend tracking.
+                        </p>
+                      </div>
+                      <div>
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">By model</p>
+                        <div className="overflow-x-auto rounded-md border">
+                          <table className="w-full border-collapse text-xs">
+                            <thead>
+                              <tr>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-left font-medium">Model</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Spend</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Calls</th>
+                                <th className="border-b bg-muted/50 px-2 py-1 text-right font-medium">Tokens</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(detail.models || []).map((m) => (
+                                <tr key={m.model}>
+                                  <td className="border-b px-2 py-1 font-mono text-[11px]">{m.model}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{dollars(m.cents)}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{Number(m.calls).toLocaleString()}</td>
+                                  <td className="border-b px-2 py-1 text-right tabular-nums">{Number(m.tokens).toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : <p className="text-sm text-muted-foreground">No AI spend attributed to this user yet.</p>}
+
             <div>
               <p className="mb-1 text-sm font-medium">Through VS Code (external git pushes)</p>
               {data.vscode?.projects?.length ? (

@@ -39,8 +39,8 @@ export const HARNESS_STEPS = Object.freeze([
   },
   {
     id: 'mockup-tweak', stage: 'Concept', title: 'Mockup tweak',
-    description: 'Surgical search/replace edit blocks against the current HTML; any miss falls back to the full renderer.',
-    intendedOutcome: 'A one-line change costs cents, not a re-render.',
+    description: 'Surgical search/replace edit blocks against the current HTML (whitespace-tolerant matching). A miss gets ONE corrective retry, then escalates to a single-screen re-render when the edits localize to one screen; the full renderer is the last resort.',
+    intendedOutcome: 'A one-line change costs cents and seconds — never a surprise whole-document rebuild.',
     slotKey: 'mockup', laneKey: null, envModelVar: 'MOCK2_MOCKUP_MODEL', envEffortVar: null,
     defaults: { model: 'claude-fable-5', effort: 'low', thinking: 'off', budgetNote: 'uncapped (model max)' }, tunable: true,
   },

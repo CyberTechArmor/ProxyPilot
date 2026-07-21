@@ -55,6 +55,7 @@ import {
   DESIGN_DOC_ADJUST_SYSTEM_PROMPT,
   stitchContinuation, buildContinuationInstruction,
   buildMockupEditSystemPrompt, parseMockupEdits, applyMockupEdits,
+  screenForEditTargets, buildTweakRetryMessage,
   findScreenSection, replaceScreenSection, extractSectionHtml, buildScreenRenderSystemPrompt,
 } from './concept-logic.js';
 import {
@@ -93,7 +94,12 @@ const INITIAL_BUILD_INSTRUCTION = `${INITIAL_BUILD_INSTRUCTION_PREFIX}: implemen
 // then reject a page that was actually fine). Feedback for iteration is large
 // enough that the model sees the whole prior mockup, not a truncated head.
 const MAX_MOCKUP_CHARS = 400000;
-const MAX_MOCKUP_FEEDBACK_CHARS = 160000; // how much prior HTML we feed back for iteration
+// How much prior HTML we feed back for iteration. Matches MAX_MOCKUP_CHARS
+// (the save cap) so every saved mockup stays TWEAKABLE — below this the read
+// is "complete" and the tweak/screen paths can run; an incomplete read used
+// to silently force a full re-render on big mockups, which is exactly the
+// slow, drift-prone outcome the tweak ladder exists to avoid.
+const MAX_MOCKUP_FEEDBACK_CHARS = 400000;
 
 // Live concept-job progress, keyed by project id (house 202+poll pattern). The
 // chat/concept poll endpoints read this; entries drop a couple minutes after the
@@ -700,45 +706,98 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
         updateProject(projectId, { current_mockup_id: mockupIdForCycle(cycle.id) });
       } catch { /* preview-only nicety */ }
     }
+    // Escalation ladder for a failed tweak: corrective RETRY (same edit
+    // contract, the exact miss fed back) → SCREEN re-render when the failed
+    // edits all localize inside one <section data-screen> → full render as
+    // the true last resort. A silent whole-document rebuild is the outcome
+    // the Builder hates most (slow, and it can drift details they liked), so
+    // every rung of this ladder exists to avoid it.
+    let tweakFallbackScreen = null;
     if (decision.scope === 'tweak' && currentHtml && currentHtmlComplete) {
       setJob(projectId, { phase: 'designing', message: 'Applying a targeted tweak to the mockup…', kind: 'turn', cycleId: cycle.id });
+      let lastEdits = null; // the most recent parsed (non-FULL_RERENDER) edit set that failed
       try {
         const editModel = mockupRenderModel(process.env, ready.mockup.model);
+        const editSystem = stepSystemPrompt('mockup-tweak', buildMockupEditSystemPrompt(), {});
+        const firstTurn = { role: 'user', text: `Revision request:\n${decision.brief}\n\nCurrent mockup HTML:\n${currentHtml}` };
+        const applyParsed = (parsed) => {
+          const applied = applyMockupEdits(currentHtml, parsed.edits);
+          if (applied.ok && isPlausibleMockup(applied.html)) {
+            html = applied.html.slice(0, MAX_MOCKUP_CHARS);
+            activeModel = editModel;
+            tweaked = true;
+            return null;
+          }
+          lastEdits = parsed.edits;
+          return applied.ok ? 'the edited document was not a complete page' : applied.error;
+        };
         const res = await callStepTurn('mockup-tweak', {
           connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
-          system: stepSystemPrompt('mockup-tweak', buildMockupEditSystemPrompt(), {}),
+          system: editSystem,
           tools: [],
-          transcript: [{ role: 'user', text: `Revision request:\n${decision.brief}\n\nCurrent mockup HTML:\n${currentHtml}` }],
+          transcript: [firstTurn],
           timeoutMs: 300000, effort: 'low', thinking: 'off',
         });
         if (res.ok) {
           recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
           const parsed = parseMockupEdits(res.text);
           if (parsed.ok && !parsed.fullRerender) {
-            const applied = applyMockupEdits(currentHtml, parsed.edits);
-            if (applied.ok && isPlausibleMockup(applied.html)) {
-              html = applied.html.slice(0, MAX_MOCKUP_CHARS);
-              activeModel = editModel;
-              tweaked = true;
-            } else {
-              console.warn(`[mock2] mockup tweak did not apply cleanly (${applied.error || 'implausible result'}) — full render fallback`);
+            const failure = applyParsed(parsed);
+            if (failure) {
+              // ONE corrective retry: same conversation, the exact miss named.
+              // Most tweak failures are copy-paste inexactness a second attempt
+              // fixes in seconds — far cheaper in time than any re-render.
+              setJob(projectId, { phase: 'designing', message: 'A tweak edit missed its target — retrying with corrections…', kind: 'turn', cycleId: cycle.id });
+              const retry = await callStepTurn('mockup-tweak', {
+                connector: ready.mockup.connector, apiKey: ready.mockup.apiKey, model: editModel,
+                system: editSystem,
+                tools: [],
+                transcript: [firstTurn, { role: 'assistant', text: res.text }, { role: 'user', text: buildTweakRetryMessage(failure) }],
+                timeoutMs: 300000, effort: 'low', thinking: 'off',
+              });
+              if (retry.ok) {
+                recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: retry.modelUsed || editModel, usage: retry.usage, step: 'mockup-tweak' });
+                const parsed2 = parseMockupEdits(retry.text);
+                if (parsed2.ok && !parsed2.fullRerender) {
+                  const failure2 = applyParsed(parsed2);
+                  if (failure2) console.warn(`[mock2] mockup tweak retry did not apply cleanly (${failure2})`);
+                }
+                // A FULL_RERENDER on retry falls through (the model judged it
+                // structural after a second look).
+              }
             }
           }
           // parsed.fullRerender (the model judged it structural) falls through.
         }
-      } catch (e) { console.warn('[mock2] mockup tweak failed — full render fallback:', e?.message); }
-      if (!tweaked) setJob(projectId, { phase: 'designing', message: 'The change needs the full renderer — rendering the mockup…', kind: 'turn', cycleId: cycle.id });
+      } catch (e) { console.warn('[mock2] mockup tweak failed:', e?.message); }
+      if (!tweaked && lastEdits) {
+        // The edits told us WHERE the change lives. If every target sits in
+        // one screen, escalate to that screen's re-render — not the document.
+        tweakFallbackScreen = screenForEditTargets(currentHtml, lastEdits);
+      }
+      if (!tweaked) {
+        setJob(projectId, {
+          phase: 'designing',
+          message: tweakFallbackScreen
+            ? `The tweak needs a bigger brush — re-rendering just the "${tweakFallbackScreen}" screen…`
+            : 'The change needs the full renderer — rendering the mockup…',
+          kind: 'turn', cycleId: cycle.id,
+        });
+      }
     }
-    // ---- screen path (scope 'screen'): re-render ONE section ----
+    // ---- screen path: re-render ONE section ----
+    // Runs for scope 'screen' from the design partner AND as the escalation
+    // target of a failed tweak whose edits all localized inside one screen.
     // A single-screen redesign re-renders only that screen's <section> (the
     // structural contract every mockup follows) — output is one screen, not
     // the whole document, so it lands in a fraction of the time and cost.
     // Global changes still run the full renderer. Any miss (unknown screen
     // name, unusable reply) falls back to the full renderer.
-    if (!tweaked && decision.scope === 'screen' && decision.screen && currentHtml && currentHtmlComplete) {
-      const found = findScreenSection(currentHtml, decision.screen);
+    const screenTarget = (decision.scope === 'screen' && decision.screen) ? decision.screen : tweakFallbackScreen;
+    if (!tweaked && screenTarget && currentHtml && currentHtmlComplete) {
+      const found = findScreenSection(currentHtml, screenTarget);
       if (found.ok) {
-        setJob(projectId, { phase: 'designing', message: `Re-rendering the "${decision.screen}" screen…`, kind: 'turn', cycleId: cycle.id });
+        setJob(projectId, { phase: 'designing', message: `Re-rendering the "${screenTarget}" screen…`, kind: 'turn', cycleId: cycle.id });
         try {
           const secModel = mockupRenderModel(process.env, ready.mockup.model);
           const res = await callStepTurn('mockup-screen', {
@@ -747,16 +806,16 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
             tools: [],
             transcript: [{
               role: 'user',
-              text: `Screen to re-render: "${decision.screen}"\n\nRevision brief:\n${decision.brief}\n\nCurrent FULL mockup document (context — its styles, navigation, and the other screens stay untouched):\n${currentHtml}`,
+              text: `Screen to re-render: "${screenTarget}"\n\nRevision brief:\n${decision.brief}\n\nCurrent FULL mockup document (context — its styles, navigation, and the other screens stay untouched):\n${currentHtml}`,
               ...(mockupImages.length ? { images: mockupImages } : {}),
             }],
             timeoutMs: 600000, effort: 'high', thinking: null,
           });
           if (res.ok) {
             recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || secModel, usage: res.usage, step: 'mockup-screen' });
-            const section = extractSectionHtml(res.text, decision.screen);
+            const section = extractSectionHtml(res.text, screenTarget);
             if (section) {
-              const swapped = replaceScreenSection(currentHtml, decision.screen, section);
+              const swapped = replaceScreenSection(currentHtml, screenTarget, section);
               if (swapped.ok && isPlausibleMockup(swapped.html)) {
                 html = swapped.html.slice(0, MAX_MOCKUP_CHARS);
                 activeModel = secModel;
@@ -766,7 +825,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           }
         } catch (e) { console.warn('[mock2] screen re-render failed — full render fallback:', e?.message); }
       }
-      if (!tweaked) setJob(projectId, { phase: 'designing', message: `The "${decision.screen}" change needs the full renderer — rendering the mockup…`, kind: 'turn', cycleId: cycle.id });
+      if (!tweaked) setJob(projectId, { phase: 'designing', message: `The "${screenTarget}" change needs the full renderer — rendering the mockup…`, kind: 'turn', cycleId: cycle.id });
     }
     const heartbeat = tweaked ? null : startDesignHeartbeat(projectId, cycle.id, { iterating: !!currentHtml });
     // A render that hits its output ceiling is CONTINUED, never discarded

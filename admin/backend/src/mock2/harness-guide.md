@@ -220,18 +220,28 @@ Concept.
 
 ### 3. Mockup tweak 💰
 
-- **Trigger:** scope `tweak` with an existing, fully-readable mockup (≤160k
-  chars). Exists because *"a one-line copy change used to re-output the ENTIRE
-  document — output tokens dominate render cost."*
-- **Model:** same render model · **effort low / thinking off / 6k** output ·
+- **Trigger:** scope `tweak` with an existing mockup (readable up to the 400k
+  save cap, so every saved mockup is tweakable). Exists because *"a one-line
+  copy change used to re-output the ENTIRE document — output tokens dominate
+  render cost."*
+- **Model:** same render model · **effort low / thinking off** ·
   no lane tuning on this path.
 - **Prompt:** search/replace contract — *"Output ONLY edit blocks… Each
   SEARCH must be copied EXACTLY from the current file (whitespace included)
-  and long enough to be UNIQUE"*; at most 12 blocks; the escape hatch is
-  outputting exactly `FULL_RERENDER`.
-- **Fallback:** any miss — parse failure, ambiguous match, implausible result
-  — falls back **silently** to the full renderer. A half-applied mockup can
-  never ship.
+  and long enough to be UNIQUE"*; at most 12 blocks, several small blocks
+  preferred over one large; `FULL_RERENDER` is framed as a **last resort**
+  reserved for new screens or cross-screen restructuring.
+- **Escalation ladder (2026-07):** a miss no longer jumps straight to a full
+  re-render. Edit application is whitespace-tolerant (runs of whitespace
+  match any whitespace; uniqueness still required — ambiguity always fails).
+  A failed application gets **one corrective retry** in the same
+  conversation with the exact miss named ("edit 2: search text not found").
+  If the retry still fails and every failed edit localizes inside ONE
+  `<section data-screen>`, the fallback is that **screen's re-render**, not
+  the document. Only cross-screen or shared-CSS targets (or an explicit
+  `FULL_RERENDER` from the model) reach the full renderer — the slow,
+  drift-prone outcome the ladder exists to avoid. A half-applied mockup
+  still can never ship.
 
 ### 4. Mockup single-screen re-render 💰
 

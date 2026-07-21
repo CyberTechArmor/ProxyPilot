@@ -9,6 +9,10 @@ admin-side Harness page (every model-bearing row here becomes a tunable).
 
 File references are the implementation anchors, not reading assignments.
 
+The full operator-facing companion — every prompt contract quoted, every
+resolution chain spelled out — is `admin/backend/src/mock2/harness-guide.md`,
+served editable on the dashboard at Projects → Harness guide.
+
 ## 0. How a step's model is resolved (four layers, later wins)
 
 1. **Slot** — the operator assigns connectors+models to FIVE slots

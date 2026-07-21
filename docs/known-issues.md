@@ -6,25 +6,28 @@ scope. Anyone picking up a future session should treat this file
 as a punch list, not a roadmap — items here are meant to be
 addressed individually, not bundled.
 
-## Backend test runner: 3 tests fail under `node --test` in a fresh
-sandbox
+## Backend test runner: 6 test files fail under `node --test` in a
+fresh sandbox
 
 Discovered during the WireGuard MTU = 1280 session
-(`docs/core/plan/NEXT-SESSION-PROMPT-wireguard-mtu.md`).
+(`docs/core/plan/NEXT-SESSION-PROMPT-wireguard-mtu.md`); count
+re-verified 2026-07 (grew from 3 to 6 as tests were added).
 
-Affected files:
+Affected files (all `ERR_MODULE_NOT_FOUND` — packages absent from
+the sandbox, never logic failures):
 
-- `admin/backend/src/__tests__/cves.test.js`
-- `admin/backend/src/__tests__/incus.test.js`
-- `admin/backend/src/__tests__/webauthn.test.js`
+- `admin/backend/src/__tests__/cve-research.test.js` — imports real `db.js` → `better-sqlite3`
+- `admin/backend/src/__tests__/cves.test.js` — imports real `db.js` → `better-sqlite3`
+- `admin/backend/src/__tests__/incus.test.js` — imports real `db.js` → `better-sqlite3`
+- `admin/backend/src/__tests__/webauthn.test.js` — imports real `db.js` → `better-sqlite3`
+- `admin/backend/src/__tests__/vpn-mtu.test.js` — imports `cli/src/db/index.js` → `better-sqlite3`
+- `admin/backend/src/__tests__/ldap.test.js` — imports `src/lib/ldap.js` → `ldapts`
 
-Symptom: `Cannot find package 'better-sqlite3' imported from
-admin/backend/src/db.js`. The three test files import the real
-`db.js`, which top-level-imports `better-sqlite3`. Other backend
-tests stub the DB at the module boundary and pass cleanly.
+Other backend tests stub the DB at the module boundary and pass
+cleanly.
 
-Pre-existing — these fail on `main` too. The other 73 tests in the
-suite pass.
+Pre-existing — these fail on `main` too. The rest of the suite
+passes (943 pass / 954 as of 2026-07).
 
 Possible fixes (pick one — they're not all equivalent):
 

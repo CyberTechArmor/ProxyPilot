@@ -189,12 +189,21 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 const CAPTURE_DEADLINE_MS = 90000;
 
 export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390 }) {
-  const chromium = await loadChromium();
-  if (!chromium) return { ok: false, error: 'playwright-core is not installed (rerun update.sh / npm install)' };
   let browser = null;
   let stage = 'starting';
+  const t0 = Date.now();
+  // Every stage transition is logged with elapsed ms, so a wedged install's
+  // journal shows exactly where the time went even when the dialog only
+  // shows the timeout.
+  const mark = (s) => { stage = s; console.log(`[mock2] screenshot ${containerName}: ${s} (+${Date.now() - t0}ms)`); };
   const work = (async () => {
-    stage = 'resolving the app address + launching the browser';
+    // The driver import lives INSIDE the deadline: a broken/slow node_modules
+    // used to hang here BEFORE any timeout applied — the route then never
+    // answered and the dialog sat on its generic client abort (user report).
+    mark('loading the browser driver');
+    const chromium = await loadChromium();
+    if (!chromium) throw new Error('playwright-core is not installed (rerun update.sh / npm install)');
+    mark('resolving the app address + launching the browser');
     const [baseUrl, specText, launched] = await Promise.all([
       resolveBrowserTarget(containerName, webPort),
       readContainerFile(containerName, UI_CHECKS_PATH, { timeoutMs: 15000 }).catch(() => ''),
@@ -204,14 +213,14 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
     const parsed = specText ? parseUiChecks(specText) : { ok: false };
     const spec = parsed.ok ? parsed.spec : null;
     const w = Math.min(1600, Math.max(320, Number(width) || 390));
-    stage = 'opening a page';
+    mark('opening a page');
     const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
-    stage = 'signing in with the fixture login';
+    mark('signing in with the fixture login');
     await tryLogin(page, baseUrl, spec);
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
-    stage = `loading ${safePath}`;
+    mark(`loading ${safePath}`);
     await gotoSettled(page, new URL(safePath, baseUrl).toString());
     // Signed-out detection: the auth gate redirects page navigations to
     // /login, and fixture logins only exist once a full build has written
@@ -222,8 +231,9 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
       signedOut = /\/login(?:[/?#]|$)/.test(page.url())
         || (safePath !== '/login' && (await page.locator('input[type="password"]').count()) > 0);
     } catch { signedOut = false; }
-    stage = 'capturing the page';
+    mark('capturing the page');
     const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 20000 });
+    mark('done');
     return { ok: true, buffer: buf, signedOut };
   })();
   let result;

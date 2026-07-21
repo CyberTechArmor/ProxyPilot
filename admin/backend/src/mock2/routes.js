@@ -2635,12 +2635,21 @@ export function createMock2Router() {
     const project = req.mock2Project;
     if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project is not online.' });
     const { captureOneScreenshot } = await import('./design-review.js');
-    const shot = await captureOneScreenshot({
-      containerName: project.container_name,
-      webPort: project.web_port || 3000,
-      path: String(req.query.path || '/'),
-      width: Number(req.query.w) || 390,
-    });
+    // Backstop: the route must ALWAYS answer. The capture has its own 90s
+    // deadline; this outer race only fires if that machinery itself wedges,
+    // and it answers with a pointer at the server log's stage trail.
+    const shot = await Promise.race([
+      captureOneScreenshot({
+        containerName: project.container_name,
+        webPort: project.web_port || 3000,
+        path: String(req.query.path || '/'),
+        width: Number(req.query.w) || 390,
+      }),
+      new Promise((resolve) => setTimeout(
+        () => resolve({ ok: false, error: 'the screenshot machinery did not answer within 100s — check the backend log for the "[mock2] screenshot" stage trail, and restart the backend if it repeats' }),
+        100000,
+      )),
+    ]);
     if (!shot.ok) {
       const cur = latestCycle(project.id);
       const busy = cur && ['queued', 'estimating', 'running'].includes(cur.status);

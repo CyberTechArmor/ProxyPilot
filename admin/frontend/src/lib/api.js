@@ -1504,6 +1504,8 @@ export const api = {
   // Per-user AI-credit usage (admin): totals, per-project (+per-step) spend,
   // and VS Code (external git push) activity.
   mock2UserAiUsage: (userId) => request(`/mock2/users/${userId}/ai-usage`),
+  mock2UserAiUsageProject: (userId, projectId) =>
+    request(`/mock2/users/${userId}/ai-usage/projects/${projectId}`),
   mock2AppScreenshotImageUrl: (id) =>
     `/api/mock2/projects/${id}/app-screenshot-jobs/current/image?t=${Date.now()}`,
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).

@@ -2727,6 +2727,46 @@ export function createMock2Router() {
     });
   });
 
+  // One project's slice of ONE user's AI usage (the drill-down's detail
+  // pane): totals, per-step and per-model breakdowns, first/last activity —
+  // all filtered to spend attributed to that user, never project totals.
+  router.get('/users/:uid/ai-usage/projects/:pid', requireAdmin, (req, res) => {
+    const uid = String(req.params.uid || '').trim();
+    const pid = Number(req.params.pid);
+    if (!uid || uid.length > 100 || !Number.isFinite(pid)) return res.status(400).json({ error: 'bad user or project id' });
+    const db = getMock2Db();
+    const attributed = `COALESCE(l.user_id, c.initiated_by)`;
+    const where = `l.project_id = ? AND ${attributed} = ?`;
+    const totals = db.prepare(`
+      SELECT COALESCE(SUM(l.cost_cents), 0) AS cents, COUNT(*) AS calls,
+             COALESCE(SUM(l.input_tokens + l.output_tokens), 0) AS tokens,
+             MIN(l.created_at) AS first_at, MAX(l.created_at) AS last_at
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+       WHERE ${where}
+    `).get(pid, uid);
+    const steps = db.prepare(`
+      SELECT COALESCE(l.step, 'unattributed') AS step, COALESCE(SUM(l.cost_cents), 0) AS cents,
+             COUNT(*) AS calls, COALESCE(SUM(l.input_tokens + l.output_tokens), 0) AS tokens
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+       WHERE ${where}
+       GROUP BY COALESCE(l.step, 'unattributed')
+       ORDER BY cents DESC
+    `).all(pid, uid);
+    const models = db.prepare(`
+      SELECT COALESCE(l.model, 'unknown') AS model, COALESCE(SUM(l.cost_cents), 0) AS cents,
+             COUNT(*) AS calls, COALESCE(SUM(l.input_tokens + l.output_tokens), 0) AS tokens
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+       WHERE ${where}
+       GROUP BY COALESCE(l.model, 'unknown')
+       ORDER BY cents DESC
+    `).all(pid, uid);
+    const project = db.prepare(`SELECT id, name FROM mock2_projects WHERE id = ?`).get(pid) || { id: pid, name: null };
+    res.json({ user_id: uid, project, totals, steps, models });
+  });
+
   // Annotate screenshots as a JOB (house 202+poll pattern). The single
   // long-request version proved fragile: anything between the dialog and the
   // capture (proxy limits, a wedged driver, a restarted backend) surfaced as

@@ -27,6 +27,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   // offline", a browser error) — show that instead of a generic guess.
   const [imgUrl, setImgUrl] = useState(null); // object URL of the fetched PNG
   const [imgState, setImgState] = useState('idle'); // idle | loading | ready | error
+  const [signedOut, setSignedOut] = useState(false); // the shot is the app's sign-in page
   const [errMsg, setErrMsg] = useState('');
   const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the image
   const [sending, setSending] = useState(false);
@@ -36,8 +37,13 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     setPins([]);
     setImgState('loading');
     setErrMsg('');
+    setSignedOut(false);
+    // The server hard-caps a capture at ~60s; this abort is the belt on top so
+    // the dialog can never sit on the spinner forever (user report).
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 75000);
     try {
-      const res = await fetch(api.mock2AppScreenshotUrl(projectId, { path: p }), { credentials: 'same-origin' });
+      const res = await fetch(api.mock2AppScreenshotUrl(projectId, { path: p }), { credentials: 'same-origin', signal: ctrl.signal });
       if (!res.ok) {
         let msg = `the server answered ${res.status}`;
         try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep status */ }
@@ -45,12 +51,17 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
         setImgState('error');
         return;
       }
+      setSignedOut(res.headers.get('X-Screenshot-Signed-Out') === '1');
       const blob = await res.blob();
       setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
       setImgState('ready');
     } catch (e) {
-      setErrMsg(e?.message || 'network error');
+      setErrMsg(e?.name === 'AbortError'
+        ? 'the screenshot timed out — the app or backend may be busy; try Refresh in a moment'
+        : (e?.message || 'network error'));
       setImgState('error');
+    } finally {
+      clearTimeout(timer);
     }
   }, [projectId]);
   const reload = useCallback(() => load(path), [load, path]);
@@ -211,6 +222,13 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">No pins yet — tap the screenshot where something should change.</p>
+          )}
+          {imgState === 'ready' && signedOut && (
+            <p className="text-xs text-amber-500">
+              The app asked for a sign-in, so this shows its sign-in page. Screenshots sign in automatically once a
+              full build has created fixture logins (state/ui-checks.json) — until then, annotate the sign-in page or
+              run a Full build first.
+            </p>
           )}
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button className="min-h-[44px] flex-1" disabled={sending || !notedCount} onClick={send}>

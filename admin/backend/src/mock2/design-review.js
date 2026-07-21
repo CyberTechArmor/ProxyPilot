@@ -181,16 +181,21 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 }
 
 // One screenshot for the annotate dialog. Returns { ok, buffer, error }.
+// Hard ceiling for one annotate screenshot end-to-end (target resolution +
+// spec read + browser launch + login + navigation + shot). Without it the
+// serial worst case ran minutes and the dialog spun forever (user report).
+const CAPTURE_DEADLINE_MS = 60000;
+
 export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390 }) {
   const chromium = await loadChromium();
   if (!chromium) return { ok: false, error: 'playwright-core is not installed (rerun update.sh / npm install)' };
-  const baseUrl = await resolveBrowserTarget(containerName, webPort);
-  const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
-  const parsed = specText ? parseUiChecks(specText) : { ok: false };
-  const spec = parsed.ok ? parsed.spec : null;
-  const w = Math.min(1600, Math.max(320, Number(width) || 390));
   let browser = null;
-  try {
+  const work = (async () => {
+    const baseUrl = await resolveBrowserTarget(containerName, webPort);
+    const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
+    const parsed = specText ? parseUiChecks(specText) : { ok: false };
+    const spec = parsed.ok ? parsed.spec : null;
+    const w = Math.min(1600, Math.max(320, Number(width) || 390));
     browser = await chromium.launch(launchOptions());
     const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
@@ -198,14 +203,38 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
     await gotoSettled(page, new URL(safePath, baseUrl).toString());
-    const buf = await page.screenshot({ type: 'png', fullPage: true });
-    return { ok: true, buffer: buf };
+    // Signed-out detection: the auth gate redirects page navigations to
+    // /login, and fixture logins only exist once a full build has written
+    // state/ui-checks.json. The shot is still returned (annotating the
+    // sign-in page is legitimate) — the dialog just says what it shows.
+    let signedOut = false;
+    try {
+      signedOut = /\/login(?:[/?#]|$)/.test(page.url())
+        || (safePath !== '/login' && (await page.locator('input[type="password"]').count()) > 0);
+    } catch { signedOut = false; }
+    const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 20000 });
+    return { ok: true, buffer: buf, signedOut };
+  })();
+  let result;
+  try {
+    result = await Promise.race([
+      work,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`the screenshot timed out after ${Math.round(CAPTURE_DEADLINE_MS / 1000)}s — the app or container may be busy; try Refresh`)),
+        CAPTURE_DEADLINE_MS,
+      )),
+    ]);
   } catch (err) {
     console.warn(`[mock2] app screenshot failed (${containerName} ${path}):`, err?.message);
-    return { ok: false, error: String(err?.message || err).slice(0, 300) };
-  } finally {
-    try { if (browser) await browser.close(); } catch { /* ignore */ }
+    result = { ok: false, error: String(err?.message || err).slice(0, 300) };
   }
+  // Cleanup rides the WORK promise, not this function's return: on a deadline
+  // the launch may still be mid-flight — close the browser whenever it lands
+  // so an abandoned capture can't leak a Chromium.
+  void work.catch(() => {}).finally(async () => {
+    try { if (browser) await browser.close(); } catch { /* ignore */ }
+  });
+  return result;
 }
 
 // The whole review. trigger: 'manual' (Polish pass) | 'auto' (after build).

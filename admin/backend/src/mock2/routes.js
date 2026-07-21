@@ -2650,7 +2650,9 @@ export function createMock2Router() {
         : '';
       return res.status(503).json({ error: `${shot.error}${hint}` });
     }
-    res.set('Cache-Control', 'no-store').type('png').send(shot.buffer);
+    res.set('Cache-Control', 'no-store');
+    if (shot.signedOut) res.set('X-Screenshot-Signed-Out', '1');
+    res.type('png').send(shot.buffer);
   });
 
   // How this project handles the pre-pass's domain suggestions:

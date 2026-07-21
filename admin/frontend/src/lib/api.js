@@ -1501,6 +1501,9 @@ export const api = {
   mock2AppScreenshotStart: (id, { path = '/', w = 390, login = null } = {}) =>
     request(`/mock2/projects/${id}/app-screenshot-jobs`, { method: 'POST', body: JSON.stringify({ path, w, ...(login ? { login } : {}) }) }),
   mock2AppScreenshotStatus: (id) => request(`/mock2/projects/${id}/app-screenshot-jobs/current`),
+  // Per-user AI-credit usage (admin): totals, per-project (+per-step) spend,
+  // and VS Code (external git push) activity.
+  mock2UserAiUsage: (userId) => request(`/mock2/users/${userId}/ai-usage`),
   mock2AppScreenshotImageUrl: (id) =>
     `/api/mock2/projects/${id}/app-screenshot-jobs/current/image?t=${Date.now()}`,
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).

@@ -72,14 +72,14 @@ export function deleteQuota(id) {
 
 // Append a spend event. M6 writes one per model call; M5 provides the writer so
 // the ledger arithmetic is exercisable end to end.
-export function insertLedgerEntry({ projectId, cycleId = null, connectorId = null, model = null, inputTokens = 0, outputTokens = 0, costCents = 0, wallClockMs = 0, step = null }) {
+export function insertLedgerEntry({ projectId, cycleId = null, connectorId = null, model = null, inputTokens = 0, outputTokens = 0, costCents = 0, wallClockMs = 0, step = null, userId = null }) {
   const info = getMock2Db()
     .prepare(
       `INSERT INTO mock2_quota_ledger
-         (project_id, cycle_id, connector_id, model, input_tokens, output_tokens, cost_cents, wall_clock_ms, created_at, step)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (project_id, cycle_id, connector_id, model, input_tokens, output_tokens, cost_cents, wall_clock_ms, created_at, step, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(Number(projectId), cycleId, connectorId, model, Math.round(inputTokens), Math.round(outputTokens), Number(costCents) || 0, Math.round(wallClockMs), nowIso(), step || null);
+    .run(Number(projectId), cycleId, connectorId, model, Math.round(inputTokens), Math.round(outputTokens), Number(costCents) || 0, Math.round(wallClockMs), nowIso(), step || null, userId == null ? null : Number(userId));
   return getMock2Db().prepare(`SELECT * FROM mock2_quota_ledger WHERE id = ?`).get(info.lastInsertRowid);
 }
 

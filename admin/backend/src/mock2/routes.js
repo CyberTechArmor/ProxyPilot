@@ -2687,6 +2687,12 @@ export function createMock2Router() {
     // un-hangable, so a wedge anywhere later is visible through the status
     // poll (which reports the stage) instead of freezing the start call.
     res.status(202).json({ started: true, state: 'running' });
+    // Optional operator sign-in for the capture: used in-memory for this one
+    // screenshot, never persisted, never logged (the audit row records only
+    // that a login was supplied).
+    const login = req.body?.login && typeof req.body.login === 'object'
+      ? { email: String(req.body.login.email || '').slice(0, 200), password: String(req.body.login.password || '').slice(0, 200) }
+      : null;
     void (async () => {
       job.stage = 'importing the capture module';
       const { captureOneScreenshot } = await import('./design-review.js');
@@ -2696,6 +2702,7 @@ export function createMock2Router() {
         path: String(req.body?.path || '/'),
         width: Number(req.body?.w) || 390,
         onStage: (stage) => { job.stage = stage; },
+        operatorLogin: login && login.email && login.password ? login : null,
       });
       if (shot.ok) { job.state = 'done'; job.buffer = shot.buffer; job.signedOut = !!shot.signedOut; }
       else { job.state = 'error'; job.error = shot.error || 'screenshot failed'; }

@@ -56,6 +56,27 @@ async function gotoSettled(page, url) {
 // Best-effort login, bounded — fixture users may have been deleted (New-6's
 // users table was wiped and re-bootstrapped); an unauthenticated shot of the
 // login page is still useful, so never let a dead login stall the capture.
+// Sign in with the OPERATOR's app account (annotate dialog): generic
+// selectors against the scaffold's standard sign-in form. Bounded and
+// best-effort like tryLogin — a failed login just leaves the signed-out
+// detection to tell the truth. Credentials are used in-memory only: never
+// logged, never stored.
+async function tryOperatorLogin(page, baseUrl, creds) {
+  if (!creds?.email || !creds?.password) return;
+  try {
+    await Promise.race([
+      (async () => {
+        await page.goto(new URL('/login', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        await page.locator('input[type="email"], input[name="email"], input[name="username"]').first().fill(String(creds.email), { timeout: 5000 });
+        await page.locator('input[type="password"]').first().fill(String(creds.password), { timeout: 5000 });
+        await page.locator('button[type="submit"], input[type="submit"]').first().click({ timeout: 5000 });
+        await page.waitForLoadState('networkidle', { timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
+      })(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('operator login timed out')), LOGIN_TIMEOUT_MS)),
+    ]);
+  } catch { /* signed-out detection + the dialog hint still tell the truth */ }
+}
+
 async function tryLogin(page, baseUrl, spec) {
   if (!spec?.login || !Object.keys(spec.login.users || {}).length) return;
   const role = spec.login.users.admin ? 'admin' : Object.keys(spec.login.users)[0];
@@ -189,7 +210,7 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 // then NAMES the stage so a stuck install can be diagnosed from the dialog.
 const CAPTURE_DEADLINE_MS = 90000;
 
-export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390, onStage = null }) {
+export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390, onStage = null, operatorLogin = null }) {
   let browser = null;
   let stage = 'starting';
   const t0 = Date.now();
@@ -221,8 +242,13 @@ export async function captureOneScreenshot({ containerName, webPort = 3000, path
     mark('opening a page');
     const context = await browser.newContext({ viewport: { width: w, height: Math.round(w * 2) }, deviceScaleFactor: 1 });
     const page = await context.newPage();
-    mark('signing in with the fixture login');
-    await tryLogin(page, baseUrl, spec);
+    if (operatorLogin) {
+      mark('signing in with the provided account');
+      await tryOperatorLogin(page, baseUrl, operatorLogin);
+    } else {
+      mark('signing in with the fixture login');
+      await tryLogin(page, baseUrl, spec);
+    }
     // Paths are operator-clicked UI values, but sanitize anyway: same-origin only.
     const safePath = String(path || '/').startsWith('/') ? String(path) : '/';
     mark(`loading ${safePath}`);

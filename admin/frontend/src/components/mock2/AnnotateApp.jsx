@@ -29,6 +29,10 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   const [imgState, setImgState] = useState('idle'); // idle | loading | ready | error
   const [signedOut, setSignedOut] = useState(false); // the shot is the app's sign-in page
   const [stageMsg, setStageMsg] = useState(''); // live capture stage while loading
+  // App account for the capture to sign in with (kept in component state
+  // only — sent with the start request, never stored anywhere).
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [errMsg, setErrMsg] = useState('');
   const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the image
   const [sending, setSending] = useState(false);
@@ -49,7 +53,10 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
       // BACKEND is stale or stuck — say so, with the fix.
       try {
         await Promise.race([
-          api.mock2AppScreenshotStart(projectId, { path: p }),
+          api.mock2AppScreenshotStart(projectId, {
+            path: p,
+            ...(loginEmail.trim() && loginPassword ? { login: { email: loginEmail.trim(), password: loginPassword } } : {}),
+          }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('no acknowledgment within 10s')), 10000)),
         ]);
       } catch (e) {
@@ -104,7 +111,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
       setErrMsg(e?.message || 'network error');
       setImgState('error');
     }
-  }, [projectId]);
+  }, [projectId, loginEmail, loginPassword]);
   const reload = useCallback(() => load(path), [load, path]);
   // Shoot when the dialog OPENS (not on mount — the server spins up a real
   // browser). Re-shoot on reopen after a failure; a ready shot is kept until
@@ -266,11 +273,39 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
             <p className="text-xs text-muted-foreground">No pins yet — tap the screenshot where something should change.</p>
           )}
           {imgState === 'ready' && signedOut && (
-            <p className="text-xs text-amber-500">
-              The app asked for a sign-in, so this shows its sign-in page. Screenshots sign in automatically once a
-              full build has created fixture logins (state/ui-checks.json) — until then, annotate the sign-in page or
-              run a Full build first.
-            </p>
+            <div className="space-y-2">
+              <p className="text-xs text-amber-500">
+                The app asked for a sign-in, so this shows its sign-in page. Enter your app account below to retake
+                the screenshot signed in (used once for the capture, never stored) — or annotate the sign-in page
+                as-is. Full builds create fixture logins that sign screenshots in automatically.
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input
+                  className="h-11 sm:h-10 flex-1"
+                  type="email"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="app account email"
+                  aria-label="App account email for the screenshot sign-in"
+                />
+                <Input
+                  className="h-11 sm:h-10 flex-1"
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="password"
+                  aria-label="App account password for the screenshot sign-in"
+                />
+                <Button
+                  variant="outline"
+                  className="h-11 sm:h-10 shrink-0"
+                  disabled={!loginEmail.trim() || !loginPassword || imgState === 'loading'}
+                  onClick={reload}
+                >
+                  Retake signed in
+                </Button>
+              </div>
+            </div>
           )}
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button className="min-h-[44px] flex-1" disabled={sending || !notedCount} onClick={send}>

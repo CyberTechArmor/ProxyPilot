@@ -339,6 +339,12 @@ Hard requirements:
   default. Targeted revisions later re-render ONE section, so keep each
   screen's markup self-contained inside its section (shared styles stay in
   the document <style>).
+- DEMO-STATE ANNOTATION: any element you render in a pressed/active/selected
+  state purely to DEMONSTRATE it (an engaged filter, an active attention chip,
+  an expanded-for-show panel) must carry data-demo-state="<state name>". The
+  un-annotated document is the screen's true resting state — the inventory
+  extractor and the build treat it that way, so a demo left unannotated
+  becomes a wrong production default.
 - RENDER-ON-LOAD: the first/default screen must be VISIBLE immediately from the
   HTML + CSS alone, before any JavaScript runs. Do NOT hide the initial content
   with an inline style/attribute that a <script> later reveals — if the script
@@ -626,7 +632,8 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
           "required": true|false, "notes": "string — options, placeholder, or constraints if shown" }
       ],
       "actions": [ { "label": "string — the button/link text", "effect": "string — what it appears to do", "inferred": false } ],
-      "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ]
+      "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ],
+      "default_state": "string — the screen's RESTING state on a fresh load with typical data (REQUIRED)"
     }
   ],
   "entities": [ { "name": "string", "fields": ["string"] } ],
@@ -652,7 +659,15 @@ Rules:
 - Infer a field's type from how it looks and behaves; default to "text" when unsure.
 - journeys are the 3–6 PRIMARY things a user comes to do, judged from the mockup's
   navigation and emphasis; frequency decides navigation prominence downstream.
-- entities, journeys, and notes may be empty ([] / "") but screens must not be.
+- DEMONSTRATED ≠ DEFAULT: mockups render some states pressed/active purely for
+  illustration (a filter shown engaged, a chip shown selected). Elements the
+  mockup marks with data-demo-state="…" are demonstrations — record them in
+  "states" but NEVER as the resting state. "default_state" is what a user sees
+  on a fresh load with typical data: no filters applied, no chips active,
+  sections in their normal expansion. A demo state recorded as the default
+  shipped as a wrong production default; be explicit.
+- entities, journeys, and notes may be empty ([] / "") but screens must not be;
+  every screen carries default_state.
 - Do not invent screens, fields, or actions the mockup does not show.
 - required_capabilities are the INFRASTRUCTURE needs the mockup implies, as
   lowercase slugs. Include "users" whenever the app has user accounts, sign-in,
@@ -703,6 +718,7 @@ export function parseInventory(text) {
         ...(a.inferred ? { inferred: true } : {}),
       })),
       states: (Array.isArray(sc.states) ? sc.states : []).map((x) => String(x)).filter(Boolean),
+      default_state: String(sc.default_state || ''),
     }));
   if (screens.length === 0) return { ok: false, error: 'inventory has no screens' };
   const entities = (Array.isArray(doc.entities) ? doc.entities : [])
@@ -844,6 +860,12 @@ export function lintInventory(inventory) {
   if (creates > 0 && edits === 0) warnings.push(`${creates} create action${creates === 1 ? '' : 's'} but no edit action anywhere — created records could never be corrected`);
   if (creates > 0 && deletes === 0) warnings.push(`${creates} create action${creates === 1 ? '' : 's'} but no delete/archive action anywhere`);
   for (const sc of screens) {
+    // Demonstrated ≠ default (project-32: a demo-pressed chip shipped as the
+    // production default). A screen with states but no declared resting
+    // state leaves the builder to guess — usually from the demo.
+    if ((sc.states || []).length > 0 && !String(sc.default_state || '').trim()) {
+      warnings.push(`"${sc.name}": ${sc.states.length} state${sc.states.length === 1 ? '' : 's'} recorded but no default_state — the resting state is a guess`);
+    }
     const filterFields = (sc.fields || []).filter((f) => /filter|search/i.test(`${f.name} ${f.notes}`)).length;
     const filterActions = (sc.actions || []).filter((a) => /filter|search/i.test(`${a.label} ${a.effect}`)).length;
     if (filterFields > 0 && filterActions === 0) warnings.push(`"${sc.name}": ${filterFields} filter/search field${filterFields === 1 ? '' : 's'} with no filter action`);

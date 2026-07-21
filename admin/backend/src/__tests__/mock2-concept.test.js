@@ -482,3 +482,25 @@ test('CRUD completion: implied edit/delete/status actions added; immutable respe
   // The COMPLETED inventory lints clean on those families.
   assert.equal(lintInventory(inventory).filter((w) => /no edit action|display-only/.test(w)).length, 0);
 });
+
+test('states vs defaults: default_state normalized, prompts carry the demo-state convention, lint flags its absence', async () => {
+  const { parseInventory, buildInventoryExtractionPrompt, buildMockupSystemPrompt, lintInventory } = await import('../mock2/concept-logic.js');
+  const r = parseInventory(JSON.stringify({ screens: [
+    { name: 'List', states: ['default', 'chip active (filtered)'], default_state: 'all groups expanded, no filters applied' },
+    { name: 'Bare', states: ['collapsed'] },
+  ] }));
+  assert.equal(r.ok, true);
+  assert.equal(r.inventory.screens[0].default_state, 'all groups expanded, no filters applied');
+  assert.equal(r.inventory.screens[1].default_state, '');
+  // Extractor: demonstrated-vs-default semantics + the annotation channel.
+  const ep = buildInventoryExtractionPrompt();
+  assert.match(ep, /DEMONSTRATED ≠ DEFAULT/);
+  assert.match(ep, /data-demo-state/);
+  assert.match(ep, /default_state/);
+  // Renderer: mockups must annotate demonstration states.
+  assert.match(buildMockupSystemPrompt({ designSystem: 'DS' }), /DEMO-STATE ANNOTATION/);
+  // Lint: states with no declared resting state is flagged.
+  const warnings = lintInventory(r.inventory);
+  assert.ok(warnings.some((w) => /"Bare".*no default_state/.test(w)));
+  assert.ok(!warnings.some((w) => /"List".*no default_state/.test(w)));
+});

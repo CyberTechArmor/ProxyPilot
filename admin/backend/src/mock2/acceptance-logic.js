@@ -167,8 +167,14 @@ export function acceptanceVerdict({
 
 // Extract path-like claims from a summary: tokens that look like repo paths or
 // filenames ("src/adp/tls.ts", "public/app.js", "connection.repro.test.ts").
+const FILE_EXT_RE = /\.(?:ts|tsx|js|jsx|mjs|cjs|sql|html|css|scss|json|ya?ml|md)$/i;
+
 export function extractSummaryPathClaims(summary) {
-  const s = String(summary || '');
+  // Brace shorthand ("src/x/{a,b,c}.ts") is EXPANDED before token scanning —
+  // the project-32 false positive left fragments like "routes/service/schema"
+  // that matched nothing and rejected an accurate summary.
+  let s = String(summary || '').replace(/([A-Za-z0-9_./-]*)\{([^{}]+)\}([A-Za-z0-9_./-]*)/g,
+    (_, pre, inner, post) => inner.split(',').map((x) => `${pre}${x.trim()}${post}`).join(' '));
   const out = new Set();
   const re = /(?:^|[\s`'"(])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|sql|html|css|scss|json|ya?ml|md))(?=$|[\s`'"),.:;!?])/g;
   let m;
@@ -176,6 +182,26 @@ export function extractSummaryPathClaims(summary) {
     const tok = m[1].replace(/^\.\//, '');
     // Skip bare version-ish tokens and URLs.
     if (/^\d+(\.\d+)*$/.test(tok) || /:\/\//.test(tok)) continue;
+    const segs = tok.split('/');
+    const extSegs = segs.filter((x) => FILE_EXT_RE.test(x));
+    if (extSegs.length > 1) {
+      // Slash-JOINED file list ("public/app.html/app.css/app.js" — prose, not
+      // a path): split into individual files, non-first ones by basename.
+      const leadDirs = segs.slice(0, segs.indexOf(extSegs[0]));
+      out.add([...leadDirs, extSegs[0]].join('/'));
+      for (const x of extSegs.slice(1)) out.add(x);
+      continue;
+    }
+    // A slash run whose LAST segment has no file extension is either a
+    // directory claim (verified against changed paths by summaryOverclaims)
+    // or plain hyphen/slash prose ("blocked/stale/promote-ready"). Word runs
+    // where NO segment looks like a file or a known source dir are prose —
+    // never a claim to reject a summary over.
+    if (!FILE_EXT_RE.test(segs[segs.length - 1])
+      && !segs.some((x) => FILE_EXT_RE.test(x))
+      && !/^(?:src|public|app|lib|server|client|migrations|routes|components|pages|views|tests?|__tests__|scripts|state|docs)$/.test(segs[0])) {
+      continue;
+    }
     out.add(tok);
   }
   return [...out];
@@ -193,7 +219,10 @@ export function summaryOverclaims(summary, changedFiles = []) {
     const c = claim.replace(/^\.\//, '');
     const covered = changed.some((f) => f === c || f.endsWith(`/${c}`))
       || (!c.includes('/') && basenames.has(c))
-      || changed.some((f) => c.endsWith(`/${f}`));
+      || changed.some((f) => c.endsWith(`/${f}`))
+      // Directory claim ("src/opportunities"): covered when changed files
+      // live under it (summaries legitimately name the folder they filled).
+      || changed.some((f) => f.startsWith(`${c}/`));
     if (!covered) unmatched.push(claim);
   }
   return { ok: unmatched.length === 0, unmatched };

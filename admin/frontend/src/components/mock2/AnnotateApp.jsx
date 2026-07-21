@@ -139,20 +139,30 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend, att
   // can't retry-loop.
   const wasOpen = useRef(false);
   useEffect(() => {
-    // Attach mode: the image came from the chat composer — load it directly,
-    // never fire the live capture.
-    if (open && !wasOpen.current && attachImage?.url) {
+    if (open && !wasOpen.current) {
+      // Every open starts with a clean pin slate.
       setPins([]);
-      setSignedOut(false);
       setErrMsg('');
-      setSource('upload');
-      setImgUrl(attachImage.url); // data: URL from the composer — nothing to revoke
-      setImgState('ready');
-    } else if (open && !wasOpen.current && imgState !== 'ready' && !attachImage) {
-      load(path);
+      if (attachImage?.url) {
+        // Attach mode: the image came from the chat composer — load it
+        // directly, never fire the live capture.
+        setSignedOut(false);
+        setSource('upload');
+        setImgUrl(attachImage.url); // data: URL from the composer — nothing to revoke
+        setImgState('ready');
+      } else if (imgState !== 'ready' || source !== 'live') {
+        // Live mode: reuse a cached LIVE shot, but never a leftover
+        // upload/attach image from a previous session — the attachment may
+        // have been deleted since (user report), so recapture instead.
+        setSignedOut(false);
+        setSource('live');
+        setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return null; });
+        setImgState('idle');
+        load(path);
+      }
     }
     wasOpen.current = open;
-  }, [open, imgState, load, path, attachImage]);
+  }, [open, imgState, source, load, path, attachImage]);
 
   const addPin = (e) => {
     if (pins.length >= MAX_PINS || imgState !== 'ready') return;
@@ -204,11 +214,12 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend, att
     // Attach mode: hand the annotated image + pin notes back to the composer
     // (the operator finishes the message and picks Ask / Quick update).
     if (onApply && attachImage) {
+      const which = `attached image ${attachImage.index != null ? attachImage.index + 1 : ''}${attachImage.name ? ` (${attachImage.name})` : ''}`.trim();
       const applyLines = pins
-        .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of the screenshot): ${p.note.trim()}` : null))
+        .map((p, i) => (p.note.trim() ? `${i + 1}. At pin ${i + 1} (${p.x}% from the left, ${p.y}% from the top of ${which}): ${p.note.trim()}` : null))
         .filter(Boolean);
       onApply({
-        text: `Annotated screenshot attached — the numbered red pins mark the exact spots:\n${applyLines.join('\n')}`,
+        text: `Annotated ${which} — the numbered red pins mark the exact spots:\n${applyLines.join('\n')}`,
         image,
       });
       setPins([]);

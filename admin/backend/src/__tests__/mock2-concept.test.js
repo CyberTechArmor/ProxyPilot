@@ -446,3 +446,39 @@ test('stitchContinuation: overlap removal, fence stripping, restart adoption (pr
   assert.match(instr, /NO repetition/);
   assert.ok(instr.includes('alpha beta gamma delta'));
 });
+
+test('CRUD completion: implied edit/delete/status actions added; immutable respected; lint flags shapes', async () => {
+  const { completeInventoryCrud, lintInventory } = await import('../mock2/concept-logic.js');
+  // Project-32 shape: creates + navigation only, a display-only status field.
+  const inv = {
+    screens: [
+      { name: 'Opportunities', purpose: '', fields: [{ name: 'Stage filter', type: 'select', required: false, notes: 'filter' }], actions: [{ label: 'New opportunity', effect: 'Opens create form' }, { label: 'Card click', effect: 'Navigates to detail' }], states: [] },
+      { name: 'Opportunity Detail', purpose: '', fields: [{ name: 'Task status dot', type: 'radio', required: false, notes: '' }], actions: [{ label: 'Add task', effect: 'Adds a task' }, { label: 'Promote', effect: 'Promotes' }], states: [] },
+    ],
+    entities: [], notes: '',
+  };
+  const { inventory, added } = completeInventoryCrud(inv);
+  const labels = inventory.screens.flatMap((s) => s.actions.map((a) => a.label));
+  assert.ok(labels.some((l) => /^Edit opportunity/i.test(l)), 'edit added');
+  assert.ok(labels.some((l) => /^Delete opportunity/i.test(l)), 'delete added');
+  assert.ok(labels.some((l) => /^Change Task status/i.test(l)), 'status mutation added');
+  // Added on the DETAIL screen (where mutations live), all marked inferred.
+  const detail = inventory.screens[1];
+  assert.ok(detail.actions.some((a) => a.inferred && /^Edit/.test(a.label)));
+  assert.ok(added.length >= 3);
+  // Original inventory untouched (pure).
+  assert.equal(inv.screens[1].actions.length, 2);
+  // "Add task" is a create too — task edit/delete also implied.
+  assert.ok(labels.some((l) => /^Edit task/i.test(l)));
+  // Immutable opt-out suppresses record completion.
+  const frozen = completeInventoryCrud({ screens: [{ name: 'Log', fields: [], actions: [{ label: 'Add entry', effect: 'x' }], states: [] }], notes: 'entries are append-only and cannot be edited' });
+  assert.ok(!frozen.inventory.screens[0].actions.some((a) => /^Edit/.test(a.label)));
+
+  // Linter: the raw project-32 shape trips all three families.
+  const warnings = lintInventory(inv);
+  assert.ok(warnings.some((w) => /no edit action/.test(w)), 'create-without-edit flagged');
+  assert.ok(warnings.some((w) => /filter/.test(w)), 'filter fields without actions flagged');
+  assert.ok(warnings.some((w) => /display-only status/.test(w)), 'dead-end status flagged');
+  // The COMPLETED inventory lints clean on those families.
+  assert.equal(lintInventory(inventory).filter((w) => /no edit action|display-only/.test(w)).length, 0);
+});

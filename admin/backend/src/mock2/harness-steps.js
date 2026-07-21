@@ -10,6 +10,7 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { getMock2Db } from './db.js';
 import { getMock2Setting, setMock2Setting } from './settings.js';
 import { callModelTurn } from './model-client.js';
 import { normalizeStepTuning, normalizeStepOverride, resolveStepTuning, getHarnessStep } from './harness-steps-logic.js';
@@ -37,10 +38,27 @@ export function setHarnessStepOverride(stepId, patch, updatedBy = null) {
 }
 
 // 7-day per-step spend rollup for the Harness page ({ [stepId]: { cents,
-// calls } }). Empty until the ledger's step column lands (the API ships the
-// field as null per step in the meantime).
+// calls } }). Grouped on the ledger's step column (migration 541, indexed on
+// (step, created_at)); pre-541 rows have step null and are simply not
+// attributed. Best-effort: a query failure returns {} so the page renders.
 export function harnessStepSpend7d() {
-  return {};
+  try {
+    const since = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+    const rows = getMock2Db()
+      .prepare(
+        `SELECT step, SUM(cost_cents) AS cents, COUNT(*) AS calls
+           FROM mock2_quota_ledger
+          WHERE step IS NOT NULL AND created_at >= ?
+          GROUP BY step`,
+      )
+      .all(since);
+    const out = {};
+    for (const r of rows) out[r.step] = { cents: Number(r.cents) || 0, calls: Number(r.calls) || 0 };
+    return out;
+  } catch (e) {
+    console.warn('[mock2] harness spend rollup failed:', e?.message);
+    return {};
+  }
 }
 
 // The guarded call. Call sites pass their fully lane-tuned args exactly as

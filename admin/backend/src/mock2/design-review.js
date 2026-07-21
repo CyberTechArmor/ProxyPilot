@@ -259,7 +259,7 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
       inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
       cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
     }, effectivePrice(ready.connector.id, model));
-    insertLedgerEntry({ projectId: project.id, cycleId: null, connectorId: ready.connector.id, model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0 });
+    insertLedgerEntry({ projectId: project.id, cycleId: null, connectorId: ready.connector.id, model: res.modelUsed || model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'design-review' });
   } catch (e) { console.warn('[mock2] design-review ledger write failed:', e?.message); }
 
   const review = parseReviewReply(res.text) || { summary: '', findings: [] };

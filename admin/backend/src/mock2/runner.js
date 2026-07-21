@@ -227,7 +227,7 @@ async function runQuickPrepass({ project, cycle, ready, routing }) {
       inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0,
       cacheReadTokens: u.cacheReadInputTokens || 0, cacheWriteTokens: u.cacheCreationInputTokens || 0,
     }, effectivePrice(ready.connector.id, model));
-    insertLedgerEntry({ projectId: project.id, cycleId: cycle.id, connectorId: ready.connector.id, model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0 });
+    insertLedgerEntry({ projectId: project.id, cycleId: cycle.id, connectorId: ready.connector.id, model: res.modelUsed || model, inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, costCents: cost, wallClockMs: 0, step: 'quick-prepass' });
   } catch (e) { console.warn('[mock2] pre-pass ledger write failed:', e?.message); }
   const parsed = parsePrepassReply(res.text);
   if (!parsed) return null;
@@ -1111,7 +1111,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         usage_schema_version: USAGE_SCHEMA_VERSION,
       });
     } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
-    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+    try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model: result.modelUsed || ready.model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents, wallClockMs: 0, step: 'build-runner' }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
 
     // Only record a NON-EMPTY assistant turn. An empty one (no text, no tool
     // calls) serializes to empty message content, which Anthropic/OpenAI reject —

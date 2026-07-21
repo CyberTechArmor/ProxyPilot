@@ -1472,4 +1472,19 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Per-step spend attribution for the Harness page: which pipeline step
+    // (registry id from harness-steps-logic.js) a ledger entry belongs to.
+    // Old rows stay null — fine, the rollup groups only non-null. Indexed for
+    // the 7-day GROUP BY step rollup the harness-steps API serves.
+    version: 541,
+    name: 'mock2_quota_ledger_step',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_quota_ledger ADD COLUMN step TEXT;
+        CREATE INDEX idx_mock2_quota_ledger_step_created
+          ON mock2_quota_ledger (step, created_at);
+      `);
+    },
+  },
 ];

@@ -11,7 +11,11 @@ File references are the implementation anchors, not reading assignments.
 
 The full operator-facing companion — every prompt contract quoted, every
 resolution chain spelled out — is `admin/backend/src/mock2/harness-guide.md`,
-served editable on the dashboard at Projects → Harness guide.
+served editable on the dashboard at Projects → Harness. The machine-readable
+registry of these steps is `admin/backend/src/mock2/harness-steps-logic.js`
+(one entry per model-bearing row here; this doc mirrors it), and the
+Harness page's Controls tab writes a per-step override layer on top of the
+resolution described in §0 (step override wins over lane tuning, env, slot).
 
 ## 0. How a step's model is resolved (four layers, later wins)
 

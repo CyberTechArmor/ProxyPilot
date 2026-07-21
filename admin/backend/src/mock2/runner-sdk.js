@@ -347,7 +347,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
           usage_schema_version: USAGE_SCHEMA_VERSION,
         });
       } catch (e) { console.warn('[mock2] canonical usage write failed:', e?.message); }
-      try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0 }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
+      try { insertLedgerEntry({ projectId, cycleId: cycle.id, connectorId: ready.connector.id, model, inputTokens: u.inputTokens, outputTokens: u.outputTokens, costCents: cost, wallClockMs: 0, step: 'build-runner' }); } catch (e) { console.warn('[mock2] ledger write failed:', e?.message); }
       logEvent('ai_message', { role: 'assistant', content: round1.summary || '', meta: { round, num_turns: round1.numTurns, input_tokens: u.inputTokens, output_tokens: u.outputTokens, cache_read_tokens: u.cacheReadTokens, cache_write_tokens: u.cacheWriteTokens, cost_cents: cost, total_cost_usd: round1.totalCostUsd, sdk_error: round1.error || null } });
       touchLock(projectId, holder);
 

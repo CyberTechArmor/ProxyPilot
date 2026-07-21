@@ -38,6 +38,16 @@ breakers (soft pause, turn backstop, no-progress breaker) are unchanged.
 Budget figures quoted in the step sections below describe the historical
 shipped caps and now read as sizing context only.
 
+**Shipped per-step defaults were raised** (operator decision, 2026-07): the
+concept/define/utility steps now default to **Claude Opus 4.8 at high
+effort** (concept chat, design-doc adjust, design-token extraction,
+chat→prompt distill; inventory extraction runs Opus at **medium**), the rule
+audit, tweak/continuation, pre-pass/split-probe, Explain, checklist
+post-pass, and Ask default to **high** effort, and the mockup render keeps
+its Fable 5 deep/iteration split. The Controls tab shows the live resolved
+values; effort/model figures in the step sections below reflect the original
+shipped behavior.
+
 ---
 
 ## The pipeline at a glance

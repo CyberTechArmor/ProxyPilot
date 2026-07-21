@@ -64,6 +64,7 @@ import {
 } from './design-template-logic.js';
 import { callModelTurn } from './model-client.js';
 import { callStepTurn, getHarnessStepTuning, stepSystemPrompt } from './harness-steps.js';
+import { modelMaxOutputTokens } from './routing-logic.js';
 import { resolveStepTuning } from './harness-steps-logic.js';
 import { runMockupChecks, mockupChecksNote } from './mockup-checks-logic.js';
 import { startBuild } from './audit.js';
@@ -183,7 +184,7 @@ export async function adjustDesignPreset({ presetKey, instruction }) {
   if (!ready.ok) return { ok: false, error: ready.reason };
   const system = stepSystemPrompt('design-doc-adjust', DESIGN_DOC_ADJUST_SYSTEM_PROMPT, {});
   const user = `Current design "${preset.name}" (${preset.description || 'no description'}):\n${JSON.stringify(preset.tokens, null, 2)}\n\nAdjustment instruction: ${String(instruction || '').slice(0, 1000)}\n\nReturn the full adjusted token set as strict JSON.`;
-  const tuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('chat'));
+  const tuned = applyLaneTuning({ model: 'claude-opus-4-8', effort: 'high', thinking: null }, getLaneTuning('chat'));
   // Transcript turns use `text` (anthropicMessages reads turn.text — a
   // `content` key maps to an EMPTY text block, which the API rejects when the
   // cache breakpoint lands on it).
@@ -546,7 +547,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
   // maxTokens covers the reply + the generate_mockup tool call AND, on capable
   // models, adaptive thinking (routing turned it on; it shares the budget) —
   // sized up from the pre-thinking 4000 so the tool call can't be squeezed out.
-  const chatTuned = applyLaneTuning({ model: ready.chat.model, effort: null, thinking: null }, getLaneTuning('chat'));
+  const chatTuned = applyLaneTuning({ model: 'claude-opus-4-8', effort: 'high', thinking: null }, getLaneTuning('chat'));
   const chatRes = await callStepTurn('concept-chat', {
     connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: chatTuned.model,
     system, tools: planMode ? [] : CONCEPT_CHAT_TOOLS, transcript,
@@ -736,7 +737,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
           system: editSystem,
           tools: [],
           transcript: [firstTurn],
-          timeoutMs: 300000, effort: 'low', thinking: 'off',
+          timeoutMs: 300000, effort: 'high', thinking: 'off',
         });
         if (res.ok) {
           recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: res.modelUsed || editModel, usage: res.usage, step: 'mockup-tweak' });
@@ -753,7 +754,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
                 system: editSystem,
                 tools: [],
                 transcript: [firstTurn, { role: 'assistant', text: res.text }, { role: 'user', text: buildTweakRetryMessage(failure) }],
-                timeoutMs: 300000, effort: 'low', thinking: 'off',
+                timeoutMs: 300000, effort: 'high', thinking: 'off',
               });
               if (retry.ok) {
                 recordSpend({ projectId, cycleId: cycle.id, connector: ready.mockup.connector, model: retry.modelUsed || editModel, usage: retry.usage, step: 'mockup-tweak' });
@@ -852,7 +853,7 @@ async function runConceptTurn({ project, cycle, ready, framework, user, actingAs
             { role: 'assistant', text: doc },
             { role: 'user', text: buildContinuationInstruction(doc) },
           ],
-          timeoutMs: 600000, effort: 'low', thinking: 'off',
+          timeoutMs: 600000, effort: 'high', thinking: 'off',
           onDelta: onMockupDelta,
         });
         if (!res.ok) return { ok: false, error: res.error };
@@ -1135,9 +1136,10 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // approval is a hard gate — ONE automatic retry on a parse failure before we
   // make the Builder redo it.
   const extractCall = () => callStepTurn('inventory-extraction', {
-    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+    connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-4-8',
     system: stepSystemPrompt('inventory-extraction', buildInventoryExtractionPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildInventoryExtractionTask({ html, projectName: project.name }) }],
+    effort: 'medium',
     thinking: 'off',
   });
   let parsed;
@@ -1193,9 +1195,10 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // so this never blocks approval.
   try {
     const tokRes = await callStepTurn('design-token-extraction', {
-      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: ready.chat.model,
+      connector: ready.chat.connector, apiKey: ready.chat.apiKey, model: 'claude-opus-4-8',
       system: stepSystemPrompt('design-token-extraction', buildDesignTokenExtractionPrompt(), {}), tools: [],
       transcript: [{ role: 'user', text: buildDesignTokenExtractionTask({ html, projectName: project.name }) }],
+      effort: 'high',
       // Small structured-JSON output — thinking off so the tiny budget isn't
       // consumed by reasoning (best-effort: parseDesignTokens falls back to
       // framework defaults on any failure, so this never blocks approval).

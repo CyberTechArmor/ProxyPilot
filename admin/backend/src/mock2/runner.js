@@ -220,7 +220,7 @@ async function runQuickPrepass({ project, cycle, ready, routing }) {
   const res = await callStepTurn('quick-prepass', {
     connector: ready.connector, apiKey: ready.apiKey, model,
     system: stepSystemPrompt('quick-prepass', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
-    timeoutMs: 120000, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'high', thinking: 'off',
   });
   if (!res.ok) return null;
   try {
@@ -267,7 +267,7 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
   const call = callStepTurn('split-probe', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
     system: stepSystemPrompt('split-probe', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
-    timeoutMs: 120000, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'high', thinking: 'off',
   });
   const res = await Promise.race([
     call,
@@ -283,14 +283,14 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
 // one cheap turn converting a chat message (an Ask answer's improvement list, a
 // review's findings) into a well-formed quick-update instruction. Bounded and
 // fail-open like probeSplitProposal: null on error/timeout/unusable output.
-export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 25000 } = {}) {
+export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 60000 } = {}) {
   const ready = buildRunnerReady();
   if (!ready.ok) return null;
   const call = callStepTurn('chat-distill', {
-    connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
+    connector: ready.connector, apiKey: ready.apiKey, model: 'claude-opus-4-8',
     system: stepSystemPrompt('chat-distill', buildDistillSystemPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
-    timeoutMs: 120000, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'high', thinking: 'off',
   });
   const res = await Promise.race([
     call,

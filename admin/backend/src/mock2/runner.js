@@ -1341,6 +1341,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             }
             if (!parity.ok) {
               logEvent('note', { role: 'system', content: `Action parity: still missing after rejection (accepted with warning): ${parity.missing.map((a) => a.label).join(', ')}` });
+              // The warning must reach the OPERATOR, not just the log —
+              // request 92 shipped with five contract actions still missing
+              // and only a log line to show for it.
+              try {
+                insertMessage({
+                  projectId, kind: 'system', cycleId: cycle.id,
+                  body: `Heads-up — ${parity.missing.length} action${parity.missing.length === 1 ? '' : 's'} from the approved design ${parity.missing.length === 1 ? 'is' : 'are'} still not in the app after this build: ${parity.missing.slice(0, 8).map((a) => `"${a.label}"`).join(', ')}. Send a build to add them (or ask for them to be badged "Not built yet").`,
+                });
+              } catch (e) { console.warn('[mock2] parity warning message failed:', e?.message); }
             } else if (parity.present.length) {
               logEvent('note', { role: 'system', content: `Action parity: all ${parity.present.length} inventory mutation actions surfaced in the UI source.` });
             }

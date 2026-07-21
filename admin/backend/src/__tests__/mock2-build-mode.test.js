@@ -38,12 +38,12 @@ test('quick mode: runs NO gate battery (the deploy pipeline is the backstop)', (
   assert.deepEqual(filterGatesForBuildMode(gates, 'quick'), []);
 });
 
-test('quickRoutingDecision: fast model at HIGH effort (quality default), env-overridable', () => {
+test('quickRoutingDecision: fast model at MEDIUM effort (cost default — a quick update is one small change), env-overridable', () => {
   const d = quickRoutingDecision({}, 'claude-opus-4-8');
   assert.equal(d.model, DEFAULT_FAST_MODEL);
-  assert.equal(d.effort, 'high');
+  assert.equal(d.effort, 'medium');
   assert.equal(d.build_mode, 'quick');
-  assert.equal(quickRoutingDecision({ MOCK2_QUICK_EFFORT: 'medium' }, '').effort, 'medium');
+  assert.equal(quickRoutingDecision({ MOCK2_QUICK_EFFORT: 'high' }, '').effort, 'high');
   assert.equal(quickRoutingDecision({ MOCK2_FAST_MODEL: 'off' }, 'slot-model').model, 'slot-model');
 });
 

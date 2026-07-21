@@ -76,6 +76,60 @@ test('the checker catches the original defect shape', () => {
   assert.deepEqual(violations(fixed), []);
 });
 
+// Exported names of one module source (functions, consts, classes, and
+// export-list entries, aliased names counted by their exported name).
+function exportedNames(src) {
+  const names = new Set();
+  for (const m of src.matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)) names.add(m[1]);
+  for (const m of src.matchAll(/export\s+(?:const|let|var|class)\s+(\w+)/g)) names.add(m[1]);
+  for (const m of src.matchAll(/export\s*\{([^}]*)\}/g)) {
+    for (const part of m[1].split(',')) {
+      const n = part.trim().split(/\s+as\s+/).pop().trim();
+      if (n) names.add(n);
+    }
+  }
+  return names;
+}
+
+// LEARNINGS #14: design-review.js shipped importing costCentsForUsage from
+// './usage-logic.js', which never exported it — the module could not LOAD,
+// so every dynamic import of it (annotate screenshot, polish pass) rejected
+// at runtime; before the crash net that rejection killed the backend.
+// Static named imports between mock2 modules must name real exports.
+test('every same-dir named import resolves to a real export', () => {
+  const files = readdirSync(MOCK2_DIR, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.js'))
+    .map((e) => e.name);
+  const exportsByFile = new Map();
+  const getExports = (name) => {
+    if (!exportsByFile.has(name)) {
+      try { exportsByFile.set(name, exportedNames(readFileSync(path.join(MOCK2_DIR, name), 'utf8'))); }
+      catch { exportsByFile.set(name, null); }
+    }
+    return exportsByFile.get(name);
+  };
+  // Template factories embed the GENERATED app's imports inside template
+  // strings — those reference the scaffolded app's own modules, not ours.
+  const TEMPLATE_FACTORIES = new Set(['scaffold.js', 'scaffold-auth.js', 'template.js', 'mockup-template.js']);
+  const bad = [];
+  for (const name of files) {
+    if (TEMPLATE_FACTORIES.has(name)) continue;
+    const src = readFileSync(path.join(MOCK2_DIR, name), 'utf8');
+    // The name group forbids braces and quotes so one match can never span
+    // two import statements (a from-elsewhere import followed by a same-dir
+    // one used to blend into a single false match).
+    for (const m of src.matchAll(/import\s*\{([^{}'"]*?)\}\s*from\s*['"]\.\/([\w.-]+\.js)['"]/g)) {
+      const target = getExports(m[2]);
+      if (!target) continue; // missing file is a different failure class
+      for (const part of m[1].split(',')) {
+        const source = part.trim().split(/\s+as\s+/)[0].trim();
+        if (source && !target.has(source)) bad.push(`${name}: imports '${source}' from ./${m[2]} which does not export it`);
+      }
+    }
+  }
+  assert.deepEqual(bad, []);
+});
+
 test('every mock2 module imports the wired helpers it calls', () => {
   const files = readdirSync(MOCK2_DIR, { withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.js'))

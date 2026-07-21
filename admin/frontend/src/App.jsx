@@ -21,6 +21,7 @@ import FrameworkVersions from '@/pages/FrameworkVersions';
 import ComponentLibrary from '@/pages/ComponentLibrary';
 import AdminQueue from '@/pages/AdminQueue';
 import DesignSpecs from '@/pages/DesignSpecs';
+import HarnessGuide from '@/pages/HarnessGuide';
 import Notifications from '@/pages/Notifications';
 import AddDomain from '@/pages/AddDomain';
 import DomainProvisioning from '@/pages/DomainProvisioning';
@@ -109,6 +110,7 @@ function App() {
         <Route path="projects/components" element={<ComponentLibrary />} />
         <Route path="projects/design" element={<DesignSpecs />} />
         <Route path="projects/queue" element={<AdminQueue />} />
+        <Route path="projects/harness" element={<HarnessGuide />} />
         <Route path="projects/:id" element={<ProjectDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

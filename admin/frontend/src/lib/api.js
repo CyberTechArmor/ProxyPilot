@@ -1211,6 +1211,11 @@ export const api = {
   // Global thinking switch — 'off' disables thinking for every lane at once.
   mock2SetGlobalThinking: (thinking) =>
     request('/mock2/settings/global-thinking', { method: 'POST', body: JSON.stringify({ thinking }) }),
+  // Harness guide (admin-only) — the operator-editable document explaining
+  // every pipeline step. Save with content '' to reset to the shipped text.
+  mock2GetHarnessGuide: () => request('/mock2/settings/harness-guide'),
+  mock2SetHarnessGuide: (content) =>
+    request('/mock2/settings/harness-guide', { method: 'POST', body: JSON.stringify({ content }) }),
   // Fast code model — '' platform default (sonnet), 'off' = the build_runner
   // slot model builds everything, or an explicit model id.
   mock2SetFastModel: (model) =>

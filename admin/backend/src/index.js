@@ -119,6 +119,13 @@ const cspDirectives = {
 // still forbids the admin app itself from being embedded anywhere.
 if (mock2Gate.enabled) {
   cspDirectives.frameSrc = ["'self'", 'https:'];
+  // The annotate-on-screenshot dialog fetches the captured PNG with
+  // credentials and displays it through URL.createObjectURL — img-src must
+  // allow blob: or the browser silently renders the broken-image icon
+  // (caught the first time the capture path ever actually ran; see
+  // LEARNINGS #14 for why it never ran before). Mock2-only so a disabled
+  // host's CSP stays byte-for-byte unchanged.
+  cspDirectives.imgSrc = ["'self'", 'data:', 'blob:'];
 }
 
 app.use(helmet({

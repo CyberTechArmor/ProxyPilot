@@ -585,6 +585,18 @@ app.use((err, req, res, next) => {
 sweepStaleSessions();
 setInterval(sweepStaleSessions, 6 * 60 * 60 * 1000).unref();
 
+// Crash safety net (LEARNINGS #13): Node exits on an unhandled rejection,
+// and a stray async error from a driver (the annotate screenshot's Playwright
+// launch was the caught-in-the-wild case) then kills the whole backend —
+// orphaning every running build cycle ("orphaned by restart"). A server that
+// hosts long-running build state logs loudly and keeps serving instead.
+process.on('unhandledRejection', (reason) => {
+  console.error('[backend] UNHANDLED REJECTION (kept alive):', reason?.stack || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[backend] UNCAUGHT EXCEPTION (kept alive):', err?.stack || err);
+});
+
 // Wrap the express app in an http.Server so we can attach a WebSocket
 // upgrade handler on the same port. The streaming-terminal route uses
 // `noServer` mode and registers its own `upgrade` listener on `server`,

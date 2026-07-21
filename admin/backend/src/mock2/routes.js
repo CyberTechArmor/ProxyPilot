@@ -2641,7 +2641,15 @@ export function createMock2Router() {
       path: String(req.query.path || '/'),
       width: Number(req.query.w) || 390,
     });
-    if (!shot.ok) return res.status(503).json({ error: shot.error });
+    if (!shot.ok) {
+      const cur = latestCycle(project.id);
+      const busy = cur && ['queued', 'estimating', 'running'].includes(cur.status);
+      const deploying = cur && cur.deploy_status === 'deploying';
+      const hint = busy || deploying
+        ? ' A build is in progress — the app restarts when it deploys; use Refresh once the build finishes.'
+        : '';
+      return res.status(503).json({ error: `${shot.error}${hint}` });
+    }
     res.set('Cache-Control', 'no-store').type('png').send(shot.buffer);
   });
 

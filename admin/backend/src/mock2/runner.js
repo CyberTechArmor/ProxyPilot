@@ -91,6 +91,7 @@ import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smo
 import {
   ACCEPTANCE_PATH, classifyTaskKind, parseAcceptance, batteryHasRedTestGate,
   acceptanceVerdict, summaryOverclaims, anomalySignals, acceptanceRecord, codeChangedFiles,
+  mutationActions, actionParityReport,
 } from './acceptance-logic.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -107,6 +108,7 @@ import { CONTRACT_FIXTURE_PATH_RE } from './scaffold.js';
 import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-scan.js';
 import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
+import { crudRulesFloorSection } from './rules-pack-logic.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -902,7 +904,14 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // flagged mistake is corrected once, not re-flagged build after build.
   let feedbackSection = '';
   try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { /* optional */ }
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  // MVP-path floor (project-32 ratchet): the fast path skips the rule
+  // interview, and exactly the rules an interview would set (editability,
+  // status mutability, deletion policy) are what shipped missing. Fast
+  // builds get the standard CRUD rules pack injected as a binding floor —
+  // the inventory/instruction still outrank it where they explicitly
+  // deviate. Full builds are unchanged (their interview owns the rules).
+  const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no
@@ -984,6 +993,10 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // carry before finish is accepted.
   const taskKind = classifyTaskKind(cycle.instruction);
   let redTestObserved = false;
+  // Action-parity gate state (ratchet 3): reject a finish at most once for
+  // silently-missing inventory mutations — a second finish proceeds with a
+  // loud note instead of looping.
+  let parityRejected = false;
   // An enforced reproduce-first waiver carried on the resume context (admin-
   // granted upstream). Applied at the acceptance verdict — the real enforcement
   // layer — and stamped into the acceptance record, never merely narrated.
@@ -1297,6 +1310,43 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         }
         continue;
       }
+      // ACTION PARITY (ratchet 3): on the inventory-implementation build,
+      // every mutation action in the contract must be SURFACED in the app's
+      // UI source — working control or a visible "Not built yet" badge both
+      // put the label in the source; a label found NOWHERE is silently
+      // missing and rejects the finish once (with the list). Deterministic:
+      // one container grep per label over src/ + public/.
+      if (/approved design inventory/i.test(String(cycle.instruction || ''))) {
+        try {
+          const invRead = await readFileInContainer(containerName, 'state/inventory.json');
+          const inventory = invRead.ok ? JSON.parse(invRead.content) : null;
+          const actions = inventory && !inventory.skipped ? mutationActions(inventory) : [];
+          if (actions.length) {
+            const script = ['cd "' + APP_DIR + '"']
+              .concat(actions.map((a) => `l=$(printf '%s' '${b64(a.label)}' | base64 -d); if grep -rqiF -- "$l" src public app views 2>/dev/null; then printf 'FOUND\\t%s\\n' "$l"; fi`))
+              .join('\n');
+            const gr = await containerSh(containerName, script, { timeoutMs: 60000 });
+            const found = new Set(String(gr.stdout || '').split('\n').filter((x) => x.startsWith('FOUND\t')).map((x) => x.slice(6).trim().toLowerCase()));
+            const parity = actionParityReport(actions, found);
+            if (!parity.ok && !parityRejected) {
+              parityRejected = true;
+              const list = parity.missing.slice(0, 10).map((a) => `"${a.label}" (${a.screen})`).join(', ');
+              transcript.push({
+                role: 'tool', toolCallId: termId, name: termName,
+                content: `Not finished — action parity: these inventory mutation actions are in the approved contract but appear NOWHERE in the app's UI source: ${list}. Implement each one, or render its control disabled with a visible "Not built yet" badge — never silently drop a contract action. Then re-call finish.`,
+              });
+              logEvent('note', { role: 'system', content: `Finish rejected — action parity: silently missing: ${list}` });
+              touchLock(projectId, holder);
+              continue;
+            }
+            if (!parity.ok) {
+              logEvent('note', { role: 'system', content: `Action parity: still missing after rejection (accepted with warning): ${parity.missing.map((a) => a.label).join(', ')}` });
+            } else if (parity.present.length) {
+              logEvent('note', { role: 'system', content: `Action parity: all ${parity.present.length} inventory mutation actions surfaced in the UI source.` });
+            }
+          }
+        } catch (e) { console.warn('[mock2] action-parity gate failed open:', e?.message); }
+      }
       // Stamp the machine-readable acceptance state (migration 517) so "gates
       // green" and "acceptance demonstrated" are distinguishable in the record —
       // including the verified no-op flag (the loop-termination signal) and the
@@ -1488,9 +1538,29 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // terminal: nothing changed, so re-running install/build/restart adds risk
       // and time for zero benefit — the existing deploy keeps serving.
       const noOpCycle = codeChanged.length === 0;
+      // ANOMALY TRIPWIRE — BEFORE deploy (ratchet 6; it used to fire as a
+      // post-deploy note, i.e. after the under-verified change was live).
+      // A bug-fix that closed at a fraction of its estimate with no red
+      // test and no test file touched now HOLDS the deploy: the cycle
+      // still succeeds (work + record kept, gates already green), the flag
+      // is raised for review, and the operator releases it with the
+      // existing Deploy action once satisfied. Conservative option: hold,
+      // never auto-rollback; the previous deploy keeps serving.
+      let anomalyHold = null;
+      try {
+        const preAnomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: changedThisCycle, redTestObserved });
+        if (preAnomaly.flag && !noOpCycle) anomalyHold = preAnomaly;
+      } catch { /* tripwire must not break the finish path */ }
+      if (anomalyHold) {
+        const detail = `${project.name}: cycle ${cycle.id} looks under-verified — ${anomalyHold.reasons.join('; ')}. Deploy is HELD: review the change record, then press Deploy to release it.`;
+        safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly-hold:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
+        logEvent('note', { role: 'system', content: `Anomaly tripwire — deploy HELD for human review (was: post-deploy note): ${anomalyHold.reasons.join('; ')}`, meta: { anomaly: anomalyHold.reasons, held: true } });
+      }
       const deployed = noOpCycle
         ? { ok: true, skipped: true, noop: true }
-        : await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
+        : anomalyHold
+          ? { ok: true, skipped: true, held: true }
+          : await deployStage({ cycle: getCycle(cycle.id), project, containerName, holder });
       if (!deployed.ok) {
         logEvent('deploy', { role: 'system', content: deployed.error || 'deploy failed', meta: { ok: false } });
         finishCycle(cycle.id, { status: 'failed', error: deployed.error });
@@ -1516,7 +1586,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // Every run/skip + reason is logged. With the connectors off and http not
       // enforced (defaults), ok is always true → the success path is unchanged.
       if (!deployed.skipped) {
-        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, logEvent, env: process.env });
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env });
         if (!smoke.ok) {
           const detail = smokeFailSummary(smoke.report);
           finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });
@@ -1593,7 +1663,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         // to the spec's chore/feature kind, so a legitimate no-op is not nagged as
         // an under-verified bug fix on every run.
         const anomaly = anomalySignals({ kind: accState.kind, usedTokens: usedTokensThisRun, estTokens: cycle.est_tokens, changedFiles: commitFiles, redTestObserved });
-        if (anomaly.flag) {
+        if (anomaly.flag && !anomalyHold) {
           const detail = `${project.name}: cycle ${cycle.id} succeeded but looks under-verified — ${anomaly.reasons.join('; ')}. Review the change record and the live behavior.`;
           safeRaise({ kind: 'flag', project_id: projectId, dedupe_key: `mock2-anomaly:${cycle.id}`, ref_table: 'mock2_cycles', ref_id: cycle.id, detail });
           logEvent('note', { role: 'system', content: `Anomaly tripwire raised for human review: ${anomaly.reasons.join('; ')}`, meta: { anomaly: anomaly.reasons } });
@@ -1605,9 +1675,11 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         phase: deployed.skipped ? 'succeeded' : 'serving',
         message: deployed.noop
           ? 'Nothing left to do — the work is already complete and verified; the existing deploy keeps serving.'
-          : deployed.skipped
-            ? 'Change complete — gates green, checkpoint recorded.'
-            : 'Deployed — gates green and the app is live on its URL.',
+          : deployed.held
+            ? 'Change complete but deploy HELD — the anomaly tripwire wants a human look (under-verified change). Review the change record, then press Deploy to release it; the previous deploy keeps serving.'
+            : deployed.skipped
+              ? 'Change complete — gates green, checkpoint recorded.'
+              : 'Deployed — gates green and the app is live on its URL.',
         commit: record?.commit_sha || null,
       });
       void notifyCycleComplete({ project: { id: projectId, name: project.name }, cycle: getCycle(cycle.id), outcome: 'succeeded' });

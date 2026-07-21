@@ -46,6 +46,7 @@ import {
   CONCEPT_CHAT_TOOLS, buildConceptChatSystemPrompt, buildMockupSystemPrompt, buildMockupTask,
   buildInventoryExtractionPrompt, buildInventoryExtractionTask,
   extractMockupHtml, isPlausibleMockup, parseInventory, inventoryCounts,
+  completeInventoryCrud, lintInventory,
   classifyConceptTurn, buildConceptTranscript, conversationRecap,
   estimateConceptTurnTokens, estimateInventoryTokens,
   mockupIdForCycle, mockupFileName, MOCKUP_CURRENT, INVENTORY_PATH,
@@ -1094,6 +1095,15 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
     setJob(projectId, { phase: 'failed', message: parsed.error });
     return scheduleJobCleanup(projectId);
   }
+  // CRUD completion + completeness lint (project-32 ratchet): a static
+  // mockup can't demonstrate mutation flows, so the implied edit/delete/
+  // status actions are ADDED (marked inferred) before the inventory becomes
+  // the build contract, and suspicious shapes are surfaced on the approval
+  // message. Applies to NEW approvals only — existing inventories are never
+  // rewritten.
+  const crud = completeInventoryCrud(parsed.inventory);
+  parsed = { ok: true, inventory: crud.inventory };
+  const invWarnings = lintInventory(crud.inventory);
   const counts = inventoryCounts(parsed.inventory);
 
   // 2) Write state/inventory.json (the concept-stage exit artifact) and ARCHIVE
@@ -1183,7 +1193,15 @@ async function runDesignApproval({ project, cycle, ready, framework, user, actin
   // them as scoped background builds. Never blocks approval.
   try { replaceScreenPlan(projectId, parsed.inventory); } catch (e) { console.warn('[mock2] screen plan seed failed:', e?.message); }
 
-  insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approved — the design inventory (${counts.screens} screen${counts.screens === 1 ? '' : 's'}) is saved to the repository and Build is now unlocked. The original mockup is archived at the design preview so you can always see where the design started.` });
+  {
+    const crudNote = crud.added.length
+      ? ` ${crud.added.length} implied mutation action${crud.added.length === 1 ? '' : 's'} (edit/delete/status) ${crud.added.length === 1 ? 'was' : 'were'} added to the inventory — static mockups can't show them, but the built app needs them (e.g. ${crud.added.slice(0, 3).map((a) => `"${a.label}"`).join(', ')}).`
+      : '';
+    const lintNote = invWarnings.length
+      ? `\n\n⚠ Inventory review: ${invWarnings.slice(0, 4).join('; ')}${invWarnings.length > 4 ? `; +${invWarnings.length - 4} more` : ''}. Mention anything intentional in the build request so it isn't "fixed".`
+      : '';
+    insertMessage({ projectId, kind: 'system', cycleId: cycle.id, body: `Design approved — the design inventory (${counts.screens} screen${counts.screens === 1 ? '' : 's'}) is saved to the repository and Build is now unlocked.${crudNote} The original mockup is archived at the design preview so you can always see where the design started.${lintNote}` });
+  }
   setJob(projectId, { phase: 'approved', message: 'Design approved — Build unlocked.', kind: 'approval', cycleId: cycle.id, changeSeq: record?.seq || null });
   console.log(`[mock2] project ${projectId} design approved (inventory ${counts.screens} screens, change record ${record?.seq ?? '—'})`);
   scheduleJobCleanup(projectId);

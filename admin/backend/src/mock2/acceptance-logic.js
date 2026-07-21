@@ -167,8 +167,14 @@ export function acceptanceVerdict({
 
 // Extract path-like claims from a summary: tokens that look like repo paths or
 // filenames ("src/adp/tls.ts", "public/app.js", "connection.repro.test.ts").
+const FILE_EXT_RE = /\.(?:ts|tsx|js|jsx|mjs|cjs|sql|html|css|scss|json|ya?ml|md)$/i;
+
 export function extractSummaryPathClaims(summary) {
-  const s = String(summary || '');
+  // Brace shorthand ("src/x/{a,b,c}.ts") is EXPANDED before token scanning —
+  // the project-32 false positive left fragments like "routes/service/schema"
+  // that matched nothing and rejected an accurate summary.
+  let s = String(summary || '').replace(/([A-Za-z0-9_./-]*)\{([^{}]+)\}([A-Za-z0-9_./-]*)/g,
+    (_, pre, inner, post) => inner.split(',').map((x) => `${pre}${x.trim()}${post}`).join(' '));
   const out = new Set();
   const re = /(?:^|[\s`'"(])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|sql|html|css|scss|json|ya?ml|md))(?=$|[\s`'"),.:;!?])/g;
   let m;
@@ -176,6 +182,26 @@ export function extractSummaryPathClaims(summary) {
     const tok = m[1].replace(/^\.\//, '');
     // Skip bare version-ish tokens and URLs.
     if (/^\d+(\.\d+)*$/.test(tok) || /:\/\//.test(tok)) continue;
+    const segs = tok.split('/');
+    const extSegs = segs.filter((x) => FILE_EXT_RE.test(x));
+    if (extSegs.length > 1) {
+      // Slash-JOINED file list ("public/app.html/app.css/app.js" — prose, not
+      // a path): split into individual files, non-first ones by basename.
+      const leadDirs = segs.slice(0, segs.indexOf(extSegs[0]));
+      out.add([...leadDirs, extSegs[0]].join('/'));
+      for (const x of extSegs.slice(1)) out.add(x);
+      continue;
+    }
+    // A slash run whose LAST segment has no file extension is either a
+    // directory claim (verified against changed paths by summaryOverclaims)
+    // or plain hyphen/slash prose ("blocked/stale/promote-ready"). Word runs
+    // where NO segment looks like a file or a known source dir are prose —
+    // never a claim to reject a summary over.
+    if (!FILE_EXT_RE.test(segs[segs.length - 1])
+      && !segs.some((x) => FILE_EXT_RE.test(x))
+      && !/^(?:src|public|app|lib|server|client|migrations|routes|components|pages|views|tests?|__tests__|scripts|state|docs)$/.test(segs[0])) {
+      continue;
+    }
     out.add(tok);
   }
   return [...out];
@@ -193,7 +219,10 @@ export function summaryOverclaims(summary, changedFiles = []) {
     const c = claim.replace(/^\.\//, '');
     const covered = changed.some((f) => f === c || f.endsWith(`/${c}`))
       || (!c.includes('/') && basenames.has(c))
-      || changed.some((f) => c.endsWith(`/${f}`));
+      || changed.some((f) => c.endsWith(`/${f}`))
+      // Directory claim ("src/opportunities"): covered when changed files
+      // live under it (summaries legitimately name the folder they filled).
+      || changed.some((f) => f.startsWith(`${c}/`));
     if (!covered) unmatched.push(claim);
   }
   return { ok: unmatched.length === 0, unmatched };
@@ -260,4 +289,61 @@ export function acceptanceRecord({
       ? (!!redTestObserved || basis === 'not_required_empty_diff' || basis === 'waived_by_operator')
       : true,
   };
+}
+
+// ---- action-parity gate (harness ratchet 3, project-32 finding 1) ----
+// The inventory is the build contract, but nothing diffed its actions
+// against what actually shipped — project 32's inventory-driven build
+// implemented create flows and silently dropped nothing it was given...
+// because the inventory itself was incomplete. Now that CRUD completion
+// puts mutations INTO the inventory, this gate makes silently dropping
+// them impossible: every mutation action must either appear in the app's
+// UI source (its label is user-visible — implemented or explicitly badged
+// "Not built yet") or the finish is rejected with the missing list.
+
+const MUTATION_LABEL_RE = /^(?:\+\s*)?(?:new|add|create|edit|update|rename|delete|remove|archive|change|mark|complete|reopen|promote|assign|unblock|resolve)\b/i;
+
+// Normalize an inventory label to a greppable literal: parentheticals and
+// bracket placeholders stripped, whitespace collapsed. Returns '' when the
+// remainder is too short to match meaningfully.
+export function normalizeActionLabel(label) {
+  const s = String(label || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/^\s*\+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length >= 4 ? s : '';
+}
+
+// The subset of inventory actions the parity gate enforces: mutations.
+// Navigation/expand/filter labels are often descriptions ("Card click"),
+// not button text — enforcing them would be noise. Mutations are the class
+// that silently vanished. Returns [{ label, screen }], deduped by label.
+export function mutationActions(inventory) {
+  const out = [];
+  const seen = new Set();
+  for (const sc of inventory?.screens || []) {
+    for (const a of sc.actions || []) {
+      if (!MUTATION_LABEL_RE.test(String(a.label || ''))) continue;
+      const label = normalizeActionLabel(a.label);
+      if (!label || seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      out.push({ label, screen: sc.name });
+    }
+  }
+  return out;
+}
+
+// Classify against the labels actually found in UI source (case-insensitive
+// set from the orchestrator's container grep). A label present in the UI is
+// surfaced either way — working control or a visible "Not built yet" badge;
+// a label present NOWHERE is silently missing, which fails the gate.
+export function actionParityReport(actions = [], foundLabelsLower = new Set()) {
+  const present = [];
+  const missing = [];
+  for (const a of actions) {
+    (foundLabelsLower.has(a.label.toLowerCase()) ? present : missing).push(a);
+  }
+  return { ok: missing.length === 0, present, missing };
 }

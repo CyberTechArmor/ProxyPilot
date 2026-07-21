@@ -54,6 +54,7 @@ Any change under `admin/frontend/src/pages/` or `admin/frontend/src/components/`
 ## Gotchas
 
 - `docs/known-issues.md` is the punch list of parked follow-ups; check it before diagnosing "broken" behavior.
+- `LEARNINGS.md` is the harness ratchet registry: every human-caught defect in generated output must be triaged into a template, a rule, or a machine check and recorded there (see its triage guidance). `HARNESS-INVESTIGATION.md` holds the evidence method.
 - Operator scripts (`install.sh`, `update.sh`) are large and load-bearing — `update.sh` handles DB backup/restore guards and retro-fits config (e.g., WireGuard MTU via `scripts/patch-wg-mtu.sh`). Generated WireGuard configs pin MTU 1280, overridable via `PROXYPILOT_VPN_MTU`.
 - `var/lib/` in the repo mirrors runtime state layout (`/var/lib/proxypilot/` on a real install: backups, inventory, CVE inbox).
 - Deeper feature docs live in `docs/features/` (terminal, backups, security) and `docs/core/` (architecture, phase plans).

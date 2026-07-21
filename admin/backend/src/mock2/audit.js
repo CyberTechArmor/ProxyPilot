@@ -290,7 +290,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
       projectId, kind: 'system', cycleId: mvpCycle.id,
       body: quick
         ? 'Quick update — one small scoped change, no gate battery, straight to deploy (the deploy build + health check are the backstop). Run a full Build or the Production check later for the complete battery.'
-        : 'MVP build — skipping the rule interview and the gate battery to get a testable first version up fast (the deploy build + health check are the backstop). Run a full Build afterwards for the rule questions, per-rule tests, and acceptance checks.',
+        : 'MVP build — skipping the rule interview and the gate battery to get a testable first version up fast (the deploy build + health check are the backstop). The standard CRUD rules pack applies as the floor: created records are editable and deletable, statuses fully cyclable, deletes confirm-guarded, no pre-applied filters on load. Run a full Build afterwards to confirm deviations, per-rule tests, and acceptance checks.',
     });
     setJob(projectId, { phase: 'building', message: quick ? 'Quick update starting…' : 'MVP build starting — installing standard components, then building.', cycleId: mvpCycle.id, startedAt: Date.now() });
     proceedToBuild({

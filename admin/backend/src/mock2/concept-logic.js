@@ -339,6 +339,12 @@ Hard requirements:
   default. Targeted revisions later re-render ONE section, so keep each
   screen's markup self-contained inside its section (shared styles stay in
   the document <style>).
+- DEMO-STATE ANNOTATION: any element you render in a pressed/active/selected
+  state purely to DEMONSTRATE it (an engaged filter, an active attention chip,
+  an expanded-for-show panel) must carry data-demo-state="<state name>". The
+  un-annotated document is the screen's true resting state — the inventory
+  extractor and the build treat it that way, so a demo left unannotated
+  becomes a wrong production default.
 - RENDER-ON-LOAD: the first/default screen must be VISIBLE immediately from the
   HTML + CSS alone, before any JavaScript runs. Do NOT hide the initial content
   with an inline style/attribute that a <script> later reveals — if the script
@@ -625,8 +631,9 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
         { "name": "string", "type": "text|textarea|number|email|password|date|time|datetime|select|multiselect|checkbox|radio|toggle|file|search|currency|phone|url|other",
           "required": true|false, "notes": "string — options, placeholder, or constraints if shown" }
       ],
-      "actions": [ { "label": "string — the button/link text", "effect": "string — what it appears to do" } ],
-      "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ]
+      "actions": [ { "label": "string — the button/link text", "effect": "string — what it appears to do", "inferred": false } ],
+      "states": [ "string — e.g. empty, loading, error, success, selected — states the mockup implies" ],
+      "default_state": "string — the screen's RESTING state on a fresh load with typical data (REQUIRED)"
     }
   ],
   "entities": [ { "name": "string", "fields": ["string"] } ],
@@ -642,10 +649,25 @@ Output ONLY a JSON object (no markdown, no code fences, no commentary) with this
 Rules:
 - Every distinct screen or view in the mockup is a screen. In-page tabs/steps that
   show different content are separate screens.
+- MUTATION COVERAGE: a static mockup rarely demonstrates edit/delete flows, but
+  real apps are not append-only. After extracting what IS shown, ADD the implied
+  mutation actions for every record a user can create — edit its fields, delete/
+  archive it, change its status — each marked "inferred": true, unless the design
+  explicitly marks the record immutable (say so in notes). An app whose inventory
+  has create actions but no edit/delete actions produced permanent workflow dead
+  ends in production; do not repeat that.
 - Infer a field's type from how it looks and behaves; default to "text" when unsure.
 - journeys are the 3–6 PRIMARY things a user comes to do, judged from the mockup's
   navigation and emphasis; frequency decides navigation prominence downstream.
-- entities, journeys, and notes may be empty ([] / "") but screens must not be.
+- DEMONSTRATED ≠ DEFAULT: mockups render some states pressed/active purely for
+  illustration (a filter shown engaged, a chip shown selected). Elements the
+  mockup marks with data-demo-state="…" are demonstrations — record them in
+  "states" but NEVER as the resting state. "default_state" is what a user sees
+  on a fresh load with typical data: no filters applied, no chips active,
+  sections in their normal expansion. A demo state recorded as the default
+  shipped as a wrong production default; be explicit.
+- entities, journeys, and notes may be empty ([] / "") but screens must not be;
+  every screen carries default_state.
 - Do not invent screens, fields, or actions the mockup does not show.
 - required_capabilities are the INFRASTRUCTURE needs the mockup implies, as
   lowercase slugs. Include "users" whenever the app has user accounts, sign-in,
@@ -693,8 +715,10 @@ export function parseInventory(text) {
       actions: (Array.isArray(sc.actions) ? sc.actions : []).filter((a) => a && typeof a === 'object').map((a) => ({
         label: String(a.label || ''),
         effect: String(a.effect || ''),
+        ...(a.inferred ? { inferred: true } : {}),
       })),
       states: (Array.isArray(sc.states) ? sc.states : []).map((x) => String(x)).filter(Boolean),
+      default_state: String(sc.default_state || ''),
     }));
   if (screens.length === 0) return { ok: false, error: 'inventory has no screens' };
   const entities = (Array.isArray(doc.entities) ? doc.entities : [])
@@ -742,6 +766,117 @@ export function inventoryCounts(inventory) {
     actions += Array.isArray(sc.actions) ? sc.actions.length : 0;
   }
   return { screens: screens.length, fields, actions };
+}
+
+// ---- inventory CRUD completion + completeness lint (harness ratchet) ----
+// Project-32 postmortem: a static mockup cannot demonstrate mutation flows,
+// the extractor was told "do not invent actions the mockup does not show",
+// and the builder faithfully implemented the CRUD-incomplete contract —
+// the shipped app had NO edit/delete anywhere (permanent workflow dead
+// ends: a barrier task could never be unblocked, metrics could never be
+// recorded). These two passes make that class of miss structural:
+// completion ADDS the implied mutations; the linter SURFACES suspicious
+// shapes on the approval message so a human sees them before Build.
+
+const CREATE_ACTION_RE = /^\s*(?:\+\s*)?(?:new|add|create)\s+(?:a\s+|an\s+)?(.{2,40})$/i;
+const EDIT_ACTION_RE = /edit|update|rename|modify|change/i;
+const DELETE_ACTION_RE = /delete|remove|archive/i;
+const IMMUTABLE_RE = /immutable|read-?only|append-?only|cannot be (?:edited|changed|deleted)/i;
+
+function creatableNouns(inventory) {
+  const nouns = new Map(); // noun -> first screen index it can be created from
+  const screens = inventory?.screens || [];
+  screens.forEach((sc, i) => {
+    for (const a of sc.actions || []) {
+      const m = CREATE_ACTION_RE.exec(String(a.label || ''));
+      if (m) {
+        const noun = m[1].trim().toLowerCase().replace(/[^a-z0-9 -]/g, '');
+        if (noun && !nouns.has(noun)) nouns.set(noun, i);
+      }
+    }
+  });
+  return nouns;
+}
+
+// completeInventoryCrud — for every creatable record with no edit and/or no
+// delete action anywhere in the inventory, append the implied action(s)
+// (marked inferred) to the screen the create appears on — preferring a
+// detail screen that names the noun, where the mutation actually lives.
+// Skips nouns the notes mark immutable. Returns { inventory, added: [] }.
+export function completeInventoryCrud(inventory) {
+  const inv = JSON.parse(JSON.stringify(inventory || {}));
+  const screens = inv.screens || [];
+  const allActions = screens.flatMap((sc) => (sc.actions || []).map((a) => `${a.label} ${a.effect}`));
+  const notesBlob = `${inv.notes || ''} ${screens.map((s) => (s.fields || []).map((f) => f.notes).join(' ')).join(' ')}`;
+  const added = [];
+  for (const [noun, createIdx] of creatableNouns(inv)) {
+    if (IMMUTABLE_RE.test(notesBlob)) continue; // design explicitly opted out
+    const mentions = (re) => allActions.some((t) => re.test(t) && t.toLowerCase().includes(noun.split(' ')[0]));
+    const hasEditAnywhere = allActions.some((t) => EDIT_ACTION_RE.test(t));
+    const hasDeleteAnywhere = allActions.some((t) => DELETE_ACTION_RE.test(t));
+    // Prefer the detail screen for the noun (where mutations belong).
+    const detailIdx = screens.findIndex((s) => new RegExp(`\\b${noun.split(' ')[0]}\\b`, 'i').test(s.name) && /detail/i.test(s.name));
+    const target = screens[detailIdx >= 0 ? detailIdx : createIdx];
+    if (!target) continue;
+    target.actions = target.actions || [];
+    if (!(hasEditAnywhere && mentions(EDIT_ACTION_RE))) {
+      target.actions.push({ label: `Edit ${noun}`, effect: `Update the ${noun}'s fields after creation (title, owner, dates, status — everything the create form set)`, inferred: true });
+      added.push({ screen: target.name, label: `Edit ${noun}` });
+    }
+    if (!(hasDeleteAnywhere && mentions(DELETE_ACTION_RE))) {
+      target.actions.push({ label: `Delete ${noun}`, effect: `Remove the ${noun} (confirm-guarded; cascades or blocks per its children)`, inferred: true });
+      added.push({ screen: target.name, label: `Delete ${noun}` });
+    }
+  }
+  // Status-bearing fields must be mutable: a status field with no action that
+  // can change it is a workflow dead end (the project-32 barrier task).
+  for (const sc of screens) {
+    for (const f of sc.fields || []) {
+      const statusish = /status|state/i.test(String(f.name || '')) && /select|radio|toggle/i.test(String(f.type || ''));
+      if (!statusish) continue;
+      // Only DESIGNED actions count — the generic inferred Edit mentions
+      // "status" in its effect text but a status needs its own explicit
+      // cycle action (each displayed value must be reachable).
+      const changeable = (sc.actions || []).some((a) => !a.inferred && /status|mark|complete|reopen|toggle|resolve|unblock|change/i.test(`${a.label} ${a.effect}`));
+      if (!changeable) {
+        sc.actions = sc.actions || [];
+        sc.actions.push({ label: `Change ${f.name}`, effect: `Cycle ${f.name} through every value it displays (each shown state must be reachable)`, inferred: true });
+        added.push({ screen: sc.name, label: `Change ${f.name}` });
+      }
+    }
+  }
+  return { inventory: inv, added };
+}
+
+// lintInventory — suspicious-shape warnings surfaced at approval time.
+// Advisory: the human approves with eyes open; nothing blocks.
+export function lintInventory(inventory) {
+  const warnings = [];
+  const screens = inventory?.screens || [];
+  const acts = screens.flatMap((sc) => sc.actions || []);
+  const creates = acts.filter((a) => CREATE_ACTION_RE.test(String(a.label || ''))).length;
+  const edits = acts.filter((a) => EDIT_ACTION_RE.test(`${a.label} ${a.effect}`)).length;
+  const deletes = acts.filter((a) => DELETE_ACTION_RE.test(`${a.label} ${a.effect}`)).length;
+  if (creates > 0 && edits === 0) warnings.push(`${creates} create action${creates === 1 ? '' : 's'} but no edit action anywhere — created records could never be corrected`);
+  if (creates > 0 && deletes === 0) warnings.push(`${creates} create action${creates === 1 ? '' : 's'} but no delete/archive action anywhere`);
+  for (const sc of screens) {
+    // Demonstrated ≠ default (project-32: a demo-pressed chip shipped as the
+    // production default). A screen with states but no declared resting
+    // state leaves the builder to guess — usually from the demo.
+    if ((sc.states || []).length > 0 && !String(sc.default_state || '').trim()) {
+      warnings.push(`"${sc.name}": ${sc.states.length} state${sc.states.length === 1 ? '' : 's'} recorded but no default_state — the resting state is a guess`);
+    }
+    const filterFields = (sc.fields || []).filter((f) => /filter|search/i.test(`${f.name} ${f.notes}`)).length;
+    const filterActions = (sc.actions || []).filter((a) => /filter|search/i.test(`${a.label} ${a.effect}`)).length;
+    if (filterFields > 0 && filterActions === 0) warnings.push(`"${sc.name}": ${filterFields} filter/search field${filterFields === 1 ? '' : 's'} with no filter action`);
+    for (const f of sc.fields || []) {
+      if (/status|state/i.test(String(f.name || '')) && /select|radio|toggle/i.test(String(f.type || ''))
+        && !(sc.actions || []).some((a) => /status|mark|complete|reopen|toggle|resolve|unblock|change/i.test(`${a.label} ${a.effect}`))) {
+        warnings.push(`"${sc.name}": status field "${f.name}" has no action that can change it (display-only status = dead end)`);
+      }
+    }
+  }
+  return warnings;
 }
 
 // ---- design tokens (carry the approved mockup's look into the build) ----

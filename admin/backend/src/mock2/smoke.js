@@ -302,7 +302,7 @@ function shSingleQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 // A backend-only change invokes zero connectors and costs one curl round-trip.
 export async function runSmokeGate({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
-  changedFiles = [], changeMeta = {}, escalations = [], env = process.env,
+  changedFiles = [], changeMeta = {}, escalations = [], requiredIds = [], env = process.env,
 }) {
   // The dashboard's browser toggle (settings.smokeEnv) overlays the env var —
   // an operator flips the connector from the UI without touching .env.
@@ -323,6 +323,10 @@ export async function runSmokeGate({
       if (parsedAcc.ok) acceptanceUi = parsedAcc.spec.ui;
     }
   } catch { /* best effort — finish-time enforcement owns spec validity */ }
+  // Builder-declared machine acceptance (finish acceptance_ids — ratchet 7):
+  // union with the task-spec ids; both force the browser connector and both
+  // hard-fail when the id has no defined check.
+  acceptanceUi = [...new Set([...acceptanceUi, ...(Array.isArray(requiredIds) ? requiredIds.filter(Boolean) : [])])];
   const allEscalations = acceptanceUi.length
     ? [...escalations, { connector: 'browser', reason: `acceptance requires live ui check(s): ${acceptanceUi.join(', ')}` }]
     : escalations;
@@ -378,11 +382,11 @@ export function smokeFailSummary(report) {
 export async function smokeAfterDeploy({
   containerName, appDir = '/srv/app', webPort = 3000, url = null,
   commitSha = null, summary = '', instruction = '', escalations = [],
-  logEvent = null, env = process.env,
+  requiredIds = [], logEvent = null, env = process.env,
 }) {
   const changedFiles = await changedFilesForCommit(containerName, appDir, commitSha);
   const changeMeta = { summary: summary || '', ruleUnderTest: instruction || '' };
-  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, env });
+  const result = await runSmokeGate({ containerName, appDir, webPort, url, changedFiles, changeMeta, escalations, requiredIds, env });
   if (typeof logEvent === 'function') {
     try {
       logEvent('smoke', {

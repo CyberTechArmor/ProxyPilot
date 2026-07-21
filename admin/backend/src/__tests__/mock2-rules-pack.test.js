@@ -20,3 +20,17 @@ test('the floor section binds the pack but keeps inventory/instruction authorita
   assert.match(s, /inventory\/instruction wins/);
   assert.ok(s.includes(CRUD_RULES_PACK));
 });
+
+test('executable acceptance (ratchet 7): finish carries acceptance_ids into classifyTurn', async () => {
+  const { classifyTurn, RUNNER_TOOLS } = await import('../mock2/runner-logic.js');
+  const d = classifyTurn([{ name: 'finish', input: { summary: 's', acceptance: ['as user, do x, expect y'], assumptions: { verified: [], assumed: [] }, acceptance_ids: ['opp-create-happy', ' ', 'promote-blocked'] } }]);
+  assert.equal(d.done, true);
+  assert.deepEqual(d.finishAcceptanceIds, ['opp-create-happy', 'promote-blocked']);
+  // Omitted → empty list, never undefined.
+  const d2 = classifyTurn([{ name: 'finish', input: { summary: 's', acceptance: ['a'], assumptions: { verified: [], assumed: [] } } }]);
+  assert.deepEqual(d2.finishAcceptanceIds, []);
+  // The schema advertises the machine-execution contract on the finish tool.
+  const finishTool = RUNNER_TOOLS.find((t) => t.name === 'finish');
+  assert.ok(finishTool.input_schema.properties.acceptance_ids);
+  assert.match(finishTool.input_schema.properties.acceptance_ids.description, /hard smoke failure/);
+});

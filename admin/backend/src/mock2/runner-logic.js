@@ -108,6 +108,11 @@ export const RUNNER_TOOLS = Object.freeze([
           items: { type: 'string' },
           description: 'Human-runnable acceptance check(s), ONE PER USER-VISIBLE CHANGE, each in "as <role>, do X, expect Y" form (e.g. "as admin, open Connection Settings, type into Client ID — the value persists and Test connection is clickable"). For a change with no user-visible surface, one entry describing the verification actually performed.',
         },
+        acceptance_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'MACHINE-EXECUTED acceptance: for each user-visible happy path above, ADD a matching interaction check to state/ui-checks.json (page + steps: expect_visible / expect_text / click / fill / expect_enabled) and list its id here. These ids are run against the DEPLOYED app right after deploy — an id with no defined check is a hard smoke failure, so define the check first. Acceptance that exists only as prose is never executed by a machine; give at least the happy path an id.',
+        },
         assumptions: {
           type: 'object',
           description: 'Cross-layer assumptions behind this change, split HONESTLY: verified = values you READ the authoritative source for THIS cycle (name the file, e.g. "src/routes/profile.ts returns lowercase role slugs"); assumed = values you relied on without reading. A permission or role-name value in `assumed` is a defect — verify it before finishing. Use empty arrays only when genuinely none exist.',
@@ -700,7 +705,11 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
     const assumptions = a && typeof a === 'object' && strList(a.verified) && strList(a.assumed)
       ? { verified: strList(a.verified), assumed: strList(a.assumed) }
       : null;
-    return { summary: String(input?.summary || 'change complete'), acceptance, assumptions };
+    // Machine-executed acceptance: ui-check ids the builder declared (run
+    // against the deployed app by smoke — ratchet 7; prose alone is never
+    // machine-executed).
+    const acceptanceIds = strList(input?.acceptance_ids) || [];
+    return { summary: String(input?.summary || 'change complete'), acceptance, assumptions, acceptanceIds };
   };
   // A calm PENDING-OPERATOR-VERIFICATION conclusion: the same finish-shaped
   // payload, but the builder is declaring "real + complete in-fence, awaiting a
@@ -725,6 +734,7 @@ export function classifyTurn(toolCalls = [], { stopReason = null } = {}) {
       finishSummary: f.summary,
       finishAcceptance: f.acceptance,
       finishAssumptions: f.assumptions,
+      finishAcceptanceIds: f.acceptanceIds,
     };
   }
   if (calls.length === 0) {

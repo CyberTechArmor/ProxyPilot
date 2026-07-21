@@ -1586,7 +1586,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // Every run/skip + reason is logged. With the connectors off and http not
       // enforced (defaults), ok is always true → the success path is unchanged.
       if (!deployed.skipped) {
-        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, logEvent, env: process.env });
+        const smoke = await smokeAfterDeploy({ containerName, appDir: APP_DIR, webPort: project.web_port || 3000, commitSha: record?.commit_sha, summary: decision.finishSummary, instruction: cycle.instruction, requiredIds: decision.finishAcceptanceIds || [], logEvent, env: process.env });
         if (!smoke.ok) {
           const detail = smokeFailSummary(smoke.report);
           finishCycle(cycle.id, { status: 'failed', error: `Smoke gate failed after deploy — ${detail}` });

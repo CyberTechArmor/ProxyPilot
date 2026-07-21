@@ -89,6 +89,20 @@ export function anthropicTuning({ model, effort = null, thinking = null } = {}) 
   return out;
 }
 
+// The serving model's maximum output tokens — the ONLY per-turn output cap
+// the pipeline applies. Per-step output budgets were removed (operator
+// decision, 2026-07): a turn runs free within the model's own ability, and
+// spend is governed solely by the platform/project/people quotas (plus the
+// runner's safety breakers). 128k is sent only to models known to accept it
+// (the runner's long-standing MOCK2_RUNNER_MAX_TOKENS=128000 guidance);
+// everything else gets the universally-safe 64k — a max_tokens above a
+// model's real ceiling 400s the request.
+export function modelMaxOutputTokens(model) {
+  const id = String(model || '');
+  if (/(opus-4-8|sonnet-5)/.test(id)) return 128000;
+  return 64000;
+}
+
 // ---- escalation signals (ground truth, never a model claim) ----
 
 // Statuses that count as "the prior attempt did not succeed" for escalation.

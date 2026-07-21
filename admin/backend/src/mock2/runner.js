@@ -48,7 +48,7 @@ import { applyLaneTuning } from './lane-tuning-logic.js';
 import { decideRouting, escalationAttempts, routingMode, parseRoutingJson, mvpRoutingDecision, quickRoutingDecision } from './routing-logic.js';
 import {
   prepassEnabled, prepassModel, buildPrepassPrompt, parsePrepassReply,
-  prepassEffort, formatBriefForTask, featureScaleNotice, PREPASS_MAX_TOKENS,
+  prepassEffort, formatBriefForTask, featureScaleNotice,
   normalizeSuggestMode,
   buildDistillSystemPrompt, buildDistillUserTurn, cleanDistilledInstruction,
 } from './prepass-logic.js';
@@ -73,7 +73,7 @@ import {
   updateProgress, initProgressState, noProgressLimit, haltReasonLabel,
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
-import { callStepTurn } from './harness-steps.js';
+import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import { listPublishedComponents, getPublishedComponentWithVersion, listProjectComponents } from './components.js';
 import {
   formatComponentForModel, parseFilesJson, safeComponentPath, buildComponentManifest,
@@ -125,11 +125,13 @@ const nowIso = () => new Date().toISOString();
 // 4.5 caps at 64k, and a max_tokens above the model's limit 400s, so 64k is
 // the highest universally-safe default). model-client streams automatically
 // above its 12k threshold and scales the HTTP timeout with the budget.
-// Uncapped override via MOCK2_RUNNER_MAX_TOKENS (e.g. 128000 when the build
-// slot model supports it); floored at 1024 so a typo can't brick the runner.
+// Per-turn output budgets are gone (operator decision): with no env override
+// the turn runs to the serving model's own ceiling (modelMaxOutputTokens via
+// callStepTurn). MOCK2_RUNNER_MAX_TOKENS remains an explicit operator cap;
+// floored at 1024 so a typo can't brick the runner.
 const RUNNER_MAX_TOKENS = (() => {
   const n = Number(process.env.MOCK2_RUNNER_MAX_TOKENS);
-  if (!Number.isFinite(n) || n <= 0) return 64000;
+  if (!Number.isFinite(n) || n <= 0) return null;
   return Math.max(1024, Math.round(n));
 })();
 
@@ -217,8 +219,8 @@ async function runQuickPrepass({ project, cycle, ready, routing }) {
   const model = prepassModel(routingEnv());
   const res = await callStepTurn('quick-prepass', {
     connector: ready.connector, apiKey: ready.apiKey, model,
-    system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
-    maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
+    system: stepSystemPrompt('quick-prepass', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(cycle.instruction || '') }],
+    timeoutMs: 120000, effort: 'low', thinking: 'off',
   });
   if (!res.ok) return null;
   try {
@@ -264,8 +266,8 @@ export async function probeSplitProposal(instruction, { timeoutMs = 9000 } = {})
   if (!ready.ok) return null;
   const call = callStepTurn('split-probe', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
-    system: buildPrepassPrompt(), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
-    maxTokens: PREPASS_MAX_TOKENS, effort: 'low', thinking: 'off',
+    system: stepSystemPrompt('split-probe', buildPrepassPrompt(), {}), tools: [], transcript: [{ role: 'user', text: String(instruction || '') }],
+    timeoutMs: 120000, effort: 'low', thinking: 'off',
   });
   const res = await Promise.race([
     call,
@@ -286,9 +288,9 @@ export async function distillChatPrompt({ body, precedingUser = '', timeoutMs = 
   if (!ready.ok) return null;
   const call = callStepTurn('chat-distill', {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
-    system: buildDistillSystemPrompt(), tools: [],
+    system: stepSystemPrompt('chat-distill', buildDistillSystemPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildDistillUserTurn({ body, precedingUser }) }],
-    maxTokens: 1600, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'low', thinking: 'off',
   });
   const res = await Promise.race([
     call,
@@ -879,13 +881,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       .map((r) => ({ key: r.key, name: r.name, version: r.pinned_version, contract: parseContractJson(r.contract_json) }));
   } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
   const installedKeys = new Set(installedComponents.map((c) => c.key));
-  const system = buildRunnerSystemPrompt({
+  const system = stepSystemPrompt('build-runner', buildRunnerSystemPrompt({
     constitution: framework.constitution_md, skills, appDir: APP_DIR,
     webPort: project.web_port || 3000,
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
     installedComponents,
     buildMode: cycleMode,
-  });
+  }), { CONSTITUTION: framework.constitution_md, APP_DIR, WEB_PORT: project.web_port || 3000 });
   // Multi-modal: images attached to the Build press live on the REQUEST row
   // (migration 526), so every segment of the request — the first build, a
   // deferred build after rule questions, a resume — re-hydrates the same
@@ -1068,7 +1070,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     // (MOCK2_RUNNER_WEB_SEARCH=on, Anthropic connectors only) — Anthropic runs
     // the search server-side during the call, so the fence stays sealed.
     const result = await callStepTurn('build-runner', {
-      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: runnerToolsForCycle({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS,
+      connector: ready.connector, apiKey: ready.apiKey, model: ready.model, system, tools: runnerToolsForCycle({ hasGates: gateScripts.length > 0 }), transcript, maxTokens: RUNNER_MAX_TOKENS || undefined,
       serverTools: webSearchServerTools({ provider: ready.connector.provider, env: process.env, flag: RUNNER_WEB_SEARCH_FLAG, defaultOn: false }),
       effort: ready.effort || null,
       thinking: ready.thinking || null,

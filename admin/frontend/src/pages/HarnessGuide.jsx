@@ -92,6 +92,123 @@ const docComponents = {
   td: ({ children }) => <td className="border-b border-r last:border-r-0 px-2 py-1.5 align-top">{children}</td>,
 };
 
+// Expandable system-prompt panel for one step: shows the shipped prompt
+// (with {{PLACEHOLDER}} markers for call-time values) or the operator's
+// override, and lets an admin edit it. Editing IS a live harness change —
+// the override serves on the step's next model call, with placeholders
+// substituted from the same values the shipped prompt embeds. Fetched on
+// first expand (the full prompt set is large).
+function StepPrompt({ step }) {
+  const { toast } = useToast();
+  const meta = step.prompt_meta;
+  const [open, setOpen] = useState(false);
+  const [doc, setDoc] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      setDoc(await api.mock2HarnessStepPrompt(step.id));
+    } catch (err) {
+      setDoc({ error: err.message });
+    }
+  };
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && doc == null) load();
+  };
+  const save = async (content) => {
+    setBusy(true);
+    try {
+      await api.mock2HarnessStepPromptSave(doc.owner, content);
+      await load();
+      setEditing(false);
+      toast({
+        title: content.trim() ? 'System prompt saved' : 'System prompt reset',
+        description: content.trim()
+          ? `${doc.owner} uses your prompt on its next model call.`
+          : `${doc.owner} is back on the shipped prompt.`,
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Save failed', description: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!meta) return null;
+  return (
+    <div className="rounded-md border">
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex min-h-[44px] w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-medium hover:bg-muted/40"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+        System prompt
+        {meta.has_override && (
+          <span className="inline-flex items-center rounded-full border border-amber-500/50 bg-amber-500/10 px-1.5 py-px text-[10px] font-medium text-amber-600 dark:text-amber-400">edited</span>
+        )}
+        {meta.shares_prompt_of && (
+          <span className="text-[10px] text-muted-foreground">shares the {meta.shares_prompt_of} prompt</span>
+        )}
+      </button>
+      {open && (
+        <div className="space-y-2 border-t p-3">
+          {doc == null ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : doc.error ? (
+            <p className="text-xs text-destructive">{doc.error}</p>
+          ) : editing ? (
+            <>
+              {(doc.placeholders || []).length > 0 && (
+                <p className="text-[11px] text-muted-foreground">
+                  Call-time values — keep these markers where the content should land:{' '}
+                  {doc.placeholders.map((k) => <code key={k} className="mr-1 rounded bg-muted px-1">{'{{' + k + '}}'}</code>)}
+                </p>
+              )}
+              {doc.note && <p className="text-[11px] text-muted-foreground">{doc.note}</p>}
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                spellCheck={false}
+                className="min-h-[40vh] w-full resize-y rounded-md border bg-background p-2 font-mono text-[11px] leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+              <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                <Button variant="outline" size="sm" className="h-11 sm:h-9" disabled={busy} onClick={() => setEditing(false)}>
+                  <X className="h-4 w-4 mr-1" /> Cancel
+                </Button>
+                <Button size="sm" className="h-11 sm:h-9" disabled={busy} onClick={() => save(draft)}>
+                  {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />} Save prompt
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              {doc.note && <p className="text-[11px] text-muted-foreground">{doc.note}</p>}
+              <pre className="max-h-96 overflow-auto rounded-md border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
+                {doc.override || doc.default || '(no prompt)'}
+              </pre>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" className="h-11 sm:h-9" onClick={() => { setDraft(doc.override || doc.default || ''); setEditing(true); }}>
+                  <Pencil className="h-4 w-4 mr-1" /> Edit prompt
+                </Button>
+                {doc.override && (
+                  <Button variant="outline" size="sm" className="h-11 sm:h-9" disabled={busy} onClick={() => save('')}>
+                    <RotateCcw className="h-4 w-4 mr-1" /> Reset to shipped
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One tunable step row. The three controls write the step-override layer:
 // picking a value stores an override, picking "Resolved default" clears that
 // field. Saves send the FULL desired override (absent fields clear on the
@@ -202,8 +319,10 @@ function StepRow({ step, options, onSave, busy }) {
           </p>
         )}
 
+        <StepPrompt step={step} />
+
         <p className="text-[11px] text-muted-foreground">
-          Budget: {step.defaults.budgetNote} (read-only — a mis-set budget causes truncation failures that don’t look like a settings mistake)
+          Output: {step.defaults.budgetNote} — spend is capped only by the platform/project/people quotas, never per step.
         </p>
       </CardContent>
     </Card>
@@ -321,7 +440,9 @@ export default function HarnessGuide() {
               <p className="text-xs text-muted-foreground">
                 Precedence per value: <span className="font-medium">step override → lane tuning → env override → slot / shipped default</span>.
                 Slots stay owned by Model Connectors and lanes by Routing — these controls write only the step layer.
-                A rejected override model falls back to the step’s default on the same call and logs it. Prompts and budgets are not editable here by design.
+                A rejected override model falls back to the step’s default on the same call and logs it.
+                Output is uncapped per step (each turn runs to the serving model’s own maximum) — the platform/project/people quotas are the only spend caps.
+                Each row’s system prompt is shown below it and can be edited; overrides serve on the next call, with <code className="rounded bg-muted px-1">{'{{PLACEHOLDER}}'}</code> markers filled at call time.
               </p>
               {stages.map((stage) => (
                 <div key={stage} className="space-y-3">

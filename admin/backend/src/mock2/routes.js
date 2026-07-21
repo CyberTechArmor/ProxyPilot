@@ -124,7 +124,8 @@ import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, 
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
 import { HARNESS_STEPS, DETERMINISTIC_STEPS, STEP_TUNING_EFFORTS, resolveStepDisplay } from './harness-steps-logic.js';
-import { getHarnessStepTuning, setHarnessStepOverride, harnessStepSpend7d } from './harness-steps.js';
+import { getHarnessStepTuning, setHarnessStepOverride, harnessStepSpend7d, getHarnessStepPrompts, setHarnessStepPrompt } from './harness-steps.js';
+import { STEP_PROMPT_SPECS, STEP_PROMPT_MAX_LENGTH, promptOwnerStepId, renderDefaultStepPrompt } from './harness-prompts-logic.js';
 import { normalizeDesignPresetKey, publicDesignPresets, DESIGN_PRESET_AI, parseDesignDoc } from './design-presets.js';
 import { saveCustomDesignPreset, deleteCustomDesignPreset } from './design-presets-store.js';
 import { listScreenPlan, decideScreen, queueScreens, drainScreenQueue, reconcileScreenPlan, backfillScreenItems, listScreenItems, listScreenItemHistory, setScreenItemStatus, startItemsBuild } from './screen-plan.js';
@@ -1439,18 +1440,58 @@ export function createMock2Router() {
   // fields clear it). Admin-only like the neighboring settings endpoints.
   router.get('/settings/harness-steps', requireAdmin, (_req, res) => {
     const overrides = getHarnessStepTuning();
+    const prompts = getHarnessStepPrompts();
     const spend = harnessStepSpend7d();
     const steps = HARNESS_STEPS.map((step) => {
       const slotModel = step.slotKey ? (getSlot(step.slotKey)?.model || null) : null;
       const laneEntry = step.laneKey ? getLaneTuning(step.laneKey) : null;
+      const spec = STEP_PROMPT_SPECS[step.id] || null;
+      const promptOwner = promptOwnerStepId(step.id);
       return {
         ...step,
         override: overrides[step.id] || null,
         resolved: resolveStepDisplay(step, { slotModel, laneEntry, env: process.env, override: overrides[step.id] || null }),
         spend7d: spend[step.id] || null,
+        prompt_meta: spec ? {
+          shares_prompt_of: spec.sharesPromptOf || null,
+          has_override: !!(promptOwner && prompts[promptOwner]),
+          placeholders: spec.sharesPromptOf ? (STEP_PROMPT_SPECS[spec.sharesPromptOf]?.placeholders || []) : (spec.placeholders || []),
+        } : null,
       };
     });
     res.json({ steps, deterministic: DETERMINISTIC_STEPS, options: { efforts: STEP_TUNING_EFFORTS, thinking: ['off'] } });
+  });
+  // One step's system prompt: the shipped text rendered with {{PLACEHOLDER}}
+  // markers (the values injected at call time), plus any stored override.
+  // Served per-step because the full prompt set is large.
+  router.get('/settings/harness-steps/:id/prompt', requireAdmin, (req, res) => {
+    const spec = STEP_PROMPT_SPECS[req.params.id];
+    if (!spec) return res.status(404).json({ error: `unknown step: ${req.params.id}` });
+    const owner = promptOwnerStepId(req.params.id);
+    const ownerSpec = STEP_PROMPT_SPECS[owner];
+    const prompts = getHarnessStepPrompts();
+    res.json({
+      step: req.params.id,
+      owner,
+      shares_prompt_of: spec.sharesPromptOf || null,
+      default: renderDefaultStepPrompt(req.params.id),
+      override: prompts[owner] || null,
+      placeholders: ownerSpec.placeholders || [],
+      note: ownerSpec.note || null,
+    });
+  });
+  router.put('/settings/harness-steps/:id/prompt', requireAdmin, (req, res) => {
+    const parsed = z.object({ content: z.string().max(STEP_PROMPT_MAX_LENGTH) }).safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid content' });
+    let doc;
+    try {
+      doc = setHarnessStepPrompt(req.params.id, parsed.data.content, req.user.id);
+    } catch (e) {
+      return res.status(404).json({ error: e.message });
+    }
+    const edited = !!doc[req.params.id];
+    logAudit(req.user.id, 'MOCK2_SETTING_HARNESS_STEP_PROMPT', 'mock2_setting', 0, { step: req.params.id, edited, length: parsed.data.content.length }, req.ip);
+    res.json({ step: req.params.id, edited });
   });
   router.put('/settings/harness-steps/:id', requireAdmin, (req, res) => {
     const parsed = z.object({

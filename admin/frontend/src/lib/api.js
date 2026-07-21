@@ -1222,6 +1222,12 @@ export const api = {
   mock2HarnessSteps: () => request('/mock2/settings/harness-steps'),
   mock2HarnessStepSave: (id, patch) =>
     request(`/mock2/settings/harness-steps/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  // Per-step system prompt: GET returns the shipped text (with {{PLACEHOLDER}}
+  // markers) + any override; PUT with content '' clears the override.
+  mock2HarnessStepPrompt: (id) =>
+    request(`/mock2/settings/harness-steps/${encodeURIComponent(id)}/prompt`),
+  mock2HarnessStepPromptSave: (id, content) =>
+    request(`/mock2/settings/harness-steps/${encodeURIComponent(id)}/prompt`, { method: 'PUT', body: JSON.stringify({ content }) }),
   // Fast code model — '' platform default (sonnet), 'off' = the build_runner
   // slot model builds everything, or an explicit model id.
   mock2SetFastModel: (model) =>

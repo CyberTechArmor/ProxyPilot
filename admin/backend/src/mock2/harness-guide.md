@@ -21,9 +21,22 @@ model/effort/thinking control that writes the **step-override layer** — the
 topmost precedence (step override → lane tuning → env override →
 slot/shipped default), applied on the step's very next model call. A rejected
 override model falls back to the step's default on the same call and logs it.
-Prompts and budgets are deliberately not editable: prompt contracts change in
-code review, and a mis-set budget causes truncation failures that don't look
-like a settings mistake.
+Each step's **system prompt** is shown on its row and is editable: an
+override serves verbatim on the next call, with `{{PLACEHOLDER}}` markers
+(design system, constitution, project name, …) substituted at call time —
+keep the markers to keep the dynamic content. Steps whose prompt varies by
+mode note it; an override replaces every variant. The render continuation
+shares the full render's prompt.
+
+**Output budgets were removed** (operator decision, 2026-07): per-step
+output-token caps no longer exist. Every turn runs free to the serving
+model's own maximum output (128k where the model is known to accept it,
+64k otherwise), and the only spend caps are the **platform / project /
+people quotas** — never per step or per model. `MOCK2_RUNNER_MAX_TOKENS`
+remains available as an explicit operator cap on runner turns; the safety
+breakers (soft pause, turn backstop, no-progress breaker) are unchanged.
+Budget figures quoted in the step sections below describe the historical
+shipped caps and now read as sizing context only.
 
 ---
 
@@ -543,7 +556,9 @@ Anthropic connectors — the fence stays sealed.
 
 ### Budgets, limits, breakers
 
-- Per-turn output: **64000** tokens (`MOCK2_RUNNER_MAX_TOKENS`, floor 1024).
+- Per-turn output: **the model's own maximum** (128k on models known to
+  accept it, 64k otherwise); `MOCK2_RUNNER_MAX_TOKENS` is an explicit
+  operator cap (floor 1024) when set.
 - Per-tool-result: 200k chars (`MOCK2_MAX_TOOL_RESULT_CHARS`).
 - Soft pause (the primary stop): 1M fresh tokens or 45 minutes per run
   (`MOCK2_SOFT_PAUSE_TOKENS` / `MOCK2_SOFT_PAUSE_MINUTES`; dollar mode via

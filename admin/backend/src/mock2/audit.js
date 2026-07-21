@@ -58,7 +58,7 @@ import {
 import { preinstallComponents } from './component-install.js';
 import { buildRunnerReady, startCycle } from './runner.js';
 import { normalizeBuildMode, isFastBuildMode, BUILD_MODE_MVP, BUILD_MODE_QUICK } from './cycle-logic.js';
-import { callStepTurn } from './harness-steps.js';
+import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
   buildAuditSystemPrompt, buildAuditTask, parseAuditQuestions, splitQuestionsByRoute,
   buildRuleQuestionBody, appendRule, auditGateCleared, blockedBuildStatus,
@@ -391,10 +391,11 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   const auditTuned = applyLaneTuning({ model: ready.model, effort: 'medium', thinking: null }, getLaneTuning('audit'));
   const auditRes = await callStepTurn('rule-audit', {
     connector: ready.connector, apiKey: ready.apiKey, model: auditTuned.model,
-    system: buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
+    system: stepSystemPrompt('rule-audit',
+      buildAuditSystemPrompt({ constitution: framework.constitution_md, projectName: project.name }),
+      { CONSTITUTION: framework.constitution_md, PROJECT_NAME: project.name }),
     tools: [],
     transcript: [{ role: 'user', text: buildAuditTask({ inventory: inventoryText, rulesMd, instruction, projectName: project.name, frameworkVersion: framework.version }), ...(auditImages.length ? { images: auditImages } : {}) }],
-    maxTokens: 16000,
     effort: auditTuned.effort,
     thinking: auditTuned.thinking,
   });

@@ -1,3 +1,4 @@
+import { mergeVariantScreens } from './concept-logic.js';
 // Mock2 screen plan — the PURE decision layer for per-screen apply. Design
 // approval extracts an inventory whose screens[] enumerate the app's pages;
 // this module turns that list into a reviewable plan (approve/defer per
@@ -24,7 +25,10 @@ export const SCREEN_DECISIONS = Object.freeze(['planned', 'deferred']);
 export const INITIAL_BUILD_INSTRUCTION_PREFIX = 'Build the working application from the approved design inventory';
 
 export function screenPlanFromInventory(inventory) {
-  const screens = Array.isArray(inventory?.screens) ? inventory.screens : [];
+  // Variant screens fold into their base BEFORE planning (project 33: a dark
+  // theme and an empty state each burned a full per-screen build). Plan-time
+  // merge protects already-approved inventories without rewriting them.
+  const screens = Array.isArray(inventory?.screens) ? mergeVariantScreens(inventory).inventory.screens : [];
   const seen = new Set();
   const rows = [];
   for (const s of screens) {
@@ -111,7 +115,7 @@ export function publicScreenShape(row) {
 // BUILT while several of their items are still pending, and that gap is
 // exactly what the checklist makes visible.
 export function screenItemsFromInventory(inventory) {
-  const screens = Array.isArray(inventory?.screens) ? inventory.screens : [];
+  const screens = Array.isArray(inventory?.screens) ? mergeVariantScreens(inventory).inventory.screens : [];
   const out = [];
   for (const s of screens) {
     const screenName = String(s?.name || '').trim().slice(0, 120);

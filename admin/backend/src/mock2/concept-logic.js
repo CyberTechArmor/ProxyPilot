@@ -334,7 +334,14 @@ Hard requirements:
   of the approved design.
 - SCREEN SECTIONS (structural contract): wrap every distinct screen/view in
   <section data-screen="Screen Name"> … </section> at the top level of <body>,
-  with unique human-readable names and NO nested <section> elements. The
+  with unique human-readable names and NO nested <section> elements. One
+  section per SCREEN, never per variant: no separate sections for a theme
+  ("X (Dark)" — the header toggle is the mechanism), for an empty/loading/
+  error state (design those INSIDE the screen, annotated data-demo-state),
+  or for the same layout repeated. A variant section becomes a separate
+  build later and ships as a duplicate page (a dark-mode COPY of a screen
+  shipped as its own route with a second theme switch — operator-reported
+  waste). The
   in-page navigation shows/hides these sections; the first is visible by
   default. Targeted revisions later re-render ONE section, so keep each
   screen's markup self-contained inside its section (shared styles stay in
@@ -846,6 +853,53 @@ export function completeInventoryCrud(inventory) {
     }
   }
   return { inventory: inv, added };
+}
+
+// mergeVariantScreens — collapse variant screens into their base screen.
+// Project 33: the mockup carried "Opportunities List (Light)", "Opportunities
+// List (Dark)", and "My Projects (Empty)" as separate sections; extraction
+// made them separate screens; the screen plan then spent a FULL BUILD each —
+// the dark variant shipped as its own route with a second theme switch
+// (operator: "multiple places for light/dark mode"), the empty state as its
+// own page. A theme is a toggle and a state is a state — never a screen.
+// Pure; used at approval (inventory write) AND at plan time (protects
+// already-approved inventories without rewriting them).
+const VARIANT_SCREEN_RE = /^(.{2,80}?)\s*\((light|dark|empty|loading|error)(?:\s+(?:mode|state|theme|variant))?\)\s*$/i;
+
+export function mergeVariantScreens(inventory) {
+  const inv = JSON.parse(JSON.stringify(inventory || {}));
+  // Tolerant of junk rows (plan-time callers feed raw inventories).
+  const screens = (Array.isArray(inv.screens) ? inv.screens : []).filter((s) => s && typeof s === 'object');
+  const out = [];
+  const byBase = new Map(); // lowercased base name -> carrier screen in out
+  const merged = [];
+  for (const s of screens) {
+    const m = VARIANT_SCREEN_RE.exec(String(s.name || ''));
+    const baseName = (m ? m[1] : String(s.name || '')).trim();
+    const key = baseName.toLowerCase();
+    const variant = m ? m[2].toLowerCase() : null;
+    const variantState = variant === 'empty' ? 'empty'
+      : variant === 'light' ? null // light is the reference theme, not a state
+        : variant ? `${variant} ${variant === 'dark' ? 'theme (via the header toggle)' : 'state'}` : null;
+    if (!byBase.has(key)) {
+      const carrier = { ...s, name: baseName };
+      if (variantState) carrier.states = [...new Set([...(s.states || []), variantState])];
+      byBase.set(key, carrier);
+      out.push(carrier);
+      if (m) merged.push({ from: s.name, into: baseName });
+      continue;
+    }
+    const base = byBase.get(key);
+    const fieldNames = new Set((base.fields || []).map((f) => String(f.name).toLowerCase()));
+    for (const f of s.fields || []) if (!fieldNames.has(String(f.name).toLowerCase())) { base.fields = base.fields || []; base.fields.push(f); }
+    const actionLabels = new Set((base.actions || []).map((a) => String(a.label).toLowerCase()));
+    for (const a of s.actions || []) if (!actionLabels.has(String(a.label).toLowerCase())) { base.actions = base.actions || []; base.actions.push(a); }
+    base.states = [...new Set([...(base.states || []), ...(s.states || []), ...(variantState ? [variantState] : [])])];
+    if (!String(base.default_state || '').trim() && String(s.default_state || '').trim()) base.default_state = s.default_state;
+    merged.push({ from: s.name, into: base.name });
+  }
+  inv.screens = out;
+  return { inventory: inv, merged };
 }
 
 // lintInventory — suspicious-shape warnings surfaced at approval time.

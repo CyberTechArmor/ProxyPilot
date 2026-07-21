@@ -1351,9 +1351,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // green" and "acceptance demonstrated" are distinguishable in the record —
       // including the verified no-op flag (the loop-termination signal) and the
       // reproduce-first basis (demonstrated / not-required-empty-diff / waived).
+      // STALE-SPEC GUARD (project 33): state/acceptance.json persists in the
+      // working tree, so a spec left by an earlier cycle (a bugfix) rode into
+      // six unrelated screen builds, mis-kinded them 'bugfix', and put the
+      // anomaly tripwire into a false-positive storm (every deploy held). A
+      // spec this cycle did not write never feeds the record/tripwire kind —
+      // the instruction classification does.
+      const accSpecCurrent = accParsed.ok && changedThisCycle.includes(ACCEPTANCE_PATH);
       const accState = acceptanceRecord({
-        spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
-        uiRequired: accParsed.ok ? accParsed.spec.ui : [],
+        spec: accSpecCurrent ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
+        uiRequired: accSpecCurrent ? accParsed.spec.ui : [],
         changedFiles: changedThisCycle, reproduceFirst: verdict.reproduce_first,
       });
       try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
@@ -1573,10 +1580,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         role: 'system',
         content: deployed.noop
           ? 'No code changes this cycle — the existing deploy keeps serving (nothing to redeploy).'
-          : deployed.skipped
-            ? 'No run contract — placeholder still serving (nothing to deploy).'
-            : 'Deployed — app serving on its live URL.',
-        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop },
+          : deployed.held
+            ? 'Deploy HELD by the anomaly tripwire — review the change record, then press Deploy to release it; the previous deploy keeps serving.'
+            : deployed.skipped
+              ? 'No run contract — placeholder still serving (nothing to deploy).'
+              : 'Deployed — app serving on its live URL.',
+        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop, held: !!deployed.held },
       });
 
       // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap

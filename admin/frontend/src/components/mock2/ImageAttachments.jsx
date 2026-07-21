@@ -51,6 +51,15 @@ export function useChatImages({ onError } = {}) {
 
   const clear = useCallback(() => setImages([]), []);
 
+  // Replace one attachment IN PLACE (the annotate dialog swaps in the pinned
+  // version) — order-stable, unlike remove+add which pushed it to the end.
+  const replaceAt = useCallback(async (idx, file) => {
+    try {
+      const prepared = await prepareChatImage(file);
+      setImages((cur) => cur.map((img, i) => (i === idx ? prepared : img)));
+    } catch (err) { if (onError) onError(err.message); }
+  }, [onError]);
+
   // Wire these to the composer textarea / wrapper.
   const handlePaste = useCallback((e) => {
     const files = imageFilesFromDataTransfer(e.clipboardData);
@@ -61,7 +70,7 @@ export function useChatImages({ onError } = {}) {
     if (files.length) { e.preventDefault(); addFiles(files); }
   }, [addFiles]);
 
-  return { images, busy, addFiles, remove, clear, handlePaste, handleDrop };
+  return { images, busy, addFiles, remove, replaceAt, clear, handlePaste, handleDrop };
 }
 
 // The thumbnails row + "+" picker rendered under a composer. Renders nothing

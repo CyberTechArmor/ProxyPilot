@@ -277,8 +277,8 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
     try {
       const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
       const file = new File([bytes], image.name || 'annotated.png', { type: image.media_type || 'image/png' });
-      attach.remove(idx);
-      attach.addFiles([file]);
+      if (typeof attach.replaceAt === 'function') attach.replaceAt(idx, file);
+      else { attach.remove(idx); attach.addFiles([file]); }
     } catch { /* keep the original attachment on a decode failure */ }
     setInstruction((cur) => (cur && cur.trim() ? `${cur}\n${text}` : text));
   };
@@ -670,7 +670,7 @@ export default function BuildChat({ projectId, project, cycle = null, canEdit, o
           onOpenChange={(o) => { if (!o) { setAnnotateOpen(false); setAnnotateAttachIdx(null); } }}
           onSend={sendAnnotation}
           attachImage={annotateAttachIdx != null && attach.images[annotateAttachIdx]
-            ? { url: attach.images[annotateAttachIdx].previewUrl, name: attach.images[annotateAttachIdx].name }
+            ? { url: attach.images[annotateAttachIdx].previewUrl, name: attach.images[annotateAttachIdx].name, index: annotateAttachIdx }
             : null}
           onApply={applyAnnotation}
         />

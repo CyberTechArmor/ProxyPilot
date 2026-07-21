@@ -33,7 +33,7 @@ npm run dev        # Vite dev server, proxies /api to http://localhost:3001
 npm run build      # production build (parallelism deliberately limited for low-memory VPS)
 ```
 
-**Known failing tests:** `cves.test.js`, `incus.test.js`, `webauthn.test.js` fail in a fresh checkout with `Cannot find package 'better-sqlite3'` because they import the real `db.js` (native module). The other 73 tests pass. This is pre-existing on `main` — see `docs/known-issues.md` before "fixing" it in an unrelated PR. Other tests pass because they stub the DB at the module boundary; follow that pattern for new tests.
+**Known failing tests:** 6 test files fail in a fresh checkout, all `ERR_MODULE_NOT_FOUND` on packages absent from the sandbox: `cve-research.test.js`, `cves.test.js`, `incus.test.js`, `webauthn.test.js` (import the real `admin/backend/src/db.js` → native `better-sqlite3`), `vpn-mtu.test.js` (imports `cli/src/db/index.js` → `better-sqlite3`), and `ldap.test.js` (imports `ldapts`). Everything else passes (943/954 as of 2026-07). This is pre-existing on `main` — see `docs/known-issues.md` before "fixing" it in an unrelated PR. Other tests pass because they stub the DB at the module boundary; follow that pattern for new tests.
 
 ## Architecture
 

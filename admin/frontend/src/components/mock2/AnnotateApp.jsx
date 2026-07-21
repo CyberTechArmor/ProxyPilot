@@ -28,6 +28,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
   const [imgUrl, setImgUrl] = useState(null); // object URL of the fetched PNG
   const [imgState, setImgState] = useState('idle'); // idle | loading | ready | error
   const [signedOut, setSignedOut] = useState(false); // the shot is the app's sign-in page
+  const [stageMsg, setStageMsg] = useState(''); // live capture stage while loading
   const [errMsg, setErrMsg] = useState('');
   const [pins, setPins] = useState([]); // { x, y, note } — x/y in % of the image
   const [sending, setSending] = useState(false);
@@ -38,31 +39,48 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     setImgState('loading');
     setErrMsg('');
     setSignedOut(false);
-    // The server hard-caps a capture at 90s and its timeout names the stage
-    // that wedged; this abort is only the belt on top, so it must OUTLAST the
-    // server deadline or the generic client message shadows the useful one.
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 105000);
+    setStageMsg('starting…');
+    // Job pattern: start answers instantly (proves the backend is alive),
+    // then we poll the LIVE capture stage — a wedge shows on screen at the
+    // exact stage it happens instead of an eternal spinner.
     try {
-      const res = await fetch(api.mock2AppScreenshotUrl(projectId, { path: p }), { credentials: 'same-origin', signal: ctrl.signal });
-      if (!res.ok) {
-        let msg = `the server answered ${res.status}`;
-        try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep status */ }
-        setErrMsg(msg);
-        setImgState('error');
-        return;
+      await api.mock2AppScreenshotStart(projectId, { path: p });
+      const t0 = Date.now();
+      while (Date.now() - t0 < 130000) {
+        let st;
+        try {
+          st = await api.mock2AppScreenshotStatus(projectId);
+        } catch (e) {
+          setErrMsg(`lost the backend while polling: ${e?.message || 'network error'}`);
+          setImgState('error');
+          return;
+        }
+        if (st.state === 'error') {
+          setErrMsg(st.error || 'screenshot failed');
+          setImgState('error');
+          return;
+        }
+        if (st.state === 'done') {
+          setSignedOut(!!st.signed_out);
+          const res = await fetch(api.mock2AppScreenshotImageUrl(projectId), { credentials: 'same-origin' });
+          if (!res.ok) {
+            setErrMsg(`the server answered ${res.status} for the finished image`);
+            setImgState('error');
+            return;
+          }
+          const blob = await res.blob();
+          setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
+          setImgState('ready');
+          return;
+        }
+        setStageMsg(st.stage ? `${st.stage} · ${Math.round((st.elapsed_ms || 0) / 1000)}s` : 'working…');
+        await new Promise((r) => setTimeout(r, 1200));
       }
-      setSignedOut(res.headers.get('X-Screenshot-Signed-Out') === '1');
-      const blob = await res.blob();
-      setImgUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
-      setImgState('ready');
-    } catch (e) {
-      setErrMsg(e?.name === 'AbortError'
-        ? 'the screenshot timed out — the app or backend may be busy; try Refresh in a moment'
-        : (e?.message || 'network error'));
+      setErrMsg('the capture never finished — the backend log has the "[mock2] screenshot" stage trail');
       setImgState('error');
-    } finally {
-      clearTimeout(timer);
+    } catch (e) {
+      setErrMsg(e?.message || 'network error');
+      setImgState('error');
     }
   }, [projectId]);
   const reload = useCallback(() => load(path), [load, path]);
@@ -193,6 +211,7 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
             {imgState === 'loading' ? (
               <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" /> Taking a live screenshot…
+                {stageMsg ? <span className="block w-full text-center text-[11px] text-muted-foreground">{stageMsg}</span> : null}
               </div>
             ) : null}
             {imgState === 'error' ? (

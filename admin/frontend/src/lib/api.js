@@ -1496,6 +1496,13 @@ export const api = {
   // Live-app screenshot URL (feeds the annotate dialog's <img>).
   mock2AppScreenshotUrl: (id, { path = '/', w = 390 } = {}) =>
     `/api/mock2/projects/${id}/app-screenshot?path=${encodeURIComponent(path)}&w=${w}&t=${Date.now()}`,
+  // Screenshot as a job (202+poll): start answers instantly, status reports
+  // the live capture stage, image serves the finished PNG.
+  mock2AppScreenshotStart: (id, { path = '/', w = 390 } = {}) =>
+    request(`/mock2/projects/${id}/app-screenshot-jobs`, { method: 'POST', body: JSON.stringify({ path, w }) }),
+  mock2AppScreenshotStatus: (id) => request(`/mock2/projects/${id}/app-screenshot-jobs/current`),
+  mock2AppScreenshotImageUrl: (id) =>
+    `/api/mock2/projects/${id}/app-screenshot-jobs/current/image?t=${Date.now()}`,
   // Browser smoke connector toggle (drives the deployed UI after user-facing diffs).
   mock2GetSmokeBrowser: () => request('/mock2/settings/smoke-browser'),
   mock2SetSmokeBrowser: (setting) =>

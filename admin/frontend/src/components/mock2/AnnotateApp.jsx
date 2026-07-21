@@ -44,7 +44,22 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     // then we poll the LIVE capture stage — a wedge shows on screen at the
     // exact stage it happens instead of an eternal spinner.
     try {
-      await api.mock2AppScreenshotStart(projectId, { path: p });
+      // The start call must acknowledge within seconds (the server replies
+      // before doing any work). A slow or missing acknowledgment means the
+      // BACKEND is stale or stuck — say so, with the fix.
+      try {
+        await Promise.race([
+          api.mock2AppScreenshotStart(projectId, { path: p }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('no acknowledgment within 10s')), 10000)),
+        ]);
+      } catch (e) {
+        const msg = String(e?.message || '');
+        setErrMsg(/404|No such|not found|acknowledgment/i.test(msg)
+          ? `the backend did not acknowledge the screenshot job (${msg}) — it is likely running an older version or needs a restart: rerun update.sh and restart the backend service`
+          : msg || 'network error');
+        setImgState('error');
+        return;
+      }
       const t0 = Date.now();
       while (Date.now() - t0 < 130000) {
         let st;

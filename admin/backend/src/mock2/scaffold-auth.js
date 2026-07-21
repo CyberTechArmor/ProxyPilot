@@ -270,7 +270,7 @@ function adminHtml() {
 <link rel="stylesheet" href="/design.css">
 <link rel="stylesheet" href="/base.css">
 <style>
-.note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin:6px 0 0}
+.note{font-size:12.5px;color:var(--app-muted,#5a6b81);margin:6px 0 0;overflow-wrap:anywhere}
 .note.err{color:var(--app-danger,#d24545)}
 .linklike{background:none;border:none;padding:2px 4px;cursor:pointer;color:var(--app-muted,#5a6b81);font-size:12px;min-height:0}
 .linklike:hover{color:var(--app-text,#12263f)}
@@ -886,6 +886,10 @@ const WIRED_HISTORY = new Map([
   ['src/server.ts', [
     '070d8a86bed4239d087bf461ef9083acaca7c856188b18311f3560380d48919f', // v1-v2: pre listen-retry
     '23ee2276133346daf264ddae596d887f4a53ab464fb0597eb770c16005de22c5', // v3: EADDRINUSE listen-retry
+  ]],
+  ['public/admin.html', [
+    // v1: pre overflow-wrap .note (long sign-in links / ldaps URLs overflowed)
+    'b085d64f6a4d285efe47a0d85f9e844096cd235f5565a6de192b79d7dff0ee9c',
   ]],
   ['public/login.html', [
     // The component-shipped centered-card sign-in page (installer-written, no

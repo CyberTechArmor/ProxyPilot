@@ -504,3 +504,44 @@ test('states vs defaults: default_state normalized, prompts carry the demo-state
   assert.ok(warnings.some((w) => /"Bare".*no default_state/.test(w)));
   assert.ok(!warnings.some((w) => /"List".*no default_state/.test(w)));
 });
+
+test('variant screens fold into their base (project-33: theme/empty sections each burned a build)', async () => {
+  const { mergeVariantScreens, buildMockupSystemPrompt } = await import('../mock2/concept-logic.js');
+  const inv = { screens: [
+    { name: 'Opportunities List (Light)', purpose: 'browse', fields: [{ name: 'Stage filter', type: 'select' }], actions: [{ label: 'New opportunity', effect: 'create' }], states: ['default'], default_state: 'all groups expanded' },
+    { name: 'Opportunities List (Dark)', purpose: 'same grouped list, dark', fields: [{ name: 'Stage filter', type: 'select' }], actions: [{ label: 'New opportunity', effect: 'create' }, { label: 'Theme switch', effect: 'toggles' }], states: [] },
+    { name: 'My Projects (Empty)', purpose: 'developer lens', fields: [], actions: [{ label: 'New opportunity', effect: 'create' }], states: [] },
+    { name: 'Opportunity Detail', purpose: 'detail', fields: [], actions: [], states: [] },
+  ] };
+  const { inventory, merged } = mergeVariantScreens(inv);
+  const names = inventory.screens.map((s) => s.name);
+  // Light+Dark collapse to ONE base screen; Empty collapses to its base.
+  assert.deepEqual(names, ['Opportunities List', 'My Projects', 'Opportunity Detail']);
+  const list = inventory.screens[0];
+  // Dark becomes a state (the toggle mechanism), not a screen; fields/actions union without dupes.
+  assert.ok(list.states.some((st) => /dark theme/.test(st)));
+  assert.equal(list.fields.filter((f) => f.name === 'Stage filter').length, 1);
+  assert.ok(list.actions.some((a) => a.label === 'Theme switch'));
+  assert.equal(list.default_state, 'all groups expanded');
+  // Empty variant becomes the base screen carrying an 'empty' state.
+  assert.ok(inventory.screens[1].states.includes('empty'));
+  assert.equal(merged.length, 3); // Light renamed + Dark folded + Empty renamed
+  // Non-variant parentheses survive untouched.
+  const keep = mergeVariantScreens({ screens: [{ name: 'Reports (Admin)', states: [] }] });
+  assert.equal(keep.inventory.screens[0].name, 'Reports (Admin)');
+  // The renderer contract forbids variant sections at the source.
+  assert.match(buildMockupSystemPrompt({ designSystem: 'DS' }), /never per variant/);
+});
+
+test('screen plan folds variants before planning (already-approved inventories protected)', async () => {
+  const { screenPlanFromInventory, screenItemsFromInventory } = await import('../mock2/screen-plan-logic.js');
+  const inv = { screens: [
+    { name: 'List (Light)', purpose: 'p', fields: [], actions: [], states: [] },
+    { name: 'List (Dark)', purpose: 'p', fields: [], actions: [], states: [] },
+    { name: 'Detail', purpose: 'p', fields: [], actions: [], states: [] },
+  ] };
+  const plan = screenPlanFromInventory(inv);
+  assert.deepEqual(plan.map((r) => r.name), ['List', 'Detail']);
+  const items = screenItemsFromInventory(inv);
+  assert.ok(items.every((i) => i.screen !== 'List (Dark)' && i.screen !== 'List (Light)'));
+});

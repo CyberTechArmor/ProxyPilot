@@ -1341,6 +1341,15 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             }
             if (!parity.ok) {
               logEvent('note', { role: 'system', content: `Action parity: still missing after rejection (accepted with warning): ${parity.missing.map((a) => a.label).join(', ')}` });
+              // The warning must reach the OPERATOR, not just the log —
+              // request 92 shipped with five contract actions still missing
+              // and only a log line to show for it.
+              try {
+                insertMessage({
+                  projectId, kind: 'system', cycleId: cycle.id,
+                  body: `Heads-up — ${parity.missing.length} action${parity.missing.length === 1 ? '' : 's'} from the approved design ${parity.missing.length === 1 ? 'is' : 'are'} still not in the app after this build: ${parity.missing.slice(0, 8).map((a) => `"${a.label}"`).join(', ')}. Send a build to add them (or ask for them to be badged "Not built yet").`,
+                });
+              } catch (e) { console.warn('[mock2] parity warning message failed:', e?.message); }
             } else if (parity.present.length) {
               logEvent('note', { role: 'system', content: `Action parity: all ${parity.present.length} inventory mutation actions surfaced in the UI source.` });
             }
@@ -1351,9 +1360,16 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // green" and "acceptance demonstrated" are distinguishable in the record —
       // including the verified no-op flag (the loop-termination signal) and the
       // reproduce-first basis (demonstrated / not-required-empty-diff / waived).
+      // STALE-SPEC GUARD (project 33): state/acceptance.json persists in the
+      // working tree, so a spec left by an earlier cycle (a bugfix) rode into
+      // six unrelated screen builds, mis-kinded them 'bugfix', and put the
+      // anomaly tripwire into a false-positive storm (every deploy held). A
+      // spec this cycle did not write never feeds the record/tripwire kind —
+      // the instruction classification does.
+      const accSpecCurrent = accParsed.ok && changedThisCycle.includes(ACCEPTANCE_PATH);
       const accState = acceptanceRecord({
-        spec: accParsed.ok ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
-        uiRequired: accParsed.ok ? accParsed.spec.ui : [],
+        spec: accSpecCurrent ? accParsed.spec : null, instructionKind: taskKind, redTestObserved,
+        uiRequired: accSpecCurrent ? accParsed.spec.ui : [],
         changedFiles: changedThisCycle, reproduceFirst: verdict.reproduce_first,
       });
       try { updateCycle(cycle.id, { acceptance_json: JSON.stringify(accState) }); } catch (e) { console.warn('[mock2] acceptance state write failed:', e?.message); }
@@ -1573,10 +1589,12 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
         role: 'system',
         content: deployed.noop
           ? 'No code changes this cycle — the existing deploy keeps serving (nothing to redeploy).'
-          : deployed.skipped
-            ? 'No run contract — placeholder still serving (nothing to deploy).'
-            : 'Deployed — app serving on its live URL.',
-        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop },
+          : deployed.held
+            ? 'Deploy HELD by the anomaly tripwire — review the change record, then press Deploy to release it; the previous deploy keeps serving.'
+            : deployed.skipped
+              ? 'No run contract — placeholder still serving (nothing to deploy).'
+              : 'Deployed — app serving on its live URL.',
+        meta: { ok: true, skipped: !!deployed.skipped, noop: !!deployed.noop, held: !!deployed.held },
       });
 
       // e2e/journey SMOKE GATE — runs against the now-deployed app. The cheap

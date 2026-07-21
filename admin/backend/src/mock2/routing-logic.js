@@ -150,14 +150,18 @@ export function mvpRoutingDecision(env = {}, slotModel = '') {
 
 // ---- Quick-update routing (the iteration path) ----
 
-// The fixed routing a QUICK update runs with: the fast code model at HIGH
+// The fixed routing a QUICK update runs with: the fast code model at MEDIUM
 // effort (raised from 'medium' with the MVP lane — quality default; the small
 // scope keeps wall-clock short either way). Operator-editable from the same
 // lane-tuning card; MOCK2_QUICK_EFFORT overrides.
 export function quickRoutingDecision(env = {}, slotModel = '') {
   const model = fastCodeModel(env) || String(slotModel || '');
   const rawEffort = String(env?.MOCK2_QUICK_EFFORT ?? '').trim().toLowerCase();
-  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'high';
+  // MEDIUM by default (operator: $6.96/42k tokens for "a simple frontend
+  // change" on the quick lane at high). A quick update is one small scoped
+  // change — medium is the right spend; MOCK2_QUICK_EFFORT or the lane
+  // tuning restores high when an operator wants it.
+  const effort = ROUTING_EFFORTS.includes(rawEffort) ? rawEffort : 'medium';
   return {
     model, effort, rung: 0, task_kind: 'feature', difficulty: null,
     reason: 'quick update', build_mode: 'quick',

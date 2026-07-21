@@ -38,10 +38,11 @@ export default function AnnotateApp({ projectId, open, onOpenChange, onSend }) {
     setImgState('loading');
     setErrMsg('');
     setSignedOut(false);
-    // The server hard-caps a capture at ~60s; this abort is the belt on top so
-    // the dialog can never sit on the spinner forever (user report).
+    // The server hard-caps a capture at 90s and its timeout names the stage
+    // that wedged; this abort is only the belt on top, so it must OUTLAST the
+    // server deadline or the generic client message shadows the useful one.
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 75000);
+    const timer = setTimeout(() => ctrl.abort(), 105000);
     try {
       const res = await fetch(api.mock2AppScreenshotUrl(projectId, { path: p }), { credentials: 'same-origin', signal: ctrl.signal });
       if (!res.ok) {

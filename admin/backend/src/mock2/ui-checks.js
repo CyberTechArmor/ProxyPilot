@@ -48,7 +48,15 @@ export function resolveBrowserExecutable(env = process.env) {
 // is absent even though a compatible binary exists.
 export function launchOptions(env = process.env) {
   const exe = resolveBrowserExecutable(env);
-  return { headless: true, ...(exe ? { executablePath: exe } : {}) };
+  return {
+    headless: true,
+    // Low-memory VPS discipline: /dev/shm is tiny in containers (Chromium
+    // crashes writing to it) and there is no GPU; a hard launch timeout keeps
+    // a wedged browser from hanging the caller.
+    args: ['--disable-dev-shm-usage', '--disable-gpu'],
+    timeout: 30000,
+    ...(exe ? { executablePath: exe } : {}),
+  };
 }
 
 // Load the Playwright chromium driver: playwright-core first (a plain npm dep,

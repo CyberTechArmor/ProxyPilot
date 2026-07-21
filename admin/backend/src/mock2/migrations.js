@@ -1503,4 +1503,19 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // Per-user AI-credit attribution. Cycle-attached spend already
+    // attributes via mock2_cycles.initiated_by (query-time join, covers all
+    // historical rows); this column carries the user for CYCLE-LESS rows
+    // (Ask, operator-triggered design reviews). Old rows stay null.
+    version: 543,
+    name: 'mock2_quota_ledger_user',
+    up: (d) => {
+      d.exec(`
+        ALTER TABLE mock2_quota_ledger ADD COLUMN user_id INTEGER;
+        CREATE INDEX idx_mock2_quota_ledger_user_created
+          ON mock2_quota_ledger (user_id, created_at);
+      `);
+    },
+  },
 ];

@@ -70,13 +70,13 @@ function askJobActive(projectId) {
   return !!j && !['done', 'failed'].includes(j.phase);
 }
 
-function recordSpend({ projectId, connector, model, usage, step = null }) {
+function recordSpend({ projectId, connector, model, usage, step = null, userId = null }) {
   const cents = costCentsForUsage({
     inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0,
     cacheReadTokens: usage.cacheReadInputTokens || 0, cacheWriteTokens: usage.cacheCreationInputTokens || 0,
   }, effectivePrice(connector.id, model));
   try {
-    insertLedgerEntry({ projectId, cycleId: null, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0, step });
+    insertLedgerEntry({ projectId, cycleId: null, connectorId: connector.id, model, inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0, costCents: cents, wallClockMs: 0, step, userId });
   } catch (e) { console.warn('[mock2] ask ledger write failed:', e?.message); }
   return cents;
 }
@@ -127,7 +127,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q, attachments });
   setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0 });
 
-  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages })
+  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages, user })
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
@@ -141,7 +141,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   return { status: 'started' };
 }
 
-async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [] }) {
+async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [], user = null }) {
   const containerName = project.container_name || containerNameForProject(projectId);
 
   // The installed-components section rides along so questions about auth /
@@ -209,7 +209,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
       setJob(projectId, { phase: 'failed', message: res.error, partial: null });
       return scheduleJobCleanup(projectId);
     }
-    totalCents += recordSpend({ projectId, connector: ready.connector, model: res.modelUsed || ready.model, usage: res.usage, step: 'ask' });
+    totalCents += recordSpend({ projectId, connector: ready.connector, model: res.modelUsed || ready.model, usage: res.usage, step: 'ask', userId: user?.id ?? null });
     totalTokens += (res.usage.inputTokens || 0) + (res.usage.outputTokens || 0);
     touchLock(projectId, holder);
 

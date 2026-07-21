@@ -23,11 +23,127 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder, Network, UserCog } from 'lucide-react';
+import { Loader2, Shield, Users, UserPlus, Trash2, RefreshCw, Copy, Check, Settings, Eye, Edit3, Folder, Network, UserCog, Coins } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 import LdapConnections from '@/components/LdapConnections';
 
+// Per-user AI-usage drill-down (admin): totals, per-project spend with a
+// per-step breakdown, and VS Code (external push) activity. Data comes from
+// the mock2 spend ledger; a host without the Projects module 404s and the
+// dialog says so instead of guessing.
+function AiUsageDialog({ user, open, onOpenChange }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    if (!open || !user) return;
+    setData(null);
+    setErr('');
+    api.mock2UserAiUsage(user.id)
+      .then(setData)
+      .catch((e) => setErr(e?.message || 'Could not load AI usage (is the Projects module enabled on this host?)'));
+  }, [open, user]);
+  const dollars = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-full h-full rounded-none overflow-y-auto sm:max-w-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Coins className="h-4 w-4" /> AI usage — {user?.username}
+          </DialogTitle>
+          <DialogDescription>
+            All AI credits this user has spent, by project and step, plus their VS Code push activity.
+          </DialogDescription>
+        </DialogHeader>
+        {err ? (
+          <p className="text-sm text-muted-foreground">{err}</p>
+        ) : !data ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Total spend</p>
+                <p className="text-lg font-semibold tabular-nums">{dollars(data.totals?.cents)}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Model calls</p>
+                <p className="text-lg font-semibold tabular-nums">{Number(data.totals?.calls || 0).toLocaleString()}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Tokens (in+out)</p>
+                <p className="text-lg font-semibold tabular-nums">{Number(data.totals?.tokens || 0).toLocaleString()}</p>
+              </div>
+            </div>
+            <div>
+              <p className="mb-1 text-sm font-medium">By project (in-platform AI spend)</p>
+              {data.projects?.length ? (
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full border-collapse text-xs sm:text-sm">
+                    <thead>
+                      <tr>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-left font-medium">Project</th>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Spend</th>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Calls</th>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.projects.map((row) => (
+                        <tr key={row.project_id}>
+                          <td className="border-b px-2 py-1.5 align-top">
+                            <span className="font-medium">{row.name || `project ${row.project_id}`}</span>
+                            {row.steps?.length ? (
+                              <span className="block text-[11px] text-muted-foreground">
+                                {row.steps.slice(0, 4).map((s) => `${s.step} ${dollars(s.cents)}`).join(' · ')}
+                                {row.steps.length > 4 ? ` · +${row.steps.length - 4} more` : ''}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{dollars(row.cents)}</td>
+                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{Number(row.calls).toLocaleString()}</td>
+                          <td className="border-b px-2 py-1.5 text-right tabular-nums align-top">{Number(row.tokens).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <p className="text-sm text-muted-foreground">No AI spend attributed to this user yet.</p>}
+            </div>
+            <div>
+              <p className="mb-1 text-sm font-medium">Through VS Code (external git pushes)</p>
+              {data.vscode?.projects?.length ? (
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full border-collapse text-xs sm:text-sm">
+                    <thead>
+                      <tr>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-left font-medium">Project</th>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Pushes</th>
+                        <th className="border-b bg-muted/50 px-2 py-1.5 text-right font-medium">Last push</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.vscode.projects.map((row) => (
+                        <tr key={row.project_id}>
+                          <td className="border-b px-2 py-1.5">{row.name || `project ${row.project_id}`}</td>
+                          <td className="border-b px-2 py-1.5 text-right tabular-nums">{row.pushes}</td>
+                          <td className="border-b px-2 py-1.5 text-right">{row.last_at ? new Date(row.last_at).toLocaleDateString() : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <p className="text-sm text-muted-foreground">No external pushes by this user.</p>}
+              {data.note ? <p className="mt-1 text-[11px] text-muted-foreground">{data.note}</p> : null}
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function UsersPage() {
+  const [aiUsageUser, setAiUsageUser] = useState(null);
   const { user: authUser } = useAuth();
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
@@ -402,7 +518,16 @@ export default function UsersPage() {
             <div className="space-y-2">
               {users.map((user) => (
                 <div key={user.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 border rounded-lg">
-                  <div className="flex-1 min-w-0">
+                  {/* The identity block opens the AI-usage drill-down (the
+                      coins button is the discoverable affordance). */}
+                  <div
+                    className="flex-1 min-w-0 cursor-pointer"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setAiUsageUser(user)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') setAiUsageUser(user); }}
+                    title="View AI usage"
+                  >
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-lg">{user.username}</span>
                       {user.displayName && (
@@ -439,6 +564,15 @@ export default function UsersPage() {
                     </div>
                   </div>
                   <div className="flex gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-11 w-11 sm:h-9 sm:w-9 p-0"
+                      onClick={() => setAiUsageUser(user)}
+                      title="AI usage — credits by project, and VS Code activity"
+                    >
+                      <Coins className="h-4 w-4" />
+                    </Button>
                     {user.role === 'pending' && (
                       <Button
                         variant="outline"
@@ -918,6 +1052,7 @@ export default function UsersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+          <AiUsageDialog user={aiUsageUser} open={aiUsageUser != null} onOpenChange={(o) => { if (!o) setAiUsageUser(null); }} />
     </div>
   );
 }

@@ -122,6 +122,7 @@ import {
 import { publishDomain } from './publish.js';
 import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting } from './settings.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
+import { getMock2Db } from './db.js';
 import { getHarnessGuide, setHarnessGuide, HARNESS_GUIDE_MAX_LENGTH } from './harness-guide.js';
 import { HARNESS_STEPS, DETERMINISTIC_STEPS, STEP_TUNING_EFFORTS, resolveStepDisplay } from './harness-steps-logic.js';
 import { getHarnessStepTuning, setHarnessStepOverride, harnessStepSpend7d, getHarnessStepPrompts, setHarnessStepPrompt } from './harness-steps.js';
@@ -2662,6 +2663,65 @@ export function createMock2Router() {
     res.set('Cache-Control', 'no-store');
     if (shot.signedOut) res.set('X-Screenshot-Signed-Out', '1');
     res.type('png').send(shot.buffer);
+  });
+
+  // Per-user AI-credit usage (admin, feeds the User Management drill-down).
+  // Attribution: a ledger row's user is its own user_id (cycle-less spend:
+  // Ask, operator design reviews) or the initiating user of its cycle
+  // (mock2_cycles.initiated_by — covers builds, audits, concept turns, and
+  // all historical rows). 'VS Code' usage = external git pushes (change
+  // records this user initiated with the external-push summary) — they
+  // consume no AI credits themselves; AI spend always happens in-platform.
+  router.get('/users/:uid/ai-usage', requireAdmin, (req, res) => {
+    const uid = Number(req.params.uid);
+    if (!Number.isFinite(uid)) return res.status(400).json({ error: 'bad user id' });
+    const db = getMock2Db();
+    const attributed = `COALESCE(l.user_id, c.initiated_by)`;
+    const totals = db.prepare(`
+      SELECT COALESCE(SUM(l.cost_cents), 0) AS cents, COUNT(*) AS calls,
+             COALESCE(SUM(l.input_tokens + l.output_tokens), 0) AS tokens
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+       WHERE ${attributed} = ?
+    `).get(uid);
+    const projects = db.prepare(`
+      SELECT l.project_id, p.name, COALESCE(SUM(l.cost_cents), 0) AS cents, COUNT(*) AS calls,
+             COALESCE(SUM(l.input_tokens + l.output_tokens), 0) AS tokens, MAX(l.created_at) AS last_at
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+        LEFT JOIN mock2_projects p ON p.id = l.project_id
+       WHERE ${attributed} = ?
+       GROUP BY l.project_id
+       ORDER BY cents DESC
+    `).all(uid);
+    const steps = db.prepare(`
+      SELECT l.project_id, COALESCE(l.step, 'unattributed') AS step,
+             COALESCE(SUM(l.cost_cents), 0) AS cents, COUNT(*) AS calls
+        FROM mock2_quota_ledger l
+        LEFT JOIN mock2_cycles c ON c.id = l.cycle_id
+       WHERE ${attributed} = ?
+       GROUP BY l.project_id, COALESCE(l.step, 'unattributed')
+       ORDER BY cents DESC
+    `).all(uid);
+    const stepsByProject = {};
+    for (const s of steps) {
+      (stepsByProject[s.project_id] ||= []).push({ step: s.step, cents: s.cents, calls: s.calls });
+    }
+    const vscode = db.prepare(`
+      SELECT r.project_id, p.name, COUNT(*) AS pushes, MAX(r.created_at) AS last_at
+        FROM mock2_change_records r
+        LEFT JOIN mock2_projects p ON p.id = r.project_id
+       WHERE r.initiated_by = ? AND r.summary LIKE 'External push (VS Code / git)%'
+       GROUP BY r.project_id
+       ORDER BY pushes DESC
+    `).all(uid);
+    res.json({
+      user_id: uid,
+      totals,
+      projects: projects.map((row) => ({ ...row, steps: stepsByProject[row.project_id] || [] })),
+      vscode: { pushes: vscode.reduce((n, v) => n + v.pushes, 0), projects: vscode },
+      note: 'AI credits are always spent in-platform (builds, chat, asks, reviews). VS Code pushes deploy code but consume no AI credits; spend from builds a user starts in the dashboard is attributed to that user.',
+    });
   });
 
   // Annotate screenshots as a JOB (house 202+poll pattern). The single

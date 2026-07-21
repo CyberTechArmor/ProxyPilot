@@ -219,7 +219,7 @@ export default function Projects() {
           <Button asChild variant="outline" className="h-auto justify-start gap-3 py-3">
             <Link to="/projects/harness">
               <Workflow className="h-5 w-5 shrink-0 text-primary" />
-              <span className="flex flex-col items-start text-left"><span className="font-medium">Harness guide</span><span className="text-xs text-muted-foreground">Every step · models · prompts · gates</span></span>
+              <span className="flex flex-col items-start text-left"><span className="font-medium">Harness</span><span className="text-xs text-muted-foreground">Per-step model · effort · thinking · guide</span></span>
             </Link>
           </Button>
         </div>

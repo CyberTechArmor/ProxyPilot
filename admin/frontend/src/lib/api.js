@@ -1216,6 +1216,12 @@ export const api = {
   mock2GetHarnessGuide: () => request('/mock2/settings/harness-guide'),
   mock2SetHarnessGuide: (content) =>
     request('/mock2/settings/harness-guide', { method: 'POST', body: JSON.stringify({ content }) }),
+  // Harness steps (admin-only) — the per-step tuning layer. GET returns every
+  // registry step with resolved model/effort/thinking + source badges; PUT
+  // writes one step's full override (absent fields clear).
+  mock2HarnessSteps: () => request('/mock2/settings/harness-steps'),
+  mock2HarnessStepSave: (id, patch) =>
+    request(`/mock2/settings/harness-steps/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
   // Fast code model — '' platform default (sonnet), 'off' = the build_runner
   // slot model builds everything, or an explicit model id.
   mock2SetFastModel: (model) =>

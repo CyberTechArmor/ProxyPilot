@@ -107,6 +107,7 @@ import { CONTRACT_FIXTURE_PATH_RE } from './scaffold.js';
 import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-scan.js';
 import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
+import { crudRulesFloorSection } from './rules-pack-logic.js';
 
 // Exported so the alternative Claude Agent SDK runner (runner-sdk.js, gated behind
 // BUILD_RUNNER=sdk — docs/agent-sdk-migration.md) orients in the same container
@@ -902,7 +903,14 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   // flagged mistake is corrected once, not re-flagged build after build.
   let feedbackSection = '';
   try { feedbackSection = buildFeedbackSection(listRecentDownNotes(projectId)); } catch { /* optional */ }
-  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
+  // MVP-path floor (project-32 ratchet): the fast path skips the rule
+  // interview, and exactly the rules an interview would set (editability,
+  // status mutability, deletion policy) are what shipped missing. Fast
+  // builds get the standard CRUD rules pack injected as a binding floor —
+  // the inventory/instruction still outrank it where they explicitly
+  // deviate. Full builds are unchanged (their interview owns the rules).
+  const rulesFloor = mvpBuild ? crudRulesFloorSection() : '';
+  const transcript = [{ role: 'user', text: `${buildRunnerTask(cycle.instruction)}${prepassBrief}${rulesFloor}${feedbackSection}`, ...(taskImages.length ? { images: taskImages } : {}) }];
   if (taskImages.length) logEvent('attachments', { role: 'user', content: `${taskImages.length} image attachment(s) included with the task`, meta: { count: taskImages.length } });
   // Stub-registry context (B.6): EVERY cycle receives a concise global list of
   // unresolved production simulations, so a later instruction-scoped cycle can no

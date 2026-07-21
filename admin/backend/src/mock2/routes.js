@@ -2680,20 +2680,26 @@ export function createMock2Router() {
     if (cur && cur.state === 'running' && Date.now() - cur.startedAt < 150000) {
       return res.status(202).json({ started: false, state: 'running' });
     }
-    const job = { state: 'running', stage: 'starting', startedAt: Date.now(), error: null, buffer: null, signedOut: false };
+    const job = { state: 'running', stage: 'accepted', startedAt: Date.now(), error: null, buffer: null, signedOut: false };
     screenshotJobs.set(key, job);
-    const { captureOneScreenshot } = await import('./design-review.js');
-    void captureOneScreenshot({
-      containerName: project.container_name,
-      webPort: project.web_port || 3000,
-      path: String(req.body?.path || '/'),
-      width: Number(req.body?.w) || 390,
-      onStage: (stage) => { job.stage = stage; },
-    }).then((shot) => {
+    console.log(`[mock2] screenshot job start: project ${key} path=${String(req.body?.path || '/')}`);
+    // Respond BEFORE any further await: the acknowledgment must be
+    // un-hangable, so a wedge anywhere later is visible through the status
+    // poll (which reports the stage) instead of freezing the start call.
+    res.status(202).json({ started: true, state: 'running' });
+    void (async () => {
+      job.stage = 'importing the capture module';
+      const { captureOneScreenshot } = await import('./design-review.js');
+      const shot = await captureOneScreenshot({
+        containerName: project.container_name,
+        webPort: project.web_port || 3000,
+        path: String(req.body?.path || '/'),
+        width: Number(req.body?.w) || 390,
+        onStage: (stage) => { job.stage = stage; },
+      });
       if (shot.ok) { job.state = 'done'; job.buffer = shot.buffer; job.signedOut = !!shot.signedOut; }
       else { job.state = 'error'; job.error = shot.error || 'screenshot failed'; }
-    }).catch((e) => { job.state = 'error'; job.error = String(e?.message || e).slice(0, 300); });
-    res.status(202).json({ started: true, state: 'running' });
+    })().catch((e) => { job.state = 'error'; job.error = String(e?.message || e).slice(0, 300); });
   });
   router.get('/projects/:id/app-screenshot-jobs/current', requireMock2Role('viewer'), (req, res) => {
     const job = screenshotJobs.get(Number(req.mock2Project.id));

@@ -188,14 +188,18 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
 // then NAMES the stage so a stuck install can be diagnosed from the dialog.
 const CAPTURE_DEADLINE_MS = 90000;
 
-export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390 }) {
+export async function captureOneScreenshot({ containerName, webPort = 3000, path = '/', width = 390, onStage = null }) {
   let browser = null;
   let stage = 'starting';
   const t0 = Date.now();
   // Every stage transition is logged with elapsed ms, so a wedged install's
   // journal shows exactly where the time went even when the dialog only
   // shows the timeout.
-  const mark = (s) => { stage = s; console.log(`[mock2] screenshot ${containerName}: ${s} (+${Date.now() - t0}ms)`); };
+  const mark = (s) => {
+    stage = s;
+    console.log(`[mock2] screenshot ${containerName}: ${s} (+${Date.now() - t0}ms)`);
+    try { onStage?.(s); } catch { /* advisory */ }
+  };
   const work = (async () => {
     // The driver import lives INSIDE the deadline: a broken/slow node_modules
     // used to hang here BEFORE any timeout applied — the route then never

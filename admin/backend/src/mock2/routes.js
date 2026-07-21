@@ -2664,6 +2664,50 @@ export function createMock2Router() {
     res.type('png').send(shot.buffer);
   });
 
+  // Annotate screenshots as a JOB (house 202+poll pattern). The single
+  // long-request version proved fragile: anything between the dialog and the
+  // capture (proxy limits, a wedged driver, a restarted backend) surfaced as
+  // an eternal spinner with a generic client timeout. The start route answers
+  // instantly, the status route reports the LIVE capture stage, and the
+  // image route serves the finished PNG — so a wedge is visible on screen at
+  // the exact stage it happens.
+  const screenshotJobs = new Map(); // project id -> { state, stage, startedAt, error, buffer, signedOut }
+  router.post('/projects/:id/app-screenshot-jobs', requireMock2Role('viewer'), async (req, res) => {
+    const project = req.mock2Project;
+    if (project.lifecycle !== 'active') return res.status(409).json({ error: 'The project is not online.' });
+    const key = Number(project.id);
+    const cur = screenshotJobs.get(key);
+    if (cur && cur.state === 'running' && Date.now() - cur.startedAt < 150000) {
+      return res.status(202).json({ started: false, state: 'running' });
+    }
+    const job = { state: 'running', stage: 'starting', startedAt: Date.now(), error: null, buffer: null, signedOut: false };
+    screenshotJobs.set(key, job);
+    const { captureOneScreenshot } = await import('./design-review.js');
+    void captureOneScreenshot({
+      containerName: project.container_name,
+      webPort: project.web_port || 3000,
+      path: String(req.body?.path || '/'),
+      width: Number(req.body?.w) || 390,
+      onStage: (stage) => { job.stage = stage; },
+    }).then((shot) => {
+      if (shot.ok) { job.state = 'done'; job.buffer = shot.buffer; job.signedOut = !!shot.signedOut; }
+      else { job.state = 'error'; job.error = shot.error || 'screenshot failed'; }
+    }).catch((e) => { job.state = 'error'; job.error = String(e?.message || e).slice(0, 300); });
+    res.status(202).json({ started: true, state: 'running' });
+  });
+  router.get('/projects/:id/app-screenshot-jobs/current', requireMock2Role('viewer'), (req, res) => {
+    const job = screenshotJobs.get(Number(req.mock2Project.id));
+    if (!job) return res.json({ state: 'none' });
+    res.json({ state: job.state, stage: job.stage, elapsed_ms: Date.now() - job.startedAt, error: job.error, signed_out: job.signedOut });
+  });
+  router.get('/projects/:id/app-screenshot-jobs/current/image', requireMock2Role('viewer'), (req, res) => {
+    const job = screenshotJobs.get(Number(req.mock2Project.id));
+    if (!job || job.state !== 'done' || !job.buffer) return res.status(404).json({ error: 'No finished screenshot — start a new one' });
+    res.set('Cache-Control', 'no-store');
+    if (job.signedOut) res.set('X-Screenshot-Signed-Out', '1');
+    res.type('png').send(job.buffer);
+  });
+
   // How this project handles the pre-pass's domain suggestions:
   // 'ask' (card, default) | 'auto' (fold all in) | 'off' (build exactly as asked).
   router.put('/projects/:id/suggest-mode', requireMock2Role('editor'), refuseIfArchived, (req, res) => {

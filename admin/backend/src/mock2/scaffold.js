@@ -583,9 +583,15 @@ header.app nav a.active,header.app nav button.active{background:var(--app-bg,#e7
 /* ---------- Tables ---------- */
 table.list{width:100%;border-collapse:collapse;font-size:14px}
 table.list th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;text-align:left;color:var(--app-muted,#5a6b81);padding:10px 12px;border-bottom:1px solid var(--app-border,#e2e8f1)}
-table.list td{padding:12px;border-bottom:1px solid var(--app-border,#e2e8f1)}
+table.list td{padding:12px;border-bottom:1px solid var(--app-border,#e2e8f1);overflow-wrap:anywhere}
 table.list tr:last-child td{border-bottom:none}
 .table-scroll{overflow-x:auto}
+/* Long unbroken strings (emails, ldaps:// URLs, one-time links, tokens) must
+   never overflow their card/cell — operator-reported CSS overflow in the
+   admin area. Cells break anywhere (above); these cover the rest. */
+.truncate{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:inline-block;vertical-align:bottom}
+code,kbd,.mono{overflow-wrap:anywhere}
+.card-b{min-width:0}
 
 /* ---------- Progress ---------- */
 .prog{height:8px;background:var(--app-bg,#eef2f7);border-radius:20px;overflow:hidden}

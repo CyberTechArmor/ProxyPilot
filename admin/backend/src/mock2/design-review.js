@@ -102,7 +102,7 @@ function pathsToShoot(spec) {
 // JPEG base64 (cheaper tokens than PNG at review fidelity). Never throws.
 export async function captureAppScreens({ containerName, webPort = 3000, paths = null, withAxe = true }) {
   const chromium = await loadChromium();
-  if (!chromium) return { shots: [], axe: [], detail: 'playwright-core is not installed (rerun update.sh / npm install)' };
+  if (!chromium) return { shots: [], axe: [], overflows: [], detail: 'playwright-core is not installed (rerun update.sh / npm install)' };
   const baseUrl = await resolveBrowserTarget(containerName, webPort);
   const specText = await readContainerFile(containerName, UI_CHECKS_PATH);
   const parsed = specText ? parseUiChecks(specText) : { ok: false };
@@ -113,6 +113,7 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
   let browser = null;
   const shots = [];
   const axeViolations = [];
+  const overflowFindings = [];
   try {
     browser = await chromium.launch(launchOptions());
     const context = await browser.newContext({ viewport: MOBILE, deviceScaleFactor: 1 });
@@ -127,6 +128,27 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
         await gotoSettled(page, new URL(path, baseUrl).toString());
         const mobileShot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false });
         shots.push({ path, width: MOBILE.width, media_type: 'image/jpeg', data: mobileShot.toString('base64') });
+        // Deterministic overflow check (operator-reported: scrolling strip in
+        // the header, admin text overflow): any page that scrolls horizontally
+        // at mobile width is a defect — record the offenders for the critique
+        // and the polish queue.
+        try {
+          const of = await page.evaluate(() => {
+            const doc = document.documentElement;
+            const over = doc.scrollWidth - doc.clientWidth;
+            if (over <= 1) return null;
+            const bad = [];
+            for (const el of document.querySelectorAll('body *')) {
+              const r = el.getBoundingClientRect();
+              if (r.right > doc.clientWidth + 1 && !el.children.length) {
+                bad.push(`${el.tagName.toLowerCase()}${el.className ? '.' + String(el.className).trim().split(/\s+/).slice(0, 2).join('.') : ''}`);
+                if (bad.length >= 5) break;
+              }
+            }
+            return { over, elements: [...new Set(bad)] };
+          });
+          if (of) overflowFindings.push({ page: path, width: MOBILE.width, over_px: of.over, elements: of.elements });
+        } catch { /* advisory */ }
         if (axeSource) {
           try {
             await page.addScriptTag({ content: axeSource });
@@ -150,9 +172,9 @@ export async function captureAppScreens({ containerName, webPort = 3000, paths =
         console.warn(`[mock2] design-review screenshot failed for ${path}:`, err?.message);
       }
     }
-    return { shots, axe: axeViolations, detail: null };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: null };
   } catch (err) {
-    return { shots, axe: axeViolations, detail: `browser error: ${err?.message || err}` };
+    return { shots, axe: axeViolations, overflows: overflowFindings, detail: `browser error: ${err?.message || err}` };
   } finally {
     try { if (browser) await browser.close(); } catch { /* ignore */ }
   }
@@ -218,6 +240,9 @@ export async function runDesignReview({ project, trigger = 'manual', apply = fal
   const model = String(process.env.MOCK2_REVIEW_MODEL || '').trim() || ready.model;
   const userText = [
     `Screens shot (in order, mobile ${MOBILE.width}px first; the first two paths also have a ${DESKTOP.width}px desktop shot): ${capture.shots.map((s) => `${s.path}@${s.width}`).join(', ')}.`,
+    (capture.overflows || []).length
+      ? `DETERMINISTIC FINDING — horizontal overflow at ${MOBILE.width}px (a defect; include a fix in your findings): ${capture.overflows.map((o) => `${o.page} overflows by ${o.over_px}px (${o.elements.join(', ') || 'container'})`).join('; ')}.`
+      : 'No horizontal overflow detected at mobile width.',
     tokensJson ? `Design tokens:\n${tokensJson.slice(0, 4000)}` : 'No design tokens file.',
     mockupHtml ? `Approved mockup HTML (the visual contract):\n${mockupHtml.slice(0, 120000)}` : 'No approved mockup — judge craft and consistency on their own.',
   ].join('\n\n');

@@ -431,6 +431,17 @@ and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
 compute day boundaries from the client clock, and never compare client-local
 dates against server-UTC dates — that class of bug shifts punches/records
 across midnight.
+CHROME OVERFLOW (operator-reported defects — binding):
+- The app chrome NEVER scrolls horizontally: the top nav wraps or collapses
+  into a menu — never a horizontally scrolling strip beside the brand.
+- ONE theme control in the whole app, in the header. Never a second theme
+  switch, a theme page, or a separate route per theme — themes are tokens
+  flipped by the one toggle.
+- Long unbroken strings (emails, URLs, one-time links, tokens) truncate with
+  ellipsis or break-anywhere inside their cell/card. A visible horizontal
+  scrollbar on the page, header, or a card is a defect (.table-scroll on wide
+  tables is the one sanctioned exception).
+
 DESIGN CRAFT (the fidelity floor is not the ceiling): the mockup fixes the
 layout and style; production polish is still your job. Keep a consistent
 spacing rhythm and clear visual hierarchy (one primary action per view), align
@@ -1089,6 +1100,17 @@ and timezone (Intl.DateTimeFormat / toLocaleString on the ISO value). Never
 compute day boundaries from the client clock, and never compare client-local
 dates against server-UTC dates — that class of bug shifts punches/records
 across midnight.
+CHROME OVERFLOW (operator-reported defects — binding):
+- The app chrome NEVER scrolls horizontally: the top nav wraps or collapses
+  into a menu — never a horizontally scrolling strip beside the brand.
+- ONE theme control in the whole app, in the header. Never a second theme
+  switch, a theme page, or a separate route per theme — themes are tokens
+  flipped by the one toggle.
+- Long unbroken strings (emails, URLs, one-time links, tokens) truncate with
+  ellipsis or break-anywhere inside their cell/card. A visible horizontal
+  scrollbar on the page, header, or a card is a defect (.table-scroll on wide
+  tables is the one sanctioned exception).
+
 DESIGN CRAFT (the fidelity floor is not the ceiling): the mockup fixes the
 layout and style; production polish is still your job. Keep a consistent
 spacing rhythm and clear visual hierarchy (one primary action per view), align

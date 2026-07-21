@@ -185,6 +185,59 @@ DATABASE_URL=postgres://app:app@127.0.0.1:5432/app
 // server. Before the first build, serve.py owns the web port (serves the
 // placeholder page at / and the mockup at /_preview); the deploy step swaps in
 // the scaffold's own runtime once a build succeeds.
+
+// WORKING-COPY.md — the external-editor guide shipped in every project repo.
+export function workingCopyMd(project) {
+  const id = Number(project?.id) || '<project-id>';
+  return `# Working copy guide (VS Code and other editors)
+
+This repository is hosted by ProxyPilot. Clone it over authenticated smart
+HTTP (the exact URL and a one-click VS Code link are on the project page
+under **Connect**):
+
+    git clone https://<your-proxypilot-domain>/api/mock2/git/${id}
+
+Sign in with your dashboard username and a **connect token** (project page →
+Connect → new token; tokens expire after 30 days). Editors can push;
+viewers can only clone/pull.
+
+## The push contract — no manual deploy
+
+1. Commit your work. This repo ships \`.vscode/settings.json\` with
+   \`"git.postCommitCommand": "push"\`, so VS Code pushes automatically after
+   every commit (remove that setting if you prefer pushing by hand).
+2. On every successful push the platform automatically:
+   - records the change (hash-chained change record, visible in Change history),
+   - syncs the project container's working tree,
+   - **redeploys the app** — install → migrate → build → restart → health
+     check — and posts the result in the build chat.
+
+If the project is asleep when you push, the commits are safe in the repo;
+wake the project and press "Redeploy app" once.
+
+## Design specs — reference these, do not fight them
+
+The approved design travels with the repo:
+
+- \`state/design-tokens.json\` — colors, typography, radius, spacing, shadow
+- \`state/design.css\` — the rendered stylesheet every page links as \`/design.css\`
+- \`state/mockups/current.html\` — the approved mockup: the visual contract
+
+Style new UI through the tokens (\`var(--app-*)\`); the platform's design
+review flags colors that bypass them. The app is an installable PWA — keep
+\`public/manifest.webmanifest\`, \`sw.js\`, \`install.js\`, and the manifest
+link + install script in every page head.
+
+## Ground rules
+
+- Do not edit \`state/changes/\` (hash-chained audit trail) and avoid
+  rewriting pushed history.
+- \`mock2.yaml\` declares how the app installs, migrates, builds, and starts —
+  keep it truthful; every deploy reads it.
+- Platform builds also commit to this repo; pull before you start a session.
+`;
+}
+
 export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
   return [
     { path: 'mock2.yaml', content: defaultManifest({ webPort }) },
@@ -205,7 +258,27 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
         `ProxyPilot Mock2 project (template ${MOCK2_TEMPLATE_VERSION}). ` +
         `The declared topology and run contract are in \`mock2.yaml\`; the app is a ` +
         `TypeScript/Express/Drizzle scaffold under \`src/\` with migrations in \`migrations/\`. ` +
-        `\`serve.py\` is the pre-build placeholder dev server (Concept stage).\n`,
+        `\`serve.py\` is the pre-build placeholder dev server (Concept stage).\n\n` +
+        `Working on this repo from VS Code or another editor? Read \`WORKING-COPY.md\` — ` +
+        `pushes auto-deploy, and the approved design specs live in \`state/\` ` +
+        `(\`design-tokens.json\`, \`design.css\`, \`mockups/current.html\`).\n`,
+    },
+    {
+      // The external-editor contract: clone → commit → push, and the platform
+      // does the rest (sync + redeploy). Shipped in every project repo so the
+      // workflow travels with the code.
+      path: 'WORKING-COPY.md',
+      content: workingCopyMd(project),
+    },
+    {
+      // VS Code: push automatically after every commit, so the push→deploy
+      // contract in WORKING-COPY.md fires without a manual sync step.
+      path: '.vscode/settings.json',
+      content: `${JSON.stringify({
+        'git.postCommitCommand': 'push',
+        'git.confirmSync': false,
+        'git.autofetch': true,
+      }, null, 2)}\n`,
     },
     {
       // state/ is where later phases append rules.md and change records

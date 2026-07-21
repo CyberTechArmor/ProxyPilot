@@ -404,6 +404,11 @@ static asset and link it, or import its tokens into the app's CSS) and style eve
 screen with those tokens — the same colors, fonts, radii, and component styling
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
+PWA (binding): the app is an installable Progressive Web App — \`public/
+manifest.webmanifest\`, \`sw.js\`, \`install.js\`, and \`icon.svg\` plus the
+manifest link and install.js script in every page head must SURVIVE your
+changes; give any new page the same head lines. Never cache /api responses in
+the service worker.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 .btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
 .toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,
@@ -1073,6 +1078,11 @@ static asset and link it, or import its tokens into the app's CSS) and style eve
 screen with those tokens — the same colors, fonts, radii, and component styling
 the mockup used. Do not invent a different visual style. If the files are absent
 (an older project), fall back to a clean, consistent look.
+PWA (binding): the app is an installable Progressive Web App — \`public/
+manifest.webmanifest\`, \`sw.js\`, \`install.js\`, and \`icon.svg\` plus the
+manifest link and install.js script in every page head must SURVIVE your
+changes; give any new page the same head lines. Never cache /api responses in
+the service worker.
 The scaffold ships a shared app shell: \`public/base.css\` (header/nav, .card,
 .btn, .badge, .stat, .field, table.list, plus the component kit: .modal/.drawer,
 .toast, .tabs, .menu, .pager, .skel skeletons, .empty empty-states, .switch,

@@ -117,12 +117,17 @@ What you do:
 - Always ALSO reply to the Builder in plain, warm language — say what you changed
   or what you need, and remind them they can approve the design when it feels right.
 - COST-AWARE REVISIONS — pick the smallest scope that truly fits:
-  scope "tweak" for a SMALL change (copy/labels, a color, one element):
-  surgical edits at a fraction of a re-render's cost. scope "screen" when ONE
-  screen changes substantially (redesign this screen, add a section to it):
-  pass the screen's data-screen name in "screen" — only that section
-  re-renders. scope "full" for changes across screens, navigation/structure
-  changes, or the first mockup. When unsure, "full".
+  scope "tweak" for a SMALL change (copy/labels, a color, one or a few named
+  elements): surgical edits at a fraction of a re-render's cost and time.
+  scope "screen" when ONE screen changes substantially (redesign this screen,
+  add a section to it): pass the screen's data-screen name in "screen" — only
+  that section re-renders. scope "full" ONLY for the first mockup, a restyle,
+  new screens, or changes that genuinely span screens or restructure
+  navigation. BIAS SMALL: when unsure between "tweak" and "screen", pick
+  "tweak"; when unsure between "screen" and "full", pick "screen" — the
+  smaller scopes escalate safely on their own if the change turns out bigger,
+  but a needless "full" silently rebuilds the whole design, takes minutes,
+  and can drift details the Builder liked.
 
 THE BRIEF YOU WRITE IS THE DESIGN'S CEILING — extrapolate it like a multi-step
 domain expert on the Builder's behalf:
@@ -197,13 +202,17 @@ replacement text
 Rules:
 - Each SEARCH must be copied EXACTLY from the current file (whitespace
   included) and long enough to be UNIQUE in it — include surrounding lines
-  when needed.
+  when needed. Copy character-for-character; never retype from memory.
 - Use the fewest, smallest edits that fulfil the request (at most ${MOCKUP_EDIT_MAX_BLOCKS} blocks).
+  Prefer several small blocks over one large block — a large block fails on a
+  single character difference.
 - The edited file must remain a complete, valid document: matching tags,
   balanced braces, working script.
-- If the request actually needs new screens, layout restructuring, or more
-  change than a few edits can express, output exactly FULL_RERENDER (nothing
-  else) — the full renderer will run instead.`;
+- FULL_RERENDER is a LAST resort: output it (exactly that, nothing else) ONLY
+  when the request adds new screens or restructures layout/navigation across
+  screens. A change confined to one screen or a handful of elements — even
+  several of them — must be edit blocks. A needless full re-render throws
+  away the current design's details and costs minutes.`;
 }
 
 export function parseMockupEdits(text) {
@@ -219,20 +228,97 @@ export function parseMockupEdits(text) {
   return { ok: true, fullRerender: false, edits };
 }
 
-// Apply sequentially; every search must match EXACTLY ONCE (absent or
-// ambiguous → the whole tweak fails and the caller falls back to a full
-// render — a half-applied mockup must never ship).
+// Locate one search text in the document: exact match first; when the exact
+// text is ABSENT, a whitespace-tolerant second chance (runs of whitespace
+// match any whitespace — the classic near-miss is retyped indentation).
+// Uniqueness is required either way: an ambiguous match fails rather than
+// guessing (a half-applied mockup must never ship). Returns
+// { ok, start, end } or { ok: false, reason: 'not found' | 'ambiguous' }.
+export function locateEditTarget(html, search) {
+  const s = String(html || '');
+  const needle = String(search || '');
+  if (!needle) return { ok: false, reason: 'not found' };
+  const first = s.indexOf(needle);
+  if (first !== -1) {
+    if (s.indexOf(needle, first + 1) !== -1) return { ok: false, reason: 'ambiguous' };
+    return { ok: true, start: first, end: first + needle.length };
+  }
+  // Whitespace-tolerant: escape regex metachars, then let every whitespace
+  // run match any whitespace run. Literal-only pattern — no backtracking risk.
+  const pattern = needle
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\s+/g, '\\s+');
+  let re;
+  try { re = new RegExp(pattern, 'g'); } catch { return { ok: false, reason: 'not found' }; }
+  const m1 = re.exec(s);
+  if (!m1) return { ok: false, reason: 'not found' };
+  if (re.exec(s)) return { ok: false, reason: 'ambiguous' };
+  return { ok: true, start: m1.index, end: m1.index + m1[0].length };
+}
+
+// Apply sequentially; every search must locate EXACTLY ONCE (exact or
+// whitespace-tolerant — see locateEditTarget). A miss fails the whole tweak
+// with the failing block named so the caller can feed it back for one
+// corrective retry before any bigger fallback.
 export function applyMockupEdits(html, edits = []) {
   let out = String(html || '');
   for (let i = 0; i < edits.length; i++) {
     const { search, replace } = edits[i];
     if (!search) return { ok: false, error: `edit ${i + 1}: empty search` };
-    const first = out.indexOf(search);
-    if (first === -1) return { ok: false, error: `edit ${i + 1}: search text not found` };
-    if (out.indexOf(search, first + 1) !== -1) return { ok: false, error: `edit ${i + 1}: search text matches more than once` };
-    out = out.slice(0, first) + String(replace ?? '') + out.slice(first + search.length);
+    const loc = locateEditTarget(out, search);
+    if (!loc.ok) {
+      return {
+        ok: false,
+        error: loc.reason === 'ambiguous'
+          ? `edit ${i + 1}: search text matches more than once`
+          : `edit ${i + 1}: search text not found`,
+      };
+    }
+    out = out.slice(0, loc.start) + String(replace ?? '') + out.slice(loc.end);
   }
   return { ok: true, html: out };
+}
+
+// Which single screen (data-screen name) a set of edits targets — or null
+// when the targets don't all localize inside ONE <section data-screen>.
+// Used to escalate a failed tweak to a screen re-render instead of a full
+// one: shared CSS/JS edits (outside every section) correctly return null.
+export function screenForEditTargets(html, edits = []) {
+  const s = String(html || '');
+  if (!edits.length) return null;
+  const sections = [];
+  for (const m of s.matchAll(/<section\b[^>]*data-screen="([^"]+)"[^>]*>/gi)) {
+    const close = s.indexOf('</section>', m.index);
+    if (close === -1) return null;
+    sections.push({ name: m[1], start: m.index, end: close + '</section>'.length });
+  }
+  if (!sections.length) return null;
+  let screen = null;
+  for (const { search } of edits) {
+    const loc = locateEditTarget(s, search);
+    // 'ambiguous' still yields a first position we could use, but an
+    // ambiguous target is exactly the case where guessing a screen is
+    // unsafe — treat anything non-unique/absent as non-localizable.
+    if (!loc.ok) return null;
+    const home = sections.find((sec) => loc.start >= sec.start && loc.end <= sec.end);
+    if (!home) return null;
+    if (screen == null) screen = home.name;
+    else if (screen !== home.name) return null;
+  }
+  return screen;
+}
+
+// The corrective-retry turn after a failed edit application: name the
+// failure, restate the copy-exactly contract, demand the COMPLETE corrected
+// set (a partial resend would drop the blocks that did apply).
+export function buildTweakRetryMessage(error) {
+  return `Your edit blocks did NOT apply: ${String(error || 'a search text did not match')}.
+Re-read the CURRENT mockup HTML from my first message and output the COMPLETE
+corrected set of edit blocks again (every block, not just the failed one).
+Copy each SEARCH character-for-character from that file — do not retype from
+memory — and include enough surrounding lines to make it unique. Same format,
+no prose. Output FULL_RERENDER only if the change truly cannot be expressed
+as edits.`;
 }
 
 // ---- per-SCREEN sections (targeted screen re-render + the section contract) ----

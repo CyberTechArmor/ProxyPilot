@@ -469,7 +469,7 @@ async function checklistPostPass(requestRow) {
     connector: ready.connector, apiKey: ready.apiKey, model: prepassModel(routingEnv()),
     system: stepSystemPrompt('checklist-postpass', buildChecklistPostPassPrompt(), {}), tools: [],
     transcript: [{ role: 'user', text: buildChecklistPostPassTask({ instruction: requestRow.instruction, summary: requestChangeSummary(requestRow), screens: byScreen }) }],
-    timeoutMs: 120000, effort: 'low', thinking: 'off',
+    timeoutMs: 120000, effort: 'high', thinking: 'off',
   });
   if (!res.ok) return;
   const parsed = parseChecklistPostPassReply(res.text);

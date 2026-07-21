@@ -197,7 +197,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   for (let turn = 0; turn < ASK_MAX_TURNS; turn += 1) {
     setJob(projectId, { phase: 'running', message: turn === 0 ? 'Looking into it…' : `Working… (step ${turn + 1})`, turns: turn + 1 });
     turnStreamed = false;
-    const askTuned = applyLaneTuning({ model: ready.model, effort: null, thinking: null }, getLaneTuning('ask'));
+    const askTuned = applyLaneTuning({ model: ready.model, effort: 'high', thinking: null }, getLaneTuning('ask'));
     const res = await callStepTurn('ask', {
       connector: ready.connector, apiKey: ready.apiKey, model: askTuned.model,
       system, tools: ASK_TOOLS, serverTools, transcript,

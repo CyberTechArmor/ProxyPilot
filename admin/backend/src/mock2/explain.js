@@ -49,7 +49,7 @@ export async function explainCard({ text, title = '', status = '', kind = '' }) 
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: stepSystemPrompt('explain-card', EXPLAIN_SYSTEM_PROMPT, {}), tools: [],
       transcript: buildExplainTranscript({ text, title, status, kind }),
-      timeoutMs: 240000,
+      timeoutMs: 240000, effort: 'high',
     });
   } catch (err) {
     return { ok: false, error: `the explainer call failed: ${err?.message || String(err)}` };
@@ -72,7 +72,7 @@ export async function explainFollowup({ text, title = '', status = '', kind = ''
       connector: ready.connector, apiKey: ready.apiKey, model: ready.model,
       system: stepSystemPrompt('explain-followup', EXPLAIN_FOLLOWUP_SYSTEM_PROMPT, {}), tools: [],
       transcript: buildFollowupTranscript({ text, title, status, kind, prior, question }),
-      timeoutMs: 240000,
+      timeoutMs: 240000, effort: 'high',
     });
   } catch (err) {
     return { ok: false, error: `the explainer call failed: ${err?.message || String(err)}` };

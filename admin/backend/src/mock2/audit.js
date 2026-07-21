@@ -388,7 +388,7 @@ async function runAudit({ project, cycle, ready, framework, user, actingAsAdmin,
   const auditImages = hydrateAttachments(projectId, attachments);
   // Operator lane tuning (admin settings) over the lane default: a bounded
   // classification/reasoning task — medium effort unless tuned otherwise.
-  const auditTuned = applyLaneTuning({ model: ready.model, effort: 'medium', thinking: null }, getLaneTuning('audit'));
+  const auditTuned = applyLaneTuning({ model: ready.model, effort: 'high', thinking: null }, getLaneTuning('audit'));
   const auditRes = await callStepTurn('rule-audit', {
     connector: ready.connector, apiKey: ready.apiKey, model: auditTuned.model,
     system: stepSystemPrompt('rule-audit',

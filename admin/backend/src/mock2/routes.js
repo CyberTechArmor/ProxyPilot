@@ -355,6 +355,10 @@ const createProjectSchema = z.object({
   // Base design preset (design-presets.js); omitted/'ai' → the mockup model
   // picks the look, exactly as before.
   design_preset: z.string().trim().max(40).optional(),
+  // Lean BEAF Pro integration: an existing LBP card to link this LXC build
+  // project to ("Build LXC" from an LBP project). Omitted → a new LBP card
+  // is auto-created for this project instead.
+  lbp_project_id: z.number().int().positive().optional(),
 });
 const memberSchema = z.object({
   user_id: z.union([z.number().int(), z.string()]),
@@ -861,7 +865,7 @@ export function createMock2Router() {
   // gate), create the row + permanent slug reservation, add the creator as an
   // editor (so it isn't born orphaned), and kick off provisioning (202 + poll).
   // Admin-gated — creating a project provisions a container.
-  router.post('/projects', requireAdmin, (req, res) => {
+  router.post('/projects', requireAdmin, async (req, res) => {
     const parsed = createProjectSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'name and parent_domain_id are required' });
     const { name, description } = parsed.data;
@@ -905,6 +909,31 @@ export function createMock2Router() {
     }
 
     logAudit(req.user.id, 'MOCK2_PROJECT_CREATE', 'mock2_project', project.id, { name, slug: project.slug, domain: parent.domain, design_preset: presetKey }, req.ip);
+
+    // Lean BEAF Pro: every LXC AI-dev project gets a card on the innovation
+    // board. If the create came FROM an LBP card ("Build LXC"), link that
+    // card; otherwise auto-create one. Best-effort — a failure here must
+    // never break container provisioning.
+    try {
+      const lbp = await import('../lib/lean-beaf-store.js');
+      const requestedCard = parsed.data.lbp_project_id
+        ? lbp.getProject(parsed.data.lbp_project_id) : null;
+      if (requestedCard && !requestedCard.outcome) {
+        lbp.linkMock2Project(requestedCard.id, project.id);
+        lbp.addActivity(requestedCard.id, {
+          type: 'lxc_linked', authorId: req.user.id,
+          payload: { mock2_project_id: project.id, source: 'build_lxc' },
+        });
+      } else {
+        lbp.createCardForMock2Project({
+          mock2ProjectId: project.id, name, description: description ?? null,
+          createdBy: req.user.id,
+        });
+      }
+    } catch (err) {
+      console.warn('[mock2] LBP card create/link failed (non-fatal):', err?.message);
+    }
+
     startProvision(project);
     res.status(202).json({ project: shapeProject(project, { isAdmin: true }) });
   });

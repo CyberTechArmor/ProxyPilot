@@ -23,6 +23,7 @@ import { backupsRouter } from './routes/backups.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { ldapRouter } from './routes/ldap.js';
 import { domainsRouter } from './routes/domains.js';
+import { createLeanBeafRouter } from './routes/lean-beaf.js';
 import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { autoHealVpnListenPort } from './lib/vpn-startup.js';
@@ -463,6 +464,9 @@ app.use('/api/cves', authenticateToken, blockPendingRole, cvesRouter);
 app.use('/api/housekeeping', authenticateToken, blockPendingRole, housekeepingRouter);
 app.use('/api/backups', authenticateToken, blockPendingRole, backupsRouter);
 app.use('/api/notifications', authenticateToken, blockPendingRole, notificationsRouter);
+// Lean BEAF Pro — team-shared innovation project management. Deliberately
+// NOT admin-gated: every non-pending user is a workspace member (R01).
+app.use('/api/lbp', authenticateToken, blockPendingRole, createLeanBeafRouter());
 app.use('/api/ldap', authenticateToken, ldapRouter);
 // Domain provisioning: NOT behind authenticateToken — the /provision/*
 // endpoints authenticate with the X-API-Key provisioning key (validated

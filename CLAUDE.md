@@ -39,7 +39,7 @@ npm run build      # production build (parallelism deliberately limited for low-
 
 **Request flow:** Frontend (`admin/frontend/src/lib/api.js`) → cookie-sessioned Express API → SQLite. The API client centralizes CSRF (`pp_csrf` cookie echoed as `X-CSRF-Token`), the sudo-elevation modal flow on 403, and retries — go through it rather than raw `fetch`.
 
-**Backend layout:** `src/index.js` (entry) → `src/routes/*.js` (auth, services, lxc, vpn, firewall, ssh-access, backups, cves, security, housekeeping, notifications, terminal-ws, user) → `src/lib/*` (Caddy driver, L4/L7 reconcilers, backup pack/unpack, cert-mount reconciler, S3, WebAuthn, etc.). Validation uses Zod on both backend and frontend.
+**Backend layout:** `src/index.js` (entry) → `src/routes/*.js` (auth, services, lxc, vpn, firewall, ssh-access, backups, cves, security, housekeeping, notifications, terminal-ws, user, lean-beaf) → `src/lib/*` (Caddy driver, L4/L7 reconcilers, backup pack/unpack, cert-mount reconciler, S3, WebAuthn, etc.). Validation uses Zod on both backend and frontend.
 
 **Caddy integration:** the backend owns `/etc/caddy/sites/*.caddy` (regenerated from DB state, then `caddy reload`); operator-managed `/etc/caddy/custom/*.caddy` is never clobbered. HTTP/S routes go through Caddy; raw TCP/UDP forwards (`service_l4_forwards`) are reconciled as Incus proxy devices. When the backend runs inside Docker (detected via `/.dockerenv` or `DOCKER_CONTAINER=true`), host-level commands run through `nsenter -t 1`.
 

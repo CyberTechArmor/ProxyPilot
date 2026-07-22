@@ -1,0 +1,479 @@
+// Lean BEAF Pro ("Pro" for projects) — pure decision logic.
+//
+// Innovation project management for the Spec Ops team: rollout pipeline
+// (Idea → MVP → Testing → Site → POD → Region → All), meeting-to-meeting
+// movement tracking, grounded evidence (metric reports, time events,
+// feedback, learnings) and an archive with meta-analysis.
+//
+// No DB / network / clock access in here — everything takes plain data in
+// and returns decisions, so the rules (R01–R12, see docs/features/
+// lean-beaf-pro.md) are unit-testable without better-sqlite3 (the repo's
+// stub-at-the-module-boundary test pattern). DB wiring lives in
+// lean-beaf-store.js; HTTP in routes/lean-beaf.js.
+//
+// Deliberately absent (locked design decisions — do not add): progress
+// status, priority, due dates, overdue mechanics. The rollout stage is the
+// only lifecycle axis; movement between meetings is the accountability
+// mechanism; blockers are activity/comments, not a field.
+
+// ---- stages (R02) ----
+
+export const LBP_STAGES = ['Idea', 'MVP', 'Testing', 'Site', 'POD', 'Region', 'All'];
+
+export function isValidStage(stage) {
+  return LBP_STAGES.includes(stage);
+}
+
+export function stageIndex(stage) {
+  return LBP_STAGES.indexOf(stage);
+}
+
+// Stage moves are free in either direction and may skip steps (decided
+// default: skipping is allowed and logged). The only invalid transition is
+// to a non-stage or a no-op to the same stage.
+export function validateStageChange(from, to) {
+  if (!isValidStage(to)) return { ok: false, error: `"${to}" is not a rollout stage` };
+  if (from === to) return { ok: false, error: 'Project is already at that stage' };
+  return { ok: true, skipped: isValidStage(from) ? Math.abs(stageIndex(to) - stageIndex(from)) > 1 : false };
+}
+
+// ---- outcome / archive (R08, R09) ----
+
+export const LBP_OUTCOMES = ['rolled_out', 'abandoned'];
+
+export function isArchived(project) {
+  return project?.outcome === 'rolled_out' || project?.outcome === 'abandoned';
+}
+
+// Close-out flow: reason AND takeaway are both required, outcome is exactly
+// one of the two end states (R08).
+export function validateCloseOut({ outcome, reason, takeaway }) {
+  const errors = [];
+  if (!LBP_OUTCOMES.includes(outcome)) errors.push('Outcome must be "rolled_out" or "abandoned"');
+  if (!String(reason || '').trim()) errors.push('A reason is required to close a project');
+  if (!String(takeaway || '').trim()) errors.push('A key takeaway is required to close a project');
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+// R09: archived projects are read-only. The route layer calls this before
+// every project-scoped mutation; only these actions stay allowed so revive
+// (new project + link, R11) and meta work keep functioning.
+const ARCHIVE_ALLOWED_ACTIONS = new Set(['link_add', 'link_remove']);
+export function assertMutableProject(project, action = 'edit') {
+  if (!project) return { ok: false, status: 404, error: 'Project not found' };
+  if (isArchived(project) && !ARCHIVE_ALLOWED_ACTIONS.has(action)) {
+    return {
+      ok: false, status: 409,
+      error: 'This project is archived and read-only. Revive it by creating a new project and linking it to this one.',
+    };
+  }
+  return { ok: true };
+}
+
+// ---- project creation ----
+
+export function validateNewProject({ name, stage, start_date } = {}) {
+  const errors = [];
+  if (!String(name || '').trim()) errors.push('A project name is required');
+  if (String(name || '').trim().length > 200) errors.push('Project name is too long (max 200 characters)');
+  if (stage != null && !isValidStage(stage)) errors.push(`"${stage}" is not a rollout stage`);
+  if (start_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(start_date))) {
+    errors.push('start_date must be YYYY-MM-DD');
+  }
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+// ---- current location label (derived, never stored) ----
+
+// stage + rollout scope → the 📍 label. locationsById maps id → {name, kind}.
+export function deriveLocationLabel({ stage, scope = {}, locationsById = new Map() }) {
+  const name = (id) => locationsById.get(id)?.name || null;
+  switch (stage) {
+    case 'Testing': {
+      const t = String(scope.testers_text || '').trim();
+      return t ? `Testers: ${t}` : 'Testing — testers not set';
+    }
+    case 'Site':
+      return name(scope.site_id) || 'Site not set';
+    case 'POD': {
+      const pods = (scope.pod_ids || []).map(name).filter(Boolean);
+      const planned = (scope.planned_pod_ids || []).map(name).filter(Boolean);
+      if (pods.length === 0) return 'POD not set';
+      let label = `POD ${pods.join(' + ')}`;
+      if (planned.length) label += ` (planned: ${planned.join(' + ')})`;
+      return label;
+    }
+    case 'Region':
+      return name(scope.region_id) || 'Region not set';
+    case 'All':
+      return 'Everywhere';
+    default:
+      // Idea / MVP: nothing is live anywhere yet.
+      return 'Pre-rollout';
+  }
+}
+
+// ---- movement (R04) ----
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A project "moved" iff it has ≥1 activity entry strictly after the current
+// meeting marker. No marker yet → everything counts as moved (first meeting
+// hasn't happened; there is no baseline to be stalled against). Archived
+// projects are excluded by the caller (they are neither moved nor stalled).
+export function deriveMovement({ project, markerAt, now = new Date().toISOString() }) {
+  const last = project.last_activity_at || project.created_at || null;
+  const moved = markerAt ? (last != null && last > markerAt) : true;
+  let daysIdle = null;
+  if (!moved && last) {
+    daysIdle = Math.max(0, Math.floor((new Date(now).getTime() - new Date(last).getTime()) / DAY_MS));
+  }
+  return { moved, days_idle: daysIdle };
+}
+
+// Human-readable "what actually changed" lines for the Since-last-meeting
+// list, from raw activity entries (payloads already parsed).
+export function summarizeActivityEntries(entries = []) {
+  const lines = [];
+  for (const e of entries) {
+    const p = e.payload || {};
+    switch (e.type) {
+      case 'stage_change': lines.push(`Stage ${p.from} → ${p.to}`); break;
+      case 'scope_change': lines.push(p.summary || 'Rollout scope updated'); break;
+      case 'task_done': lines.push(`Task done: ${p.title || ''}`.trim()); break;
+      case 'metric_report': lines.push(`Reported ${p.metric || 'a metric'}: ${p.value ?? ''} ${p.unit || ''}`.trim()); break;
+      case 'file_added': lines.push(`File added: ${p.name || ''}`.trim()); break;
+      case 'feedback_added': lines.push(`Feedback captured (${p.sentiment || 'noted'})`); break;
+      case 'learning_added': lines.push('Learning recorded'); break;
+      case 'outcome_set': lines.push(p.outcome === 'rolled_out' ? 'Closed — rolled out ✓' : 'Closed — abandoned ✕'); break;
+      case 'time_event': lines.push(`${p.event_type || 'Time'} logged${p.hours ? ` (${p.hours}h)` : ''}`); break;
+      case 'lxc_linked': lines.push('Linked to an LXC build project'); break;
+      case 'link_added': lines.push('Related project linked'); break;
+      case 'comment': lines.push('Comment added'); break;
+      case 'created': lines.push('Project created'); break;
+      default: lines.push('Updated'); break;
+    }
+  }
+  return lines;
+}
+
+// ---- meeting schedule (R05) ----
+
+// Weekly schedule {active, day_of_week 0(Sun)–6, time_hhmm 'HH:MM'} →
+// the most recent occurrence at-or-before `now` (Date). Returns a Date or
+// null. Pure (no clock); the store passes now and compares to the latest
+// marker to decide whether to lazily materialize a schedule-sourced marker.
+export function latestScheduleOccurrence(schedule, now) {
+  if (!schedule || !schedule.active) return null;
+  const dow = Number(schedule.day_of_week);
+  const m = /^(\d{2}):(\d{2})$/.exec(String(schedule.time_hhmm || ''));
+  if (!Number.isInteger(dow) || dow < 0 || dow > 6 || !m) return null;
+  const occ = new Date(now.getTime());
+  occ.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  // Walk back to the scheduled weekday (0..6 days), then one more week if
+  // today's occurrence is still in the future.
+  const back = (occ.getDay() - dow + 7) % 7;
+  occ.setDate(occ.getDate() - back);
+  if (occ.getTime() > now.getTime()) occ.setDate(occ.getDate() - 7);
+  return occ;
+}
+
+// Should the schedule auto-mark now? Only when the latest due occurrence is
+// newer than the latest existing marker (of any source) — markers accumulate
+// as history and never delete anything (R05).
+export function dueScheduleMarker({ schedule, lastMarkerAt, now }) {
+  const occ = latestScheduleOccurrence(schedule, now);
+  if (!occ) return null;
+  if (lastMarkerAt && new Date(lastMarkerAt).getTime() >= occ.getTime()) return null;
+  return occ.toISOString();
+}
+
+// ---- metrics (R06) ----
+
+export const LBP_METRIC_UNITS = ['count', 'hours', 'currency', 'percent'];
+export const LBP_TIME_EVENT_TYPES = ['Work session', 'Training', 'Site visit', 'Go-live', 'Meeting'];
+export const LBP_SENTIMENTS = ['positive', 'neutral', 'needs_work'];
+
+// A metric report needs an ACTIVE catalog metric, a numeric value, and at
+// least one source (text / url / file). Reports are immutable — corrections
+// are new reports referencing the old one (corrects_report_id).
+export function validateMetricReport({ definition, value, source_text, source_url, file_id } = {}) {
+  const errors = [];
+  if (!definition) errors.push('Pick a metric from the catalog');
+  else if (definition.status !== 'active') errors.push(`"${definition.name}" is not approved yet — an admin must approve it before first use`);
+  if (value == null || Number.isNaN(Number(value))) errors.push('A numeric value is required');
+  const hasSource = String(source_text || '').trim() || String(source_url || '').trim() || file_id != null;
+  if (!hasSource) errors.push('A source is required — where does this number come from? (text, link or file)');
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+// New metric definitions: members propose (status 'proposed'), a workspace
+// admin approves before first use. An admin creating one activates it
+// immediately.
+export function newMetricDefinitionStatus({ isAdmin }) {
+  return isAdmin ? 'active' : 'proposed';
+}
+
+// ---- feedback (decided default: author-editable for 24h, then locked) ----
+
+const FEEDBACK_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+export function canEditFeedback({ feedback, userId, now = new Date().toISOString() }) {
+  if (!feedback) return false;
+  if (String(feedback.captured_by) !== String(userId)) return false;
+  const age = new Date(now).getTime() - new Date(feedback.captured_at).getTime();
+  return age <= FEEDBACK_EDIT_WINDOW_MS;
+}
+
+// ---- project links (R11) ----
+
+// Links are one row per pair, rendered bidirectionally. Canonicalize so
+// (a,b) and (b,a) collide on the UNIQUE index.
+export function canonicalLinkPair(a, b) {
+  const x = Number(a); const y = Number(b);
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x <= 0 || y <= 0) {
+    return { ok: false, error: 'Both projects are required for a link' };
+  }
+  if (x === y) return { ok: false, error: 'A project cannot be linked to itself' };
+  return { ok: true, a: Math.min(x, y), b: Math.max(x, y) };
+}
+
+// ---- idea checker (R10) ----
+
+const tokenize = (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
+
+// Live idea checker: fires at ≥3 typed chars, searches ALL projects ever
+// (active + archived) across name, description, learnings and outcome
+// notes. Each candidate: {id, name, description, stage, outcome,
+// outcome_reason, outcome_takeaway, learnings: [body]}. Returns up to
+// `limit` matches, best first, each with a how-it-went line.
+export function ideaCheckMatches(query, candidates = [], { limit = 5 } = {}) {
+  const q = String(query || '').trim();
+  if (q.length < 3) return [];
+  const qTokens = tokenize(q);
+  if (qTokens.length === 0) return [];
+  const scored = [];
+  for (const c of candidates) {
+    const name = String(c.name || '').toLowerCase();
+    const hayFields = [
+      [name, 5],
+      [String(c.description || '').toLowerCase(), 2],
+      [(c.learnings || []).join(' ').toLowerCase(), 2],
+      [String(c.outcome_reason || '').toLowerCase(), 2],
+      [String(c.outcome_takeaway || '').toLowerCase(), 2],
+    ];
+    let score = 0;
+    if (name.includes(q.toLowerCase())) score += 10;
+    for (const t of qTokens) {
+      for (const [hay, w] of hayFields) {
+        if (hay.includes(t)) score += w;
+      }
+    }
+    if (score > 0) scored.push({ candidate: c, score });
+  }
+  scored.sort((x, y) => y.score - x.score);
+  return scored.slice(0, limit).map(({ candidate: c, score }) => ({
+    id: c.id,
+    name: c.name,
+    stage: c.stage,
+    outcome: c.outcome || null,
+    score,
+    how_it_went: howItWentLine(c),
+  }));
+}
+
+export function howItWentLine(project) {
+  if (project.outcome === 'rolled_out') {
+    return `Rolled out at ${project.stage}${project.outcome_takeaway ? ` — ${project.outcome_takeaway}` : ''}`;
+  }
+  if (project.outcome === 'abandoned') {
+    return `Abandoned at ${project.stage}${project.outcome_reason ? ` — ${project.outcome_reason}` : ''}`;
+  }
+  return `Active — currently at ${project.stage}`;
+}
+
+// ---- pipeline + archive rollups (R12: computed from stored records only) ----
+
+export function pipelineCounts(projects = []) {
+  const active = projects.filter((p) => !isArchived(p));
+  return LBP_STAGES.map((stage) => ({ stage, count: active.filter((p) => p.stage === stage).length }));
+}
+
+export function projectSpanDays(project, now = new Date().toISOString()) {
+  const start = project.start_date || project.created_at;
+  if (!start) return null;
+  const end = project.outcome_at || now;
+  return Math.max(0, Math.round((new Date(end).getTime() - new Date(start).getTime()) / DAY_MS));
+}
+
+export function investedHours(timeEvents = []) {
+  return timeEvents.reduce((sum, t) => sum + (Number(t.hours) || 0), 0);
+}
+
+// Archive meta tiles: every figure traces to stored rows (R12).
+export function archiveMeta({ projects = [], timeEventsByProject = new Map() } = {}) {
+  const archived = projects.filter(isArchived);
+  const rolledOut = archived.filter((p) => p.outcome === 'rolled_out');
+  const abandoned = archived.filter((p) => p.outcome === 'abandoned');
+  const hours = archived.reduce(
+    (sum, p) => sum + investedHours(timeEventsByProject.get(p.id) || []), 0,
+  );
+  return {
+    ideas_attempted: projects.length,
+    rolled_out: rolledOut.length,
+    abandoned: abandoned.length,
+    hours_invested: Math.round(hours * 10) / 10,
+  };
+}
+
+// Grounded meta-analysis paragraph — states only numbers present in `meta`
+// and the per-outcome arrays (R07/R12). No invented figures.
+export function archiveMetaAnalysis({ meta, abandonedProjects = [] }) {
+  if (!meta || meta.ideas_attempted === 0) {
+    return 'No projects yet — the archive meta-analysis will appear once ideas have been attempted and closed out.';
+  }
+  const closed = meta.rolled_out + meta.abandoned;
+  const parts = [];
+  parts.push(`The team has attempted ${meta.ideas_attempted} idea${meta.ideas_attempted === 1 ? '' : 's'}; ${closed} closed out (${meta.rolled_out} rolled out, ${meta.abandoned} abandoned).`);
+  if (closed > 0) {
+    parts.push(`Success rate among closed projects: ${Math.round((meta.rolled_out / closed) * 100)}%.`);
+  }
+  if (meta.hours_invested > 0) {
+    parts.push(`${meta.hours_invested} logged hours are invested in closed projects.`);
+  }
+  const deathStages = {};
+  for (const p of abandonedProjects) deathStages[p.stage] = (deathStages[p.stage] || 0) + 1;
+  const stages = Object.entries(deathStages).sort((a, b) => b[1] - a[1]);
+  if (stages.length) {
+    parts.push(`Abandoned ideas most often died at ${stages[0][0]} (${stages[0][1]} of ${meta.abandoned}).`);
+  }
+  return parts.join(' ');
+}
+
+// ---- AI briefs (R07: grounded — every number traces to a record id) ----
+
+// Deterministic, record-grounded brief text. Modes: 'daily' (last 24h),
+// 'since_meeting', 'leadership'. Inputs are plain rows; metric reports and
+// activity entries carry ids, and every figure in the output cites the
+// records it came from ([activity #12], [report #3]) so R07 holds by
+// construction.
+export function buildBrief({
+  mode = 'daily',
+  projects = [],
+  activityEntries = [],   // parsed, each {id, project_id, type, created_at, payload}
+  metricReports = [],     // each {id, project_id, value, period_label, metric_name, unit, reported_at}
+  markerAt = null,
+  now = new Date().toISOString(),
+} = {}) {
+  const active = projects.filter((p) => !isArchived(p));
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const sinceIso = mode === 'daily'
+    ? new Date(new Date(now).getTime() - DAY_MS).toISOString()
+    : (markerAt || null);
+  const windowLabel = mode === 'daily' ? 'the last 24 hours'
+    : (markerAt ? 'the last meeting' : 'the start (no meeting marked yet)');
+
+  const inWindow = (iso) => (sinceIso ? iso > sinceIso : true);
+  const recent = activityEntries.filter((e) => inWindow(e.created_at));
+  const recentByProject = new Map();
+  for (const e of recent) {
+    if (!recentByProject.has(e.project_id)) recentByProject.set(e.project_id, []);
+    recentByProject.get(e.project_id).push(e);
+  }
+
+  const lines = [];
+  const citations = [];
+
+  if (mode === 'leadership') {
+    lines.push(`Leadership report — ${active.length} active innovation project${active.length === 1 ? '' : 's'} in the pipeline.`);
+    for (const [stage, count] of Object.entries(Object.fromEntries(pipelineCounts(projects).filter((r) => r.count > 0).map((r) => [r.stage, r.count])))) {
+      lines.push(`• ${count} at ${stage}`);
+    }
+    const reports = metricReports.slice().sort((a, b) => (a.reported_at < b.reported_at ? 1 : -1));
+    if (reports.length === 0) {
+      lines.push('No metric reports on record yet — impact figures will appear here once reported.');
+    } else {
+      lines.push('Reported impact (each figure from its metric report):');
+      for (const r of reports.slice(0, 10)) {
+        const project = byId.get(r.project_id);
+        lines.push(`• ${project ? project.name : `Project ${r.project_id}`}: ${r.metric_name} ${formatMetricValue(r.value, r.unit)}${r.period_label ? ` (${r.period_label})` : ''} [report #${r.id}]`);
+        citations.push({ kind: 'metric_report', id: r.id });
+      }
+    }
+  } else {
+    const movedIds = [...recentByProject.keys()].filter((id) => byId.get(id) && !isArchived(byId.get(id)));
+    lines.push(`${movedIds.length} of ${active.length} active project${active.length === 1 ? '' : 's'} moved in ${windowLabel}.`);
+    for (const id of movedIds) {
+      const p = byId.get(id);
+      const entries = recentByProject.get(id);
+      const summary = summarizeActivityEntries(entries).slice(0, 3).join('; ');
+      lines.push(`• ${p.name}: ${summary} [${entries.slice(0, 3).map((e) => `activity #${e.id}`).join(', ')}]`);
+      for (const e of entries.slice(0, 3)) citations.push({ kind: 'activity', id: e.id });
+    }
+    const stalled = active.filter((p) => !recentByProject.has(p.id));
+    if (stalled.length) {
+      lines.push(`No movement in ${windowLabel}: ${stalled.map((p) => p.name).join(', ')}.`);
+    }
+  }
+
+  return { mode, generated_at: now, since: sinceIso, text: lines.join('\n'), citations };
+}
+
+export function formatMetricValue(value, unit) {
+  const n = Number(value);
+  switch (unit) {
+    case 'currency': return `$${n.toLocaleString('en-US')}`;
+    case 'percent': return `${n}%`;
+    case 'hours': return `${n}h`;
+    default: return String(n);
+  }
+}
+
+// ---- scope change summary (R03) ----
+
+// Diff two scope shapes into a short human summary for the activity log.
+// Both shapes: {testers_text, site_id, pod_ids:[], planned_pod_ids:[], region_id}.
+export function summarizeScopeChange(before = {}, after = {}, locationsById = new Map()) {
+  const name = (id) => locationsById.get(id)?.name || `#${id}`;
+  const parts = [];
+  if (String(before.testers_text || '') !== String(after.testers_text || '')) {
+    parts.push(after.testers_text ? `Testers set: ${after.testers_text}` : 'Testers cleared');
+  }
+  if ((before.site_id ?? null) !== (after.site_id ?? null)) {
+    parts.push(after.site_id ? `Site set: ${name(after.site_id)}` : 'Site cleared');
+  }
+  const podsDiff = arrayDiff(before.pod_ids || [], after.pod_ids || []);
+  if (podsDiff.added.length) parts.push(`POD added: ${podsDiff.added.map(name).join(', ')}`);
+  if (podsDiff.removed.length) parts.push(`POD removed: ${podsDiff.removed.map(name).join(', ')}`);
+  const plannedDiff = arrayDiff(before.planned_pod_ids || [], after.planned_pod_ids || []);
+  if (plannedDiff.added.length) parts.push(`Planned POD added: ${plannedDiff.added.map(name).join(', ')}`);
+  if (plannedDiff.removed.length) parts.push(`Planned POD removed: ${plannedDiff.removed.map(name).join(', ')}`);
+  if ((before.region_id ?? null) !== (after.region_id ?? null)) {
+    parts.push(after.region_id ? `Region set: ${name(after.region_id)}` : 'Region cleared');
+  }
+  return parts.join('; ');
+}
+
+function arrayDiff(before, after) {
+  const b = new Set(before.map(Number));
+  const a = new Set(after.map(Number));
+  return {
+    added: [...a].filter((x) => !b.has(x)),
+    removed: [...b].filter((x) => !a.has(x)),
+  };
+}
+
+// ---- location catalog ----
+
+export const LBP_LOCATION_KINDS = ['site', 'pod', 'region'];
+
+export function validateLocation({ name, kind, parent } = {}) {
+  const errors = [];
+  if (!String(name || '').trim()) errors.push('A location name is required');
+  if (!LBP_LOCATION_KINDS.includes(kind)) errors.push('Kind must be site, pod or region');
+  // Hierarchy: Region → PODs → Sites. Parents are optional but must be the
+  // right kind when set.
+  if (kind === 'pod' && parent && parent.kind !== 'region') errors.push('A POD\'s parent must be a region');
+  if (kind === 'site' && parent && parent.kind !== 'pod') errors.push('A site\'s parent must be a POD');
+  if (kind === 'region' && parent) errors.push('A region cannot have a parent');
+  return errors.length ? { ok: false, errors } : { ok: true };
+}

@@ -1819,9 +1819,16 @@ export const api = {
   lbpUpdateLocation: (id, data) =>
     request(`/lbp/locations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   lbpMeetings: () => request('/lbp/meetings'),
-  lbpMarkMeeting: () => request('/lbp/meetings', { method: 'POST' }),
-  lbpSetMeetingSchedule: (data) =>
-    request('/lbp/meetings/schedule', { method: 'PUT', body: JSON.stringify(data) }),
+  lbpMarkMeeting: (at) =>
+    request('/lbp/meetings', { method: 'POST', body: JSON.stringify(at ? { at } : {}) }),
+  lbpSchedules: () => request('/lbp/schedules'),
+  lbpCreateSchedule: (data) =>
+    request('/lbp/schedules', { method: 'POST', body: JSON.stringify(data) }),
+  lbpUpdateSchedule: (sid, data) =>
+    request(`/lbp/schedules/${sid}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  lbpDeleteSchedule: (sid) =>
+    request(`/lbp/schedules/${sid}`, { method: 'DELETE' }),
+  lbpBriefsFeed: () => request('/lbp/briefs'),
   lbpOverview: () => request('/lbp/overview'),
   lbpBrief: (mode) => request(`/lbp/brief?mode=${encodeURIComponent(mode)}`),
   lbpArchive: () => request('/lbp/archive'),

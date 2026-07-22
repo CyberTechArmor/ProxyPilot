@@ -21,6 +21,7 @@ import {
   projectSpanDays, investedHours, archiveMeta, archiveMetaAnalysis,
   buildBrief, formatMetricValue, summarizeScopeChange, validateLocation,
   validateBlocker, validateBreakBarrier, blockerDurationDays,
+  dueScheduleMarkers, describeSchedules, buildWindowBrief, buildBriefsFeed,
 } from '../lib/lean-beaf-logic.js';
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -108,6 +109,62 @@ test('R05: dueScheduleMarker fires only when the occurrence is newer than the la
   const due = dueScheduleMarker({ schedule, lastMarkerAt: '2026-07-01T00:00:00.000Z', now });
   assert.ok(due, 'a marker is due');
   assert.equal(dueScheduleMarker({ schedule, lastMarkerAt: now.toISOString(), now }), null);
+});
+
+test('R05: daily schedules resolve to today (or yesterday before the time)', () => {
+  const morning = new Date('2026-07-22T15:00:00'); // after 09:00
+  const daily = { active: 1, frequency: 'daily', time_hhmm: '09:00' };
+  const occ = latestScheduleOccurrence(daily, morning);
+  assert.equal(occ.getFullYear(), 2026);
+  assert.equal(occ.getDate(), 22);
+  assert.equal(occ.getHours(), 9);
+  // before today's time → yesterday's occurrence
+  const early = new Date('2026-07-22T06:00:00');
+  assert.equal(latestScheduleOccurrence(daily, early).getDate(), 21);
+});
+
+test('R05: multiple schedules produce one due marker each (deduped), newest-inclusive', () => {
+  const now = new Date('2026-07-20T15:00:00'); // Monday
+  const schedules = [
+    { active: 1, frequency: 'daily', time_hhmm: '08:00' },
+    { active: 1, frequency: 'weekly', day_of_week: 1, time_hhmm: '14:00' }, // Mon 14:00
+    { active: 0, frequency: 'daily', time_hhmm: '10:00' }, // paused → ignored
+  ];
+  const due = dueScheduleMarkers({ schedules, lastMarkerAt: '2026-07-01T00:00:00.000Z', now });
+  assert.equal(due.length, 2);
+  // sorted ascending; nothing due when the last marker is already now
+  assert.equal(dueScheduleMarkers({ schedules, lastMarkerAt: now.toISOString(), now }).length, 0);
+});
+
+test('R05: describeSchedules summarizes active schedules only', () => {
+  assert.equal(
+    describeSchedules([
+      { active: 1, frequency: 'daily', time_hhmm: '09:00' },
+      { active: 1, frequency: 'weekly', day_of_week: 1, time_hhmm: '14:00' },
+      { active: 0, frequency: 'daily', time_hhmm: '23:00' },
+    ]),
+    'Daily 09:00 · Mon 14:00',
+  );
+  assert.equal(describeSchedules([]), null);
+});
+
+test('briefs: window brief is grounded and cites activity ids; feed has today + periods', () => {
+  const projects = [{ id: 1, name: 'Reminders', stage: 'POD', outcome: null }];
+  const activity = [
+    { id: 5, project_id: 1, type: 'comment', created_at: '2026-07-10T10:00:00Z', payload: null },
+    { id: 6, project_id: 1, type: 'stage_change', created_at: '2026-07-21T10:00:00Z', payload: { from: 'Site', to: 'POD' } },
+  ];
+  const win = buildWindowBrief({ from: '2026-07-20T00:00:00Z', to: null, label: 'X', projects, activityEntries: activity });
+  assert.equal(win.moved.length, 1);
+  assert.deepEqual(win.moved[0].activity_ids, [6]);
+  assert.equal(win.entry_count, 1);
+  const feed = buildBriefsFeed({
+    markers: [{ marked_at: '2026-07-20T00:00:00Z' }],
+    projects, activityEntries: activity, now: '2026-07-22T00:00:00Z',
+  });
+  assert.equal(feed.today.label, 'Today');
+  assert.ok(feed.periods.length >= 2); // open window + one meeting period
+  assert.equal(feed.periods[0].label, 'Since last meeting');
 });
 
 // ---- R06: metric reports need catalog metric + source; approval first ----

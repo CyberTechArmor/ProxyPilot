@@ -104,7 +104,17 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
 - Metric-definition approval = workspace admin (Thomas).
 - Rolled Out does not require a metric on record, but the close-out modal
   warns when none exists.
-- Meeting marker = manual button + optional weekly schedule.
+- Meeting marker = manual "Mark meeting now" button + any number of
+  recurring schedules (migration 703, lbp_schedules), each daily or weekly.
+  Each occurrence lazily auto-marks a meeting; ad-hoc or different-time
+  meetings are the manual button. Endpoints: GET/POST /schedules,
+  PATCH/DELETE /schedules/:id. The legacy single weekly schedule migrates in.
+- Briefs page (/lean-beaf/briefs, GET /lbp/briefs): a feed of "Today" plus
+  one brief per meeting-to-meeting period (the notes between meetings), each
+  moved project citing its activity record ids (R07). Reached from the
+  subtle "Briefs" button on the dashboard's Brief card. The dashboard's
+  moved / no-movement lists were removed — the tiles drill into those — and
+  the Brief section was enlarged to fill the space.
 - AI reports render in-app only for now (deterministic, record-grounded —
   no model call needed to satisfy R07).
 - Feedback entries are editable by their author for 24h, then locked.

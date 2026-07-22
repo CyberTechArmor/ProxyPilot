@@ -7,7 +7,7 @@
 // meeting-to-meeting movement (R04) and the grounded briefs (R07).
 
 import { getDb } from '../db.js';
-import { dueScheduleMarker } from './lean-beaf-logic.js';
+import { dueScheduleMarkers } from './lean-beaf-logic.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -226,30 +226,60 @@ export function listMarkers({ limit = 50 } = {}) {
   return getDb().prepare(`SELECT * FROM lbp_meeting_markers ORDER BY marked_at DESC LIMIT ?`).all(limit);
 }
 
-export function getSchedule() {
-  const row = getDb().prepare(`SELECT * FROM lbp_meeting_schedules WHERE workspace_id = ?`).get(WORKSPACE_ID);
-  return row || { workspace_id: WORKSPACE_ID, active: 0, day_of_week: 1, time_hhmm: '09:00' };
+// ---- meeting schedules (multiple, daily|weekly — migration 703) ----
+
+export function listSchedules() {
+  return getDb()
+    .prepare(`SELECT * FROM lbp_schedules WHERE workspace_id = ? ORDER BY active DESC, frequency, day_of_week, time_hhmm`)
+    .all(WORKSPACE_ID);
 }
 
-export function setSchedule({ active, day_of_week, time_hhmm, updatedBy }) {
-  getDb().prepare(`
-    INSERT INTO lbp_meeting_schedules (workspace_id, active, day_of_week, time_hhmm, updated_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(workspace_id) DO UPDATE SET active = excluded.active,
-      day_of_week = excluded.day_of_week, time_hhmm = excluded.time_hhmm,
-      updated_by = excluded.updated_by, updated_at = excluded.updated_at
-  `).run(WORKSPACE_ID, active ? 1 : 0, day_of_week, time_hhmm, updatedBy ?? null, nowIso());
-  return getSchedule();
+export function getScheduleRow(id) {
+  return getDb().prepare(`SELECT * FROM lbp_schedules WHERE id = ? AND workspace_id = ?`).get(id, WORKSPACE_ID);
 }
 
-// Lazily materialize a schedule-sourced marker if an occurrence has passed
-// since the latest marker. Called by meeting-aware reads; markers accumulate
-// as history (R05) so this never deletes or edits anything.
+export function createSchedule({ label, frequency, day_of_week, time_hhmm, active = true, createdBy }) {
+  const r = getDb().prepare(`
+    INSERT INTO lbp_schedules (workspace_id, label, frequency, day_of_week, time_hhmm, active, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    WORKSPACE_ID, label ?? null, frequency,
+    frequency === 'weekly' ? day_of_week : null,
+    time_hhmm, active ? 1 : 0, createdBy ?? null, nowIso(),
+  );
+  return getScheduleRow(r.lastInsertRowid);
+}
+
+export function updateSchedule(id, patch = {}) {
+  const db = getDb();
+  const sets = []; const vals = [];
+  const set = (col, v) => { sets.push(`${col} = ?`); vals.push(v); };
+  if (patch.label !== undefined) set('label', patch.label ?? null);
+  if (patch.frequency !== undefined) {
+    set('frequency', patch.frequency);
+    // Weekly needs a day; daily clears it. Keep them consistent here.
+    if (patch.frequency === 'daily') set('day_of_week', null);
+  }
+  if (patch.day_of_week !== undefined) set('day_of_week', patch.day_of_week);
+  if (patch.time_hhmm !== undefined) set('time_hhmm', patch.time_hhmm);
+  if (patch.active !== undefined) set('active', patch.active ? 1 : 0);
+  if (sets.length) db.prepare(`UPDATE lbp_schedules SET ${sets.join(', ')} WHERE id = ? AND workspace_id = ?`).run(...vals, id, WORKSPACE_ID);
+  return getScheduleRow(id);
+}
+
+export function deleteSchedule(id) {
+  return getDb().prepare(`DELETE FROM lbp_schedules WHERE id = ? AND workspace_id = ?`).run(id, WORKSPACE_ID).changes > 0;
+}
+
+// Lazily materialize schedule markers if occurrences have passed since the
+// latest marker (across ALL active schedules). Called by meeting-aware reads;
+// markers accumulate as history (R05) so this never deletes or edits anything.
 export function ensureScheduledMarker(now = new Date()) {
-  const schedule = getSchedule();
+  const schedules = listSchedules().filter((s) => s.active);
+  if (schedules.length === 0) return;
   const last = latestMarker();
-  const due = dueScheduleMarker({ schedule, lastMarkerAt: last?.marked_at || null, now });
-  if (due) addMarker({ source: 'schedule', markedAt: due });
+  const due = dueScheduleMarkers({ schedules, lastMarkerAt: last?.marked_at || null, now });
+  for (const iso of due) addMarker({ source: 'schedule', markedAt: iso });
 }
 
 // ---- locations ----

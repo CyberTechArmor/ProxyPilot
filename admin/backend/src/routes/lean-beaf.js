@@ -29,7 +29,7 @@ import {
   summarizeActivityEntries, summarizeScopeChange, archiveMeta,
   archiveMetaAnalysis, projectSpanDays, investedHours, buildBrief,
   validateLocation, stageIndex, validateBlocker, validateBreakBarrier,
-  blockerDurationDays,
+  blockerDurationDays, describeSchedules, buildBriefsFeed,
 } from '../lib/lean-beaf-logic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -177,30 +177,77 @@ export function createLeanBeafRouter() {
 
   router.get('/meetings', (_req, res) => {
     store.ensureScheduledMarker();
+    const schedules = store.listSchedules();
     res.json({
       current: store.latestMarker(),
       history: store.listMarkers(),
-      schedule: store.getSchedule(),
+      schedules,
+      schedules_summary: describeSchedules(schedules),
     });
   });
 
-  // Anyone can mark a meeting; markers accumulate and never delete.
+  // Anyone can mark a meeting; markers accumulate and never delete. Optional
+  // `at` lets an ad-hoc meeting be backdated / set to a different time.
   router.post('/meetings', (req, res) => {
-    const marker = store.addMarker({ markedBy: req.user.id, source: 'manual' });
+    const at = typeof req.body?.at === 'string' && req.body.at.trim() ? req.body.at : undefined;
+    const marker = store.addMarker({ markedBy: req.user.id, source: 'manual', markedAt: at });
     res.status(201).json({ marker });
   });
 
-  const scheduleSchema = z.object({
-    active: z.boolean(),
-    day_of_week: z.number().int().min(0).max(6),
-    time_hhmm: z.string().regex(/^\d{2}:\d{2}$/),
+  // ---- meeting schedules (multiple recurring: daily | weekly) ----
+
+  router.get('/schedules', (_req, res) => {
+    res.json({ schedules: store.listSchedules() });
   });
 
-  router.put('/meetings/schedule', (req, res) => {
+  const scheduleSchema = z.object({
+    label: z.string().max(80).nullable().optional(),
+    frequency: z.enum(['daily', 'weekly']),
+    day_of_week: z.number().int().min(0).max(6).nullable().optional(),
+    time_hhmm: z.string().regex(/^\d{2}:\d{2}$/),
+    active: z.boolean().optional(),
+  }).refine((s) => s.frequency === 'daily' || (Number.isInteger(s.day_of_week) && s.day_of_week >= 0 && s.day_of_week <= 6), {
+    message: 'A weekly schedule needs a day_of_week (0-6)',
+  });
+
+  router.post('/schedules', (req, res) => {
     const parsed = scheduleSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: 'active, day_of_week (0-6) and time_hhmm (HH:MM) are required' });
-    const schedule = store.setSchedule({ ...parsed.data, updatedBy: req.user.id });
-    res.json({ schedule });
+    if (!parsed.success) return res.status(400).json({ error: 'frequency (daily|weekly), time_hhmm and a day for weekly are required' });
+    const schedule = store.createSchedule({ ...parsed.data, createdBy: req.user.id });
+    res.status(201).json({ schedule });
+  });
+
+  const schedulePatchSchema = z.object({
+    label: z.string().max(80).nullable().optional(),
+    frequency: z.enum(['daily', 'weekly']).optional(),
+    day_of_week: z.number().int().min(0).max(6).nullable().optional(),
+    time_hhmm: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+    active: z.boolean().optional(),
+  });
+
+  router.patch('/schedules/:sid', (req, res) => {
+    const existing = store.getScheduleRow(Number(req.params.sid));
+    if (!existing) return res.status(404).json({ error: 'Schedule not found' });
+    const parsed = schedulePatchSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid schedule fields' });
+    res.json({ schedule: store.updateSchedule(existing.id, parsed.data) });
+  });
+
+  router.delete('/schedules/:sid', (req, res) => {
+    const ok = store.deleteSchedule(Number(req.params.sid));
+    if (!ok) return res.status(404).json({ error: 'Schedule not found' });
+    res.json({ ok: true });
+  });
+
+  // ---- briefs feed (Briefs page): today + between-meeting periods ----
+
+  router.get('/briefs', (_req, res) => {
+    store.ensureScheduledMarker();
+    res.json(buildBriefsFeed({
+      markers: store.listMarkers({ limit: 60 }),
+      projects: store.listProjects(),
+      activityEntries: store.listActivitySince(null),
+    }));
   });
 
   // ---- dashboard ----
@@ -246,7 +293,11 @@ export function createLeanBeafRouter() {
         no_movement: stalled.length,
         locations_live: liveLocationIds.size + (everywhere > 0 ? 1 : 0),
       },
-      meeting: { current: store.latestMarker(), schedule: store.getSchedule() },
+      meeting: {
+        current: store.latestMarker(),
+        schedules: store.listSchedules(),
+        schedules_summary: describeSchedules(store.listSchedules()),
+      },
       moved,
       stalled,
       pipeline: pipelineCounts(projects),

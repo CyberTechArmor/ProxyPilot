@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin,
+  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
@@ -99,6 +99,7 @@ export default function LeanBeafPro() {
             <DashboardView
               onOpenArchive={() => setView('archive')}
               onOpenProject={(id) => navigate(`/lean-beaf/${id}`)}
+              onOpenBriefs={() => navigate('/lean-beaf/briefs')}
               onDrillTile={goToList}
               onDrillStage={goToBoardStage}
             />
@@ -117,7 +118,7 @@ export default function LeanBeafPro() {
 
 // ---- Dashboard ----
 
-function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage }) {
+function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile, onDrillStage }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -139,6 +140,10 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
       .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
       .finally(() => setBriefLoading(false));
   }, [toast]);
+
+  // The Brief is now the dashboard's centerpiece — generate one on load so it
+  // is never empty.
+  useEffect(() => { loadBrief('since_meeting'); }, [loadBrief]);
 
   const markMeeting = async () => {
     try {
@@ -180,7 +185,8 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
         ))}
       </div>
 
-      {/* meeting bar */}
+      {/* meeting bar — shows all recurring schedules; the moved / no-movement
+          lists were removed because the tiles above already drill into them. */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4">
         <CalendarCheck className="h-5 w-5 text-primary" />
         <div className="min-w-[180px] flex-1">
@@ -188,8 +194,8 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
             {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
           </b>
           <span className="text-xs text-muted-foreground">
-            {data.meeting.schedule?.active
-              ? `Auto-marks weekly (${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][data.meeting.schedule.day_of_week]} ${data.meeting.schedule.time_hhmm})`
+            {data.meeting.schedules_summary
+              ? `Auto-marks: ${data.meeting.schedules_summary}`
               : 'Movement is measured meeting-to-meeting'}
           </span>
         </div>
@@ -201,86 +207,46 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
         </div>
       </div>
 
-      {/* since last meeting: moved */}
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-sm uppercase tracking-wide text-muted-foreground">Since last meeting · moved</CardTitle></CardHeader>
-        <CardContent className="divide-y">
-          {data.moved.length === 0 && <p className="py-2 text-sm text-muted-foreground">Nothing has moved yet.</p>}
-          {data.moved.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => onDrillStage(p.stage)}
-              className="flex w-full items-start gap-2 py-2.5 text-left"
-              title={`Open the ${p.stage} column on the board`}
-            >
-              <div className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-semibold">{p.name}</span>
-                <span className="block text-xs text-muted-foreground">
-                  {p.changes.length ? p.changes.join(' · ') : 'Updated'}
-                </span>
-              </div>
-              <span className="mt-0.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
-                {p.stage}
-              </span>
-              <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
-            </button>
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* no movement */}
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-sm uppercase tracking-wide text-muted-foreground">No movement</CardTitle></CardHeader>
-        <CardContent className="divide-y">
-          {data.stalled.length === 0 && <p className="py-2 text-sm text-muted-foreground">Everything has moved. 🎉</p>}
-          {data.stalled.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => onDrillStage(p.stage)}
-              className="flex w-full items-center gap-2 py-2.5 text-left"
-              title={`Open the ${p.stage} column on the board`}
-            >
-              <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
-              <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary whitespace-nowrap">{p.stage}</span>
-              <span className="text-xs font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">
-                {p.days_idle != null ? `${p.days_idle}d idle` : 'idle'}
-              </span>
-            </button>
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* AI brief — grounded (R07): numbers cite their records */}
-      <div className="rounded-xl border bg-gradient-to-br from-card to-muted/30 p-4">
-        <div className="mb-2 flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
-            <Sparkles className="h-4 w-4" />
+      {/* AI brief — the dashboard centerpiece. Grounded (R07): numbers cite
+          their records. Grows to fill the space the removed lists left. */}
+      <div className="flex min-h-[360px] flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
+            <Sparkles className="h-5 w-5" />
           </span>
-          <b className="text-sm">Brief</b>
-          <span className="ml-auto text-[11px] text-muted-foreground">every number cites its record</span>
+          <b className="text-base">Brief</b>
+          <span className="text-[11px] text-muted-foreground">every number cites its record</span>
+          <button
+            type="button"
+            onClick={onOpenBriefs}
+            className="ml-auto inline-flex items-center gap-1 rounded-full border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+            title="See all briefs (daily + between meetings)"
+          >
+            <ScrollText className="h-3.5 w-3.5" /> Briefs
+          </button>
         </div>
-        {briefLoading ? (
-          <div className="py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-        ) : brief ? (
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">{brief.text}</p>
-        ) : (
-          <p className="text-sm text-muted-foreground">Pick a mode to generate a brief from the activity + metric records.</p>
-        )}
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mb-3 flex flex-wrap gap-2">
           {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
             <button
               key={mode}
               type="button"
               onClick={() => loadBrief(mode)}
-              className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${
-                brief && briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
               }`}
             >
               {label}
             </button>
           ))}
+        </div>
+        <div className="flex-1 rounded-lg border border-border/60 bg-background/40 p-4">
+          {briefLoading ? (
+            <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+          ) : brief ? (
+            <p className="whitespace-pre-wrap text-sm leading-relaxed">{brief.text}</p>
+          ) : (
+            <p className="text-sm text-muted-foreground">Pick a mode to generate a brief from the activity + metric records.</p>
+          )}
         </div>
       </div>
 
@@ -306,74 +272,133 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
         </p>
       </div>
 
-      <MeetingScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} schedule={data.meeting.schedule} onSaved={load} />
+      <MeetingScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} onSaved={load} />
     </div>
   );
 }
 
-function MeetingScheduleDialog({ open, onOpenChange, schedule, onSaved }) {
+const DOW_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Manage MANY recurring schedules (daily or weekly). Each auto-marks a meeting
+// at its occurrences; ad-hoc / different-time meetings use "Mark meeting now".
+function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
   const { toast } = useToast();
-  const [active, setActive] = useState(false);
+  const [schedules, setSchedules] = useState([]);
+  const [loading, setLoading] = useState(false);
+  // Draft for the "add" row.
+  const [freq, setFreq] = useState('weekly');
   const [dow, setDow] = useState('1');
   const [time, setTime] = useState('09:00');
-  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    api.lbpSchedules()
+      .then((d) => setSchedules(d.schedules || []))
+      .catch((e) => toast({ variant: 'destructive', title: 'Could not load schedules', description: e.message }))
+      .finally(() => setLoading(false));
+  }, [toast]);
 
   useEffect(() => {
     if (!open) return;
-    setActive(!!schedule?.active);
-    setDow(String(schedule?.day_of_week ?? 1));
-    setTime(schedule?.time_hhmm || '09:00');
-  }, [open, schedule]);
+    setFreq('weekly'); setDow('1'); setTime('09:00');
+    reload();
+  }, [open, reload]);
 
-  const save = async () => {
-    setSaving(true);
+  const changed = () => { reload(); onSaved?.(); };
+
+  const add = async () => {
+    setAdding(true);
     try {
-      await api.lbpSetMeetingSchedule({ active, day_of_week: Number(dow), time_hhmm: time });
-      toast({ title: 'Meeting schedule saved' });
-      onOpenChange(false);
-      onSaved?.();
+      await api.lbpCreateSchedule({
+        frequency: freq,
+        day_of_week: freq === 'weekly' ? Number(dow) : null,
+        time_hhmm: time,
+        active: true,
+      });
+      changed();
     } catch (e) {
-      toast({ variant: 'destructive', title: 'Could not save schedule', description: e.message });
+      toast({ variant: 'destructive', title: 'Could not add schedule', description: e.message });
     } finally {
-      setSaving(false);
+      setAdding(false);
     }
   };
 
+  const toggle = (s) => api.lbpUpdateSchedule(s.id, { active: !s.active }).then(changed)
+    .catch((e) => toast({ variant: 'destructive', title: 'Could not update', description: e.message }));
+  const remove = (s) => api.lbpDeleteSchedule(s.id).then(changed)
+    .catch((e) => toast({ variant: 'destructive', title: 'Could not delete', description: e.message }));
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg">
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Meeting schedule</DialogTitle>
-          <DialogDescription>Each occurrence automatically marks a meeting. Manual marks still work any time.</DialogDescription>
+          <DialogTitle>Meeting schedules</DialogTitle>
+          <DialogDescription>
+            Add as many recurring meetings as you need — a daily stand-up, a weekly review, etc. Each occurrence
+            auto-marks a meeting. For a one-off or different-time meeting, use “Mark meeting now”.
+          </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-            Weekly auto-mark enabled
-          </label>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label>Day</Label>
-              <Select value={dow} onValueChange={setDow}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+
+        <div className="space-y-3">
+          {loading && schedules.length === 0 && <div className="py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}
+          {!loading && schedules.length === 0 && <p className="text-sm text-muted-foreground">No recurring schedules yet — add one below.</p>}
+          {schedules.map((s) => (
+            <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
+              <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
+                <CalendarClock className={`h-4 w-4 ${s.active ? 'text-primary' : 'text-muted-foreground'}`} />
+                {s.frequency === 'daily' ? 'Daily' : DOW_SHORT[s.day_of_week] ?? '?'} · {s.time_hhmm}
+              </span>
+              {!s.active && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">paused</span>}
+              <div className="ml-auto flex items-center gap-1">
+                <Button variant="ghost" size="sm" className="h-9" onClick={() => toggle(s)}>
+                  {s.active ? 'Pause' : 'Resume'}
+                </Button>
+                <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground" title="Delete" onClick={() => remove(s)}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-2 rounded-lg border border-dashed p-3">
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Add a schedule</p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="space-y-1">
+              <Label className="text-xs">Repeats</Label>
+              <Select value={freq} onValueChange={setFreq}>
+                <SelectTrigger className="w-full sm:w-28"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => (
-                    <SelectItem key={d} value={String(i)}>{d}</SelectItem>
-                  ))}
+                  <SelectItem value="daily">Daily</SelectItem>
+                  <SelectItem value="weekly">Weekly</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="lbp-sched-time">Time</Label>
-              <Input id="lbp-sched-time" type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+            {freq === 'weekly' && (
+              <div className="space-y-1">
+                <Label className="text-xs">Day</Label>
+                <Select value={dow} onValueChange={setDow}>
+                  <SelectTrigger className="w-full sm:w-36"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {DOW_LABELS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <div className="space-y-1">
+              <Label className="text-xs">Time</Label>
+              <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="w-full sm:w-32" />
             </div>
+            <Button className="h-10 sm:ml-auto" onClick={add} disabled={adding}>
+              {adding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-1.5 h-4 w-4" />} Add
+            </Button>
           </div>
         </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button className="h-11 sm:h-10" onClick={save} disabled={saving}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Save
-          </Button>
+
+        <div className="flex justify-end">
+          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Done</Button>
         </div>
       </DialogContent>
     </Dialog>

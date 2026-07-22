@@ -310,3 +310,37 @@ export function lbpMigration702BoardOrder(d) {
     d.exec(`ALTER TABLE lbp_projects ADD COLUMN board_pos INTEGER NOT NULL DEFAULT 0`);
   }
 }
+
+// Migration 703 (additive) — MULTIPLE recurring meeting schedules. The
+// original design had a single weekly schedule (lbp_meeting_schedules, one
+// row per workspace); operators need several (e.g. a daily stand-up plus a
+// weekly review, and the odd different-time day). lbp_schedules holds many
+// rows, each daily or weekly. The single legacy row is migrated in if it was
+// active. Ad-hoc meetings are still the "Mark meeting now" button.
+export function lbpMigration703Schedules(d) {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS lbp_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL DEFAULT 1,
+      label TEXT,
+      frequency TEXT NOT NULL DEFAULT 'weekly' CHECK (frequency IN ('daily', 'weekly')),
+      day_of_week INTEGER,
+      time_hhmm TEXT NOT NULL DEFAULT '09:00',
+      active INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  // One-time migration of the legacy single schedule, if present and active
+  // and nothing has been seeded into the new table yet.
+  const already = d.prepare(`SELECT COUNT(*) AS n FROM lbp_schedules`).get().n;
+  if (already === 0) {
+    const legacy = d.prepare(`SELECT * FROM lbp_meeting_schedules WHERE workspace_id = 1`).get();
+    if (legacy && legacy.active) {
+      d.prepare(`
+        INSERT INTO lbp_schedules (workspace_id, label, frequency, day_of_week, time_hhmm, active, created_at)
+        VALUES (1, 'Weekly meeting', 'weekly', ?, ?, 1, ?)
+      `).run(legacy.day_of_week ?? 1, legacy.time_hhmm || '09:00', legacy.updated_at || new Date(0).toISOString());
+    }
+  }
+}

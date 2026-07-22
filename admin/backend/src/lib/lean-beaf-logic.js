@@ -161,17 +161,25 @@ export function summarizeActivityEntries(entries = []) {
 
 // ---- meeting schedule (R05) ----
 
-// Weekly schedule {active, day_of_week 0(Sun)–6, time_hhmm 'HH:MM'} →
-// the most recent occurrence at-or-before `now` (Date). Returns a Date or
-// null. Pure (no clock); the store passes now and compares to the latest
-// marker to decide whether to lazily materialize a schedule-sourced marker.
+// Schedule {active, frequency 'daily'|'weekly', day_of_week 0(Sun)–6 (weekly
+// only), time_hhmm 'HH:MM'} → the most recent occurrence at-or-before `now`
+// (Date), or null. Pure (no clock); the store passes now and compares to the
+// latest marker to decide whether to lazily materialize a schedule marker.
+// Frequency defaults to 'weekly' so pre-703 callers keep their behavior.
 export function latestScheduleOccurrence(schedule, now) {
   if (!schedule || !schedule.active) return null;
-  const dow = Number(schedule.day_of_week);
   const m = /^(\d{2}):(\d{2})$/.exec(String(schedule.time_hhmm || ''));
-  if (!Number.isInteger(dow) || dow < 0 || dow > 6 || !m) return null;
+  if (!m) return null;
   const occ = new Date(now.getTime());
   occ.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  const freq = schedule.frequency || 'weekly';
+  if (freq === 'daily') {
+    // Today's occurrence, or yesterday's if today's time hasn't arrived yet.
+    if (occ.getTime() > now.getTime()) occ.setDate(occ.getDate() - 1);
+    return occ;
+  }
+  const dow = Number(schedule.day_of_week);
+  if (!Number.isInteger(dow) || dow < 0 || dow > 6) return null;
   // Walk back to the scheduled weekday (0..6 days), then one more week if
   // today's occurrence is still in the future.
   const back = (occ.getDay() - dow + 7) % 7;
@@ -180,14 +188,99 @@ export function latestScheduleOccurrence(schedule, now) {
   return occ;
 }
 
-// Should the schedule auto-mark now? Only when the latest due occurrence is
-// newer than the latest existing marker (of any source) — markers accumulate
-// as history and never delete anything (R05).
+// Should a single schedule auto-mark now? Only when its latest occurrence is
+// newer than the latest existing marker — markers accumulate as history and
+// never delete anything (R05). Kept for callers that pass one schedule.
 export function dueScheduleMarker({ schedule, lastMarkerAt, now }) {
   const occ = latestScheduleOccurrence(schedule, now);
   if (!occ) return null;
   if (lastMarkerAt && new Date(lastMarkerAt).getTime() >= occ.getTime()) return null;
   return occ.toISOString();
+}
+
+// Across MANY active schedules: the distinct occurrence timestamps that are
+// newer than the latest marker and should each become a schedule marker.
+// Sorted ascending, deduped (a daily + weekly landing on the same minute is
+// one meeting). At most one per schedule per call — no backfilling every
+// missed occurrence.
+export function dueScheduleMarkers({ schedules = [], lastMarkerAt = null, now }) {
+  const cutoff = lastMarkerAt ? new Date(lastMarkerAt).getTime() : null;
+  const seen = new Set();
+  const out = [];
+  for (const s of schedules) {
+    const occ = latestScheduleOccurrence(s, now);
+    if (!occ) continue;
+    if (cutoff != null && cutoff >= occ.getTime()) continue;
+    const iso = occ.toISOString();
+    if (seen.has(iso)) continue;
+    seen.add(iso);
+    out.push(iso);
+  }
+  return out.sort();
+}
+
+// Human summary of the active schedules for the meeting bar.
+export function describeSchedules(schedules = []) {
+  const active = schedules.filter((s) => s.active);
+  if (active.length === 0) return null;
+  const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return active
+    .map((s) => (s.frequency === 'daily' ? `Daily ${s.time_hhmm}` : `${DOW[s.day_of_week] || '?'} ${s.time_hhmm}`))
+    .join(' · ');
+}
+
+// ---- briefs list (Briefs page: daily + between-meeting notes) ----
+
+// Grounded summary of movement in a time window (from, to]. `from`/`to` are
+// ISO strings or null (open-ended). Each moved project cites the activity ids
+// behind it (R07). Comments (the "notes between meetings") are included via
+// summarizeActivityEntries.
+export function buildWindowBrief({ from = null, to = null, label = '', projects = [], activityEntries = [] }) {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const inWindow = (iso) => (from ? iso > from : true) && (to ? iso <= to : true);
+  const recent = activityEntries.filter((e) => inWindow(e.created_at));
+  const grouped = new Map();
+  for (const e of recent) {
+    if (!grouped.has(e.project_id)) grouped.set(e.project_id, []);
+    grouped.get(e.project_id).push(e);
+  }
+  const moved = [...grouped.entries()]
+    .filter(([id]) => byId.has(id))
+    .map(([id, entries]) => ({
+      project_id: id,
+      name: byId.get(id)?.name || `#${id}`,
+      archived: isArchived(byId.get(id)),
+      changes: summarizeActivityEntries(entries),
+      activity_ids: entries.map((e) => e.id),
+    }));
+  const text = moved.length
+    ? `${moved.length} project${moved.length === 1 ? '' : 's'} moved (${recent.length} update${recent.length === 1 ? '' : 's'}).`
+    : 'No movement recorded in this window.';
+  return { from, to, label, moved, entry_count: recent.length, text };
+}
+
+// The Briefs feed: a "Today" daily brief plus one brief per meeting-to-meeting
+// period, newest first. `markers` are newest-first {marked_at}. Every figure
+// traces to an activity record (R07).
+export function buildBriefsFeed({ markers = [], projects = [], activityEntries = [], now = new Date().toISOString() }) {
+  const dayStart = `${now.slice(0, 10)}T00:00:00.000Z`;
+  const today = buildWindowBrief({ from: dayStart, to: null, label: 'Today', projects, activityEntries });
+  const periods = [];
+  const latestAt = markers[0]?.marked_at || null;
+  periods.push(buildWindowBrief({
+    from: latestAt, to: null,
+    label: latestAt ? 'Since last meeting' : 'Since the start',
+    projects, activityEntries,
+  }));
+  for (let i = 0; i < markers.length; i++) {
+    periods.push(buildWindowBrief({
+      from: markers[i + 1]?.marked_at || null,
+      to: markers[i].marked_at,
+      label: 'Meeting period',
+      projects, activityEntries,
+    }));
+  }
+  return { today, periods };
 }
 
 // ---- metrics (R06) ----

@@ -275,14 +275,20 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
         </div>
       </div>
 
-      {/* pipeline strip */}
+      {/* pipeline strip — each stage jumps to its Kanban column */}
       <div>
         <div className="flex gap-1.5 overflow-x-auto pb-1">
           {data.pipeline.map((s) => (
-            <div key={s.stage} className="min-w-[60px] flex-1 rounded-lg border bg-card px-1.5 py-2 text-center">
+            <button
+              key={s.stage}
+              type="button"
+              onClick={() => onDrillStage(s.stage)}
+              className="min-w-[60px] flex-1 rounded-lg border bg-card px-1.5 py-2 text-center transition-colors hover:border-primary/50 focus-visible:border-primary/50 focus-visible:outline-none"
+              title={`Open the ${s.stage} column on the board`}
+            >
               <b className={`block text-lg ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
               <span className="text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
-            </div>
+            </button>
           ))}
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
@@ -431,6 +437,49 @@ function BoardView({ focusStage, onOpenProject }) {
   const colRefs = useRef({});
   const [highlight, setHighlight] = useState(null);
 
+  // Edge auto-scroll: hovering (or dragging a card) near the left/right edge
+  // of the board scrolls it horizontally, so off-screen columns are reachable
+  // without touching the scrollbar — essential during drag, when the native
+  // drag interaction blocks manual scrolling. Speed ramps up nearer the edge.
+  const scrollRef = useRef(null);
+  const edgeRef = useRef({ dir: 0, speed: 0 });
+  const rafRef = useRef(null);
+
+  const stepScroll = useCallback(() => {
+    const el = scrollRef.current;
+    const { dir, speed } = edgeRef.current;
+    if (el && dir !== 0) el.scrollLeft += dir * speed;
+    if (edgeRef.current.dir !== 0) {
+      rafRef.current = requestAnimationFrame(stepScroll);
+    } else {
+      rafRef.current = null;
+    }
+  }, []);
+
+  const onEdgeMove = useCallback((clientX) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const EDGE = 96;   // px hot-zone at each side
+    const MAX = 22;    // max px/frame at the very edge
+    const leftDist = clientX - rect.left;
+    const rightDist = rect.right - clientX;
+    if (leftDist >= 0 && leftDist < EDGE) {
+      edgeRef.current = { dir: -1, speed: MAX * (1 - leftDist / EDGE) };
+    } else if (rightDist >= 0 && rightDist < EDGE) {
+      edgeRef.current = { dir: 1, speed: MAX * (1 - rightDist / EDGE) };
+    } else {
+      edgeRef.current = { dir: 0, speed: 0 };
+    }
+    if (edgeRef.current.dir !== 0 && rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(stepScroll);
+    }
+  }, [stepScroll]);
+
+  const stopEdge = useCallback(() => { edgeRef.current = { dir: 0, speed: 0 }; }, []);
+
+  useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current); }, []);
+
   const load = useCallback(() => {
     api.lbpProjects().then((d) => setProjects(d.projects)).catch((e) => setErr(e.message));
   }, []);
@@ -470,8 +519,16 @@ function BoardView({ focusStage, onOpenProject }) {
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Drag a card to a column (or use ›) to change its stage — the move is logged and you'll be asked for the new stage's scope.</p>
-      <div className="flex gap-2.5 overflow-x-auto pb-3">
+      <p className="text-xs text-muted-foreground">Drag a card to a column (or use ›) to change its stage — the move is logged and you'll be asked for the new stage's scope. Hover near an edge to scroll.</p>
+      <div
+        ref={scrollRef}
+        className="flex gap-2.5 overflow-x-auto pb-3"
+        onMouseMove={(e) => onEdgeMove(e.clientX)}
+        onMouseLeave={stopEdge}
+        onDragOver={(e) => { e.preventDefault(); onEdgeMove(e.clientX); }}
+        onDrop={stopEdge}
+        onDragEnd={stopEdge}
+      >
         {LBP_STAGES.map((stage) => {
           const cards = projects.filter((p) => p.stage === stage);
           return (

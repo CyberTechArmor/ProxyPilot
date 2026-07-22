@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight, Send, MessageSquare,
+  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight, Send,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
@@ -119,6 +119,22 @@ export default function LeanBeafPro() {
 
 // ---- Dashboard ----
 
+const BRIEF_MODE_LABEL = { daily: 'Daily brief', since_meeting: 'Since last meeting', leadership: 'Leadership report' };
+
+// One assistant message row in the brief chat: a small avatar + a bubble.
+function ChatRow({ children }) {
+  return (
+    <div className="flex gap-2.5">
+      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
+        <Sparkles className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm border bg-background px-3.5 py-2.5">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile, onDrillStage }) {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -135,14 +151,21 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSettings, setAiSettings] = useState(null);
   const [refs, setRefs] = useState(null); // link metadata for the brief text
-  // Ask (grounded Q&A over the portfolio).
-  const [askOpen, setAskOpen] = useState(false);
+  // Chat: the brief is the first (assistant) message; questions thread below it
+  // (grounded Q&A over the portfolio). The input is always available.
   const [askText, setAskText] = useState('');
   const [asking, setAsking] = useState(false);
-  const [answer, setAnswer] = useState(null); // { text, cost_usd, model, error, ... }
+  const [turns, setTurns] = useState([]); // [{ role:'user'|'assistant', text, cost_usd, model, error, ... }]
+  const threadRef = useRef(null);
 
   // Open a project, optionally at a specific tab/area (deep-link from the brief).
   const openArea = (id, tab) => onOpenProject(id, tab);
+
+  // Keep the newest message in view as the conversation grows.
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [turns, asking, brief, briefLoading, aiLoading]);
 
   const load = useCallback(() => {
     api.lbpOverview().then(setData).catch((e) => setErr(e.message));
@@ -192,24 +215,28 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
     }
   };
 
-  // Ask a grounded question about the portfolio.
+  // Ask a grounded question about the portfolio. Clears the input immediately
+  // (chat feel) and appends the exchange to the thread.
   const ask = async () => {
     const q = askText.trim();
     if (!q || asking) return;
+    setAskText('');
+    setTurns((t) => [...t, { role: 'user', text: q }]);
     setAsking(true);
-    setAnswer(null);
     try {
       const d = await api.lbpBriefAsk(q);
       setRefs(d.refs);
-      setAnswer(d.answer);
-      if (d.answer?.error === 'not_configured') {
+      const a = d.answer || {};
+      setTurns((t) => [...t, { role: 'assistant', ...a }]);
+      if (a.error === 'not_configured') {
         toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.' });
-      } else if (d.answer?.error === 'ungrounded_output') {
+      } else if (a.error === 'ungrounded_output') {
         toast({ variant: 'destructive', title: 'Answer withheld', description: 'The model referenced a record not in the grounded facts.' });
-      } else if (d.answer?.error) {
-        toast({ variant: 'destructive', title: 'Question failed', description: d.answer.error });
+      } else if (a.error) {
+        toast({ variant: 'destructive', title: 'Question failed', description: a.error });
       }
     } catch (e) {
+      setTurns((t) => [...t, { role: 'assistant', error: e.message }]);
       toast({ variant: 'destructive', title: 'Question failed', description: e.message });
     } finally {
       setAsking(false);
@@ -258,20 +285,20 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
         ))}
       </div>
 
-      {/* AI brief — the dashboard centerpiece. The meeting rhythm now lives in
-          its header (a brief IS the meeting-to-meeting summary, so this is
-          where marking a meeting belongs). Grounded (R07): numbers cite their
-          records; the AI only restyles those grounded facts. */}
-      <div className="flex min-h-[420px] flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+      {/* AI brief — a chat. The brief is the first (assistant) message; the
+          input below is always ready so anyone can go straight to asking. The
+          meeting rhythm sits right above the controls. Grounded (R07): numbers
+          cite their records; the AI only restyles / answers from those facts. */}
+      <div className="flex flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
             <Sparkles className="h-5 w-5" />
           </span>
           <b className="text-base">Brief</b>
-          <span className="text-[11px] text-muted-foreground">every number cites its record · tap a citation to open it</span>
+          <span className="text-[11px] text-muted-foreground">chat grounded in your records · tap a citation to open it</span>
         </div>
 
-        {/* meeting rhythm — kept right above the AI/brief buttons. Marking a
+        {/* meeting rhythm — kept right above the AI/brief controls. Marking a
             meeting resets the "since meeting" window this brief summarizes. */}
         <div className="mb-2.5 flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5">
           <CalendarCheck className="h-4 w-4 shrink-0 text-primary" />
@@ -293,8 +320,7 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
           </div>
         </div>
 
-        {/* one row: all AI / brief controls inline — mode chips on the left,
-            actions (Ask, Generate, Briefs, settings) on the right. */}
+        {/* one row: the brief-mode chips (which brief opens the chat) + actions. */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
             <button
@@ -309,15 +335,6 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
             </button>
           ))}
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className={`h-9 ${askOpen ? 'border-primary text-primary' : ''}`}
-              onClick={() => setAskOpen((v) => !v)}
-              title="Ask a grounded question about these projects"
-            >
-              <MessageSquare className="mr-1.5 h-4 w-4" /> Ask
-            </Button>
             <Button
               size="sm"
               className="h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
@@ -339,120 +356,127 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
           </div>
         </div>
 
-        {/* Ask box — grounded Q&A, appears inline when "Ask" is toggled. */}
-        {askOpen && (
-          <div className="mb-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <Label className="mb-1 block text-xs font-semibold text-primary">Ask about these projects</Label>
-                <Input
-                  value={askText}
-                  onChange={(e) => setAskText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') ask(); }}
-                  placeholder="e.g. What's blocked right now? Which projects moved this week?"
-                  maxLength={500}
-                  className="h-10 bg-background"
-                />
+        {/* chat thread — brief is the first message, questions thread below it. */}
+        <div ref={threadRef} className="flex max-h-[460px] min-h-[240px] flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
+          {/* head: the brief itself, as the opening assistant message */}
+          <ChatRow role="assistant">
+            {(briefLoading || aiLoading) ? (
+              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Preparing the brief…</div>
+            ) : brief ? (
+              <>
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{BRIEF_MODE_LABEL[briefMode] || 'Brief'}</span>
+                  {aiOn && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
+                      <Sparkles className="h-3 w-3" /> AI
+                    </span>
+                  )}
+                </div>
+                <BriefText text={brief.text} refs={refs} onOpen={openArea} />
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  {aiResult ? (
+                    aiResult.error === 'not_configured' ? (
+                      <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in AI settings.' : 'ask an admin to connect one.'}</span>
+                    ) : (
+                      <>
+                        <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
+                        <span>·</span>
+                        <span>{formatUsd(aiResult.cost_usd)} · {aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
+                        {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
+                      </>
+                    )
+                  ) : (
+                    <span>Record-grounded · “Generate with AI” restyles it{aiSettings ? ` with ${aiSettings.model}` : ''}</span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">Pick a mode above to open a brief — or just ask a question below.</p>
+            )}
+          </ChatRow>
+
+          {/* Q&A turns */}
+          {turns.map((t, i) => (
+            t.role === 'user' ? (
+              <div key={i} className="flex justify-end">
+                <div className="max-w-[85%] rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2 text-sm text-primary-foreground">{t.text}</div>
               </div>
-              <Button className="h-10" onClick={ask} disabled={asking || !askText.trim()}>
-                {asking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              </Button>
-            </div>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">Answers use only the recorded facts — every figure stays cited.</p>
-            {(asking || answer) && (
-              <div className="mt-3 rounded-lg border border-border/60 bg-background p-3">
-                {asking ? (
-                  <div className="flex items-center justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-                ) : answer?.error ? (
+            ) : (
+              <ChatRow key={i} role="assistant">
+                {t.error ? (
                   <p className="text-sm text-amber-600 dark:text-amber-400">
-                    {answer.error === 'not_configured' ? 'No model connected — an admin can set one in AI settings.'
-                      : answer.error === 'ungrounded_output' ? 'The answer referenced a record not in the grounded facts, so it was withheld.'
-                        : `Could not answer: ${answer.error}`}
+                    {t.error === 'not_configured' ? 'No model connected — an admin can set one in AI settings.'
+                      : t.error === 'ungrounded_output' ? 'The answer referenced a record not in the grounded facts, so it was withheld.'
+                        : `Could not answer: ${t.error}`}
                   </p>
                 ) : (
                   <>
-                    <BriefText text={answer.text} refs={refs} onOpen={openArea} />
+                    <BriefText text={t.text} refs={refs} onOpen={openArea} />
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
-                      <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {answer.model}</span>
+                      <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {t.model}</span>
                       <span>·</span>
-                      <span>{formatUsd(answer.cost_usd)} · {answer.input_tokens.toLocaleString()} in / {answer.output_tokens.toLocaleString()} out</span>
+                      <span>{formatUsd(t.cost_usd)} · {(t.input_tokens || 0).toLocaleString()} in / {(t.output_tokens || 0).toLocaleString()} out</span>
                     </div>
                   </>
                 )}
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="relative flex-1 rounded-lg border border-border/60 bg-background/40 p-4">
-          {(briefLoading || aiLoading) ? (
-            <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-          ) : brief ? (
-            <BriefText text={brief.text} refs={refs} onOpen={openArea} />
-          ) : (
-            <p className="text-sm text-muted-foreground">Pick a mode to generate a brief from the activity + metric records.</p>
-          )}
-          {aiOn && (
-            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
-              <Sparkles className="h-3 w-3" /> AI
-            </span>
-          )}
-        </div>
-
-        {/* cost + model line — shown after an AI run (spend transparency). */}
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          {aiResult ? (
-            aiResult.error === 'not_configured' ? (
-              <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in AI settings.' : 'ask an admin to connect one.'}</span>
-            ) : (
-              <>
-                <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
-                <span>·</span>
-                <span>{formatUsd(aiResult.cost_usd)} this run</span>
-                <span>·</span>
-                <span>{aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
-                {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
-              </>
+              </ChatRow>
             )
-          ) : (
-            <span>
-              Deterministic &amp; record-grounded. “Generate with AI” restyles it
-              {aiSettings ? ` with ${aiSettings.model}` : ''}.
-            </span>
+          ))}
+
+          {asking && (
+            <ChatRow role="assistant">
+              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Thinking…</div>
+            </ChatRow>
           )}
         </div>
 
-        {/* rollout process-map — the innovation pipeline as a flow. Each stage
-            jumps to its Kanban column. Grounded: counts come from the records. */}
-        <div className="mt-4">
-          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            <ArrowRight className="h-3.5 w-3.5" /> Rollout pipeline
-          </div>
-          <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
-            {data.pipeline.map((s, i) => (
-              <div key={s.stage} className="flex items-center">
-                <button
-                  type="button"
-                  onClick={() => onDrillStage(s.stage)}
-                  className={`flex min-w-[64px] flex-col items-center rounded-lg border px-2 py-2 text-center transition-colors hover:border-primary/60 focus-visible:border-primary/60 focus-visible:outline-none ${
-                    s.count === 0 ? 'border-border/60 bg-background/40' : 'border-primary/30 bg-primary/5'
-                  }`}
-                  title={`Open the ${s.stage} column on the board`}
-                >
-                  <b className={`text-lg leading-none ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
-                  <span className="mt-1 text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
-                </button>
-                {i < data.pipeline.length - 1 && (
-                  <ChevronRight className="mx-0.5 h-4 w-4 shrink-0 text-muted-foreground/40" />
-                )}
-              </div>
-            ))}
-          </div>
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            {data.archived_count} finished project{data.archived_count === 1 ? '' : 's'} in the{' '}
-            <button type="button" className="font-bold text-primary" onClick={onOpenArchive}>Archive →</button>
-          </p>
+        {/* persistent composer — always ready, clears on send */}
+        <div className="mt-3 flex items-end gap-2">
+          <Input
+            value={askText}
+            onChange={(e) => setAskText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } }}
+            placeholder="Ask about these projects — e.g. what's blocked? which moved this week?"
+            maxLength={500}
+            className="h-11 bg-background"
+          />
+          <Button className="h-11 px-4" onClick={ask} disabled={asking || !askText.trim()} title="Ask (grounded in the records)">
+            {asking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </Button>
         </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground">Answers use only the recorded facts — every figure stays cited. Each question is saved to the <button type="button" className="font-semibold text-primary" onClick={onOpenBriefs}>Briefs log</button>.</p>
+      </div>
+
+      {/* rollout process-map — the innovation pipeline as a flow. Each stage
+          jumps to its Kanban column. Grounded: counts come from the records. */}
+      <div className="rounded-xl border bg-card p-4">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+          <ArrowRight className="h-3.5 w-3.5" /> Rollout pipeline
+        </div>
+        <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+          {data.pipeline.map((s, i) => (
+            <div key={s.stage} className="flex items-center">
+              <button
+                type="button"
+                onClick={() => onDrillStage(s.stage)}
+                className={`flex min-w-[64px] flex-col items-center rounded-lg border px-2 py-2 text-center transition-colors hover:border-primary/60 focus-visible:border-primary/60 focus-visible:outline-none ${
+                  s.count === 0 ? 'border-border/60 bg-background/40' : 'border-primary/30 bg-primary/5'
+                }`}
+                title={`Open the ${s.stage} column on the board`}
+              >
+                <b className={`text-lg leading-none ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
+                <span className="mt-1 text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
+              </button>
+              {i < data.pipeline.length - 1 && (
+                <ChevronRight className="mx-0.5 h-4 w-4 shrink-0 text-muted-foreground/40" />
+              )}
+            </div>
+          ))}
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          {data.archived_count} finished project{data.archived_count === 1 ? '' : 's'} in the{' '}
+          <button type="button" className="font-bold text-primary" onClick={onOpenArchive}>Archive →</button>
+        </p>
       </div>
 
       <MeetingScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} onSaved={load} />

@@ -222,6 +222,9 @@ export default function Layout() {
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+    // Lean BEAF Pro — team-shared innovation projects. No adminOnly flag:
+    // every non-pending user is a workspace member (R01).
+    { name: 'Lean BEAF Pro', href: '/lean-beaf', icon: Rocket },
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true, permission: 'proxy' },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },

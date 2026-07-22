@@ -1155,10 +1155,10 @@ export const api = {
     request(`/mock2/design-presets/${encodeURIComponent(key)}/adjust`, { method: 'POST', body: JSON.stringify({ instruction }) }),
   mock2DeleteDesignPreset: (key) =>
     request(`/mock2/design-presets/${encodeURIComponent(key)}`, { method: 'DELETE' }),
-  mock2CreateProject: ({ name, description, parent_domain_id, design_preset }) =>
+  mock2CreateProject: ({ name, description, parent_domain_id, design_preset, lbp_project_id }) =>
     request('/mock2/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, description, parent_domain_id, design_preset }),
+      body: JSON.stringify({ name, description, parent_domain_id, design_preset, lbp_project_id }),
     }),
   mock2ProjectProvisionStatus: (id) => request(`/mock2/projects/${id}/provision-status`),
   mock2RotateProjectSlug: (id) => request(`/mock2/projects/${id}/rotate-slug`, { method: 'POST' }),
@@ -1809,6 +1809,94 @@ export const api = {
     request('/domains/admin/cloudflare-token', { method: 'DELETE' }),
   domainCloudflarePluginInstall: () =>
     request('/domains/admin/cloudflare-plugin/install', { method: 'POST' }),
+
+  // ---- Lean BEAF Pro (/api/lbp) — team-shared innovation projects ----
+
+  lbpUsers: () => request('/lbp/users'),
+  lbpLocations: (all = false) => request(`/lbp/locations${all ? '?all=1' : ''}`),
+  lbpCreateLocation: (data) =>
+    request('/lbp/locations', { method: 'POST', body: JSON.stringify(data) }),
+  lbpUpdateLocation: (id, data) =>
+    request(`/lbp/locations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  lbpMeetings: () => request('/lbp/meetings'),
+  lbpMarkMeeting: () => request('/lbp/meetings', { method: 'POST' }),
+  lbpSetMeetingSchedule: (data) =>
+    request('/lbp/meetings/schedule', { method: 'PUT', body: JSON.stringify(data) }),
+  lbpOverview: () => request('/lbp/overview'),
+  lbpBrief: (mode) => request(`/lbp/brief?mode=${encodeURIComponent(mode)}`),
+  lbpArchive: () => request('/lbp/archive'),
+  lbpProjects: ({ filter, includeArchived } = {}) => {
+    const params = new URLSearchParams();
+    if (filter) params.set('filter', filter);
+    if (includeArchived) params.set('include', 'archived');
+    const qs = params.toString();
+    return request(`/lbp/projects${qs ? `?${qs}` : ''}`);
+  },
+  lbpIdeaCheck: (q) => request(`/lbp/idea-check?q=${encodeURIComponent(q)}`),
+  lbpCreateProject: (data) =>
+    request('/lbp/projects', { method: 'POST', body: JSON.stringify(data) }),
+  lbpProject: (id) => request(`/lbp/projects/${id}`),
+  lbpUpdateProject: (id, data) =>
+    request(`/lbp/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  lbpSetStage: (id, stage) =>
+    request(`/lbp/projects/${id}/stage`, { method: 'POST', body: JSON.stringify({ stage }) }),
+  lbpSetScope: (id, scope) =>
+    request(`/lbp/projects/${id}/scope`, { method: 'PUT', body: JSON.stringify(scope) }),
+  lbpSetAssignees: (id, user_ids) =>
+    request(`/lbp/projects/${id}/assignees`, { method: 'POST', body: JSON.stringify({ user_ids }) }),
+  lbpCloseProject: (id, data) =>
+    request(`/lbp/projects/${id}/close`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpActivity: (id) => request(`/lbp/projects/${id}/activity`),
+  lbpAddComment: (id, body) =>
+    request(`/lbp/projects/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }),
+  lbpTasks: (id) => request(`/lbp/projects/${id}/tasks`),
+  lbpAddTask: (id, data) =>
+    request(`/lbp/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpUpdateTask: (taskId, data) =>
+    request(`/lbp/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  lbpDeleteTask: (taskId) => request(`/lbp/tasks/${taskId}`, { method: 'DELETE' }),
+  lbpMetrics: () => request('/lbp/metrics'),
+  lbpProposeMetric: (data) =>
+    request('/lbp/metrics', { method: 'POST', body: JSON.stringify(data) }),
+  lbpApproveMetric: (id) => request(`/lbp/metrics/${id}/approve`, { method: 'POST' }),
+  lbpRetireMetric: (id) => request(`/lbp/metrics/${id}/retire`, { method: 'POST' }),
+  lbpMetricReports: (id) => request(`/lbp/projects/${id}/metric-reports`),
+  lbpAddMetricReport: (id, data) =>
+    request(`/lbp/projects/${id}/metric-reports`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpTimeEvents: (id) => request(`/lbp/projects/${id}/time-events`),
+  lbpAddTimeEvent: (id, data) =>
+    request(`/lbp/projects/${id}/time-events`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpFeedback: (id) => request(`/lbp/projects/${id}/feedback`),
+  lbpAddFeedback: (id, data) =>
+    request(`/lbp/projects/${id}/feedback`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpUpdateFeedback: (feedbackId, data) =>
+    request(`/lbp/feedback/${feedbackId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  lbpLearnings: (id) => request(`/lbp/projects/${id}/learnings`),
+  lbpAddLearning: (id, body) =>
+    request(`/lbp/projects/${id}/learnings`, { method: 'POST', body: JSON.stringify({ body }) }),
+  lbpFiles: (id) => request(`/lbp/projects/${id}/files`),
+  lbpFileUrl: (fileId, download = false) =>
+    `${API_BASE}/lbp/files/${fileId}${download ? '?download=1' : ''}`,
+  lbpUploadFile: async (id, file) => {
+    const csrf = readCookie('pp_csrf');
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${API_BASE}/lbp/projects/${id}/files`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: csrf ? { 'X-CSRF-Token': csrf } : {},
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new ApiError(data.error || 'Upload failed', response.status, data);
+    return data;
+  },
+  lbpAddLink: (id, other_id, note) =>
+    request(`/lbp/projects/${id}/links`, { method: 'POST', body: JSON.stringify({ other_id, note }) }),
+  lbpDeleteLink: (linkId) => request(`/lbp/links/${linkId}`, { method: 'DELETE' }),
+  lbpLinkLxc: (id, mock2_project_id) =>
+    request(`/lbp/projects/${id}/link-lxc`, { method: 'POST', body: JSON.stringify({ mock2_project_id }) }),
+  lbpSeedDemo: () => request('/lbp/seed-demo', { method: 'POST' }),
 
   uploadFileToContainer: async (name, destPath, file) => {
     const csrf = readCookie('pp_csrf');

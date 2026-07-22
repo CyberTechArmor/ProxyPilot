@@ -13,6 +13,8 @@ import CVEs from '@/pages/CVEs';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Projects from '@/pages/Projects';
+import LeanBeafPro from '@/pages/LeanBeafPro';
+import LbpProjectDetail from '@/pages/LbpProjectDetail';
 import ProjectDetail from '@/pages/ProjectDetail';
 import ParentDomains from '@/pages/ParentDomains';
 import ModelConnectors from '@/pages/ModelConnectors';
@@ -94,6 +96,10 @@ function App() {
         <Route path="troubleshooting" element={<Troubleshooting />} />
         <Route path="housekeeping" element={<Housekeeping />} />
         <Route path="notifications" element={<Notifications />} />
+        {/* Lean BEAF Pro — team-shared innovation projects. Open to every
+            authenticated non-pending user (R01); backend enforces the same. */}
+        <Route path="lean-beaf" element={<LeanBeafPro />} />
+        <Route path="lean-beaf/:id" element={<LbpProjectDetail />} />
         <Route path="domains" element={<DomainProvisioning />} />
         {/* Admin-gated: the page renders inside the dashboard shell and the
             backend requires an admin session (or a provisioning API key for

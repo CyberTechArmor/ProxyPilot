@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lean BEAF Pro (Concept v6)</title>
+<style>
+  :root{
+    --bg:#0c1210; --bg2:#111a17; --card:#152019; --card2:#1a2620;
+    --line:#243530; --line2:#2e443c;
+    --text:#e8f0ed; --muted:#93a8a1; --faint:#5f736c;
+    --teal:#3ec6b0; --teal-dim:#2a9d8c; --teal-bg:rgba(62,198,176,.13);
+    --red:#f27d72; --red-bg:rgba(242,125,114,.14);
+    --amber:#e8b34b; --amber-bg:rgba(232,179,75,.14);
+    --blue:#6aa9e8; --blue-bg:rgba(106,169,232,.14);
+    --purple:#c9a3e8; --purple-bg:rgba(201,163,232,.14);
+    --green:#8fd6a8; --green-bg:rgba(143,214,168,.13);
+    --gray-bg:rgba(147,168,161,.14);
+    --radius:14px;
+  }
+
+  html.light,body.light{
+    --bg:#f2f6f4; --bg2:#e9efec; --card:#ffffff; --card2:#f4f8f6;
+    --line:#dde6e2; --line2:#c8d6d1;
+    --text:#182220; --muted:#54685f; --faint:#7f948c;
+    --teal:#0b8a77; --teal-dim:#0a7061; --teal-bg:rgba(11,138,119,.10);
+    --red:#c2453a; --red-bg:rgba(194,69,58,.10);
+    --amber:#96690a; --amber-bg:rgba(200,146,20,.16);
+    --blue:#2f66a8; --blue-bg:rgba(47,102,168,.10);
+    --purple:#7a4f9e; --purple-bg:rgba(122,79,158,.10);
+    --green:#1e7f43; --green-bg:rgba(30,127,67,.12);
+    --gray-bg:rgba(84,104,95,.10);
+  }
+  body.light .btn.primary{color:#fff}
+  body.light .brand .dot{color:#fff}
+  body.light .viewtabs{box-shadow:0 6px 18px rgba(23,40,35,.08)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:16px;-webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  input,textarea,select{font:inherit}
+
+  .app{max-width:980px;margin:0 auto;padding:0 14px 90px}
+
+  header{display:flex;align-items:center;gap:10px;padding:16px 2px 12px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:1.05rem}
+  .brand .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--teal),#7ce0d0);display:inline-flex;align-items:center;justify-content:center;color:#07211c;font-size:.8rem;font-weight:800}
+  .brand small{color:var(--faint);font-weight:500}
+  .spacer{flex:1}
+  .btn{border:1px solid var(--line2);border-radius:11px;padding:9px 14px;color:var(--text);background:var(--card);font-weight:600;font-size:.92rem}
+  .btn.primary{background:var(--teal);color:#06231e;border-color:var(--teal)}
+  .btn.danger{color:var(--red);border-color:rgba(242,125,114,.4)}
+  .btn.small{padding:6px 10px;font-size:.83rem;border-radius:9px}
+
+  .viewtabs{display:flex;gap:5px;background:var(--bg2);border:1px solid var(--line);border-radius:13px;padding:5px;margin:6px 0 14px;position:sticky;top:8px;z-index:40;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .viewtabs button{flex:1;padding:9px 2px;border-radius:9px;color:var(--muted);font-weight:600;font-size:.84rem}
+  .viewtabs button.active{background:var(--card2);color:var(--teal);box-shadow:inset 0 -2px 0 var(--teal)}
+
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:.74rem;font-weight:700;letter-spacing:.02em;white-space:nowrap}
+  .badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+  .badge.nodot::before{display:none}
+  .chg-moved{color:var(--teal);background:var(--teal-bg)}
+  .chg-stalled{color:var(--amber);background:var(--amber-bg)}
+  .out-rolled{color:var(--green);background:var(--green-bg)}
+  .out-abandoned{color:var(--red);background:var(--red-bg)}
+  .st-active{color:var(--teal);background:var(--teal-bg)}
+
+  .loc{display:inline-flex;align-items:center;gap:5px;font-size:.8rem;color:var(--blue);background:var(--blue-bg);border-radius:999px;padding:3px 10px;font-weight:700;white-space:nowrap}
+  .started{font-size:.8rem;color:var(--muted);white-space:nowrap}
+
+  .avatars{display:inline-flex}
+  .av{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:.68rem;font-weight:700;border:2px solid var(--card);margin-left:-7px;color:#06231e}
+  .av:first-child{margin-left:0}
+  .av.a1{background:#7ce0d0}.av.a2{background:#e8b34b}.av.a3{background:#6aa9e8}.av.a4{background:#d9a3e8}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .section-title{font-size:.78rem;font-weight:700;letter-spacing:.09em;color:var(--faint);text-transform:uppercase;margin:20px 2px 10px;display:flex;align-items:center;gap:8px}
+  .section-title .right{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:600}
+
+  .stepper{display:flex;align-items:flex-start;gap:0;overflow-x:auto;padding:4px 0 2px;scrollbar-width:none}
+  .stepper::-webkit-scrollbar{display:none}
+  .step{display:flex;flex-direction:column;align-items:center;min-width:52px;position:relative;flex:1}
+  .step .nd{width:16px;height:16px;border-radius:50%;border:2px solid var(--line2);background:var(--bg2);z-index:2}
+  .step.past .nd{background:var(--teal-dim);border-color:var(--teal-dim)}
+  .step.cur .nd{background:var(--teal);border-color:var(--teal);box-shadow:0 0 0 4px var(--teal-bg)}
+  .step .lb{font-size:.66rem;color:var(--faint);margin-top:5px;font-weight:700;white-space:nowrap}
+  .step.past .lb{color:var(--muted)}
+  .step.cur .lb{color:var(--teal)}
+  .step::after{content:"";position:absolute;top:11px;left:calc(50% + 10px);right:calc(-50% + 10px);height:2px;background:var(--line2);z-index:1}
+  .step:last-child::after{display:none}
+  .step.past::after{background:var(--teal-dim)}
+
+  .ministage{display:flex;align-items:center;gap:8px;margin-top:10px}
+  .ministage .dots{display:flex;gap:4px;flex:1;max-width:150px}
+  .ministage .dots i{height:6px;border-radius:99px;flex:1;background:var(--line)}
+  .ministage .dots i.f{background:var(--teal-dim)}
+  .ministage .dots i.c{background:var(--teal)}
+  .ministage .sl{font-size:.78rem;color:var(--teal);font-weight:700;white-space:nowrap}
+
+  .tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  @media(min-width:640px){.tiles{grid-template-columns:repeat(4,1fr)}}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  .tile b{display:block;font-size:1.75rem;font-weight:800;margin-top:2px}
+  .tile span{font-size:.8rem;color:var(--muted);font-weight:600}
+  .tile.alert b{color:var(--red)}
+  .tile.warn b{color:var(--amber)}
+  .tile.ok b{color:var(--teal)}
+  .tile.good b{color:var(--green)}
+  .tile small{display:block;font-size:.7rem;color:var(--faint);margin-top:3px}
+
+  .meetbar{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-top:12px;flex-wrap:wrap}
+  .meetbar .ic{font-size:1.1rem}
+  .meetbar .tx{flex:1;min-width:180px}
+  .meetbar .tx b{display:block;font-size:.9rem}
+  .meetbar .tx span{font-size:.78rem;color:var(--faint)}
+
+  .chgrow{display:flex;align-items:flex-start;gap:10px;padding:11px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+  .chgrow:last-child{border-bottom:none}
+  .chgrow .nm{font-weight:700;font-size:.92rem}
+  .chgrow .what{font-size:.82rem;color:var(--muted);margin-top:3px;line-height:1.45}
+  .chgrow .what .up{color:var(--teal);font-weight:700}
+  .chgrow .idle{margin-left:auto;font-size:.78rem;color:var(--amber);font-weight:700;white-space:nowrap;padding-top:2px}
+
+  .aicard{background:linear-gradient(160deg,var(--card2),var(--card));border:1px solid var(--line2);border-radius:var(--radius);padding:16px}
+  .aicard .aihead{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .aicard .aihead .spark{width:26px;height:26px;border-radius:8px;background:var(--purple-bg);color:var(--purple);display:flex;align-items:center;justify-content:center;font-size:.9rem}
+  .aicard .aihead b{font-size:.95rem}
+  .aicard .aihead span{color:var(--faint);font-size:.76rem;margin-left:auto}
+  .aicard p{font-size:.9rem;line-height:1.55}
+  .aicard .modes{display:flex;gap:7px;margin-top:12px;flex-wrap:wrap}
+
+  .pipe{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+  .pipe::-webkit-scrollbar{display:none}
+  .pipe .pchip{flex:1;min-width:60px;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:9px 6px;text-align:center}
+  .pipe .pchip b{display:block;font-size:1.1rem;color:var(--teal)}
+  .pipe .pchip.zero b{color:var(--faint)}
+  .pipe .pchip span{font-size:.66rem;color:var(--muted);font-weight:700;letter-spacing:.03em}
+  .pipefoot{font-size:.8rem;color:var(--muted);margin-top:8px}
+  .pipefoot a{color:var(--teal);font-weight:700;text-decoration:none;cursor:pointer}
+
+  .filters{display:flex;gap:8px;overflow-x:auto;padding:2px 0 12px;scrollbar-width:none}
+  .filters::-webkit-scrollbar{display:none}
+  .chip{border:1px solid var(--line2);border-radius:999px;padding:6px 13px;font-size:.83rem;color:var(--muted);font-weight:600;white-space:nowrap;background:var(--card)}
+  .chip.on{color:var(--teal);border-color:var(--teal-dim);background:var(--teal-bg)}
+  .plist{display:flex;flex-direction:column;gap:10px}
+  .pcard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;cursor:pointer;transition:border-color .15s}
+  .pcard:hover{border-color:var(--teal-dim)}
+  .pcard .top{display:flex;align-items:center;gap:8px}
+  .pcard h3{font-size:1rem;font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pcard .pin{color:var(--teal);font-size:.8rem}
+  .pcard .meta{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+  .pcard .why{font-size:.82rem;color:var(--muted);margin-top:8px;line-height:1.45}
+  .pcard .why b{color:var(--text)}
+
+  .board{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px;align-items:flex-start;scrollbar-width:thin}
+  .col{min-width:225px;width:225px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);padding:10px;flex-shrink:0}
+  .col h4{display:flex;align-items:center;gap:7px;font-size:.8rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:4px 4px 10px}
+  .col h4 .cnt{margin-left:auto;background:var(--card2);border-radius:99px;padding:1px 8px;font-size:.75rem}
+  .kcard{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:11px 12px;margin-bottom:8px;cursor:pointer}
+  .kcard:hover{border-color:var(--teal-dim)}
+  .kcard h5{font-size:.9rem;font-weight:700;margin-bottom:7px}
+  .kcard .meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .colhead-dot{width:8px;height:8px;border-radius:50%}
+
+  .back{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-weight:600;font-size:.9rem;padding:4px 0;margin-bottom:8px}
+  .dhead h2{font-size:1.4rem;font-weight:800;line-height:1.25}
+  .dhead .meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .fakectl{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);background:var(--card);border-radius:10px;padding:7px 11px;font-size:.84rem;font-weight:600;color:var(--text)}
+  .fakectl .carat{color:var(--faint);font-size:.7rem}
+  .outbanner{display:flex;align-items:flex-start;gap:10px;border-radius:var(--radius);padding:13px 15px;margin-top:14px;font-size:.9rem;line-height:1.5}
+  .outbanner.rolled{background:var(--green-bg);border:1px solid rgba(143,214,168,.35);color:var(--green)}
+  .outbanner.abandoned{background:var(--red-bg);border:1px solid rgba(242,125,114,.35);color:var(--red)}
+  .outbanner .obtx{color:var(--text)}
+  .outbanner .obtx b{display:block;margin-bottom:2px}
+  .outbanner.rolled .obtx b{color:var(--green)}
+  .outbanner.abandoned .obtx b{color:var(--red)}
+
+  .stagecard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 14px 12px;margin-top:14px}
+  .stagecard .shead{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+  .stagecard .shead b{font-size:.82rem;letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+  .stagecard .shead .cur{color:var(--teal);font-weight:800;font-size:.9rem;letter-spacing:0;text-transform:none}
+  .outbtns{display:flex;gap:7px;margin-left:auto}
+
+  /* rollout scope */
+  .scope{margin-top:14px;border-top:1px solid var(--line);padding-top:4px}
+  .scoperow{display:flex;align-items:flex-start;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line)}
+  .scoperow:last-child{border-bottom:none}
+  .scoperow .sk{width:96px;flex-shrink:0;font-size:.74rem;font-weight:800;letter-spacing:.05em;color:var(--faint);text-transform:uppercase;padding-top:4px}
+  .scoperow.reached .sk{color:var(--muted)}
+  .scoperow.current .sk{color:var(--teal)}
+  .scoperow .sv{flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .scopechip{display:inline-flex;align-items:center;gap:5px;background:var(--bg2);border:1px solid var(--line2);border-radius:999px;padding:4px 11px;font-size:.8rem;font-weight:600}
+  .scopechip.hot{border-color:var(--teal-dim);color:var(--teal);background:var(--teal-bg)}
+  .scopechip.plan{border-style:dashed;color:var(--muted)}
+  .scopeadd{font-size:.78rem;color:var(--faint);border:1px dashed var(--line2);border-radius:999px;padding:4px 11px;cursor:pointer}
+  .scopeadd:hover{color:var(--teal);border-color:var(--teal-dim)}
+
+  .relwrap{margin-top:12px}
+  .relchip{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--line2);border-radius:999px;padding:6px 12px;font-size:.8rem;font-weight:600;color:var(--text);margin:0 6px 6px 0;cursor:pointer}
+  .relchip .rk{font-size:.66rem;font-weight:800;color:var(--faint);letter-spacing:.05em}
+  .relchip:hover{border-color:var(--teal-dim)}
+
+  .dtabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:18px 0 14px;overflow-x:auto;scrollbar-width:none}
+  .dtabs::-webkit-scrollbar{display:none}
+  .dtabs button{padding:9px 12px;color:var(--muted);font-weight:600;font-size:.88rem;border-bottom:2px solid transparent;white-space:nowrap}
+  .dtabs button.active{color:var(--teal);border-bottom-color:var(--teal)}
+
+  .notebox{white-space:pre-wrap;line-height:1.55;font-size:.94rem}
+  .h1v{display:block;font-size:1.05rem;font-weight:800;margin-bottom:6px}
+
+  .task{border-bottom:1px solid var(--line);padding:11px 2px}
+  .task:last-child{border-bottom:none}
+  .task .main{display:flex;align-items:center;gap:11px}
+  .cb{width:24px;height:24px;border-radius:7px;border:2px solid var(--line2);flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:.8rem;color:#06231e}
+  .task.done .cb{background:var(--teal);border-color:var(--teal)}
+  .task.done .tt{text-decoration:line-through;color:var(--muted)}
+  .task .tt{flex:1;font-weight:600;font-size:.94rem}
+  .addrow{display:flex;gap:8px;margin-top:12px}
+  .addrow input{flex:1;background:var(--bg2);border:1px solid var(--line2);border-radius:11px;padding:11px 13px;color:var(--text);min-width:0}
+  .addrow input::placeholder{color:var(--faint)}
+
+  .fgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+  .fitem{cursor:pointer}
+  .thumb{aspect-ratio:3/4;border-radius:10px;border:1px solid var(--line2);position:relative;overflow:hidden;background:#f4f6f5}
+  .thumb .bar{height:14%;background:var(--teal-dim)}
+  .thumb .ln{height:4px;border-radius:2px;background:#c6d2ce;margin:7px 10px 0}
+  .thumb .ln.s{width:55%}
+  .thumb.img{background:linear-gradient(135deg,#2a9d8c,#6aa9e8 60%,#c9a3e8)}
+  .thumb.xls .bar{background:#4f9e63}
+  .thumb.doc .bar{background:#5a86c9}
+  .thumb .tag{position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.65);color:#fff;font-size:.6rem;font-weight:800;padding:2px 6px;border-radius:5px;letter-spacing:.05em}
+  .fitem .fn{font-size:.76rem;font-weight:600;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fitem .fm{font-size:.68rem;color:var(--faint)}
+
+  .fb{padding:12px 2px;border-bottom:1px solid var(--line)}
+  .fb:last-child{border-bottom:none}
+  .fb .who{display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+  .fb .who b{font-size:.88rem}
+  .fb .who .role{font-size:.72rem;color:var(--faint)}
+  .fb .who .when{margin-left:auto;font-size:.72rem;color:var(--faint)}
+  .fb p{font-size:.9rem;line-height:1.5}
+  .sent{font-size:.68rem;font-weight:800;border-radius:6px;padding:2px 7px}
+  .sent.pos{color:var(--green);background:var(--green-bg)}
+  .sent.neg{color:var(--red);background:var(--red-bg)}
+  .sent.neu{color:var(--muted);background:var(--gray-bg)}
+  .lrn{display:flex;gap:10px;padding:11px 2px;border-bottom:1px solid var(--line)}
+  .lrn:last-child{border-bottom:none}
+  .lrn .tx{font-size:.9rem;line-height:1.5}
+  .lrn .tx .when{display:block;font-size:.72rem;color:var(--faint);margin-top:3px}
+
+  .mtile{display:flex;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid var(--line)}
+  .mtile:last-child{border-bottom:none}
+  .mtile .val{font-size:1.2rem;font-weight:800;color:var(--teal);min-width:74px}
+  .mtile .lb{flex:1;min-width:0}
+  .mtile .lb b{display:block;font-size:.88rem}
+  .mtile .lb span{font-size:.74rem;color:var(--faint)}
+  .srcchip{font-size:.7rem;color:var(--blue);background:var(--blue-bg);border-radius:6px;padding:3px 8px;font-weight:700;white-space:nowrap}
+  .ev{display:flex;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line);font-size:.88rem;align-items:baseline}
+  .ev:last-child{border-bottom:none}
+  .ev .when{color:var(--faint);font-size:.76rem;min-width:56px}
+  .ev .hrs{margin-left:auto;color:var(--muted);font-size:.78rem;font-weight:700;white-space:nowrap}
+
+  .cmt{padding:11px 2px;border-bottom:1px solid var(--line);font-size:.9rem}
+  .cmt:last-child{border-bottom:none}
+  .cmt .who{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+  .cmt .who b{font-size:.86rem}
+  .cmt .who span{color:var(--faint);font-size:.76rem}
+  .cmt.sys{color:var(--muted);font-style:italic;font-size:.84rem}
+  textarea{width:100%;background:var(--bg2);border:1px solid var(--line2);border-radius:11px;padding:11px 13px;color:var(--text);resize:vertical;min-height:64px}
+  textarea::placeholder{color:var(--faint)}
+
+  .metatiles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  @media(min-width:640px){.metatiles{grid-template-columns:repeat(4,1fr)}}
+  .archnote{font-size:.85rem;color:var(--muted);line-height:1.55;margin-top:10px}
+  .archnote b{color:var(--text)}
+
+  .ideacheck{margin-top:10px;border:1px dashed var(--line2);border-radius:12px;padding:12px;background:var(--bg2)}
+  .ideacheck .ichead{display:flex;align-items:center;gap:7px;font-size:.78rem;font-weight:800;letter-spacing:.06em;color:var(--purple);text-transform:uppercase;margin-bottom:8px}
+  .icmatch{display:flex;align-items:flex-start;gap:9px;padding:9px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+  .icmatch:last-child{border-bottom:none}
+  .icmatch .nm{font-weight:700;font-size:.86rem}
+  .icmatch .how{font-size:.78rem;color:var(--muted);margin-top:2px;line-height:1.45}
+  .icempty{font-size:.82rem;color:var(--faint)}
+
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:flex-end;justify-content:center;z-index:100;padding:14px}
+  .overlay.open{display:flex}
+  @media(min-width:640px){.overlay{align-items:center}}
+  .modal{background:var(--card2);border:1px solid var(--line2);border-radius:18px;width:100%;max-width:470px;padding:20px;max-height:88vh;overflow-y:auto}
+  .modal h3{margin-bottom:6px}
+  .modal .sub{color:var(--faint);font-size:.8rem;margin-bottom:10px}
+  .modal label{display:block;font-size:.8rem;font-weight:700;color:var(--muted);margin:12px 0 5px}
+  .modal input,.modal select{width:100%;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;padding:10px 12px;color:var(--text)}
+  .modal .mrow{display:flex;gap:10px}
+  .modal .mrow>div{flex:1}
+  .modal .actions{display:flex;gap:10px;margin-top:18px;justify-content:flex-end}
+  .viewerpage{background:#f4f6f5;border-radius:10px;padding:22px 18px;color:#26332f;min-height:340px}
+  .viewerpage h4{color:#14211d;margin-bottom:12px}
+  .viewerpage .vln{height:7px;border-radius:3px;background:#c6d2ce;margin:9px 0}
+  .viewerpage .vln.s{width:60%}
+  .viewerpage .vimg{height:110px;border-radius:8px;background:linear-gradient(135deg,#2a9d8c,#6aa9e8 60%,#c9a3e8);margin:14px 0}
+
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:var(--card2);border:1px solid var(--teal-dim);color:var(--teal);padding:10px 18px;border-radius:99px;font-weight:700;font-size:.86rem;z-index:200;opacity:0;transition:opacity .25s;pointer-events:none;max-width:92vw;text-align:center}
+  .toast.show{opacity:1}
+
+  .view{display:none}
+  .view.active{display:block}
+  .concept-tag{font-size:.68rem;color:var(--faint);border:1px dashed var(--line2);border-radius:6px;padding:2px 7px;margin-left:2px}
+  .empty{color:var(--faint);font-size:.86rem}
+</style>
+</head>
+<body class="light">
+<div class="app">
+
+  <header>
+    <div class="brand"><span class="dot">LB</span>Lean BEAF&nbsp;<small>Pro</small><span class="concept-tag">CONCEPT v6</span></div>
+    <div class="spacer"></div>
+    <button class="btn small" id="themebtn" onclick="toggleTheme()" title="Light/dark">🌙</button>
+    <button class="btn small" onclick="toast('Search covers active + archived — the idea memory')">🔍</button>
+    <button class="btn primary" onclick="openModal('newproj')">+ New</button>
+  </header>
+
+  <div class="viewtabs">
+    <button id="vt-dash" class="active" onclick="go('dash')">Dashboard</button>
+    <button id="vt-list" onclick="go('list')">List</button>
+    <button id="vt-board" onclick="go('board')">Board</button>
+    <button id="vt-arch" onclick="go('arch')">Archive</button>
+  </div>
+
+  <!-- ================= DASHBOARD ================= -->
+  <div class="view active" id="view-dash">
+    <div class="tiles">
+      <div class="tile"><span>Active projects</span><b>5</b></div>
+      <div class="tile ok"><span>Moved since meeting</span><b id="tile-moved">3</b></div>
+      <div class="tile warn"><span>No movement</span><b id="tile-stalled">2</b></div>
+      <div class="tile good"><span>Locations live</span><b>7</b><small>sites across active rollouts</small></div>
+    </div>
+
+    <div class="meetbar">
+      <span class="ic">🗓️</span>
+      <span class="tx"><b id="meet-label">Last meeting: Mon Jul 20, 9:00 AM</b><span>Changes below are tracked from this point</span></span>
+      <button class="btn small primary" onclick="markMeeting()">Mark meeting now</button>
+      <button class="btn small" onclick="toast('In the build: pick from the meeting schedule (e.g. every Mon 9 AM)')">Schedule</button>
+    </div>
+
+    <div class="section-title">Since last meeting · moved <span class="right"><button class="chip" style="padding:4px 11px" onclick="go('list');setFilter('changed')">Open as filter ›</button></span></div>
+    <div class="card" id="movedlist"></div>
+
+    <div class="section-title">Since last meeting · no movement</div>
+    <div class="card" id="stalledlist"></div>
+
+    <div class="section-title">AI brief</div>
+    <div class="aicard">
+      <div class="aihead"><span class="spark">✦</span><b>Spec Ops overview</b><span>generated concept text</span></div>
+      <p id="aitext"></p>
+      <div class="modes">
+        <button class="chip on" id="ai-daily" onclick="aiMode('daily')">Daily brief</button>
+        <button class="chip" id="ai-meeting" onclick="aiMode('meeting')">Since meeting</button>
+        <button class="chip" id="ai-report" onclick="aiMode('report')">Leadership report</button>
+      </div>
+    </div>
+
+    <div class="section-title">Rollout pipeline · active projects per stage</div>
+    <div class="pipe" id="pipe"></div>
+    <div class="pipefoot" id="pipefoot"></div>
+  </div>
+
+  <!-- ================= LIST ================= -->
+  <div class="view" id="view-list">
+    <div class="filters" id="filterbar"></div>
+    <div class="plist" id="plist"></div>
+  </div>
+
+  <!-- ================= BOARD ================= -->
+  <div class="view" id="view-board">
+    <div class="board" id="board"></div>
+    <p style="color:var(--faint);font-size:.78rem;margin-top:10px">Columns are the rollout stages. Active projects only — outcomes live in the Archive. Cards drag between columns in the real build.</p>
+  </div>
+
+  <!-- ================= ARCHIVE ================= -->
+  <div class="view" id="view-arch">
+    <div class="metatiles">
+      <div class="tile"><span>Ideas attempted</span><b>9</b><small>since Oct 2025</small></div>
+      <div class="tile good"><span>Rolled out</span><b>2</b><small>22% of finished ideas…</small></div>
+      <div class="tile alert"><span>Abandoned</span><b>2</b><small>…told you what to avoid</small></div>
+      <div class="tile"><span>Hours invested (archived)</span><b>234</b><small>across finished ideas</small></div>
+    </div>
+    <div class="card archnote" style="margin-top:12px">
+      <b>Portfolio meta-analysis (concept):</b> rolled-out ideas now return <b>~76 staff-hours + $4.1k per month</b>, recurring. Average path Idea → rollout: <b>4.2 months</b>. Both abandonments died at MVP/Testing on the same root cause — <b>external dependency quality (vendor accuracy, input data)</b> — and both were caught before Site, which is the system working. Most-cited learning: <b>validate the external dependency before building.</b>
+    </div>
+
+    <div class="section-title" style="color:var(--green)">✓ Rolled out — successful</div>
+    <div class="plist" id="rolledlist"></div>
+
+    <div class="section-title" style="color:var(--red)">✕ Abandoned — didn't pan out</div>
+    <div class="plist" id="abandonedlist"></div>
+  </div>
+
+  <!-- ================= DETAIL ================= -->
+  <div class="view" id="view-detail">
+    <button class="back" onclick="go(lastView)">‹ Back</button>
+    <div class="dhead">
+      <h2 id="d-title"></h2>
+      <div class="meta" id="d-meta"></div>
+    </div>
+
+    <div id="d-outbanner"></div>
+
+    <div class="stagecard">
+      <div class="shead"><b>Rollout stage</b><span class="cur" id="d-stagename"></span>
+        <span class="outbtns" id="d-outbtns"></span>
+      </div>
+      <div class="stepper" id="d-stepper"></div>
+      <div class="scope" id="d-scope"></div>
+    </div>
+
+    <div class="card relwrap" id="d-related-card">
+      <div class="section-title" style="margin:0 0 10px">Related / affects</div>
+      <div id="d-related"></div>
+      <button class="btn small" style="margin-top:4px" onclick="toast('Link another project — suggestions come from the idea checker')">+ Link project</button>
+    </div>
+
+    <div class="dtabs">
+      <button id="dt-overview" class="active" onclick="dtab('overview')">Overview</button>
+      <button id="dt-metrics" onclick="dtab('metrics')">Metrics</button>
+      <button id="dt-feedback" onclick="dtab('feedback')">Feedback</button>
+      <button id="dt-learnings" onclick="dtab('learnings')">Learnings</button>
+      <button id="dt-files" onclick="dtab('files')">Files</button>
+      <button id="dt-tasks" onclick="dtab('tasks')">Tasks</button>
+      <button id="dt-activity" onclick="dtab('activity')">Activity</button>
+    </div>
+
+    <div id="dpane-overview" class="card"><div class="notebox" id="d-note"></div></div>
+
+    <div id="dpane-metrics" style="display:none">
+      <div class="section-title" style="margin-top:0">Reported metrics</div>
+      <div class="card" id="d-metrics"></div>
+      <div class="addrow"><button class="btn primary" style="flex:1" onclick="openModal('metric')">+ Report a metric</button></div>
+      <div class="section-title">Time &amp; events</div>
+      <div class="card" id="d-events"></div>
+      <div class="addrow"><button class="btn" style="flex:1" onclick="openModal('event')">+ Log time / event</button></div>
+    </div>
+
+    <div id="dpane-feedback" style="display:none">
+      <div class="card" id="d-feedback"></div>
+      <div style="margin-top:12px">
+        <textarea id="newfb" placeholder="Capture feedback — who said it and what…"></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="addFeedback()">Add feedback</button></div>
+      </div>
+    </div>
+
+    <div id="dpane-learnings" style="display:none">
+      <div class="card" id="d-learnings"></div>
+      <div style="margin-top:12px">
+        <textarea id="newlrn" placeholder="What did we learn?"></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="addLearning()">Add learning</button></div>
+      </div>
+    </div>
+
+    <div id="dpane-files" style="display:none">
+      <div class="card"><div class="fgrid" id="d-files"></div></div>
+      <div class="addrow"><button class="btn" style="flex:1" onclick="toast('Upload — thumbnails generated on upload')">⬆ Upload file</button><button class="btn" style="flex:1" onclick="toast('Links get a favicon thumbnail in the build')">🔗 Add link</button></div>
+    </div>
+
+    <div id="dpane-tasks" style="display:none">
+      <div class="card" id="d-tasks"></div>
+      <div class="addrow"><input placeholder="Add a task…" id="newtask"><button class="btn primary" onclick="addTask()">Add</button></div>
+    </div>
+
+    <div id="dpane-activity" style="display:none">
+      <div class="card" id="d-activity"></div>
+      <div style="margin-top:12px">
+        <textarea id="newcmt" placeholder="Write a comment…"></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="addComment()">Comment</button></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================= MODALS ================= -->
+<div class="overlay" id="ov-newproj" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <h3>New project</h3>
+    <div class="sub">Start typing — the idea checker searches every past and present project, including abandoned ones.</div>
+    <label>Project name / idea</label><input id="np-name" placeholder='Try typing "referral", "fax", or "text"…' oninput="ideaCheck(this.value)">
+    <div class="ideacheck" id="ideacheck" style="display:none">
+      <div class="ichead">✦ Idea checker</div>
+      <div id="icresults"></div>
+    </div>
+    <div class="mrow">
+      <div><label>Rollout stage</label><select><option>Idea</option><option>MVP</option><option>Testing</option><option>Site</option><option>POD</option><option>Region</option><option>All</option></select></div>
+      <div><label>Start date</label><input type="date" value="2026-07-21"></div>
+    </div>
+    <label>Assignees</label><select multiple size="3"><option selected>Thomas</option><option>Maya</option><option>Jordan</option><option>Sam</option></select>
+    <label>Description</label><input placeholder="What is this project about?">
+    <div class="actions"><button class="btn" onclick="closeModals()">Cancel</button><button class="btn primary" onclick="closeModals();toast('Concept only — nothing is saved')">Create</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-scope" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <h3 id="sc-title">Set rollout scope</h3>
+    <div class="sub" id="sc-sub">Locations come from the org catalog (Region → PODs → Sites), so rollout coverage rolls up correctly.</div>
+    <div id="sc-body"></div>
+    <div class="actions"><button class="btn" onclick="closeModals()">Cancel</button><button class="btn primary" onclick="closeModals();toast('Concept only — scope would save + log to Activity')">Save</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-metric" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <h3>Report a metric</h3>
+    <div class="sub">Metrics come from the standardized Spec Ops catalog so numbers roll up across projects. Every report needs a source.</div>
+    <label>Metric</label>
+    <select>
+      <option>Appointments generated</option><option>Man-hours saved</option><option>Cost saved ($)</option><option>Calls deflected</option><option>Documents processed</option>
+      <option>＋ Request new metric (admin approves)</option>
+    </select>
+    <div class="mrow">
+      <div><label>Value</label><input placeholder="e.g. 132"></div>
+      <div><label>Period</label><select><option>This week</option><option>This month</option><option>Since launch</option></select></div>
+    </div>
+    <label>Location (optional — ties the number to a site/POD)</label><input placeholder="e.g. POD West">
+    <label>Source (report, dashboard, or file)</label><input placeholder="e.g. Epic report #4412 or link…">
+    <div class="actions"><button class="btn" onclick="closeModals()">Cancel</button><button class="btn primary" onclick="closeModals();toast('Concept only — metric would post to project + dashboard')">Report</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-event" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <h3>Log time / event</h3>
+    <label>Type</label><select><option>Work session</option><option>Training</option><option>Site visit</option><option>Go-live</option><option>Meeting</option></select>
+    <div class="mrow">
+      <div><label>Date</label><input type="date"></div>
+      <div><label>Hours</label><input placeholder="e.g. 2.5"></div>
+    </div>
+    <label>Location (optional)</label><input placeholder="e.g. Northside">
+    <label>Note</label><input placeholder="What happened?">
+    <div class="actions"><button class="btn" onclick="closeModals()">Cancel</button><button class="btn primary" onclick="closeModals();toast('Concept only — event would appear in Metrics + Activity')">Log</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-outcome" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <h3 id="oc-title">Close out project</h3>
+    <div class="sub">Outcomes are permanent history — the project moves to the Archive with everything intact (metrics, learnings, feedback, files) so future ideas can learn from it.</div>
+    <label id="oc-reasonlabel">Reason</label><input id="oc-reason" placeholder="">
+    <label>Key takeaway for the archive</label><input placeholder="One line the idea checker will show future-you">
+    <div class="actions"><button class="btn" onclick="closeModals()">Cancel</button><button class="btn primary" id="oc-confirm">Confirm</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-viewer" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <b id="viewer-name" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+      <button class="btn small" onclick="toast('Download in the build')">⬇</button>
+      <button class="btn small" onclick="closeModals()">✕</button>
+    </div>
+    <div class="viewerpage" id="viewer-page"></div>
+    <div class="sub" style="margin-top:10px">Concept: the build renders real previews (PDF pages, images, Office docs) inline.</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------------- constants ---------------- */
+const TEAM={TH:['Thomas','a1'],MR:['Maya','a2'],JD:['Jordan','a3'],SK:['Sam','a4']};
+const STAGES=['Idea','MVP','Testing','Site','POD','Region','All'];
+
+/* ---------------- fake data ---------------- */
+/* outcome: null = active · 'rolled' · 'abandoned'
+   scope: testers (who/where testing happens), site, pods[], region */
+const PROJECTS=[
+ {id:1,name:'AI Appointment Reminders',outcome:null,started:'Mar 2026',assignees:['TH','MR'],pinned:true,stage:4,
+  scope:{testers:'Front-desk pilot group (6)',site:'Northside',pods:['West'],podsPlan:['East — next gate Jul 24'],region:'North (target)'},
+  since:{kind:'changed',items:['Metric reported: <span class="up">132 appointments generated</span> (POD West, wk of Jul 13)','Task completed: “Train POD West front desk”']},
+  related:[{id:8,note:'builds on its SMS infrastructure'},{id:4,note:'shares front-desk workflow'}],
+  note:'# Goal\nAI voice + SMS reminders that rebook no-shows automatically.\n\nNow live across POD West (4 sites). Next gate: POD East, then Region.',
+  tasks:[{t:'Train POD West front desk',done:true,who:'MR'},{t:'POD East config + test calls',done:false,who:'TH'},{t:'Draft Region rollout memo',done:false,who:'TH'}],
+  files:[{kind:'pdf',name:'pod-west-golive-runbook.pdf',meta:'Maya · Jul 15'},{kind:'xls',name:'reminder-metrics-wk28.xlsx',meta:'Epic export · Jul 20'},{kind:'img',name:'front-desk-flyer.png',meta:'Jordan · Jul 12'}],
+  feedback:[
+   {who:'D. Ruiz',role:'Front desk lead, Northside',sent:'pos',when:'Jul 20',txt:'Patients actually answer the SMS — reschedules that used to take 3 calls now happen on their own.'},
+   {who:'Dr. Patel',role:'POD West medical director',sent:'neu',when:'Jul 17',txt:'Works well, but wants the voice script softened for elderly patients.'}],
+  learnings:[{when:'Jul 18',txt:'Send reminders at 10 AM, not 8 AM — answer rate nearly doubled.'},{when:'Jul 15',txt:'Front desk needs a one-page “what the AI says” script or they distrust it.'}],
+  metrics:[{metric:'Appointments generated',value:'132',period:'wk of Jul 13 · POD West',source:'Epic report #4412',who:'Maya',when:'Jul 20'},{metric:'Man-hours saved',value:'26 h',period:'wk of Jul 13 · POD West',source:'Front-desk time study',who:'Thomas',when:'Jul 20'}],
+  events:[{type:'Go-live',when:'Jul 15',hours:'3.5 h',txt:'POD West go-live — 4 sites'},{type:'Training',when:'Jul 14',hours:'2 h',txt:'Front desk training, Northside + Lakeview'}],
+  activity:[{sys:true,txt:'Maya reported metric “Appointments generated: 132”',when:'Jul 20'},{who:'Maya',when:'Jul 20',txt:'POD West holding steady. POD East checklist started.'}]},
+
+ {id:2,name:'Self-Scheduling Assistant',outcome:null,started:'May 2026',assignees:['JD','TH'],pinned:true,stage:2,
+  scope:{testers:'12 staff testers (schedulers)',site:'Pilot shortlist: Lakeview, Northside',pods:[],podsPlan:[],region:''},
+  since:{kind:'changed',items:['Stage advanced: MVP → <span class="up">Testing</span>','New learning captured']},
+  related:[{id:1,note:'could rebook via the same assistant'}],
+  note:'# Goal\nChat assistant that books directly into open slots.\n\nIn Testing with 12 staff testers; measuring booking completion rate before first Site.',
+  tasks:[{t:'Recruit staff testers',done:true,who:'JD'},{t:'Test script + edge cases',done:false,who:'JD'},{t:'Site selection for pilot',done:false,who:'TH'}],
+  files:[{kind:'doc',name:'test-plan-v2.docx',meta:'Jordan · Jul 19'},{kind:'img',name:'booking-flow-screens.png',meta:'Jordan · Jul 18'}],
+  feedback:[{who:'K. Osei',role:'Scheduler (tester)',sent:'neg',when:'Jul 19',txt:'Bot offers slots the provider blocks for procedures — needs the block-out rules.'}],
+  learnings:[{when:'Jul 20',txt:'Provider block-out rules must sync nightly, not weekly — stale slots kill trust in one bad booking.'}],
+  metrics:[],
+  events:[{type:'Work session',when:'Jul 19',hours:'4 h',txt:'Edge-case testing with schedulers'}],
+  activity:[{sys:true,txt:'Thomas advanced stage MVP → Testing',when:'Jul 21'}]},
+
+ {id:3,name:'Referral Triage Automation',outcome:null,started:'Jun 2026',assignees:['SK'],pinned:false,stage:1,
+  scope:{testers:'',site:'',pods:[],podsPlan:[],region:''},
+  since:{kind:'changed',items:['Waiting on IT security review of the HL7 feed (ETA Jul 28) — flagged in activity']},
+  related:[{id:7,note:'replaces the abandoned OCR approach'}],
+  note:'# Goal\nAuto-sort inbound referrals by urgency + completeness.\n\nWaiting: IT security review of the HL7 feed (submitted Jul 10, ETA Jul 28).\n\nHistory note: supersedes “Paper Referral OCR” (abandoned Nov 2025) — this time we fixed the input source first.',
+  tasks:[{t:'Security review request',done:true,who:'SK'},{t:'Build triage rules v1',done:false,who:'SK'}],
+  files:[{kind:'doc',name:'triage-rules-draft.docx',meta:'Sam · Jul 9'}],
+  feedback:[],
+  learnings:[{when:'Jul 10',txt:'Start IT security review before MVP build, not after — it is the long pole every time.'}],
+  metrics:[],
+  events:[{type:'Meeting',when:'Jul 16',hours:'1 h',txt:'IT security sync — review ETA Jul 28'}],
+  activity:[{sys:true,txt:'Sam noted: waiting on HL7 feed access (IT security review)',when:'Jul 21'}]},
+
+ {id:4,name:'Digital Intake Forms',outcome:null,started:'Feb 2026',assignees:['MR'],pinned:false,stage:3,
+  scope:{testers:'Front desk, Northside',site:'Northside',pods:[],podsPlan:['West — after printer fix'],region:''},
+  since:{kind:'stalled',idle:'8 days'},
+  related:[{id:1,note:'shares front-desk workflow'}],
+  note:'# Goal\nTablet + text-to-mobile intake, replacing paper at check-in.\n\nLive at Northside (Site stage). Expansion to POD West pending printer-workflow fix.',
+  tasks:[{t:'Northside go-live',done:true,who:'MR'},{t:'Fix label-printer workflow',done:false,who:'MR'},{t:'POD expansion plan',done:false,who:'TH'}],
+  files:[{kind:'pdf',name:'intake-workflow.pdf',meta:'Maya · Jul 8'},{kind:'img',name:'checkin-kiosk.png',meta:'Maya · Jul 8'}],
+  feedback:[{who:'T. Alvarez',role:'Office manager, Northside',sent:'pos',when:'Jul 11',txt:'Check-in line at 8 AM is basically gone.'}],
+  learnings:[{when:'Jul 11',txt:'Older patients prefer the text-to-own-phone flow over the kiosk 2:1.'}],
+  metrics:[{metric:'Man-hours saved',value:'9 h',period:'wk of Jul 6 · Northside',source:'Front-desk time study',who:'Maya',when:'Jul 13'}],
+  events:[{type:'Site visit',when:'Jul 11',hours:'2 h',txt:'Northside observation day'}],
+  activity:[{who:'Maya',when:'Jul 13',txt:'Printer workflow is the blocker for POD — vendor ticket open.'}]},
+
+ {id:5,name:'Lean BEAF Pro (this app)',outcome:null,started:'Jul 2026',assignees:['TH','JD'],pinned:false,stage:0,
+  scope:{testers:'',site:'',pods:[],podsPlan:[],region:''},
+  since:{kind:'stalled',idle:'12 days'},related:[],
+  note:'# Idea\nEvolve the notes app into the Spec Ops innovation platform (this concept!).',
+  tasks:[{t:'Review concept v6 with team',done:false,who:'TH'},{t:'Confirm rules + start build',done:false,who:'TH'}],
+  files:[],feedback:[],learnings:[],metrics:[],events:[],activity:[]},
+
+ /* -------- archived: rolled out -------- */
+ {id:6,name:'E-Fax Routing Bot',outcome:'rolled',outWhen:'Jun 2026',outNote:'Live across North Region since June. Misroutes down from ~40/wk to 3. Candidate for All once error rate holds one more month.',
+  started:'Oct 2025',assignees:['SK'],pinned:false,stage:5,since:{kind:'none'},invested:'114 h',span:'Oct 2025 → Jun 2026',
+  scope:{testers:'HIM team',site:'Downtown (first)',pods:['West','East','Central'],podsPlan:[],region:'North Region'},
+  related:[],
+  note:'# Rolled out — Region\nAuto-routes inbound faxes to the right department.\n\nWatching error rate monthly; candidate for All.',
+  tasks:[{t:'Monthly error-rate check (Jul)',done:true,who:'SK'}],
+  files:[{kind:'xls',name:'fax-routing-errors-jun.xlsx',meta:'Sam · Jul 2'}],
+  feedback:[{who:'HIM team',role:'Records',sent:'pos',when:'Jun 30',txt:'Misroutes down from ~40/week to 3.'}],
+  learnings:[{when:'Jun 28',txt:'Keep a human review queue for low-confidence routes — trust grew much faster.'}],
+  metrics:[{metric:'Man-hours saved',value:'31 h',period:'June · Region',source:'HIM workload report',who:'Sam',when:'Jul 2'},{metric:'Cost saved ($)',value:'$4.1k',period:'June · Region',source:'HIM workload report',who:'Sam',when:'Jul 2'}],
+  events:[],activity:[{sys:true,txt:'Sam reported June metrics',when:'Jul 2'}]},
+
+ {id:8,name:'Two-Way Patient Texting',outcome:'rolled',outWhen:'Jan 2026',outNote:'Live everywhere (All). Saves ~45 staff-hours/month; became the SMS backbone that AI Appointment Reminders now rides on.',
+  started:'Aug 2025',assignees:['MR','JD'],pinned:false,stage:6,since:{kind:'none'},invested:'120 h',span:'Aug 2025 → Jan 2026',
+  scope:{testers:'Front desk pilot, Lakeview',site:'Lakeview',pods:['West','East'],podsPlan:[],region:'North Region'},
+  related:[{id:1,note:'provides its SMS infrastructure'}],
+  note:'# Rolled out — All\nTwo-way SMS between front desk and patients, replacing phone tag.',
+  tasks:[],files:[],
+  feedback:[{who:'Front desk (all sites)',role:'Survey n=22',sent:'pos',when:'Jan 2026',txt:'Rated 4.6/5 — “can’t go back to phone tag.”'}],
+  learnings:[{when:'Dec 2025',txt:'Patients reply to texts ~4× more than portal messages — text-first is the default now.'}],
+  metrics:[{metric:'Man-hours saved',value:'45 h',period:'monthly avg · All',source:'Ops dashboard',who:'Maya',when:'Feb 2026'}],
+  events:[],activity:[]},
+
+ /* -------- archived: abandoned -------- */
+ {id:7,name:'Paper Referral OCR',outcome:'abandoned',outWhen:'Nov 2025',outNote:'Scan quality from external offices too inconsistent — OCR accuracy plateaued at 62%. Killed at MVP before wasting a pilot. Superseded by Referral Triage Automation (HL7 feed instead of paper).',
+  started:'Sep 2025',assignees:['SK'],pinned:false,stage:1,since:{kind:'none'},invested:'38 h',span:'Sep 2025 → Nov 2025',
+  scope:{testers:'Referral team (pilot readers)',site:'',pods:[],podsPlan:[],region:''},
+  related:[{id:3,note:'superseded by it'}],
+  note:'# Abandoned — MVP\nOCR inbound paper referrals into structured fields.\n\nWhy it died: input quality, not the model. External offices fax at 150dpi with coffee stains.',
+  tasks:[],files:[{kind:'doc',name:'ocr-accuracy-report.docx',meta:'Sam · Nov 2025'}],
+  feedback:[{who:'Referral team',role:'Pilot readers',sent:'neg',when:'Nov 2025',txt:'Fixing the OCR mistakes took longer than just typing it in.'}],
+  learnings:[{when:'Nov 2025',txt:'Fix the input source before automating the parsing — garbage in is unfixable downstream.'}],
+  metrics:[],events:[],activity:[]},
+
+ {id:9,name:'Voicemail Transcription Triage',outcome:'abandoned',outWhen:'Feb 2026',outNote:'Vendor transcription accuracy hit 71% on our audio (they quoted 94%), and per-minute pricing came in 3× the quote. Killed at Testing. Revisit if we ever own the phone stack.',
+  started:'Dec 2025',assignees:['JD'],pinned:false,stage:2,since:{kind:'none'},invested:'46 h',span:'Dec 2025 → Feb 2026',
+  scope:{testers:'Jordan + 3 clinic managers',site:'',pods:[],podsPlan:[],region:''},
+  related:[],
+  note:'# Abandoned — Testing\nAuto-transcribe and triage clinic voicemails.\n\nWhy it died: vendor accuracy + cost. Not our build quality — the dependency.',
+  tasks:[],files:[{kind:'xls',name:'vendor-accuracy-tests.xlsx',meta:'Jordan · Feb 2026'}],
+  feedback:[],
+  learnings:[{when:'Feb 2026',txt:'Test vendor accuracy on OUR audio before signing anything — demo audio is always clean.'}],
+  metrics:[],events:[],activity:[]}
+];
+
+const AI_TEXT={
+ daily:'Good evening. 5 active projects. <b>AI Appointment Reminders</b> is the mover: 132 appointments generated and 26 staff-hours saved in POD West last week — POD East gate is Thursday. <b>Referral Triage</b> has been waiting 11 days on the IT security review (ETA Jul 28). <b>Digital Intake</b> and <b>Lean BEAF Pro</b> have had no movement in 8+ days.',
+ meeting:'Since Monday’s meeting: <b>Self-Scheduling Assistant</b> advanced MVP → Testing (12 staff testers); <b>AI Appointment Reminders</b> reported 132 appointments generated in POD West (Epic #4412) and finished front-desk training; <b>Referral Triage</b> logged the IT review ETA (Jul 28). No movement: <b>Digital Intake</b> (8d) and <b>Lean BEAF Pro</b> (12d).',
+ report:'July summary: the portfolio saved <b>66 staff-hours + $4.1k</b> this month across live rollouts (POD West, Northside, North Region), and rolled-out ideas return <b>~76 h/month recurring</b>. Two projects advanced a stage. Archive signal: both abandoned ideas died on <b>external dependency quality</b> — recommend the “validate the dependency first” gate become standard at Idea → MVP.'
+};
+
+let current=null,lastView='dash',activeFilter='all';
+const active=()=>PROJECTS.filter(p=>!p.outcome);
+
+function toggleTheme(){document.body.classList.toggle('light');document.documentElement.classList.toggle('light');document.getElementById('themebtn').textContent=document.body.classList.contains('light')?'🌙':'☀️'}
+/* ---------------- helpers ---------------- */
+const $=id=>document.getElementById(id);
+function avs(list){return '<span class="avatars">'+list.map(k=>`<span class="av ${TEAM[k][1]}">${k}</span>`).join('')+'</span>'}
+function stageHtml(p){return `<div class="ministage"><span class="dots">${STAGES.map((s,i)=>`<i class="${i<p.stage?'f':i===p.stage?'c':''}"></i>`).join('')}</span><span class="sl">${STAGES[p.stage]} · ${p.stage+1}/7</span></div>`}
+function locLabel(p){
+  if(p.stage>=6)return 'Everywhere';
+  if(p.stage===5&&p.scope.region)return p.scope.region;
+  if(p.stage===4&&p.scope.pods.length)return 'POD '+p.scope.pods.join(' + ');
+  if(p.stage===3&&p.scope.site)return p.scope.site;
+  if(p.stage===2&&p.scope.testers)return p.scope.testers;
+  return '';
+}
+function locHtml(p){const l=locLabel(p);return l?`<span class="loc">📍 ${l}</span>`:''}
+function outBadge(p){return p.outcome==='rolled'?'<span class="badge out-rolled nodot">✓ Rolled out</span>':p.outcome==='abandoned'?'<span class="badge out-abandoned nodot">✕ Abandoned</span>':''}
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2600)}
+
+/* ---------------- navigation ---------------- */
+function go(v){
+  if(v!=='detail')lastView=v;
+  document.querySelectorAll('.view').forEach(e=>e.classList.remove('active'));
+  $('view-'+v).classList.add('active');
+  ['dash','list','board','arch'].forEach(k=>{const b=$('vt-'+k);if(b)b.classList.toggle('active',k===v)});
+  window.scrollTo({top:0});
+}
+
+/* ---------------- dashboard ---------------- */
+function renderDash(){
+  const moved=active().filter(p=>p.since.kind==='changed');
+  const stalled=active().filter(p=>p.since.kind==='stalled');
+  $('tile-moved').textContent=moved.length;$('tile-stalled').textContent=stalled.length;
+  $('movedlist').innerHTML=moved.length?moved.map(p=>`
+    <div class="chgrow" onclick="openDetail(${p.id})">
+      <div style="flex:1;min-width:0"><div class="nm">${p.name}</div><div class="what">${p.since.items.join('<br>')}</div></div>
+      <span class="badge chg-moved nodot">moved</span>
+    </div>`).join(''):'<div class="empty">No changes since this meeting yet.</div>';
+  $('stalledlist').innerHTML=stalled.length?stalled.map(p=>`
+    <div class="chgrow" onclick="openDetail(${p.id})">
+      <div style="flex:1;min-width:0"><div class="nm">${p.name}</div><div class="what">No stage, task, metric, file, feedback, or learning changes</div></div>
+      <span class="idle">⏸ ${p.since.idle}</span>
+    </div>`).join(''):'<div class="empty">Everything has moved. 🎉</div>';
+  $('pipe').innerHTML=STAGES.map((s,i)=>{const n=active().filter(p=>p.stage===i).length;
+    return `<div class="pchip ${n?'':'zero'}"><b>${n}</b><span>${s}</span></div>`}).join('');
+  const r=PROJECTS.filter(p=>p.outcome==='rolled').length,a=PROJECTS.filter(p=>p.outcome==='abandoned').length;
+  $('pipefoot').innerHTML=`Finished ideas: <a onclick="go('arch')">✓ ${r} rolled out · ✕ ${a} abandoned — view Archive ›</a>`;
+}
+function markMeeting(){
+  active().forEach(p=>{if(p.since.kind==='changed')p.since={kind:'none'}});
+  $('meet-label').textContent='Last meeting: Tue Jul 21, 7:10 PM (just marked)';
+  renderDash();renderList();
+  toast('Meeting marked — change tracking restarted from now');
+}
+function aiMode(m){['daily','meeting','report'].forEach(k=>$('ai-'+k).classList.toggle('on',k===m));$('aitext').innerHTML=AI_TEXT[m]}
+
+/* ---------------- list ---------------- */
+const FILTERS=[['all','All'],['changed','Moved since meeting'],['stalled','No movement'],['mine','Mine']];
+function setFilter(f){activeFilter=f;renderList()}
+function renderList(){
+  $('filterbar').innerHTML=FILTERS.map(([k,l])=>`<button class="chip ${activeFilter===k?'on':''}" onclick="setFilter('${k}')">${l}</button>`).join('');
+  let items=[...active()].sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0));
+  if(activeFilter==='changed')items=items.filter(p=>p.since.kind==='changed');
+  if(activeFilter==='stalled')items=items.filter(p=>p.since.kind==='stalled');
+  if(activeFilter==='mine')items=items.filter(p=>p.assignees.includes('TH'));
+  $('plist').innerHTML=items.length?items.map(p=>`
+    <div class="pcard" onclick="openDetail(${p.id})">
+      <div class="top">${p.pinned?'<span class="pin">📌</span>':''}<h3>${p.name}</h3>${p.since.kind==='changed'?'<span class="badge chg-moved nodot">moved</span>':p.since.kind==='stalled'?`<span class="badge chg-stalled nodot">⏸ ${p.since.idle}</span>`:''}${avs(p.assignees)}</div>
+      <div class="meta">${locHtml(p)}<span class="started">▶ Started ${p.started}</span></div>
+      ${stageHtml(p)}
+    </div>`).join(''):'<div class="empty" style="padding:20px 4px">Nothing matches this filter.</div>';
+}
+
+/* ---------------- board (stage columns) ---------------- */
+function renderBoard(){
+  $('board').innerHTML=STAGES.map((s,i)=>{
+    const cards=active().filter(p=>p.stage===i);
+    return `<div class="col"><h4><span class="colhead-dot" style="background:var(--teal)"></span>${s}<span class="cnt">${cards.length}</span></h4>${cards.map(p=>`
+      <div class="kcard" onclick="openDetail(${p.id})">
+        <h5>${p.pinned?'📌 ':''}${p.name}</h5>
+        <div class="meta">${locHtml(p)}</div>
+        <div class="meta" style="margin-top:6px"><span class="started">▶ ${p.started}</span></div>
+        <div class="ministage" style="margin-top:8px"><span style="font-size:.74rem;color:var(--faint)">${p.since.kind==='changed'?'<span style="color:var(--teal);font-weight:700">● moved</span>':p.since.kind==='stalled'?`<span style="color:var(--amber);font-weight:700">⏸ ${p.since.idle}</span>`:'&nbsp;'}</span><span style="margin-left:auto">${avs(p.assignees)}</span></div>
+      </div>`).join('')||'<div class="empty" style="padding:8px 4px">—</div>'}</div>`}).join('');
+}
+
+/* ---------------- archive ---------------- */
+function archCard(p){
+  const badge=p.outcome==='rolled'?'<span class="badge out-rolled nodot">✓ '+STAGES[p.stage]+'</span>':'<span class="badge out-abandoned nodot">✕ died at '+STAGES[p.stage]+'</span>';
+  return `<div class="pcard" onclick="openDetail(${p.id})">
+    <div class="top"><h3>${p.name}</h3>${avs(p.assignees)}</div>
+    <div class="meta">${badge}${locHtml(p)}<span class="started">🗓 ${p.span}</span><span class="started">⏱ ${p.invested}</span></div>
+    <div class="why"><b>${p.outcome==='rolled'?'Delivers:':'Why:'}</b> ${p.outNote}</div>
+  </div>`;
+}
+function renderArch(){
+  $('rolledlist').innerHTML=PROJECTS.filter(p=>p.outcome==='rolled').map(archCard).join('');
+  $('abandonedlist').innerHTML=PROJECTS.filter(p=>p.outcome==='abandoned').map(archCard).join('');
+}
+
+/* ---------------- idea checker ---------------- */
+function ideaCheck(q){
+  const box=$('ideacheck'),res=$('icresults');
+  q=q.trim().toLowerCase();
+  if(q.length<3){box.style.display='none';return}
+  box.style.display='block';
+  const words=q.split(/\s+/).filter(w=>w.length>=3);
+  const hay=p=>(p.name+' '+p.note+' '+(p.outNote||'')+' '+p.learnings.map(l=>l.txt).join(' ')).toLowerCase();
+  const matches=PROJECTS.filter(p=>words.some(w=>hay(p).includes(w))).slice(0,3);
+  if(!matches.length){res.innerHTML='<div class="icempty">No similar past ideas found — clear runway. (Searches every project ever, including abandoned.)</div>';return}
+  res.innerHTML=matches.map(p=>{
+    const how=p.outcome==='rolled'?`Rolled out ${p.outWhen} — ${p.outNote}`:p.outcome==='abandoned'?`Abandoned ${p.outWhen} — ${p.outNote}`:`Active now (${STAGES[p.stage]}${locLabel(p)?' · '+locLabel(p):''}) — consider linking instead of duplicating.`;
+    return `<div class="icmatch" onclick="closeModals();openDetail(${p.id})">
+      <div style="flex:1;min-width:0"><div class="nm">${p.name}</div><div class="how">${how}</div></div>
+      ${p.outcome?outBadge(p):'<span class="badge st-active nodot">Active</span>'}
+    </div>`}).join('')+
+    '<div class="icempty" style="margin-top:8px">Could affect: '+matches.map(p=>p.name).join(' · ')+' — link them on create.</div>';
+}
+
+/* ---------------- rollout scope ---------------- */
+const SCOPE_ROWS=[
+ {key:'testers',label:'Testing · who',stageIdx:2,hint:'Who is testing (people/group + where)'},
+ {key:'site',label:'Site',stageIdx:3,hint:'First live site'},
+ {key:'pods',label:'POD(s)',stageIdx:4,hint:'One or more PODs within a region'},
+ {key:'region',label:'Region',stageIdx:5,hint:'Region for full regional rollout'}
+];
+function renderScope(){
+  $('d-scope').innerHTML=SCOPE_ROWS.map(r=>{
+    const reached=current.stage>=r.stageIdx, isCur=current.stage===r.stageIdx;
+    let chips='';
+    if(r.key==='pods'){
+      chips=current.scope.pods.map(x=>`<span class="scopechip ${isCur?'hot':''}">${x}</span>`).join('')+
+            (current.scope.podsPlan||[]).map(x=>`<span class="scopechip plan">${x}</span>`).join('');
+    }else if(current.scope[r.key]){
+      chips=`<span class="scopechip ${isCur?'hot':''}">${current.scope[r.key]}</span>`;
+    }
+    if(!chips)chips=`<span class="scopeadd" onclick="openScope('${r.key}')">+ set ${r.label.toLowerCase()}</span>`;
+    else if(!current.outcome)chips+=`<span class="scopeadd" onclick="openScope('${r.key}')">edit</span>`;
+    return `<div class="scoperow ${isCur?'current':reached?'reached':''}"><span class="sk">${r.label}</span><span class="sv">${chips}</span></div>`;
+  }).join('');
+}
+function openScope(key){
+  const r=SCOPE_ROWS.find(x=>x.key===key);
+  $('sc-title').textContent='Set '+r.label;
+  $('sc-body').innerHTML=key==='pods'
+    ?`<label>PODs (multiple allowed within a region)</label>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+        ${['West','East','Central'].map(pod=>`<label style="display:flex;align-items:center;gap:9px;margin:0;font-weight:600;color:var(--text)"><input type="checkbox" style="width:auto" ${current.scope.pods.includes(pod)?'checked':''}> POD ${pod}</label>`).join('')}
+      </div>`
+    :key==='testers'
+    ?`<label>${r.hint}</label><input value="${current.scope.testers||''}" placeholder="e.g. 12 schedulers · Lakeview">`
+    :`<label>${r.hint}</label><select><option>${current.scope[key]||'Choose from catalog…'}</option><option>Northside</option><option>Lakeview</option><option>Downtown</option><option>North Region</option></select>`;
+  $('ov-scope').classList.add('open');
+}
+
+/* ---------------- detail ---------------- */
+function openDetail(id){
+  current=PROJECTS.find(p=>p.id===id);
+  $('d-title').textContent=current.name;
+  $('d-meta').innerHTML=current.outcome
+    ? `${outBadge(current)}${locHtml(current)}<span class="started">🗓 ${current.span}</span><span class="started">⏱ ${current.invested} invested</span>${avs(current.assignees)}`
+    : `${locHtml(current)}<span class="fakectl">▶ Started ${current.started}<span class="carat">▾</span></span>${avs(current.assignees)}<button class="btn small" onclick="toast('Assignee picker in the build')">+</button><button class="btn small" onclick="toast('Pinned — same as Notes')">📌</button>`;
+  $('d-outbanner').innerHTML=current.outcome
+    ? `<div class="outbanner ${current.outcome}"><span>${current.outcome==='rolled'?'✓':'✕'}</span><span class="obtx"><b>${current.outcome==='rolled'?'Rolled out':'Abandoned'} · ${current.outWhen} · reached ${STAGES[current.stage]}</b>${current.outNote}<br><span style="color:var(--faint);font-size:.8rem">Read-only archive — reopen requires a new project that links here.</span></span></div>`
+    : '';
+  $('d-outbtns').innerHTML=current.outcome?'':`
+    <button class="btn small primary" onclick="advanceStage()">Advance ›</button>
+    <button class="btn small" style="color:var(--green);border-color:rgba(143,214,168,.4)" onclick="openOutcome('rolled')">✓ Rolled out</button>
+    <button class="btn small danger" onclick="openOutcome('abandoned')">✕ Abandon</button>`;
+  $('d-stagename').textContent=STAGES[current.stage];
+  $('d-stepper').innerHTML=STAGES.map((s,i)=>`<div class="step ${i<current.stage?'past':i===current.stage?'cur':''}"><span class="nd"></span><span class="lb">${s}</span></div>`).join('');
+  renderScope();
+  $('d-related').innerHTML=current.related.length?current.related.map(r=>{
+    const t=PROJECTS.find(p=>p.id===r.id);
+    return `<span class="relchip" onclick="openDetail(${r.id})">${t.outcome==='rolled'?'✓':t.outcome==='abandoned'?'✕':'●'} ${t.name}<span class="rk">${r.note}</span></span>`}).join('')
+    :'<span class="empty">No links yet — the idea checker suggests these automatically.</span>';
+  $('d-note').innerHTML=current.note.replace(/^# (.*)$/m,'<span class="h1v">$1</span>');
+  renderTasks();renderFiles();renderFeedback();renderLearnings();renderMetrics();renderActivity();
+  dtab('overview');go('detail');
+}
+function advanceStage(){
+  if(current.stage>=6){toast('Already at All — mark it ✓ Rolled out!');return}
+  current.stage++;
+  openDetail(current.id);renderList();renderBoard();renderDash();
+  toast(`Stage → ${STAGES[current.stage]} — now set the ${['','','who is testing','site','POD(s)','region',''][current.stage]||'scope'} below`);
+}
+function openOutcome(kind){
+  window._ockind=kind;
+  $('oc-title').textContent=kind==='rolled'?'Mark as Rolled Out 🎉':'Abandon project';
+  $('oc-reasonlabel').textContent=kind==='rolled'?'What it delivers (recurring value)':'Why it didn’t pan out (required)';
+  $('oc-reason').placeholder=kind==='rolled'?'e.g. Saves ~45 staff-hours/month across all sites':'e.g. Vendor accuracy 71% on our audio; 3× quoted cost';
+  $('ov-outcome').classList.add('open');
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  $('oc-confirm').onclick=()=>{
+    const kind=window._ockind;
+    current.outcome=kind;current.outWhen='Jul 2026';current.invested='—';current.span=current.started+' → Jul 2026';
+    current.outNote=$('oc-reason').value.trim()||'(reason captured in the build — required field)';
+    closeModals();renderArch();renderList();renderBoard();renderDash();openDetail(current.id);
+    toast(kind==='rolled'?'Moved to Archive · Rolled out 🎉':'Moved to Archive · Abandoned — history preserved for the idea checker');
+  };
+});
+function dtab(name){
+  ['overview','metrics','feedback','learnings','files','tasks','activity'].forEach(k=>{
+    $('dt-'+k).classList.toggle('active',k===name);
+    $('dpane-'+k).style.display=k===name?'':'none';
+  });
+}
+function renderTasks(){$('d-tasks').innerHTML=current.tasks.length?current.tasks.map((t,i)=>`
+  <div class="task ${t.done?'done':''}"><div class="main" onclick="toggleTask(${i})" style="cursor:pointer"><span class="cb">${t.done?'✓':''}</span><span class="tt">${t.t}</span>${avs([t.who])}</div></div>`).join(''):'<div class="empty">No tasks</div>'}
+function toggleTask(i){if(current.outcome){toast('Archived — read-only');return}current.tasks[i].done=!current.tasks[i].done;renderTasks()}
+function addTask(){if(current.outcome){toast('Archived — read-only');return}const v=$('newtask').value.trim();if(!v)return;current.tasks.push({t:v,done:false,who:'TH'});$('newtask').value='';renderTasks();toast('Added (concept only)')}
+function renderFiles(){$('d-files').innerHTML=current.files.length?current.files.map((f,i)=>`
+  <div class="fitem" onclick="openViewer(${i})"><div class="thumb ${f.kind}">${f.kind==='img'?'':'<div class="bar"></div><div class="ln"></div><div class="ln"></div><div class="ln s"></div><div class="ln"></div><div class="ln s"></div>'}<span class="tag">${f.kind.toUpperCase()}</span></div><div class="fn">${f.name}</div><div class="fm">${f.meta}</div></div>`).join(''):'<div class="empty">No files yet</div>'}
+function openViewer(i){const f=current.files[i];$('viewer-name').textContent=f.name;
+  $('viewer-page').innerHTML=f.kind==='img'?'<div class="vimg" style="height:280px"></div>':`<h4>${f.name.replace(/[-_]/g,' ').replace(/\.\w+$/,'')}</h4><div class="vln"></div><div class="vln"></div><div class="vln s"></div><div class="vln"></div>${f.kind==='pdf'?'<div class="vimg"></div>':''}<div class="vln"></div><div class="vln s"></div>`;
+  $('ov-viewer').classList.add('open')}
+function renderFeedback(){$('d-feedback').innerHTML=current.feedback.length?current.feedback.map(f=>`
+  <div class="fb"><div class="who"><b>${f.who}</b><span class="role">${f.role}</span><span class="sent ${f.sent}">${f.sent==='pos'?'positive':f.sent==='neg'?'needs work':'neutral'}</span><span class="when">${f.when}</span></div><p>${f.txt}</p></div>`).join(''):'<div class="empty">No feedback captured yet</div>'}
+function addFeedback(){if(current.outcome){toast('Archived — read-only');return}const v=$('newfb').value.trim();if(!v)return;current.feedback.unshift({who:'You',role:'Spec Ops',sent:'neu',when:'Just now',txt:v});$('newfb').value='';renderFeedback();toast('Captured (concept)')}
+function renderLearnings(){$('d-learnings').innerHTML=current.learnings.length?current.learnings.map(l=>`
+  <div class="lrn"><span>💡</span><div class="tx">${l.txt}<span class="when">${l.when}</span></div></div>`).join(''):'<div class="empty">No learnings yet</div>'}
+function addLearning(){if(current.outcome){toast('Archived — read-only');return}const v=$('newlrn').value.trim();if(!v)return;current.learnings.unshift({when:'Just now',txt:v});$('newlrn').value='';renderLearnings();toast('Added (concept — learnings feed the AI report + idea checker)')}
+function renderMetrics(){
+  $('d-metrics').innerHTML=current.metrics.length?current.metrics.map(m=>`
+    <div class="mtile"><span class="val">${m.value}</span><span class="lb"><b>${m.metric}</b><span>${m.period} · ${m.who}, ${m.when}</span></span><span class="srcchip" onclick="event.stopPropagation();toast('Opens the source in the build')">⎘ ${m.source}</span></div>`).join('')
+    :'<div class="empty">No metrics reported yet</div>';
+  $('d-events').innerHTML=current.events.length?current.events.map(e=>`
+    <div class="ev"><span class="when">${e.when}</span><span><b>${e.type}</b> — ${e.txt}</span><span class="hrs">${e.hours}</span></div>`).join('')
+    :'<div class="empty">No time or events logged</div>';
+}
+function renderActivity(){$('d-activity').innerHTML=current.activity.length?current.activity.map(a=>a.sys
+  ?`<div class="cmt sys">⚙ ${a.txt} · ${a.when}</div>`
+  :`<div class="cmt"><div class="who"><b>${a.who}</b><span>${a.when}</span></div>${a.txt}</div>`).join(''):'<div class="empty">No activity yet</div>'}
+function addComment(){if(current.outcome){toast('Archived — read-only');return}const v=$('newcmt').value.trim();if(!v)return;current.activity.unshift({who:'You',when:'Just now',txt:v});$('newcmt').value='';renderActivity();toast('Comment added (concept)')}
+
+/* ---------------- modals ---------------- */
+function openModal(k){$('ov-'+k).classList.add('open');if(k==='newproj'){$('np-name').value='';$('ideacheck').style.display='none'}}
+function closeModals(){document.querySelectorAll('.overlay').forEach(o=>o.classList.remove('open'))}
+
+aiMode('daily');renderDash();renderList();renderBoard();renderArch();
+</script>
+</body>
+</html>

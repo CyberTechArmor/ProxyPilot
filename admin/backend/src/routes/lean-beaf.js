@@ -106,6 +106,7 @@ export function createLeanBeafRouter() {
       outcome_takeaway: project.outcome_takeaway,
       last_activity_at: project.last_activity_at,
       mock2_project_id: project.mock2_project_id,
+      board_pos: project.board_pos ?? 0,
       archived: isArchived(project),
       moved: movement.moved,
       days_idle: movement.days_idle,
@@ -397,6 +398,19 @@ export function createLeanBeafRouter() {
       payload: { from: project.stage, to, skipped: check.skipped },
     });
     res.json({ project: updated });
+  });
+
+  // Reorder cards vertically within a Kanban stage column (drag-sort). A view
+  // preference — writes no activity, so it never counts as movement.
+  const reorderSchema = z.object({
+    stage: z.enum(LBP_STAGES),
+    ordered_ids: z.array(z.number().int().positive()).max(500),
+  });
+  router.post('/projects/reorder', (req, res) => {
+    const parsed = reorderSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'stage and ordered_ids are required' });
+    store.reorderProjects(parsed.data.stage, parsed.data.ordered_ids);
+    res.json({ ok: true });
   });
 
   // Rollout scope (R03): logs + counts as movement; never hard-blocks.

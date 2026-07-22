@@ -110,6 +110,18 @@ export function findByMock2Project(mock2ProjectId) {
   return getDb().prepare(`SELECT * FROM lbp_projects WHERE mock2_project_id = ?`).get(mock2ProjectId);
 }
 
+// Persist the manual vertical order of a Kanban column: board_pos = index for
+// each id, scoped to that stage. A view preference — deliberately writes NO
+// activity entry, so reordering never counts as "movement".
+export function reorderProjects(stage, orderedIds) {
+  const db = getDb();
+  const upd = db.prepare(`UPDATE lbp_projects SET board_pos = ? WHERE id = ? AND stage = ?`);
+  const tx = db.transaction(() => {
+    orderedIds.forEach((id, i) => upd.run(i, Number(id), stage));
+  });
+  tx();
+}
+
 // ---- rollout scope (R03) ----
 
 export function getScope(projectId) {

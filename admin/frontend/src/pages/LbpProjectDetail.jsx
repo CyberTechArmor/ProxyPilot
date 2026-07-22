@@ -198,78 +198,11 @@ export default function LbpProjectDetail() {
             {project.blocked_reason && <p className="mt-1.5 text-sm">{project.blocked_reason}</p>}
           </div>
         )}
-        {!archived && (
-          <div className="mt-4 border-t pt-4">
-            <h3 className="mb-3 text-xs font-bold uppercase tracking-wide text-muted-foreground">Rollout scope</h3>
-            <ScopeEditor project={project} locations={locations} onSaved={load} />
-          </div>
-        )}
       </div>
 
-      {/* blocker audit trail */}
-      {(project.blockers || []).length > 0 && (
-        <BlockerHistory blockers={project.blockers} />
-      )}
-
-      {/* LXC build project (Mock2 integration) */}
-      <div className="rounded-xl border bg-card p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <Boxes className="h-5 w-5 text-primary" />
-          <div className="min-w-[160px] flex-1">
-            <b className="block text-sm">LXC build project</b>
-            {project.lxc ? (
-              <span className="text-xs text-muted-foreground">
-                {project.lxc.name || `#${project.lxc.id}`} · {project.lxc.lifecycle}
-                {project.lxc.container_name ? ` · ${project.lxc.container_name}` : ''}
-              </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">No LXC development container linked to this project yet.</span>
-            )}
-          </div>
-          {project.lxc ? (
-            <Button size="sm" variant="outline" className="h-10" onClick={() => navigate(`/projects/${project.lxc.id}`)}>
-              Open build project
-            </Button>
-          ) : (!archived && isAdmin && (
-            <Button size="sm" className="h-10" onClick={() => setBuildOpen(true)}>
-              <Plus className="mr-1.5 h-4 w-4" /> Build LXC
-            </Button>
-          ))}
-        </div>
-      </div>
-
-      {/* related links */}
-      <div className="rounded-xl border bg-card p-4">
-        <div className="mb-2 flex items-center gap-2">
-          <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Related / affects</h3>
-          <Button variant="ghost" size="sm" className="ml-auto h-9" onClick={() => setLinkOpen(true)}>
-            <Link2 className="mr-1 h-3.5 w-3.5" /> Link
-          </Button>
-        </div>
-        {(project.links || []).length === 0 && <p className="text-sm text-muted-foreground">No linked projects.</p>}
-        <div className="flex flex-wrap gap-2">
-          {(project.links || []).map((l) => (
-            <span key={l.id} className="inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm">
-              <span className={l.other_outcome === 'rolled_out' ? 'text-green-500' : l.other_outcome === 'abandoned' ? 'text-red-500' : 'text-primary'}>
-                {l.other_outcome === 'rolled_out' ? '✓' : l.other_outcome === 'abandoned' ? '✕' : '●'}
-              </span>
-              <button type="button" className="truncate font-medium" onClick={() => navigate(`/lean-beaf/${l.other_id}`)} title={l.note || ''}>
-                {l.other_name}
-              </button>
-              <button
-                type="button"
-                className="text-muted-foreground"
-                title="Remove link"
-                onClick={() => api.lbpDeleteLink(l.id).then(load).catch((e) => toast({ variant: 'destructive', title: 'Could not remove link', description: e.message }))}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* evidence tabs */}
+      {/* evidence tabs — placed right under the stage / advance / barriers
+          card. The Overview tab now gathers the project's context: rollout
+          scope, blocker history, LXC build project and related links. */}
       <Tabs defaultValue="overview">
         <div className="overflow-x-auto">
           <TabsList className="w-max">
@@ -282,7 +215,82 @@ export default function LbpProjectDetail() {
             <TabsTrigger value="activity">Activity</TabsTrigger>
           </TabsList>
         </div>
-        <TabsContent value="overview"><OverviewTab project={project} /></TabsContent>
+        <TabsContent value="overview">
+          <div className="space-y-4">
+            <OverviewTab project={project} />
+
+            {/* rollout scope */}
+            {!archived && (
+              <div className="rounded-xl border bg-card p-4">
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-wide text-muted-foreground">Rollout scope</h3>
+                <ScopeEditor project={project} locations={locations} onSaved={load} />
+              </div>
+            )}
+
+            {/* blocker audit trail */}
+            {(project.blockers || []).length > 0 && (
+              <BlockerHistory blockers={project.blockers} />
+            )}
+
+            {/* LXC build project (Mock2 integration) */}
+            <div className="rounded-xl border bg-card p-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Boxes className="h-5 w-5 text-primary" />
+                <div className="min-w-[160px] flex-1">
+                  <b className="block text-sm">LXC build project</b>
+                  {project.lxc ? (
+                    <span className="text-xs text-muted-foreground">
+                      {project.lxc.name || `#${project.lxc.id}`} · {project.lxc.lifecycle}
+                      {project.lxc.container_name ? ` · ${project.lxc.container_name}` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">No LXC development container linked to this project yet.</span>
+                  )}
+                </div>
+                {project.lxc ? (
+                  <Button size="sm" variant="outline" className="h-10" onClick={() => navigate(`/projects/${project.lxc.id}`)}>
+                    Open build project
+                  </Button>
+                ) : (!archived && isAdmin && (
+                  <Button size="sm" className="h-10" onClick={() => setBuildOpen(true)}>
+                    <Plus className="mr-1.5 h-4 w-4" /> Build LXC
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            {/* related links */}
+            <div className="rounded-xl border bg-card p-4">
+              <div className="mb-2 flex items-center gap-2">
+                <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Related / affects</h3>
+                <Button variant="ghost" size="sm" className="ml-auto h-9" onClick={() => setLinkOpen(true)}>
+                  <Link2 className="mr-1 h-3.5 w-3.5" /> Link
+                </Button>
+              </div>
+              {(project.links || []).length === 0 && <p className="text-sm text-muted-foreground">No linked projects.</p>}
+              <div className="flex flex-wrap gap-2">
+                {(project.links || []).map((l) => (
+                  <span key={l.id} className="inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm">
+                    <span className={l.other_outcome === 'rolled_out' ? 'text-green-500' : l.other_outcome === 'abandoned' ? 'text-red-500' : 'text-primary'}>
+                      {l.other_outcome === 'rolled_out' ? '✓' : l.other_outcome === 'abandoned' ? '✕' : '●'}
+                    </span>
+                    <button type="button" className="truncate font-medium" onClick={() => navigate(`/lean-beaf/${l.other_id}`)} title={l.note || ''}>
+                      {l.other_name}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-muted-foreground"
+                      title="Remove link"
+                      onClick={() => api.lbpDeleteLink(l.id).then(load).catch((e) => toast({ variant: 'destructive', title: 'Could not remove link', description: e.message }))}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </TabsContent>
         <TabsContent value="metrics"><MetricsTab project={project} archived={archived} locations={locations} /></TabsContent>
         <TabsContent value="feedback"><FeedbackTab project={project} archived={archived} /></TabsContent>
         <TabsContent value="learnings"><LearningsTab project={project} archived={archived} /></TabsContent>

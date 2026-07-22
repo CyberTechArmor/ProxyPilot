@@ -439,6 +439,7 @@ function BoardView({ focusStage, onOpenProject }) {
   const [projects, setProjects] = useState(null);
   const [err, setErr] = useState('');
   const [dragId, setDragId] = useState(null);
+  const [dragOver, setDragOver] = useState(null); // { stage, id } insertion target
   const [scopePrompt, setScopePrompt] = useState(null); // {project} after a stage move
   const [locations, setLocations] = useState([]);
   // Column focus: when the dashboard deep-links here (?stage=MVP), scroll that
@@ -523,23 +524,68 @@ function BoardView({ focusStage, onOpenProject }) {
     }
   };
 
+  // Cards in a column, in their manual (board_pos) order.
+  const columnCards = (stage) =>
+    projects.filter((p) => p.stage === stage).sort((a, b) => (a.board_pos ?? 0) - (b.board_pos ?? 0));
+
+  // Reorder within a column: move the dragged card to just before `targetId`
+  // (or to the end when targetId is null). Optimistic, then persisted.
+  const reorderWithin = async (stage, draggedId, targetId) => {
+    const ids = columnCards(stage).map((p) => p.id).filter((id) => id !== draggedId);
+    const at = targetId == null ? ids.length : ids.indexOf(targetId);
+    const next = [...ids.slice(0, at), draggedId, ...ids.slice(at)];
+    setProjects((prev) => prev.map((p) => (p.stage === stage ? { ...p, board_pos: next.indexOf(p.id) } : p)));
+    try {
+      await api.lbpReorder(stage, next);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Could not reorder', description: e.message });
+      load();
+    }
+  };
+
+  // Drop the dragged card onto another card: same column → reorder above it;
+  // different column → change stage.
+  const onCardDrop = (targetCard) => {
+    const draggedId = dragId;
+    setDragOver(null);
+    setDragId(null);
+    if (draggedId == null || draggedId === targetCard.id) return;
+    const dragged = projects.find((p) => p.id === draggedId);
+    if (!dragged) return;
+    if (dragged.stage === targetCard.stage) reorderWithin(targetCard.stage, draggedId, targetCard.id);
+    else moveTo(draggedId, targetCard.stage);
+  };
+
+  // Drop on empty column space: same column → send to end; else change stage.
+  const onColumnDrop = (stage) => {
+    const draggedId = dragId;
+    setDragOver(null);
+    setDragId(null);
+    if (draggedId == null) return;
+    const dragged = projects.find((p) => p.id === draggedId);
+    if (dragged && dragged.stage === stage) reorderWithin(stage, draggedId, null);
+    else moveTo(draggedId, stage);
+  };
+
   if (err) return <p className="text-sm text-destructive">{err}</p>;
   if (!projects) return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Drag a card to a column (or use ›) to change its stage — the move is logged and you'll be asked for the new stage's scope. Hover near an edge to scroll.</p>
+      <p className="text-xs text-muted-foreground">Drag a card between columns to change its stage, or up/down within a column to reorder. Use › to advance. Hover near an edge to scroll.</p>
+      {/* p-1.5 so the focus ring (ring + offset) on a column isn't clipped by
+          the scroll container's overflow. */}
       <div
         ref={scrollRef}
-        className="flex gap-2.5 overflow-x-auto pb-3"
+        className="flex gap-2.5 overflow-x-auto p-1.5 pb-3"
         onMouseMove={(e) => onEdgeMove(e.clientX)}
         onMouseLeave={stopEdge}
         onDragOver={(e) => { e.preventDefault(); onEdgeMove(e.clientX); }}
         onDrop={stopEdge}
-        onDragEnd={stopEdge}
+        onDragEnd={() => { stopEdge(); setDragOver(null); setDragId(null); }}
       >
         {LBP_STAGES.map((stage) => {
-          const cards = projects.filter((p) => p.stage === stage);
+          const cards = columnCards(stage);
           return (
             <div
               key={stage}
@@ -548,11 +594,7 @@ function BoardView({ focusStage, onOpenProject }) {
                 highlight === stage ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
               }`}
               onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (dragId != null) moveTo(dragId, stage);
-                setDragId(null);
-              }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onColumnDrop(stage); }}
             >
               <div className="mb-2 flex items-center justify-between px-1">
                 <span className={`text-xs font-bold uppercase tracking-wide ${highlight === stage ? 'text-primary' : 'text-muted-foreground'}`}>{stage}</span>
@@ -564,7 +606,15 @@ function BoardView({ focusStage, onOpenProject }) {
                     key={p.id}
                     draggable
                     onDragStart={() => setDragId(p.id)}
-                    className="cursor-grab rounded-lg border bg-card p-3 active:cursor-grabbing"
+                    onDragEnd={() => { setDragOver(null); setDragId(null); }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      if (dragId != null && dragId !== p.id) setDragOver({ stage, id: p.id });
+                    }}
+                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onCardDrop(p); }}
+                    className={`cursor-grab rounded-lg border bg-card p-3 transition-shadow active:cursor-grabbing ${
+                      dragId === p.id ? 'opacity-50' : ''
+                    } ${dragOver && dragOver.stage === stage && dragOver.id === p.id ? 'shadow-[inset_0_2px_0] shadow-primary' : ''}`}
                   >
                     <button type="button" onClick={() => onOpenProject(p.id)} className="block w-full text-left">
                       <span className="flex items-center gap-1.5">

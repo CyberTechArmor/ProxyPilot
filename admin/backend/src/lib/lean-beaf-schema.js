@@ -299,3 +299,14 @@ export function lbpMigration701Blockers(d) {
   // Fast "is this project currently blocked?" lookup (open rows only).
   d.exec(`CREATE INDEX IF NOT EXISTS idx_lbp_blockers_open ON lbp_blockers(project_id) WHERE resolved_at IS NULL`);
 }
+
+// Migration 702 (additive) — manual vertical order within a Kanban column.
+// board_pos is the drag-sorted position inside a stage column (lower = higher
+// up). It only drives the Board; the List keeps its pinned/last-activity
+// order. New rows default 0 and fall back to last-activity order among peers.
+export function lbpMigration702BoardOrder(d) {
+  const cols = d.prepare(`PRAGMA table_info(lbp_projects)`).all().map((c) => c.name);
+  if (!cols.includes('board_pos')) {
+    d.exec(`ALTER TABLE lbp_projects ADD COLUMN board_pos INTEGER NOT NULL DEFAULT 0`);
+  }
+}

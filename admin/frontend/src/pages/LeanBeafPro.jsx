@@ -23,12 +23,13 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight,
+  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight, Send, MessageSquare,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
   NewProjectDialog, timeAgo,
 } from '@/components/lbp/shared';
+import BriefText from '@/components/lbp/BriefText';
 
 const VIEWS = ['dashboard', 'list', 'board', 'archive'];
 
@@ -98,7 +99,7 @@ export default function LeanBeafPro() {
           {view === 'dashboard' && (
             <DashboardView
               onOpenArchive={() => setView('archive')}
-              onOpenProject={(id) => navigate(`/lean-beaf/${id}`)}
+              onOpenProject={(id, tab) => navigate(`/lean-beaf/${id}${tab ? `?tab=${tab}` : ''}`)}
               onOpenBriefs={() => navigate('/lean-beaf/briefs')}
               onDrillTile={goToList}
               onDrillStage={goToBoardStage}
@@ -133,6 +134,15 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
   const [aiResult, setAiResult] = useState(null); // { fell_back, cost_usd, model, error, ... }
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSettings, setAiSettings] = useState(null);
+  const [refs, setRefs] = useState(null); // link metadata for the brief text
+  // Ask (grounded Q&A over the portfolio).
+  const [askOpen, setAskOpen] = useState(false);
+  const [askText, setAskText] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState(null); // { text, cost_usd, model, error, ... }
+
+  // Open a project, optionally at a specific tab/area (deep-link from the brief).
+  const openArea = (id, tab) => onOpenProject(id, tab);
 
   const load = useCallback(() => {
     api.lbpOverview().then(setData).catch((e) => setErr(e.message));
@@ -151,7 +161,7 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
     setBriefLoading(true);
     setAiResult(null);
     api.lbpBrief(mode)
-      .then((d) => setBrief(d.brief))
+      .then((d) => { setBrief(d.brief); setRefs(d.refs); })
       .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
       .finally(() => setBriefLoading(false));
   }, [toast]);
@@ -164,6 +174,7 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
     try {
       const d = await api.lbpBriefAi(briefMode);
       setBrief(d.brief);
+      setRefs(d.refs);
       setAiResult(d.ai);
       if (d.ai?.error === 'not_configured') {
         toast({
@@ -178,6 +189,30 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
       toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
     } finally {
       setAiLoading(false);
+    }
+  };
+
+  // Ask a grounded question about the portfolio.
+  const ask = async () => {
+    const q = askText.trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setAnswer(null);
+    try {
+      const d = await api.lbpBriefAsk(q);
+      setRefs(d.refs);
+      setAnswer(d.answer);
+      if (d.answer?.error === 'not_configured') {
+        toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.' });
+      } else if (d.answer?.error === 'ungrounded_output') {
+        toast({ variant: 'destructive', title: 'Answer withheld', description: 'The model referenced a record not in the grounded facts.' });
+      } else if (d.answer?.error) {
+        toast({ variant: 'destructive', title: 'Question failed', description: d.answer.error });
+      }
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Question failed', description: e.message });
+    } finally {
+      setAsking(false);
     }
   };
 
@@ -233,32 +268,12 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
             <Sparkles className="h-5 w-5" />
           </span>
           <b className="text-base">Brief</b>
-          <span className="text-[11px] text-muted-foreground">every number cites its record</span>
-          <div className="ml-auto flex items-center gap-2">
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(true)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-                title="AI model settings"
-              >
-                <Settings2 className="h-3.5 w-3.5" />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={onOpenBriefs}
-              className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-              title="See all briefs + the AI run log"
-            >
-              <ScrollText className="h-3.5 w-3.5" /> Briefs
-            </button>
-          </div>
+          <span className="text-[11px] text-muted-foreground">every number cites its record · tap a citation to open it</span>
         </div>
 
-        {/* meeting rhythm — rolled into the brief header. Marking a meeting
-            resets the "since meeting" window this brief summarizes. */}
-        <div className="mb-3 flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5">
+        {/* meeting rhythm — kept right above the AI/brief buttons. Marking a
+            meeting resets the "since meeting" window this brief summarizes. */}
+        <div className="mb-2.5 flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5">
           <CalendarCheck className="h-4 w-4 shrink-0 text-primary" />
           <div className="min-w-[150px] flex-1">
             <b className="block text-xs">
@@ -278,6 +293,8 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
           </div>
         </div>
 
+        {/* one row: all AI / brief controls inline — mode chips on the left,
+            actions (Ask, Generate, Briefs, settings) on the right. */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
             <button
@@ -291,23 +308,87 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
               {label}
             </button>
           ))}
-          <Button
-            size="sm"
-            className="ml-auto h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
-            onClick={generateAi}
-            disabled={aiLoading || briefLoading}
-            title="Restyle this grounded brief with the model"
-          >
-            {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
-            Generate with AI
-          </Button>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className={`h-9 ${askOpen ? 'border-primary text-primary' : ''}`}
+              onClick={() => setAskOpen((v) => !v)}
+              title="Ask a grounded question about these projects"
+            >
+              <MessageSquare className="mr-1.5 h-4 w-4" /> Ask
+            </Button>
+            <Button
+              size="sm"
+              className="h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
+              onClick={generateAi}
+              disabled={aiLoading || briefLoading}
+              title="Restyle this grounded brief with the model"
+            >
+              {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
+              Generate with AI
+            </Button>
+            <Button size="sm" variant="outline" className="h-9" onClick={onOpenBriefs} title="See all briefs + the AI run log">
+              <ScrollText className="mr-1.5 h-4 w-4" /> Briefs
+            </Button>
+            {isAdmin && (
+              <Button size="sm" variant="ghost" className="h-9 w-9 p-0 text-muted-foreground" onClick={() => setSettingsOpen(true)} title="AI model settings">
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         </div>
+
+        {/* Ask box — grounded Q&A, appears inline when "Ask" is toggled. */}
+        {askOpen && (
+          <div className="mb-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Label className="mb-1 block text-xs font-semibold text-primary">Ask about these projects</Label>
+                <Input
+                  value={askText}
+                  onChange={(e) => setAskText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') ask(); }}
+                  placeholder="e.g. What's blocked right now? Which projects moved this week?"
+                  maxLength={500}
+                  className="h-10 bg-background"
+                />
+              </div>
+              <Button className="h-10" onClick={ask} disabled={asking || !askText.trim()}>
+                {asking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </Button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">Answers use only the recorded facts — every figure stays cited.</p>
+            {(asking || answer) && (
+              <div className="mt-3 rounded-lg border border-border/60 bg-background p-3">
+                {asking ? (
+                  <div className="flex items-center justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+                ) : answer?.error ? (
+                  <p className="text-sm text-amber-600 dark:text-amber-400">
+                    {answer.error === 'not_configured' ? 'No model connected — an admin can set one in AI settings.'
+                      : answer.error === 'ungrounded_output' ? 'The answer referenced a record not in the grounded facts, so it was withheld.'
+                        : `Could not answer: ${answer.error}`}
+                  </p>
+                ) : (
+                  <>
+                    <BriefText text={answer.text} refs={refs} onOpen={openArea} />
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
+                      <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {answer.model}</span>
+                      <span>·</span>
+                      <span>{formatUsd(answer.cost_usd)} · {answer.input_tokens.toLocaleString()} in / {answer.output_tokens.toLocaleString()} out</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="relative flex-1 rounded-lg border border-border/60 bg-background/40 p-4">
           {(briefLoading || aiLoading) ? (
             <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
           ) : brief ? (
-            <p className="whitespace-pre-wrap text-sm leading-relaxed">{brief.text}</p>
+            <BriefText text={brief.text} refs={refs} onOpen={openArea} />
           ) : (
             <p className="text-sm text-muted-foreground">Pick a mode to generate a brief from the activity + metric records.</p>
           )}

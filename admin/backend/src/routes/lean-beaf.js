@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth.js';
 import { logAudit } from '../db.js';
 import * as store from '../lib/lean-beaf-store.js';
-import { getBriefAiSettings, saveBriefAiSettings, generateAiBrief } from '../lib/lean-beaf-ai.js';
+import { getBriefAiSettings, saveBriefAiSettings, generateAiBrief, answerBriefQuestion } from '../lib/lean-beaf-ai.js';
 import {
   LBP_STAGES, LBP_METRIC_UNITS, LBP_TIME_EVENT_TYPES, LBP_SENTIMENTS,
   isArchived, assertMutableProject, validateNewProject,
@@ -30,7 +30,8 @@ import {
   summarizeActivityEntries, summarizeScopeChange, archiveMeta,
   archiveMetaAnalysis, projectSpanDays, investedHours, buildBrief,
   validateLocation, stageIndex, validateBlocker, validateBreakBarrier,
-  blockerDurationDays, describeSchedules, buildBriefsFeed,
+  blockerDurationDays, describeSchedules, buildBriefsFeed, buildBriefRefs,
+  buildAskContext,
 } from '../lib/lean-beaf-logic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -322,10 +323,19 @@ export function createLeanBeafRouter() {
     });
   };
 
+  // Link metadata so the brief text can deep-link: which project each cited
+  // record belongs to + the project-name list. Cheap; computed from the same
+  // rows the brief already reads.
+  const briefRefs = () => buildBriefRefs({
+    projects: store.listProjects(),
+    activityEntries: store.listActivitySince(null),
+    metricReports: store.listAllMetricReports(),
+  });
+
   // Grounded briefs (R07): deterministic, every number cites its record. No
   // model call, no spend — safe to auto-load on the dashboard.
   router.get('/brief', (req, res) => {
-    res.json({ brief: buildGroundedBrief(req.query.mode) });
+    res.json({ brief: buildGroundedBrief(req.query.mode), refs: briefRefs() });
   });
 
   // AI-restyled brief (explicit spend): restyles the SAME grounded facts with
@@ -338,14 +348,37 @@ export function createLeanBeafRouter() {
     const result = await generateAiBrief({
       grounded, userId: req.user.id, username: req.user.username || null,
     });
-    res.json({ brief: { ...grounded, text: result.text }, ai: result });
+    res.json({ brief: { ...grounded, text: result.text }, ai: result, refs: briefRefs() });
+  });
+
+  // Grounded Q&A (explicit spend): answer a question about the portfolio using
+  // ONLY a cited context assembled from stored records. Records a run
+  // (mode 'question') and returns link refs so the answer's citations are
+  // clickable too. Same R07 posture as the brief — an answer citing a record
+  // not in the context is rejected.
+  router.post('/brief/ask', async (req, res) => {
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'A question is required' });
+    if (question.length > 500) return res.status(400).json({ error: 'Question is too long (max 500 characters)' });
+    store.ensureScheduledMarker();
+    const context = buildAskContext({
+      projects: store.listProjects(),
+      activityEntries: store.listActivitySince(null),
+      metricReports: store.listAllMetricReports(),
+      scopes: store.scopesByProject(),
+      locationsById: store.locationsById(),
+    });
+    const result = await answerBriefQuestion({
+      question, context, userId: req.user.id, username: req.user.username || null,
+    });
+    res.json({ answer: result, refs: briefRefs() });
   });
 
   // AI brief generation audit — who ran each brief, the model, and the cost.
   // Visible to every member (it's a shared team tool); model settings below are
   // admin-only.
   router.get('/brief-runs', (_req, res) => {
-    res.json({ runs: store.listBriefRuns({ limit: 60 }), totals: store.briefRunTotals() });
+    res.json({ runs: store.listBriefRuns({ limit: 60 }), totals: store.briefRunTotals(), refs: briefRefs() });
   });
 
   // AI model settings. GET is non-secret (members see which model + cost basis

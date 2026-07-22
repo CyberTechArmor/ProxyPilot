@@ -1833,6 +1833,8 @@ export const api = {
   lbpBrief: (mode) => request(`/lbp/brief?mode=${encodeURIComponent(mode)}`),
   lbpBriefAi: (mode) =>
     request('/lbp/brief/ai', { method: 'POST', body: JSON.stringify({ mode }) }),
+  lbpBriefAsk: (question) =>
+    request('/lbp/brief/ask', { method: 'POST', body: JSON.stringify({ question }) }),
   lbpBriefRuns: () => request('/lbp/brief-runs'),
   lbpBriefSettings: () => request('/lbp/brief-settings'),
   lbpSaveBriefSettings: (data) =>

@@ -651,6 +651,116 @@ export function briefUserPrompt({ mode, groundedText } = {}) {
   ].join('\n');
 }
 
+// Link metadata for making a brief interactive: which project each cited record
+// belongs to, and the project-name list for linkifying mentions. The frontend
+// turns "[activity #N]" / "[report #N]" tokens and project-name mentions into
+// links to the project detail (activity citations → Activity tab, reports →
+// Metrics tab). Pure.
+export function buildBriefRefs({ projects = [], activityEntries = [], metricReports = [] } = {}) {
+  const activity = {};
+  for (const e of activityEntries) activity[e.id] = e.project_id;
+  const report = {};
+  for (const r of metricReports) report[r.id] = r.project_id;
+  return {
+    // Longest names first so the frontend matches "Referral Triage Automation"
+    // before a shorter project that is a prefix of it.
+    projects: projects
+      .map((p) => ({ id: p.id, name: p.name }))
+      .sort((a, b) => b.name.length - a.name.length),
+    activity,
+    report,
+  };
+}
+
+// ---- grounded Q&A ----
+
+// System prompt for answering questions: answer only from the provided cited
+// context, keep citations, admit when the answer isn't there (R07).
+export function askSystemPrompt() {
+  return [
+    'You answer questions about the Spec Ops team\'s innovation projects, tracked',
+    'in "Lean BEAF Pro". You are given a CONTEXT of facts assembled from the',
+    'team\'s own records — every figure is followed by a citation token such as',
+    '[activity #12] or [report #3].',
+    '',
+    'RULES:',
+    '1. Answer ONLY from the context. Never state a number, date, stage or outcome',
+    '   that is not in it — you have no other knowledge of these projects.',
+    '2. When you use a fact that carries a citation, keep the citation token',
+    '   ([activity #12], [report #3]) attached to it. Never invent a citation.',
+    '3. If the context does not contain the answer, say so plainly (e.g. "That',
+    '   isn\'t recorded yet") — do not guess or extrapolate.',
+    '4. Use project names exactly as written. Be concise and direct.',
+    'No preamble, no sign-off — just the answer.',
+  ].join('\n');
+}
+
+export function askUserPrompt({ question, context } = {}) {
+  return [
+    'Context (the only facts you may use):',
+    '"""',
+    String(context || '').trim() || 'No projects on record.',
+    '"""',
+    '',
+    `Question: ${String(question || '').trim()}`,
+  ].join('\n');
+}
+
+// Assemble a grounded, cited facts document about the whole portfolio for Q&A.
+// Pure — the route passes stored rows in. Every activity/report id appears as a
+// citation so the answer can cite (and so citationsGroundedIn can validate it).
+export function buildAskContext({
+  projects = [], activityEntries = [], metricReports = [],
+  scopes = new Map(), locationsById = new Map(), perProjectActivity = 8,
+} = {}) {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const active = projects.filter((p) => !isArchived(p));
+  const archived = projects.filter(isArchived);
+
+  const activityByProject = new Map();
+  for (const e of activityEntries) {
+    if (!activityByProject.has(e.project_id)) activityByProject.set(e.project_id, []);
+    activityByProject.get(e.project_id).push(e);
+  }
+
+  const lines = [];
+
+  lines.push('ACTIVE PROJECTS:');
+  if (active.length === 0) lines.push('- (none)');
+  for (const p of active) {
+    const label = deriveLocationLabel({ stage: p.stage, scope: scopes.get(p.id) || {}, locationsById });
+    lines.push(`- ${p.name} (project #${p.id}): stage ${p.stage}; ${label}`);
+  }
+
+  lines.push('', 'RECENT ACTIVITY (newest last, each cited):');
+  let anyActivity = false;
+  for (const p of active) {
+    const entries = (activityByProject.get(p.id) || []).slice(-perProjectActivity);
+    if (!entries.length) continue;
+    anyActivity = true;
+    const summary = summarizeActivityEntries(entries).join('; ');
+    const ids = entries.map((e) => `activity #${e.id}`).join(', ');
+    lines.push(`- ${p.name}: ${summary} [${ids}]`);
+  }
+  if (!anyActivity) lines.push('- (no activity recorded yet)');
+
+  lines.push('', 'METRIC REPORTS (each cited):');
+  if (metricReports.length === 0) lines.push('- (none reported yet)');
+  for (const r of metricReports.slice(0, 40)) {
+    const p = byId.get(r.project_id);
+    lines.push(`- ${p ? p.name : `Project ${r.project_id}`}: ${r.metric_name} ${formatMetricValue(r.value, r.unit)}${r.period_label ? ` (${r.period_label})` : ''} [report #${r.id}]`);
+  }
+
+  if (archived.length) {
+    lines.push('', 'CLOSED PROJECTS (archived, read-only):');
+    for (const p of archived) {
+      lines.push(`- ${p.name} (project #${p.id}): ${p.outcome === 'rolled_out' ? 'ROLLED OUT' : 'ABANDONED'} at ${p.stage}${p.outcome_takeaway ? ` — ${p.outcome_takeaway}` : ''}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 // ---- scope change summary (R03) ----
 
 // Diff two scope shapes into a short human summary for the activity log.

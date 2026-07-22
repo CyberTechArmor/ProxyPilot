@@ -7,7 +7,7 @@
 // Mobile-first per MOBILE_FIRST.md.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -30,9 +30,15 @@ import {
   MovedBadge, BlockedBadge, LocationChip, Avatars, fmtDate, timeAgo,
 } from '@/components/lbp/shared';
 
+const DETAIL_TABS = ['overview', 'metrics', 'feedback', 'learnings', 'files', 'tasks', 'activity'];
+
 export default function LbpProjectDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  // Deep-link support: ?tab= opens a specific evidence tab (used by the brief's
+  // citation links — activity citations land on Activity, reports on Metrics).
+  const [searchParams] = useSearchParams();
+  const initialTab = DETAIL_TABS.includes(searchParams.get('tab')) ? searchParams.get('tab') : 'overview';
   const { user } = useAuth();
   const { toast } = useToast();
   const isAdmin = user?.role === 'admin';
@@ -203,7 +209,7 @@ export default function LbpProjectDetail() {
       {/* evidence tabs — placed right under the stage / advance / barriers
           card. The Overview tab now gathers the project's context: rollout
           scope, blocker history, LXC build project and related links. */}
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue={initialTab}>
         <div className="overflow-x-auto">
           <TabsList className="w-max">
             <TabsTrigger value="overview">Overview</TabsTrigger>

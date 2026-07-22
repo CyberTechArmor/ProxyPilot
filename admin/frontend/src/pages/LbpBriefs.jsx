@@ -9,6 +9,7 @@ import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Loader2, ArrowLeft, ScrollText, Sparkles, ChevronRight, ChevronDown, Sun, Wand2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { fmtDate, timeAgo } from '@/components/lbp/shared';
+import BriefText from '@/components/lbp/BriefText';
 
 function formatUsd(n) {
   const v = Number(n) || 0;
@@ -23,7 +24,7 @@ const RUN_MODE_LABELS = { daily: 'Daily', since_meeting: 'Since meeting', leader
 // tokens, cost) with the generated brief stored so it can be re-read: click a
 // row to expand the exact text that was shown (the accepted AI rewrite, or the
 // grounded fallback for a run that fell back).
-function AiRunLog() {
+function AiRunLog({ onOpenArea }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [openId, setOpenId] = useState(null);
@@ -85,7 +86,7 @@ function AiRunLog() {
                         {r.error === 'not_configured' && <span className="text-amber-600 dark:text-amber-400">no model connected</span>}
                       </div>
                       {r.output_text
-                        ? <p className="whitespace-pre-wrap rounded-lg border bg-background p-3 text-sm leading-relaxed">{r.output_text}</p>
+                        ? <div className="rounded-lg border bg-background p-3"><BriefText text={r.output_text} refs={data.refs} onOpen={onOpenArea} /></div>
                         : <p className="text-xs text-muted-foreground">No text was saved for this run.</p>}
                     </div>
                   )}
@@ -156,7 +157,7 @@ export default function LbpBriefs() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const openProject = (id) => navigate(`/lean-beaf/${id}`);
+  const openProject = (id, tab) => navigate(`/lean-beaf/${id}${tab ? `?tab=${tab}` : ''}`);
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4">
@@ -181,7 +182,7 @@ export default function LbpBriefs() {
       {data && (
         <>
           <BriefCard brief={data.today} icon={Sun} onOpenBoard={openProject} />
-          <AiRunLog />
+          <AiRunLog onOpenArea={openProject} />
           <h2 className="pt-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Between meetings</h2>
           {data.periods.map((p, i) => (
             <BriefCard key={`${p.from}-${p.to}-${i}`} brief={p} onOpenBoard={openProject} />

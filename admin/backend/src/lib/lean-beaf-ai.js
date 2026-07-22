@@ -25,11 +25,12 @@
 
 import { getSetting, setSetting } from '../db.js';
 import { encryptSecret, decryptSecret } from './secrets.js';
-import { callModelTurn } from '../mock2/model-client.js';
+import { callModelTurn, isTransientModelError } from '../mock2/model-client.js';
 import * as store from './lean-beaf-store.js';
 import {
   DEFAULT_BRIEF_MODEL, LBP_MODEL_PRICING, estimateBriefCost,
   citationsGroundedIn, briefSystemPrompt, briefUserPrompt,
+  askSystemPrompt, askUserPrompt,
 } from './lean-beaf-logic.js';
 
 const SETTING_KEYS = Object.freeze({
@@ -82,6 +83,34 @@ function getBriefApiKey() {
   return process.env.ANTHROPIC_API_KEY || null;
 }
 
+// ---- model call (shared, with a transient retry) ----
+
+// One turn against the configured Anthropic model. Retries ONCE more on a
+// transient failure (dropped connection, provider overload, or a first-call
+// timeout) on top of the model client's own single retry — operators saw the
+// first "Generate with AI" click fail and the second succeed (a cold first
+// request through the agent proxy), so a brief/question no longer needs a
+// manual re-click to recover.
+async function callBriefModel({ apiKey, model, baseUrl, system, userText, maxTokens = 1200 }) {
+  const connector = { provider: 'anthropic', base_url: baseUrl || null };
+  const args = {
+    connector, apiKey, model, system,
+    transcript: [{ role: 'user', text: userText }],
+    maxTokens,
+    // Pure output work (restyle / grounded answer) — no thinking budget.
+    thinking: 'off',
+  };
+  let res = await callModelTurn(args);
+  // callModelTurn already retried once on transient errors; add one more for a
+  // transient error OR a timeout (which the client returns immediately without
+  // retrying) — exactly the "worked the second time" case.
+  if (!res.ok && (res.timedOut || isTransientModelError(res.error))) {
+    await new Promise((r) => setTimeout(r, 1200));
+    res = await callModelTurn(args);
+  }
+  return res;
+}
+
 // ---- generate ----
 
 // Restyle a grounded brief with the model and record the run.
@@ -106,16 +135,11 @@ export async function generateAiBrief({ grounded, userId = null, username = null
     };
   }
 
-  const connector = { provider: 'anthropic', base_url: settings.base_url || null };
-  const res = await callModelTurn({
-    connector,
-    apiKey,
-    model,
+  const res = await callBriefModel({
+    apiKey, model, baseUrl: settings.base_url,
     system: briefSystemPrompt(),
-    transcript: [{ role: 'user', text: briefUserPrompt({ mode, groundedText }) }],
+    userText: briefUserPrompt({ mode, groundedText }),
     maxTokens: 1200,
-    // A restyle needs no thinking budget — pure output work.
-    thinking: 'off',
   });
 
   const input_tokens = res.usage?.inputTokens || 0;
@@ -152,5 +176,65 @@ export async function generateAiBrief({ grounded, userId = null, username = null
     ok: res.ok && !fell_back,
     text, model, input_tokens, output_tokens, cost_usd, priced,
     fell_back, error, run_id: run?.id ?? null,
+  };
+}
+
+// ---- ask (grounded Q&A over the portfolio) ----
+
+// Answer a question about the projects using ONLY the grounded context
+// (assembled server-side in the route from stored records, every fact cited).
+// Same R07 posture as the brief: reject an answer that cites a record not in
+// the context. Records a run (mode 'question') storing "Q + A" for the review
+// area. `context` is the cited facts document; `question` is the user's text.
+export async function answerBriefQuestion({ question, context, userId = null, username = null }) {
+  const q = String(question || '').trim();
+  const settings = getBriefAiSettings();
+  const model = settings.model;
+  const apiKey = getBriefApiKey();
+
+  if (!q) return { ok: false, error: 'empty_question', text: '', model, cost_usd: 0, run_id: null };
+  if (!apiKey) {
+    return { ok: false, error: 'not_configured', text: '', model, fell_back: true, input_tokens: 0, output_tokens: 0, cost_usd: 0, run_id: null };
+  }
+
+  const res = await callBriefModel({
+    apiKey, model, baseUrl: settings.base_url,
+    system: askSystemPrompt(),
+    userText: askUserPrompt({ question: q, context }),
+    maxTokens: 900,
+  });
+
+  const input_tokens = res.usage?.inputTokens || 0;
+  const output_tokens = res.usage?.outputTokens || 0;
+  const { cost_usd, priced } = estimateBriefCost({ model, inputTokens: input_tokens, outputTokens: output_tokens });
+
+  let answer = '';
+  let ok = false;
+  let error = null;
+  if (!res.ok) {
+    error = res.error || 'model call failed';
+  } else if (!String(res.text || '').trim()) {
+    error = 'model returned no text';
+  } else if (!citationsGroundedIn(res.text, context)) {
+    // The answer referenced a record id not in the grounded context — reject it
+    // rather than surface a possibly-invented figure (R07).
+    error = 'ungrounded_output';
+  } else {
+    answer = res.text.trim();
+    ok = true;
+  }
+
+  const run = store.recordBriefRun({
+    userId, username, mode: 'question', model,
+    inputTokens: input_tokens, outputTokens: output_tokens,
+    costUsd: cost_usd, ok, error,
+    // Store the exchange so it's reviewable in the AI generation log.
+    outputText: ok ? `**Q:** ${q}\n\n**A:** ${answer}` : null,
+  });
+
+  return {
+    ok, question: q, text: answer, model,
+    input_tokens, output_tokens, cost_usd, priced,
+    error, run_id: run?.id ?? null,
   };
 }

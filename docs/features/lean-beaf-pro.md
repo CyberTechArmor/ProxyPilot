@@ -157,12 +157,36 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     (`[activity #1, activity #2, activity #3]`) as well as single brackets —
     an earlier bracket-strict version found zero citations in the grouped
     source and wrongly rejected every rewrite as ungrounded.
-  - Endpoints: `POST /lbp/brief/ai` (generate + record), `GET /lbp/brief-runs`
-    (audit), `GET`/`PUT /lbp/brief-settings`. The Anthropic call reuses the
-    vetted provider client in `mock2/model-client.js` (raw Messages API over
-    the agent proxy), the same one `cve-research.js` reuses; the pure pieces
-    (pricing, citation grounding, prompt text) live in `lean-beaf-logic.js` so
-    they stay unit-testable without better-sqlite3.
+  - Endpoints: `POST /lbp/brief/ai` (generate + record), `POST /lbp/brief/ask`
+    (grounded Q&A), `GET /lbp/brief-runs` (audit), `GET`/`PUT
+    /lbp/brief-settings`. The Anthropic call reuses the vetted provider client
+    in `mock2/model-client.js` (raw Messages API over the agent proxy), the
+    same one `cve-research.js` reuses; the pure pieces (pricing, citation
+    grounding, prompt text, ask-context assembly, link refs) live in
+    `lean-beaf-logic.js` so they stay unit-testable without better-sqlite3.
+  - Transient resilience: `generateAiBrief` / `answerBriefQuestion` retry once
+    more on a transient failure or first-call timeout (on top of the model
+    client's own retry) — operators saw the first "Generate with AI" click
+    fail and the second succeed (a cold request through the agent proxy), so a
+    brief/question no longer needs a manual re-click.
+  - Interactive, styled output: brief + answer text renders through
+    `components/lbp/BriefText.jsx` — a small deterministic markdown renderer
+    (headings, bullets, bold; no raw HTML injected) that also linkifies the
+    grounded references. Citation chips `[activity #N]` / `[report #N]` and
+    project-name mentions become clickable, deep-linking to the owning project
+    (activity → its Activity tab, report → its Metrics tab) via a `?tab=`
+    param `LbpProjectDetail` reads. The link map (`buildBriefRefs`) ships with
+    every brief/ask/run-log response.
+  - Ask (grounded Q&A): the "Ask" button opens an inline box; a question is
+    answered from `buildAskContext` — a cited facts document assembled from
+    `lbp_projects`, `lbp_activity`, `lbp_metric_reports` (each figure carries
+    an `[activity #N]` / `[report #N]` citation). Same R07 posture as the
+    brief: `askSystemPrompt` forbids uncited numbers and the
+    `citationsGroundedIn` check rejects an answer citing a record not in the
+    context. Each question is a recorded run (mode `question`, the Q+A stored
+    in `output_text`) so it's reviewable in the AI generation log. All AI/brief
+    controls (mode chips, Ask, Generate with AI, Briefs, settings) sit inline
+    in one row, with the meeting rhythm row directly above them.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

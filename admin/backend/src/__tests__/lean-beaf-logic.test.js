@@ -24,6 +24,7 @@ import {
   dueScheduleMarkers, describeSchedules, buildWindowBrief, buildBriefsFeed,
   estimateBriefCost, citationTokens, citationsGroundedIn,
   briefSystemPrompt, briefUserPrompt, LBP_MODEL_PRICING, DEFAULT_BRIEF_MODEL,
+  buildBriefRefs, buildAskContext, askSystemPrompt, askUserPrompt,
 } from '../lib/lean-beaf-logic.js';
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -457,4 +458,46 @@ test('brief prompts constrain the model to grounded restyle', () => {
   assert.match(user, /\[activity #1\]/);
   // Empty facts still produce a safe, non-empty prompt.
   assert.match(briefUserPrompt({ mode: 'daily', groundedText: '' }), /No activity on record/);
+});
+
+test('buildBriefRefs maps cited records to their project (for deep-linking)', () => {
+  const refs = buildBriefRefs({
+    projects: [{ id: 5, name: 'Test' }, { id: 7, name: 'Referral Triage Automation' }],
+    activityEntries: [{ id: 1, project_id: 5 }, { id: 2, project_id: 5 }, { id: 9, project_id: 7 }],
+    metricReports: [{ id: 3, project_id: 7 }],
+  });
+  assert.equal(refs.activity[1], 5);
+  assert.equal(refs.activity[9], 7);
+  assert.equal(refs.report[3], 7);
+  // Names sorted longest-first so the linkifier matches the longer name first.
+  assert.equal(refs.projects[0].name, 'Referral Triage Automation');
+});
+
+test('buildAskContext assembles a cited facts document (grounds the answer)', () => {
+  const ctx = buildAskContext({
+    projects: [
+      { id: 5, name: 'Test', stage: 'MVP', outcome: null },
+      { id: 8, name: 'E-Fax Routing Bot', stage: 'All', outcome: 'rolled_out', outcome_takeaway: 'Standardize taxonomy first' },
+    ],
+    activityEntries: [{ id: 1, project_id: 5, type: 'stage_change', payload: { from: 'Idea', to: 'MVP' } }],
+    metricReports: [{ id: 3, project_id: 8, metric_name: 'Man-hours saved', value: 120, unit: 'hours', period_label: 'June' }],
+  });
+  assert.match(ctx, /ACTIVE PROJECTS/);
+  assert.match(ctx, /Test \(project #5\): stage MVP/);
+  assert.match(ctx, /\[activity #1\]/);
+  assert.match(ctx, /Man-hours saved 120h \(June\) \[report #3\]/);
+  // Archived project surfaces its outcome for context.
+  assert.match(ctx, /E-Fax Routing Bot.*ROLLED OUT at All/);
+  // The context is a valid grounding source: an answer citing only these ids passes.
+  assert.equal(citationsGroundedIn('Test reached MVP [activity #1]; E-Fax saved 120h [report #3].', ctx), true);
+  assert.equal(citationsGroundedIn('Impact up [report #99].', ctx), false);
+});
+
+test('ask prompts constrain the model to the cited context', () => {
+  const sys = askSystemPrompt();
+  assert.match(sys, /Answer ONLY from the context/);
+  assert.match(sys, /do not guess/);
+  const user = askUserPrompt({ question: 'What is blocked?', context: '- Other: BLOCKED [activity #5]' });
+  assert.match(user, /Question: What is blocked\?/);
+  assert.match(user, /\[activity #5\]/);
 });

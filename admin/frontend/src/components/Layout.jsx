@@ -24,8 +24,11 @@ import {
   HardDrive,
   FolderGit2,
   Globe,
+  Sun,
+  Moon,
   X,
 } from 'lucide-react';
+import { useTheme } from '@/context/ThemeContext';
 import { cn } from '@/lib/utils';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
 import SnapshotExportBanner from '@/components/SnapshotExportBanner';
@@ -153,6 +156,9 @@ export default function Layout() {
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
+  const { theme, toggleTheme } = useTheme();
+  const ThemeIcon = theme === 'dark' ? Sun : Moon;
+
   // Feature permissions for the 'user' role (refreshed by the
   // AuthContext 30s re-verify, so grants show up without re-login).
   const permissions = user?.permissions ?? storedUser?.permissions ?? [];
@@ -270,6 +276,16 @@ export default function Layout() {
           <Rocket className="h-6 w-6 text-primary" />
           <span className="text-lg font-bold">ProxyPilot</span>
         </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          className="ml-auto h-11 w-11"
+        >
+          <ThemeIcon className="h-5 w-5" />
+        </Button>
       </header>
 
       {/* Mobile sidebar backdrop (click to close) */}
@@ -398,6 +414,16 @@ export default function Layout() {
                 <p className="text-sm font-medium truncate">{user?.username}</p>
                 <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                className="h-11 w-11 md:h-10 md:w-10"
+              >
+                <ThemeIcon className="h-5 w-5" />
+              </Button>
               <div className="relative" ref={notifPanelRef}>
                 <Button
                   variant="ghost"

@@ -3,7 +3,38 @@
 @tailwind utilities;
 
 @layer base {
+  /* Light theme (default token set). ProxyPilot historically shipped
+     dark-only with these tokens frozen to dark values; the palette is now
+     split the idiomatic shadcn way — light here in :root, dark under
+     `.dark` below — so the app can toggle. The page is a faint cool-gray
+     (not pure white) so white cards read as raised against it. */
   :root {
+    --background: 210 40% 98%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 142.1 76.2% 36.3%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 94%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 40%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214.3 31.8% 88%;
+    --input: 214.3 31.8% 88%;
+    --ring: 142.1 76.2% 36.3%;
+    --radius: 0.5rem;
+  }
+
+  /* Dark theme — the original ProxyPilot palette, now class-gated. Applied
+     to <html> by default (see index.html pre-paint script + ThemeContext)
+     so existing installs look identical until a user toggles to light. */
+  .dark {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
     --card: 222.2 84% 4.9%;

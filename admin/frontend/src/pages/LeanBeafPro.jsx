@@ -40,7 +40,10 @@ export default function LeanBeafPro() {
   const [newOpen, setNewOpen] = useState(false);
 
   return (
-    <div className="space-y-4">
+    // Desktop readability: cap the content to a centered ~1024px "measure"
+    // (matching the approved 980px mockup) so wide monitors don't stretch
+    // rows edge-to-edge. See docs note on line length / content well.
+    <div className="mx-auto w-full max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">

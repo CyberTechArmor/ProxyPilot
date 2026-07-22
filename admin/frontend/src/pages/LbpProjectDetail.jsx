@@ -81,7 +81,8 @@ export default function LbpProjectDetail() {
   };
 
   return (
-    <div className="space-y-4">
+    // Cap the detail page to the same centered measure as the list views.
+    <div className="mx-auto w-full max-w-5xl space-y-4">
       {/* header */}
       <div>
         <button type="button" onClick={() => navigate('/lean-beaf')} className="mb-2 inline-flex items-center gap-1 text-sm font-semibold text-muted-foreground">

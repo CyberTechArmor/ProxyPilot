@@ -372,3 +372,15 @@ export function lbpMigration704BriefRuns(d) {
   `);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_lbp_brief_runs_at ON lbp_brief_runs(created_at DESC)`);
 }
+
+// Migration 705 (additive) — persist the generated brief text so runs can be
+// re-read later ("go back and review the generated briefs"). output_text holds
+// what was actually shown for that run: the accepted AI rewrite, or the
+// deterministic grounded brief when the run fell back. Kept as a column on the
+// existing audit row (one row per generation already), not a new table.
+export function lbpMigration705BriefRunText(d) {
+  const cols = d.prepare(`PRAGMA table_info(lbp_brief_runs)`).all().map((c) => c.name);
+  if (!cols.includes('output_text')) {
+    d.exec(`ALTER TABLE lbp_brief_runs ADD COLUMN output_text TEXT`);
+  }
+}

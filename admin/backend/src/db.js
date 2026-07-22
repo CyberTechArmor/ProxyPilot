@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { migrateUnencryptedTotpSecrets, assertEncryptionKey } from './lib/secrets.js';
 import {
   lbpMigration700, lbpMigration701Blockers, lbpMigration702BoardOrder, lbpMigration703Schedules,
-  lbpMigration704BriefRuns,
+  lbpMigration704BriefRuns, lbpMigration705BriefRunText,
 } from './lib/lean-beaf-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
@@ -1841,6 +1841,7 @@ export function initDatabase() {
   runMigration(db, 702, 'lean_beaf_pro_board_order', lbpMigration702BoardOrder);
   runMigration(db, 703, 'lean_beaf_pro_schedules', lbpMigration703Schedules);
   runMigration(db, 704, 'lean_beaf_pro_brief_runs', lbpMigration704BriefRuns);
+  runMigration(db, 705, 'lean_beaf_pro_brief_run_text', lbpMigration705BriefRunText);
 
   console.log('Database initialized');
 }

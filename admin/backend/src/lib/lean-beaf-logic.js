@@ -582,9 +582,17 @@ export function estimateBriefCost({ model, inputTokens = 0, outputTokens = 0 } =
 }
 
 // Citations in a brief, normalized to tokens like "activity#12" / "report#3".
+// Matches every activity/report reference WHEREVER it appears — the
+// deterministic brief GROUPS them inside one pair of brackets
+// ("[activity #1, activity #2, activity #3]"), leadership mode uses a single
+// pair ("[report #3]"), and an AI rewrite may re-bracket either way. We only
+// care that each referenced record id is real, not how it is bracketed — so
+// the extractor is bracket-agnostic (a bracket-strict regex here silently
+// found zero citations in the grouped source and made every rewrite look
+// ungrounded).
 export function citationTokens(text) {
   const out = new Set();
-  const re = /\[(activity|report)\s*#(\d+)\]/gi;
+  const re = /(activity|report)\s*#\s*(\d+)/gi;
   let m;
   while ((m = re.exec(String(text || ''))) !== null) out.add(`${m[1].toLowerCase()}#${m[2]}`);
   return out;

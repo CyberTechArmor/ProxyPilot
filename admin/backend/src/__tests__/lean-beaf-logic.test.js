@@ -425,17 +425,25 @@ test('estimateBriefCost prices from token usage (Haiku default)', () => {
   assert.ok(LBP_MODEL_PRICING[DEFAULT_BRIEF_MODEL]);
 });
 
-test('citationTokens extracts activity/report references', () => {
+test('citationTokens extracts activity/report references (single AND grouped)', () => {
   const toks = citationTokens('Moved [activity #12], reported X [report #3] and [activity #12] again');
   assert.deepEqual([...toks].sort(), ['activity#12', 'report#3']);
+  // The deterministic brief groups many citations inside ONE bracket pair —
+  // these must all be extracted (regression: a bracket-strict regex found none
+  // here, so every AI rewrite was wrongly rejected as ungrounded).
+  const grouped = citationTokens('• Test: created; stage change [activity #1, activity #2, activity #3]');
+  assert.deepEqual([...grouped].sort(), ['activity#1', 'activity#2', 'activity#3']);
 });
 
-test('citationsGroundedIn rejects an AI rewrite that invents a citation (R07)', () => {
-  const source = '1 project moved. • A: Stage MVP → Testing [activity #7]';
-  // Faithful restyle — same citations, different prose → grounded.
-  assert.equal(citationsGroundedIn('Project A advanced to Testing [activity #7].', source), true);
-  // Invented a report citation not in the source → NOT grounded (must fall back).
-  assert.equal(citationsGroundedIn('Project A advanced [activity #7]; impact up 40% [report #99].', source), false);
+test('citationsGroundedIn accepts a faithful restyle of GROUPED citations (R07)', () => {
+  // Exactly the shape buildBrief emits — grouped citations in one bracket pair.
+  const source = '2 projects moved.\n• Test: Project created; Stage Idea → MVP [activity #1, activity #2, activity #3]';
+  // AI re-brackets into single citations, same record ids → grounded (accepted).
+  assert.equal(citationsGroundedIn('Test kicked off and advanced to MVP [activity #1] [activity #2] [activity #3].', source), true);
+  // AI keeps the grouped form → grounded.
+  assert.equal(citationsGroundedIn('Test advanced to MVP [activity #1, activity #2, activity #3].', source), true);
+  // Invents a record id not in the source → NOT grounded (must fall back).
+  assert.equal(citationsGroundedIn('Test advanced [activity #1]; impact up 40% [report #99].', source), false);
   // No citations at all is trivially grounded (nothing to invent).
   assert.equal(citationsGroundedIn('Nothing moved this period.', source), true);
 });

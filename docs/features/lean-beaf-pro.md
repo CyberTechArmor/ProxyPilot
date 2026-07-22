@@ -188,12 +188,19 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     brief: `askSystemPrompt` forbids uncited numbers and the
     `citationsGroundedIn` check rejects an answer citing a record not in the
     context. Each question is a recorded run (mode `question`, the Q+A stored
-    in `output_text`) so it's reviewable in the AI generation log. Dashboard
-    layout: stat tiles, then a dedicated meeting card (last-meeting line + Mark
-    meeting + Schedule), then the Brief chat card (Generate with AI / Briefs /
-    settings inline on the title row; the Daily / Since meeting / Leadership
-    picks are suggestion chips inside the chat that open that brief), then the
-    rollout process-map card last.
+    in `output_text`) so it's reviewable in the AI generation log.
+  - Global assistant dock: the brief chat is a right-docked assistant available
+    on EVERY page (`components/lbp/AiAssistant.jsx`, rendered once in
+    `Layout.jsx` so the conversation persists across navigation). Collapsed
+    it's a floating "Ask AI" bubble in the corner; open it slides in. Responsive
+    by design — at `lg`+ it's a ~360px side panel and the app content reflows to
+    its left (Layout adds matching right padding); below `lg` it's a
+    full-content overlay (either the app or the chat, never a cramped both). It
+    holds the brief-mode suggestion chips, the brief, the Q&A thread, the
+    composer, Generate with AI, the Briefs link and (admin) model settings.
+    Hidden for pending accounts. Dashboard layout is now just: five stat tiles
+    (the fifth, "Last meeting", opens a meeting hub modal with Mark-now +
+    schedules + history/audit) and the rollout process-map directly under them.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

@@ -32,6 +32,7 @@ import { useTheme } from '@/context/ThemeContext';
 import { cn } from '@/lib/utils';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
 import SnapshotExportBanner from '@/components/SnapshotExportBanner';
+import AiAssistant from '@/components/lbp/AiAssistant';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -40,6 +41,16 @@ export default function Layout() {
 
   // Mobile sidebar drawer state
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Global Lean BEAF Pro AI assistant dock (right side, every page). Open state
+  // persists so it stays how the operator left it across reloads/navigation.
+  const [assistantOpen, setAssistantOpen] = useState(
+    () => localStorage.getItem('lbp-assistant-open') === '1'
+  );
+  const setAssistant = useCallback((v) => {
+    setAssistantOpen(v);
+    localStorage.setItem('lbp-assistant-open', v ? '1' : '0');
+  }, []);
 
   // Desktop sidebar collapse (md+). Auto-collapses on the project studio page
   // (a /projects/<id> detail route) to give the preview + chat room; the
@@ -559,13 +570,24 @@ export default function Layout() {
         "pl-0 pt-14 md:pt-0 h-screen flex flex-col transition-[padding] duration-200 ease-out",
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
         // doesn't overlap page content; expanded: clear the full sidebar.
-        collapsed ? "md:pl-14" : "md:pl-64"
+        collapsed ? "md:pl-14" : "md:pl-64",
+        // When the AI assistant is docked (lg+), reflow content to its left so
+        // both stay usable; below lg the assistant is a full-screen overlay and
+        // content isn't padded.
+        assistantOpen && "lg:pr-[360px]"
       )}>
         <SnapshotExportBanner />
         <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
           <Outlet />
         </div>
       </main>
+
+      {/* Lean BEAF Pro AI assistant — global dock (hidden for pending accounts,
+          which only have Profile access). Persists across route changes because
+          it's mounted here, above the routed Outlet. */}
+      {!isPending && (
+        <AiAssistant open={assistantOpen} onOpen={() => setAssistant(true)} onClose={() => setAssistant(false)} />
+      )}
     </div>
     </SnapshotExportProvider>
   );

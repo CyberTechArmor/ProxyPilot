@@ -23,13 +23,12 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight, Send,
+  Loader2, Plus, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, Trash2, ArrowRight,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
   NewProjectDialog, timeAgo,
 } from '@/components/lbp/shared';
-import BriefText from '@/components/lbp/BriefText';
 
 const VIEWS = ['dashboard', 'list', 'board', 'archive'];
 
@@ -99,8 +98,6 @@ export default function LeanBeafPro() {
           {view === 'dashboard' && (
             <DashboardView
               onOpenArchive={() => setView('archive')}
-              onOpenProject={(id, tab) => navigate(`/lean-beaf/${id}${tab ? `?tab=${tab}` : ''}`)}
-              onOpenBriefs={() => navigate('/lean-beaf/briefs')}
               onDrillTile={goToList}
               onDrillStage={goToBoardStage}
             />
@@ -119,342 +116,61 @@ export default function LeanBeafPro() {
 
 // ---- Dashboard ----
 
-const BRIEF_MODE_LABEL = { daily: 'Daily brief', since_meeting: 'Since last meeting', leadership: 'Leadership report' };
+// Compact date+time for the meeting history.
+const fmtDateTime = (iso) => { try { return new Date(iso).toLocaleString(); } catch { return iso; } };
 
-// One assistant message row in the brief chat: a small avatar + a bubble.
-function ChatRow({ children }) {
-  return (
-    <div className="flex gap-2.5">
-      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
-        <Sparkles className="h-3.5 w-3.5" />
-      </span>
-      <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm border bg-background px-3.5 py-2.5">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile, onDrillStage }) {
-  const { toast } = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
+function DashboardView({ onOpenArchive, onDrillTile, onDrillStage }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
-  const [brief, setBrief] = useState(null);
-  const [briefMode, setBriefMode] = useState('since_meeting');
-  const [briefLoading, setBriefLoading] = useState(false);
-  const [scheduleOpen, setScheduleOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  // AI restyle: explicit (a real model call costs money) — never auto-run.
-  const [aiResult, setAiResult] = useState(null); // { fell_back, cost_usd, model, error, ... }
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiSettings, setAiSettings] = useState(null);
-  const [refs, setRefs] = useState(null); // link metadata for the brief text
-  // Chat: the brief is the first (assistant) message; questions thread below it
-  // (grounded Q&A over the portfolio). The input is always available.
-  const [askText, setAskText] = useState('');
-  const [asking, setAsking] = useState(false);
-  const [turns, setTurns] = useState([]); // [{ role:'user'|'assistant', text, cost_usd, model, error, ... }]
-  const threadRef = useRef(null);
-
-  // Open a project, optionally at a specific tab/area (deep-link from the brief).
-  const openArea = (id, tab) => onOpenProject(id, tab);
-
-  // Keep the newest message in view as the conversation grows.
-  useEffect(() => {
-    const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [turns, asking, brief, briefLoading, aiLoading]);
+  const [meetingOpen, setMeetingOpen] = useState(false);
 
   const load = useCallback(() => {
     api.lbpOverview().then(setData).catch((e) => setErr(e.message));
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const loadSettings = useCallback(() => {
-    api.lbpBriefSettings().then((d) => setAiSettings(d.settings)).catch(() => {});
-  }, []);
-  useEffect(() => { loadSettings(); }, [loadSettings]);
-
-  // Deterministic, record-grounded brief — free, no model call. Auto-loads so
-  // the section is never empty; the AI restyle is a separate, explicit action.
-  const loadBrief = useCallback((mode) => {
-    setBriefMode(mode);
-    setBriefLoading(true);
-    setAiResult(null);
-    api.lbpBrief(mode)
-      .then((d) => { setBrief(d.brief); setRefs(d.refs); })
-      .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
-      .finally(() => setBriefLoading(false));
-  }, [toast]);
-
-  useEffect(() => { loadBrief('since_meeting'); }, [loadBrief]);
-
-  // Restyle the current grounded brief with the model (records a run + cost).
-  const generateAi = async () => {
-    setAiLoading(true);
-    try {
-      const d = await api.lbpBriefAi(briefMode);
-      setBrief(d.brief);
-      setRefs(d.refs);
-      setAiResult(d.ai);
-      if (d.ai?.error === 'not_configured') {
-        toast({
-          variant: 'destructive',
-          title: 'No model connected',
-          description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.',
-        });
-      } else if (d.ai?.fell_back) {
-        toast({ variant: 'destructive', title: 'Used the grounded brief', description: 'The AI rewrite was rejected; showing the deterministic version.' });
-      }
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  // Ask a grounded question about the portfolio. Clears the input immediately
-  // (chat feel) and appends the exchange to the thread.
-  const ask = async () => {
-    const q = askText.trim();
-    if (!q || asking) return;
-    setAskText('');
-    setTurns((t) => [...t, { role: 'user', text: q }]);
-    setAsking(true);
-    try {
-      const d = await api.lbpBriefAsk(q);
-      setRefs(d.refs);
-      const a = d.answer || {};
-      setTurns((t) => [...t, { role: 'assistant', ...a }]);
-      if (a.error === 'not_configured') {
-        toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.' });
-      } else if (a.error === 'ungrounded_output') {
-        toast({ variant: 'destructive', title: 'Answer withheld', description: 'The model referenced a record not in the grounded facts.' });
-      } else if (a.error) {
-        toast({ variant: 'destructive', title: 'Question failed', description: a.error });
-      }
-    } catch (e) {
-      setTurns((t) => [...t, { role: 'assistant', error: e.message }]);
-      toast({ variant: 'destructive', title: 'Question failed', description: e.message });
-    } finally {
-      setAsking(false);
-    }
-  };
-
-  const markMeeting = async () => {
-    try {
-      await api.lbpMarkMeeting();
-      toast({ title: 'Meeting marked', description: 'Movement now counts from this point.' });
-      load();
-      loadBrief(briefMode);
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'Could not mark meeting', description: e.message });
-    }
-  };
-
   if (err) return <p className="text-sm text-destructive">{err}</p>;
   if (!data) return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
 
-  // Each tile drills into the List view with the matching filter. "Locations
-  // live" has no dedicated filter, so it lands on the full (unfiltered) list.
-  const tiles = [
-    { label: 'Active projects', value: data.tiles.active_projects, cls: '', filter: 'all' },
-    { label: 'Moved since meeting', value: data.tiles.moved_since_meeting, cls: 'text-primary', filter: 'moved' },
-    { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '', filter: 'stalled' },
-    { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400', filter: 'all' },
-  ];
+  const lastMeeting = data.meeting.current ? timeAgo(data.meeting.current.marked_at) : 'None yet';
 
-  const aiOn = aiResult && !aiResult.fell_back;
+  // Five tiles. The first four drill into the List; "Last meeting" is a text
+  // tile that opens the meeting hub (mark now, schedules, history).
+  const tiles = [
+    { label: 'Active projects', value: data.tiles.active_projects, cls: '', onClick: () => onDrillTile('all'), title: 'View all projects' },
+    { label: 'Moved since meeting', value: data.tiles.moved_since_meeting, cls: 'text-primary', onClick: () => onDrillTile('moved'), title: 'View moved projects' },
+    { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '', onClick: () => onDrillTile('stalled'), title: 'View stalled projects' },
+    { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400', onClick: () => onDrillTile('all'), title: 'View projects' },
+    { label: 'Last meeting', value: lastMeeting, text: true, icon: CalendarCheck, sub: data.meeting.schedules_summary ? `Auto: ${data.meeting.schedules_summary}` : 'Tap to manage', onClick: () => setMeetingOpen(true), title: 'Meetings — mark now, schedules, history' },
+  ];
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
         {tiles.map((t) => (
           <button
             key={t.label}
             type="button"
-            onClick={() => onDrillTile(t.filter)}
-            className="rounded-xl border bg-card p-4 text-left transition-colors hover:border-primary/50 focus-visible:border-primary/50 focus-visible:outline-none"
-            title={`View ${t.label.toLowerCase()} in the list`}
+            onClick={t.onClick}
+            className="relative rounded-xl border bg-card p-4 text-left transition-colors hover:border-primary/50 focus-visible:border-primary/50 focus-visible:outline-none"
+            title={t.title}
           >
+            {t.icon && <t.icon className="absolute right-3 top-3 h-4 w-4 text-primary/70" />}
             <span className="text-xs font-semibold text-muted-foreground">{t.label}</span>
-            <b className={`block text-2xl font-extrabold ${t.cls}`}>{t.value}</b>
+            {t.text ? (
+              <>
+                <b className="mt-0.5 block truncate text-lg font-extrabold">{t.value}</b>
+                <span className="block truncate text-[11px] text-muted-foreground">{t.sub}</span>
+              </>
+            ) : (
+              <b className={`block text-2xl font-extrabold ${t.cls}`}>{t.value}</b>
+            )}
           </button>
         ))}
       </div>
 
-      {/* meeting card — last meeting time + the two meeting buttons, its own
-          card now (extracted from the brief so the chat gets the space). */}
-      <div className="flex flex-wrap items-center gap-2.5 rounded-xl border bg-card p-4">
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <CalendarCheck className="h-5 w-5" />
-        </span>
-        <div className="min-w-[150px] flex-1">
-          <b className="block text-sm">
-            {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
-          </b>
-          <span className="text-xs text-muted-foreground">
-            {data.meeting.schedules_summary
-              ? `Auto-marks: ${data.meeting.schedules_summary}`
-              : 'Movement is measured meeting-to-meeting'}
-          </span>
-        </div>
-        <div className="flex gap-2">
-          <Button size="sm" className="h-10" onClick={markMeeting}>Mark meeting</Button>
-          <Button size="sm" variant="outline" className="h-10" onClick={() => setScheduleOpen(true)}>
-            <CalendarClock className="mr-1.5 h-4 w-4" /> Schedule
-          </Button>
-        </div>
-      </div>
-
-      {/* AI brief — a chat. The brief is the first (assistant) message; the
-          input below is always ready so anyone can go straight to asking. The
-          brief-mode picks are suggestion chips inside the chat. Grounded (R07):
-          numbers cite their records; the AI only restyles / answers from them. */}
-      <div className="flex flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
-        {/* header line — title + all brief/AI actions inline (saves vertical
-            space, opening the card up to the chat). */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
-            <Sparkles className="h-5 w-5" />
-          </span>
-          <b className="text-base">Brief</b>
-          <span className="hidden text-[11px] text-muted-foreground md:inline">chat grounded in your records · tap a citation to open it</span>
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              className="h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
-              onClick={generateAi}
-              disabled={aiLoading || briefLoading}
-              title="Restyle this grounded brief with the model"
-            >
-              {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
-              Generate with AI
-            </Button>
-            <Button size="sm" variant="outline" className="h-9" onClick={onOpenBriefs} title="See all briefs + the AI run log">
-              <ScrollText className="mr-1.5 h-4 w-4" /> Briefs
-            </Button>
-            {isAdmin && (
-              <Button size="sm" variant="ghost" className="h-9 w-9 p-0 text-muted-foreground" onClick={() => setSettingsOpen(true)} title="AI model settings">
-                <Settings2 className="h-4 w-4" />
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* chat thread — brief is the first message, questions thread below it. */}
-        <div ref={threadRef} className="flex max-h-[520px] min-h-[280px] flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
-          {/* in-chat suggestions — which brief to open. Clicking triggers it. */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-semibold text-muted-foreground">Suggested briefs:</span>
-            {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => loadBrief(mode)}
-                disabled={briefLoading || aiLoading}
-                className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-60 ${
-                  briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-primary'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {/* head: the brief itself, as the opening assistant message */}
-          <ChatRow role="assistant">
-            {(briefLoading || aiLoading) ? (
-              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Preparing the brief…</div>
-            ) : brief ? (
-              <>
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{BRIEF_MODE_LABEL[briefMode] || 'Brief'}</span>
-                  {aiOn && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
-                      <Sparkles className="h-3 w-3" /> AI
-                    </span>
-                  )}
-                </div>
-                <BriefText text={brief.text} refs={refs} onOpen={openArea} />
-                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                  {aiResult ? (
-                    aiResult.error === 'not_configured' ? (
-                      <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in AI settings.' : 'ask an admin to connect one.'}</span>
-                    ) : (
-                      <>
-                        <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
-                        <span>·</span>
-                        <span>{formatUsd(aiResult.cost_usd)} · {aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
-                        {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
-                      </>
-                    )
-                  ) : (
-                    <span>Record-grounded · “Generate with AI” restyles it{aiSettings ? ` with ${aiSettings.model}` : ''}</span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">Pick a mode above to open a brief — or just ask a question below.</p>
-            )}
-          </ChatRow>
-
-          {/* Q&A turns */}
-          {turns.map((t, i) => (
-            t.role === 'user' ? (
-              <div key={i} className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2 text-sm text-primary-foreground">{t.text}</div>
-              </div>
-            ) : (
-              <ChatRow key={i} role="assistant">
-                {t.error ? (
-                  <p className="text-sm text-amber-600 dark:text-amber-400">
-                    {t.error === 'not_configured' ? 'No model connected — an admin can set one in AI settings.'
-                      : t.error === 'ungrounded_output' ? 'The answer referenced a record not in the grounded facts, so it was withheld.'
-                        : `Could not answer: ${t.error}`}
-                  </p>
-                ) : (
-                  <>
-                    <BriefText text={t.text} refs={refs} onOpen={openArea} />
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
-                      <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {t.model}</span>
-                      <span>·</span>
-                      <span>{formatUsd(t.cost_usd)} · {(t.input_tokens || 0).toLocaleString()} in / {(t.output_tokens || 0).toLocaleString()} out</span>
-                    </div>
-                  </>
-                )}
-              </ChatRow>
-            )
-          ))}
-
-          {asking && (
-            <ChatRow role="assistant">
-              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Thinking…</div>
-            </ChatRow>
-          )}
-        </div>
-
-        {/* persistent composer — always ready, clears on send */}
-        <div className="mt-3 flex items-end gap-2">
-          <Input
-            value={askText}
-            onChange={(e) => setAskText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } }}
-            placeholder="Ask about these projects — e.g. what's blocked? which moved this week?"
-            maxLength={500}
-            className="h-11 bg-background"
-          />
-          <Button className="h-11 px-4" onClick={ask} disabled={asking || !askText.trim()} title="Ask (grounded in the records)">
-            {asking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </Button>
-        </div>
-        <p className="mt-1.5 text-[11px] text-muted-foreground">Answers use only the recorded facts — every figure stays cited. Each question is saved to the <button type="button" className="font-semibold text-primary" onClick={onOpenBriefs}>Briefs log</button>.</p>
-      </div>
-
-      {/* rollout process-map — the innovation pipeline as a flow. Each stage
-          jumps to its Kanban column. Grounded: counts come from the records. */}
+      {/* rollout pipeline — right under the tiles, above everything else. Each
+          stage jumps to its Kanban column. Grounded: counts come from records. */}
       <div className="rounded-xl border bg-card p-4">
         <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
           <ArrowRight className="h-3.5 w-3.5" /> Rollout pipeline
@@ -485,125 +201,110 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
         </p>
       </div>
 
-      <MeetingScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} onSaved={load} />
-      <BriefAiSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={loadSettings} />
+      <p className="text-center text-xs text-muted-foreground">
+        The AI brief &amp; chat now live in the assistant — open it from the <b className="text-primary">Ask AI</b> button in the corner, on any page.
+      </p>
+
+      <MeetingHubDialog open={meetingOpen} onOpenChange={setMeetingOpen} onChanged={load} />
     </div>
   );
 }
 
-// USD formatter for tiny per-run costs (fractions of a cent are common with
-// Haiku). Shows enough precision to be meaningful without scientific notation.
-function formatUsd(n) {
-  const v = Number(n) || 0;
-  if (v === 0) return '$0.00';
-  if (v < 0.01) return `$${v.toFixed(4)}`;
-  return `$${v.toFixed(2)}`;
-}
-
-// Admin-only AI model settings for the brief writer. Model picker + optional
-// API key (blank keeps the stored one) + optional base URL. Non-admins never
-// see the trigger; the backend also gates the PUT.
-function BriefAiSettingsDialog({ open, onOpenChange, onSaved }) {
+// Meeting hub — everything meeting-related in one modal: mark now, manage the
+// recurring schedules, and review the meeting history (audit).
+function MeetingHubDialog({ open, onOpenChange, onChanged }) {
   const { toast } = useToast();
-  const [settings, setSettings] = useState(null);
-  const [model, setModel] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [meetings, setMeetings] = useState(null); // { current, history, ... }
+  const [marking, setMarking] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    setApiKey('');
-    api.lbpBriefSettings()
-      .then((d) => { setSettings(d.settings); setModel(d.settings.model); })
-      .catch((e) => toast({ variant: 'destructive', title: 'Could not load settings', description: e.message }));
-  }, [open, toast]);
+  const reloadMeetings = useCallback(() => {
+    api.lbpMeetings().then(setMeetings).catch(() => {});
+  }, []);
+  useEffect(() => { if (open) reloadMeetings(); }, [open, reloadMeetings]);
 
-  const save = async () => {
-    setSaving(true);
+  const markNow = async () => {
+    setMarking(true);
     try {
-      const d = await api.lbpSaveBriefSettings({ model, api_key: apiKey || undefined });
-      setSettings(d.settings);
-      setApiKey('');
-      toast({ title: 'AI settings saved' });
-      onSaved?.();
-      onOpenChange(false);
+      await api.lbpMarkMeeting();
+      toast({ title: 'Meeting marked', description: 'Movement now counts from this point.' });
+      reloadMeetings();
+      onChanged?.();
     } catch (e) {
-      toast({ variant: 'destructive', title: 'Could not save', description: e.message });
+      toast({ variant: 'destructive', title: 'Could not mark meeting', description: e.message });
     } finally {
-      setSaving(false);
+      setMarking(false);
     }
   };
 
-  const choices = settings?.choices || [];
-  const price = settings?.pricing?.[model];
+  const history = meetings?.history || [];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>AI brief settings</DialogTitle>
+          <DialogTitle>Meetings</DialogTitle>
           <DialogDescription>
-            The brief writer restyles the grounded facts — it never invents numbers. Pick the model and connect an
-            Anthropic API key. The cheap, fast model (Haiku) is the default.
+            Mark a meeting now, manage the recurring schedules, and review the meeting history.
           </DialogDescription>
         </DialogHeader>
 
-        {!settings ? (
-          <div className="py-6"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-        ) : (
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <Label className="text-xs">Model</Label>
-              <Select value={model} onValueChange={setModel}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {choices.map((c) => <SelectItem key={c.id} value={c.id}>{c.label}</SelectItem>)}
-                  {!choices.some((c) => c.id === model) && model && (
-                    <SelectItem value={model}>{model}</SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-              {price && (
-                <p className="text-[11px] text-muted-foreground">
-                  ${price.in.toFixed(2)} / 1M input · ${price.out.toFixed(2)} / 1M output tokens
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-xs">Anthropic API key</Label>
-              <Input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={settings.has_api_key ? (settings.key_source === 'env' ? 'Using ANTHROPIC_API_KEY from the environment' : '•••••• stored — leave blank to keep') : 'sk-ant-…'}
-                className="font-mono"
-              />
-              <p className="text-[11px] text-muted-foreground">
-                Stored encrypted at rest. Leave blank to keep the current key.
-                {settings.key_source === 'env' && ' Currently falling back to the ANTHROPIC_API_KEY environment variable.'}
-              </p>
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button className="h-11 sm:h-10" onClick={save} disabled={saving || !model}>
-                {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Save
-              </Button>
-            </div>
+        {/* mark now */}
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/30 p-3">
+          <CalendarCheck className="h-5 w-5 shrink-0 text-primary" />
+          <div className="min-w-[160px] flex-1">
+            <b className="block text-sm">{meetings?.current ? `Last meeting ${timeAgo(meetings.current.marked_at)}` : 'No meeting marked yet'}</b>
+            <span className="text-xs text-muted-foreground">Marking resets the “since meeting” movement window.</span>
           </div>
-        )}
+          <Button className="h-10" onClick={markNow} disabled={marking}>
+            {marking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null} Mark meeting now
+          </Button>
+        </div>
+
+        {/* recurring schedules */}
+        <div>
+          <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Recurring schedules</h3>
+          <ScheduleManager onChanged={() => { reloadMeetings(); onChanged?.(); }} />
+        </div>
+
+        {/* history / audit */}
+        <div>
+          <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Meeting history</h3>
+          {history.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No meetings recorded yet.</p>
+          ) : (
+            <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+              {history.map((m) => (
+                <div key={m.id} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+                  <CalendarCheck className={`h-4 w-4 shrink-0 ${m.source === 'schedule' ? 'text-muted-foreground' : 'text-primary'}`} />
+                  <span className="min-w-0 flex-1">
+                    <b className="text-sm">{timeAgo(m.marked_at)}</b>
+                    <span className="ml-1.5 text-xs text-muted-foreground">{fmtDateTime(m.marked_at)}</span>
+                  </span>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${m.source === 'schedule' ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'}`}>
+                    {m.source === 'schedule' ? 'Auto' : 'Manual'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end">
+          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Done</Button>
+        </div>
       </DialogContent>
     </Dialog>
   );
 }
+
 
 const DOW_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 // Manage MANY recurring schedules (daily or weekly). Each auto-marks a meeting
 // at its occurrences; ad-hoc / different-time meetings use "Mark meeting now".
-function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
+// Rendered inside the meeting hub modal (no Dialog wrapper of its own).
+function ScheduleManager({ onChanged }) {
   const { toast } = useToast();
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -621,13 +322,9 @@ function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
       .finally(() => setLoading(false));
   }, [toast]);
 
-  useEffect(() => {
-    if (!open) return;
-    setFreq('weekly'); setDow('1'); setTime('09:00');
-    reload();
-  }, [open, reload]);
+  useEffect(() => { reload(); }, [reload]);
 
-  const changed = () => { reload(); onSaved?.(); };
+  const changed = () => { reload(); onChanged?.(); };
 
   const add = async () => {
     setAdding(true);
@@ -652,77 +349,63 @@ function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
     .catch((e) => toast({ variant: 'destructive', title: 'Could not delete', description: e.message }));
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Meeting schedules</DialogTitle>
-          <DialogDescription>
-            Add as many recurring meetings as you need — a daily stand-up, a weekly review, etc. Each occurrence
-            auto-marks a meeting. For a one-off or different-time meeting, use “Mark meeting now”.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-3">
-          {loading && schedules.length === 0 && <div className="py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}
-          {!loading && schedules.length === 0 && <p className="text-sm text-muted-foreground">No recurring schedules yet — add one below.</p>}
-          {schedules.map((s) => (
-            <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
-              <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
-                <CalendarClock className={`h-4 w-4 ${s.active ? 'text-primary' : 'text-muted-foreground'}`} />
-                {s.frequency === 'daily' ? 'Daily' : DOW_SHORT[s.day_of_week] ?? '?'} · {s.time_hhmm}
-              </span>
-              {!s.active && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">paused</span>}
-              <div className="ml-auto flex items-center gap-1">
-                <Button variant="ghost" size="sm" className="h-9" onClick={() => toggle(s)}>
-                  {s.active ? 'Pause' : 'Resume'}
-                </Button>
-                <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground" title="Delete" onClick={() => remove(s)}>
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
+    <div>
+      <div className="space-y-2">
+        {loading && schedules.length === 0 && <div className="py-3"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}
+        {!loading && schedules.length === 0 && <p className="text-sm text-muted-foreground">No recurring schedules yet — add one below.</p>}
+        {schedules.map((s) => (
+          <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
+            <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
+              <CalendarClock className={`h-4 w-4 ${s.active ? 'text-primary' : 'text-muted-foreground'}`} />
+              {s.frequency === 'daily' ? 'Daily' : DOW_SHORT[s.day_of_week] ?? '?'} · {s.time_hhmm}
+            </span>
+            {!s.active && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">paused</span>}
+            <div className="ml-auto flex items-center gap-1">
+              <Button variant="ghost" size="sm" className="h-9" onClick={() => toggle(s)}>
+                {s.active ? 'Pause' : 'Resume'}
+              </Button>
+              <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground" title="Delete" onClick={() => remove(s)}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
+      </div>
 
-        <div className="mt-2 rounded-lg border border-dashed p-3">
-          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Add a schedule</p>
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+      <div className="mt-2 rounded-lg border border-dashed p-3">
+        <p className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Add a schedule</p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+          <div className="space-y-1">
+            <Label className="text-xs">Repeats</Label>
+            <Select value={freq} onValueChange={setFreq}>
+              <SelectTrigger className="w-full sm:w-28"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="weekly">Weekly</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {freq === 'weekly' && (
             <div className="space-y-1">
-              <Label className="text-xs">Repeats</Label>
-              <Select value={freq} onValueChange={setFreq}>
-                <SelectTrigger className="w-full sm:w-28"><SelectValue /></SelectTrigger>
+              <Label className="text-xs">Day</Label>
+              <Select value={dow} onValueChange={setDow}>
+                <SelectTrigger className="w-full sm:w-36"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="daily">Daily</SelectItem>
-                  <SelectItem value="weekly">Weekly</SelectItem>
+                  {DOW_LABELS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            {freq === 'weekly' && (
-              <div className="space-y-1">
-                <Label className="text-xs">Day</Label>
-                <Select value={dow} onValueChange={setDow}>
-                  <SelectTrigger className="w-full sm:w-36"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {DOW_LABELS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <div className="space-y-1">
-              <Label className="text-xs">Time</Label>
-              <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="w-full sm:w-32" />
-            </div>
-            <Button className="h-10 sm:ml-auto" onClick={add} disabled={adding}>
-              {adding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-1.5 h-4 w-4" />} Add
-            </Button>
+          )}
+          <div className="space-y-1">
+            <Label className="text-xs">Time</Label>
+            <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="w-full sm:w-32" />
           </div>
+          <Button className="h-10 sm:ml-auto" onClick={add} disabled={adding}>
+            {adding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-1.5 h-4 w-4" />} Add
+          </Button>
         </div>
-
-        <div className="flex justify-end">
-          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Done</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
   );
 }
 

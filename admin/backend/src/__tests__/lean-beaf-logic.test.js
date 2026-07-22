@@ -20,6 +20,7 @@ import {
   canonicalLinkPair, ideaCheckMatches, howItWentLine, pipelineCounts,
   projectSpanDays, investedHours, archiveMeta, archiveMetaAnalysis,
   buildBrief, formatMetricValue, summarizeScopeChange, validateLocation,
+  validateBlocker, validateBreakBarrier, blockerDurationDays,
 } from '../lib/lean-beaf-logic.js';
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -254,6 +255,24 @@ test('R12: meta-analysis paragraph states only numbers present in meta', () => {
   assert.match(text, /16\.5 logged hours/);
   assert.match(text, /died at Testing \(1 of 1\)/);
   assert.match(archiveMetaAnalysis({ meta: { ideas_attempted: 0 } }), /No projects yet/);
+});
+
+// ---- blockers (operator addition: blocked flag + break-barrier audit) ----
+
+test('blocker: reason required, date must be YYYY-MM-DD; break-barrier date optional', () => {
+  assert.equal(validateBlocker({ reason: 'waiting on vendor' }).ok, true);
+  assert.equal(validateBlocker({ reason: 'x', date: '2026-07-20' }).ok, true);
+  assert.equal(validateBlocker({ reason: '' }).ok, false);
+  assert.equal(validateBlocker({ reason: 'x', date: '07/20/2026' }).ok, false);
+  assert.equal(validateBreakBarrier({}).ok, true);
+  assert.equal(validateBreakBarrier({ date: '2026-07-22' }).ok, true);
+  assert.equal(validateBreakBarrier({ date: 'nope' }).ok, false);
+});
+
+test('blockerDurationDays spans blocked_at → resolved_at (or now if still open)', () => {
+  assert.equal(blockerDurationDays({ blocked_at: '2026-07-20', resolved_at: '2026-07-22' }), 2);
+  assert.equal(blockerDurationDays({ blocked_at: '2026-07-20', resolved_at: null }, '2026-07-25T00:00:00Z'), 5);
+  assert.equal(blockerDurationDays({}), null);
 });
 
 // ---- supporting decisions ----

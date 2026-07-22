@@ -145,6 +145,8 @@ export function summarizeActivityEntries(entries = []) {
       case 'file_added': lines.push(`File added: ${p.name || ''}`.trim()); break;
       case 'feedback_added': lines.push(`Feedback captured (${p.sentiment || 'noted'})`); break;
       case 'learning_added': lines.push('Learning recorded'); break;
+      case 'blocked': lines.push(`Blocked${p.reason ? `: ${p.reason}` : ''}`); break;
+      case 'unblocked': lines.push('Barrier broken (unblocked)'); break;
       case 'outcome_set': lines.push(p.outcome === 'rolled_out' ? 'Closed — rolled out ✓' : 'Closed — abandoned ✕'); break;
       case 'time_event': lines.push(`${p.event_type || 'Time'} logged${p.hours ? ` (${p.hours}h)` : ''}`); break;
       case 'lxc_linked': lines.push('Linked to an LXC build project'); break;
@@ -212,6 +214,34 @@ export function validateMetricReport({ definition, value, source_text, source_ur
 // immediately.
 export function newMetricDefinitionStatus({ isAdmin }) {
   return isAdmin ? 'active' : 'proposed';
+}
+
+// ---- blockers (operator addition: blocked flag + break-barrier audit) ----
+
+// Flag a blocker: a reason is required; the date defaults to today and is
+// editable but must be a plain YYYY-MM-DD. Breaking the barrier (resolve)
+// takes an optional date, same shape.
+export function validateBlocker({ reason, date } = {}) {
+  const errors = [];
+  if (!String(reason || '').trim()) errors.push('A reason is required to flag a blocker');
+  if (date != null && date !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+    errors.push('The blocker date must be YYYY-MM-DD');
+  }
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+export function validateBreakBarrier({ date } = {}) {
+  if (date != null && date !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+    return { ok: false, errors: ['The resolved date must be YYYY-MM-DD'] };
+  }
+  return { ok: true };
+}
+
+// Days a blocker stood open (blocked_at → resolved_at, or → now if still open).
+export function blockerDurationDays(blocker, now = new Date().toISOString()) {
+  if (!blocker?.blocked_at) return null;
+  const end = blocker.resolved_at || now.slice(0, 10);
+  return Math.max(0, Math.round((new Date(end).getTime() - new Date(blocker.blocked_at).getTime()) / DAY_MS));
 }
 
 // ---- feedback (decided default: author-editable for 24h, then locked) ----

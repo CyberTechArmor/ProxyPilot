@@ -5,6 +5,19 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><text y=%2250%22 font-size=%2248%22>🚀</text></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ProxyPilot Admin</title>
+    <script>
+      // Pre-paint theme: apply the stored theme class before React mounts so
+      // there's no flash of the wrong palette. Defaults to dark (ProxyPilot's
+      // historical look). Kept in sync afterward by ThemeContext.
+      (function () {
+        try {
+          var t = localStorage.getItem('pp-theme');
+          if (t !== 'light' && t !== 'dark') t = 'dark';
+          if (t === 'dark') document.documentElement.classList.add('dark');
+          document.documentElement.style.colorScheme = t;
+        } catch (e) { document.documentElement.classList.add('dark'); }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

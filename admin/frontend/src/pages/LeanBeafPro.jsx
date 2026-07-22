@@ -23,14 +23,14 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, Trash2, ArrowRight, Sparkles, Wand2,
+  Loader2, Plus, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, Trash2, ArrowRight, Sparkles,
 } from 'lucide-react';
 import {
-  LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
+  LBP_STAGES, ProjectCard, MovedBadge, BlockedBadge, OutcomeBadge, CardFlags, ScopeEditor,
   NewProjectDialog, timeAgo, fmtDate, fmtDateTimeLocal, scheduleLocalLabel,
   schedulesSummaryLocal, localScheduleToUtc, Avatars, LocationChip,
 } from '@/components/lbp/shared';
-import BriefText from '@/components/lbp/BriefText';
+import AiRunList from '@/components/lbp/AiRunList';
 
 const VIEWS = ['dashboard', 'list', 'board', 'archive'];
 const TABS = ['dashboard', 'list', 'board', 'assistant', 'archive'];
@@ -219,19 +219,11 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
   );
 }
 
-// The dashboard AI brief: Daily / Since meeting / Leadership to review, with an
-// optional AI restyle. Fills the remaining dashboard height (capped). Grounded
-// (R07) — citations + project names deep-link into the app.
+// The dashboard "AI Brief" section: a left rail of the most-recently-active
+// projects (all flags shown), and — filling the rest — the log of AI briefs /
+// answers generated (tap any to re-read). Interactive brief generation and
+// follow-up questions live in the assistant; this section is the record.
 function BriefReview({ onOpenProject }) {
-  const { toast } = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
-  const [brief, setBrief] = useState(null);
-  const [mode, setMode] = useState('since_meeting');
-  const [refs, setRefs] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [aiResult, setAiResult] = useState(null);
-  const [aiLoading, setAiLoading] = useState(false);
   const [recent, setRecent] = useState([]); // active projects, newest action first
 
   useEffect(() => {
@@ -240,38 +232,7 @@ function BriefReview({ onOpenProject }) {
       .catch(() => {});
   }, []);
 
-  const load = useCallback((m) => {
-    setMode(m);
-    setLoading(true);
-    setAiResult(null);
-    api.lbpBrief(m)
-      .then((d) => { setBrief(d.brief); setRefs(d.refs); })
-      .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
-      .finally(() => setLoading(false));
-  }, [toast]);
-  useEffect(() => { load('since_meeting'); }, [load]);
-
-  const generate = async () => {
-    setAiLoading(true);
-    try {
-      const d = await api.lbpBriefAi(mode);
-      setBrief(d.brief);
-      setRefs(d.refs);
-      setAiResult(d.ai);
-      if (d.ai?.error === 'not_configured') {
-        toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings (in the assistant).' : 'Ask an admin to connect a model.' });
-      } else if (d.ai?.fell_back) {
-        toast({ variant: 'destructive', title: 'Used the grounded brief', description: 'The AI rewrite was rejected; showing the deterministic version.' });
-      }
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
   const openArea = (id, tab) => onOpenProject?.(id, tab);
-  const aiOn = aiResult && !aiResult.fell_back;
 
   return (
     <div className="flex max-h-[760px] min-h-[300px] flex-1 flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
@@ -280,38 +241,13 @@ function BriefReview({ onOpenProject }) {
           <Sparkles className="h-5 w-5" />
         </span>
         <b className="text-base">AI Brief</b>
-        <span className="hidden text-[11px] text-muted-foreground sm:inline">every number cites its record · tap a citation to open it</span>
-        <div className="ml-auto flex items-center gap-2">
-          {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership']].map(([m, label]) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => load(m)}
-              disabled={loading || aiLoading}
-              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-60 ${
-                mode === m ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-          <Button
-            size="sm"
-            className="h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
-            onClick={generate}
-            disabled={aiLoading || loading}
-            title="Restyle this grounded brief with the model"
-          >
-            {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
-            Generate with AI
-          </Button>
-        </div>
+        <span className="hidden text-[11px] text-muted-foreground sm:inline">your generated briefs &amp; answers · tap to re-read · every figure cites its record</span>
       </div>
 
       <div className="flex min-h-0 flex-1 gap-3">
-        {/* left ~20% — most recent projects by last action; only what fits
-            vertically is shown (the list is clipped, not scrolled). */}
-        <aside className="hidden w-1/5 min-w-[150px] max-w-[260px] flex-col overflow-hidden rounded-lg border border-border/60 bg-background/40 sm:flex">
+        {/* left 25% — most recent projects by last action, all flags shown;
+            only what fits vertically is shown (clipped, not scrolled). */}
+        <aside className="hidden w-1/4 min-w-[170px] max-w-[300px] flex-col overflow-hidden rounded-lg border border-border/60 bg-background/40 sm:flex">
           <div className="shrink-0 border-b border-border/60 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Recent activity</div>
           <div className="flex flex-col overflow-hidden">
             {recent.length === 0 ? (
@@ -324,56 +260,24 @@ function BriefReview({ onOpenProject }) {
                 className="shrink-0 border-b border-border/40 px-3 py-2 text-left transition-colors hover:bg-accent/50"
                 title={p.name}
               >
-                <span className="block truncate text-sm font-semibold">{p.name}</span>
-                <span className="block truncate text-[11px] text-muted-foreground">{p.stage} · {p.last_activity_at ? timeAgo(p.last_activity_at) : '—'}</span>
+                <span className="flex items-center gap-1.5">
+                  {p.pinned && <Pin className="h-3 w-3 shrink-0 text-primary" />}
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
+                </span>
+                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{p.stage} · {p.last_activity_at ? timeAgo(p.last_activity_at) : '—'}</span>
+                <span className="mt-1 flex flex-wrap gap-1"><CardFlags project={p} /></span>
               </button>
             ))}
           </div>
         </aside>
 
-        {/* brief text */}
-        <div className="relative min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
-          {(loading || aiLoading) ? (
-            <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-          ) : brief ? (
-            <BriefText text={brief.text} refs={refs} onOpen={openArea} />
-          ) : (
-            <p className="text-sm text-muted-foreground">Pick a brief above to review the latest movement.</p>
-          )}
-          {aiOn && (
-            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
-              <Sparkles className="h-3 w-3" /> AI
-            </span>
-          )}
+        {/* the generation log — every AI brief / answer, tap to re-read */}
+        <div className="min-h-0 flex-1">
+          <AiRunList onOpenArea={openArea} />
         </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-        {aiResult ? (
-          aiResult.error === 'not_configured' ? (
-            <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in the assistant’s AI settings.' : 'ask an admin to connect one.'}</span>
-          ) : (
-            <>
-              <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
-              <span>· {formatUsd(aiResult.cost_usd)} this run</span>
-              <span>· {aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
-              {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
-            </>
-          )
-        ) : (
-          <span>Record-grounded · “Generate with AI” restyles it · ask follow-up questions in the assistant →</span>
-        )}
       </div>
     </div>
   );
-}
-
-// USD formatter for tiny per-run costs (fractions of a cent are common).
-function formatUsd(n) {
-  const v = Number(n) || 0;
-  if (v === 0) return '$0.00';
-  if (v < 0.01) return `$${v.toFixed(4)}`;
-  return `$${v.toFixed(2)}`;
 }
 
 // Meeting hub — everything meeting-related in one modal: mark now, manage the
@@ -580,6 +484,14 @@ function ScheduleManager({ onChanged }) {
 
 // ---- List ----
 
+// The single most-impactful status for a row (only one at a time). Blocked
+// supersedes everything; then archived outcome; else moved / idle.
+function SingleStatus({ project }) {
+  if (project.blocked) return <BlockedBadge days={project.blocked_days} reason={project.blocked_reason} />;
+  if (project.archived) return <OutcomeBadge outcome={project.outcome} />;
+  return <MovedBadge moved={project.moved} daysIdle={project.days_idle} archived={project.archived} />;
+}
+
 function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
   const [projects, setProjects] = useState(null);
   const [err, setErr] = useState('');
@@ -627,18 +539,20 @@ function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
         <div className="min-h-0 flex-1 overflow-auto rounded-xl border">
           {/* table-fixed so columns always fit the available width and truncate
               cleanly (no clipped last column when the assistant is docked). */}
-          <table className="w-full min-w-[560px] table-fixed border-collapse text-sm">
+          <table className="w-full min-w-[720px] table-fixed border-collapse text-sm">
             <colgroup>
+              <col className="w-[18%]" />
               <col />
-              <col className="w-[104px]" />
-              <col className="w-[26%]" />
+              <col className="w-[92px]" />
+              <col className="w-[15%]" />
+              <col className="w-[68px]" />
               <col className="w-[84px]" />
-              <col className="w-[96px]" />
-              <col className="w-[104px]" />
+              <col className="w-[128px]" />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
               <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="px-3 py-2 font-semibold">Project</th>
+                <th className="px-3 py-2 font-semibold">Description</th>
                 <th className="px-3 py-2 font-semibold">Stage</th>
                 <th className="px-3 py-2 font-semibold">Location</th>
                 <th className="px-3 py-2 font-semibold">Team</th>
@@ -659,6 +573,9 @@ function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
                       <span className="truncate font-semibold">{p.name}</span>
                     </span>
                   </td>
+                  <td className="px-3 py-2.5 text-muted-foreground">
+                    <span className="block truncate">{p.description || '—'}</span>
+                  </td>
                   <td className="whitespace-nowrap px-3 py-2.5">
                     <span className="inline-flex items-center gap-1.5">
                       <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">{p.stage}</span>
@@ -668,7 +585,7 @@ function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
                   <td className="px-3 py-2.5"><LocationChip label={p.location_label} /></td>
                   <td className="px-3 py-2.5"><Avatars assignees={p.assignees} max={3} /></td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-xs text-muted-foreground">{fmtDate(p.start_date)}</td>
-                  <td className="px-3 py-2.5"><div className="flex justify-end"><CardFlags project={p} /></div></td>
+                  <td className="px-3 py-2.5"><div className="flex justify-end"><SingleStatus project={p} /></div></td>
                 </tr>
               ))}
             </tbody>

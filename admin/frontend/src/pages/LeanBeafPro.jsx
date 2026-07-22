@@ -7,7 +7,7 @@
 // Team-shared: every non-pending user sees and edits everything (R01).
 // Mobile-first per MOBILE_FIRST.md — the team drives this from phones.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -36,7 +36,15 @@ export default function LeanBeafPro() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const view = VIEWS.includes(searchParams.get('view')) ? searchParams.get('view') : 'dashboard';
+  // List filter + Board focus-stage live in the URL so the dashboard tiles
+  // and movement rows can deep-link into a filtered list / a specific
+  // Kanban column (and so those views are shareable / back-button friendly).
+  const listFilter = searchParams.get('filter') || 'all';
+  const boardStage = searchParams.get('stage') || null;
+  // Switching views via the tabs resets any tile-driven filter/stage.
   const setView = (v) => setSearchParams(v === 'dashboard' ? {} : { view: v });
+  const goToList = (filter) => setSearchParams({ view: 'list', filter });
+  const goToBoardStage = (stage) => setSearchParams(stage ? { view: 'board', stage } : { view: 'board' });
   const [newOpen, setNewOpen] = useState(false);
 
   return (
@@ -77,9 +85,20 @@ export default function LeanBeafPro() {
         ))}
       </div>
 
-      {view === 'dashboard' && <DashboardView onOpenArchive={() => setView('archive')} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
-      {view === 'list' && <ListView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
-      {view === 'board' && <BoardView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
+      {view === 'dashboard' && (
+        <DashboardView
+          onOpenArchive={() => setView('archive')}
+          onOpenProject={(id) => navigate(`/lean-beaf/${id}`)}
+          onDrillTile={goToList}
+          onDrillStage={goToBoardStage}
+        />
+      )}
+      {view === 'list' && (
+        <ListView filter={listFilter} onFilterChange={goToList} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
+      )}
+      {view === 'board' && (
+        <BoardView focusStage={boardStage} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
+      )}
       {view === 'archive' && <ArchiveView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
 
       <NewProjectDialog open={newOpen} onOpenChange={setNewOpen} onCreated={(p) => navigate(`/lean-beaf/${p.id}`)} />
@@ -89,7 +108,7 @@ export default function LeanBeafPro() {
 
 // ---- Dashboard ----
 
-function DashboardView({ onOpenArchive, onOpenProject }) {
+function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -126,21 +145,29 @@ function DashboardView({ onOpenArchive, onOpenProject }) {
   if (err) return <p className="text-sm text-destructive">{err}</p>;
   if (!data) return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
 
+  // Each tile drills into the List view with the matching filter. "Locations
+  // live" has no dedicated filter, so it lands on the full (unfiltered) list.
   const tiles = [
-    { label: 'Active projects', value: data.tiles.active_projects, cls: '' },
-    { label: 'Moved since meeting', value: data.tiles.moved_since_meeting, cls: 'text-primary' },
-    { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '' },
-    { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400' },
+    { label: 'Active projects', value: data.tiles.active_projects, cls: '', filter: 'all' },
+    { label: 'Moved since meeting', value: data.tiles.moved_since_meeting, cls: 'text-primary', filter: 'moved' },
+    { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '', filter: 'stalled' },
+    { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400', filter: 'all' },
   ];
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         {tiles.map((t) => (
-          <div key={t.label} className="rounded-xl border bg-card p-4">
+          <button
+            key={t.label}
+            type="button"
+            onClick={() => onDrillTile(t.filter)}
+            className="rounded-xl border bg-card p-4 text-left transition-colors hover:border-primary/50 focus-visible:border-primary/50 focus-visible:outline-none"
+            title={`View ${t.label.toLowerCase()} in the list`}
+          >
             <span className="text-xs font-semibold text-muted-foreground">{t.label}</span>
             <b className={`block text-2xl font-extrabold ${t.cls}`}>{t.value}</b>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -171,13 +198,22 @@ function DashboardView({ onOpenArchive, onOpenProject }) {
         <CardContent className="divide-y">
           {data.moved.length === 0 && <p className="py-2 text-sm text-muted-foreground">Nothing has moved yet.</p>}
           {data.moved.map((p) => (
-            <button key={p.id} type="button" onClick={() => onOpenProject(p.id)} className="flex w-full items-start gap-2 py-2.5 text-left">
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => onDrillStage(p.stage)}
+              className="flex w-full items-start gap-2 py-2.5 text-left"
+              title={`Open the ${p.stage} column on the board`}
+            >
               <div className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-semibold">{p.name}</span>
                 <span className="block text-xs text-muted-foreground">
                   {p.changes.length ? p.changes.join(' · ') : 'Updated'}
                 </span>
               </div>
+              <span className="mt-0.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
+                {p.stage}
+              </span>
               <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
             </button>
           ))}
@@ -190,8 +226,15 @@ function DashboardView({ onOpenArchive, onOpenProject }) {
         <CardContent className="divide-y">
           {data.stalled.length === 0 && <p className="py-2 text-sm text-muted-foreground">Everything has moved. 🎉</p>}
           {data.stalled.map((p) => (
-            <button key={p.id} type="button" onClick={() => onOpenProject(p.id)} className="flex w-full items-center gap-2 py-2.5 text-left">
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => onDrillStage(p.stage)}
+              className="flex w-full items-center gap-2 py-2.5 text-left"
+              title={`Open the ${p.stage} column on the board`}
+            >
               <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
+              <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary whitespace-nowrap">{p.stage}</span>
               <span className="text-xs font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">
                 {p.days_idle != null ? `${p.days_idle}d idle` : 'idle'}
               </span>
@@ -324,12 +367,16 @@ function MeetingScheduleDialog({ open, onOpenChange, schedule, onSaved }) {
 
 // ---- List ----
 
-function ListView({ onOpenProject }) {
+function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
   const [projects, setProjects] = useState(null);
-  const [filter, setFilter] = useState('all');
   const [err, setErr] = useState('');
+  // `filter` is owned by the URL (so dashboard tiles can deep-link here);
+  // changing a chip updates the URL via onFilterChange, which re-renders
+  // this view with the new filter.
+  const setFilter = (f) => onFilterChange?.(f);
 
   useEffect(() => {
+    setProjects(null);
     const f = filter === 'all' ? undefined : filter;
     api.lbpProjects({ filter: f })
       .then((d) => setProjects(d.projects))
@@ -372,13 +419,17 @@ function ListView({ onOpenProject }) {
 
 // ---- Board (drag card → next column advances stage + prompts scope) ----
 
-function BoardView({ onOpenProject }) {
+function BoardView({ focusStage, onOpenProject }) {
   const { toast } = useToast();
   const [projects, setProjects] = useState(null);
   const [err, setErr] = useState('');
   const [dragId, setDragId] = useState(null);
   const [scopePrompt, setScopePrompt] = useState(null); // {project} after a stage move
   const [locations, setLocations] = useState([]);
+  // Column focus: when the dashboard deep-links here (?stage=MVP), scroll that
+  // column into view and pulse a highlight so the eye lands on it.
+  const colRefs = useRef({});
+  const [highlight, setHighlight] = useState(null);
 
   const load = useCallback(() => {
     api.lbpProjects().then((d) => setProjects(d.projects)).catch((e) => setErr(e.message));
@@ -387,6 +438,16 @@ function BoardView({ onOpenProject }) {
     load();
     api.lbpLocations().then((d) => setLocations(d.locations || [])).catch(() => {});
   }, [load]);
+
+  useEffect(() => {
+    if (!focusStage || !projects) return undefined;
+    const el = colRefs.current[focusStage];
+    if (!el) return undefined;
+    el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    setHighlight(focusStage);
+    const t = setTimeout(() => setHighlight(null), 2200);
+    return () => clearTimeout(t);
+  }, [focusStage, projects]);
 
   const moveTo = async (projectId, stage) => {
     const project = projects.find((p) => p.id === projectId);
@@ -416,7 +477,10 @@ function BoardView({ onOpenProject }) {
           return (
             <div
               key={stage}
-              className="w-[240px] shrink-0 rounded-xl border bg-muted/30 p-2"
+              ref={(el) => { colRefs.current[stage] = el; }}
+              className={`w-[240px] shrink-0 rounded-xl border bg-muted/30 p-2 transition-shadow ${
+                highlight === stage ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
+              }`}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
@@ -425,7 +489,7 @@ function BoardView({ onOpenProject }) {
               }}
             >
               <div className="mb-2 flex items-center justify-between px-1">
-                <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{stage}</span>
+                <span className={`text-xs font-bold uppercase tracking-wide ${highlight === stage ? 'text-primary' : 'text-muted-foreground'}`}>{stage}</span>
                 <span className="text-xs font-bold text-primary">{cards.length}</span>
               </div>
               <div className="flex min-h-[60px] flex-col gap-2">

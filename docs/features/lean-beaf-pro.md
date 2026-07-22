@@ -203,9 +203,15 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     to the Briefs log). Hidden for pending accounts.
   - Dashboard: five stat tiles (the fifth, "Last meeting", opens a meeting hub
     modal — Mark-now + schedules + history/audit), the rollout process-map
-    directly under them, then the **AI Brief** panel (Daily / Since / Leadership
-    to review + Generate with AI) which fills the remaining height up to a max.
-    Every Lean BEAF Pro view now uses the full content width (like the board).
+    directly under them (stages stretch to fill the full width), then the
+    **AI Brief** panel (Daily / Since / Leadership to review + Generate with AI)
+    which fills the remaining height up to a max. The brief panel has a left
+    ~20% "Recent activity" rail listing active projects newest-action-first
+    (clipped to what fits vertically), and the brief text on the right. Every
+    Lean BEAF Pro view uses the full content width (like the board).
+  - List view is a dense, SharePoint-style table: one single-line row per
+    project (Project / Stage / Location / Team / Started / Status), a sticky
+    header, `table-fixed` so columns always fit + truncate, filling the space.
   - Timezone handling: meeting markers are stored as UTC ISO and rendered in the
     viewer's local timezone (relative + absolute). Recurring-schedule times are
     interpreted in UTC server-side (`latestScheduleOccurrence` uses UTC date

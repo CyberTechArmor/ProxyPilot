@@ -7,7 +7,7 @@
 // Team-shared: every non-pending user sees and edits everything (R01).
 // Mobile-first per MOBILE_FIRST.md — the team drives this from phones.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams, useOutletContext } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -27,8 +27,8 @@ import {
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
-  NewProjectDialog, timeAgo, fmtDateTimeLocal, scheduleLocalLabel,
-  schedulesSummaryLocal, localScheduleToUtc,
+  NewProjectDialog, timeAgo, fmtDate, fmtDateTimeLocal, scheduleLocalLabel,
+  schedulesSummaryLocal, localScheduleToUtc, Avatars, LocationChip,
 } from '@/components/lbp/shared';
 import BriefText from '@/components/lbp/BriefText';
 
@@ -183,24 +183,25 @@ function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage
         <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
           <ArrowRight className="h-3.5 w-3.5" /> Rollout pipeline
         </div>
-        <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+        {/* stages stretch to fill the whole width (equal columns, chevrons between). */}
+        <div className="flex items-stretch gap-1">
           {data.pipeline.map((s, i) => (
-            <div key={s.stage} className="flex items-center">
+            <Fragment key={s.stage}>
               <button
                 type="button"
                 onClick={() => onDrillStage(s.stage)}
-                className={`flex min-w-[64px] flex-col items-center rounded-lg border px-2 py-2 text-center transition-colors hover:border-primary/60 focus-visible:border-primary/60 focus-visible:outline-none ${
+                className={`flex flex-1 basis-0 flex-col items-center rounded-lg border px-2 py-3 text-center transition-colors hover:border-primary/60 focus-visible:border-primary/60 focus-visible:outline-none ${
                   s.count === 0 ? 'border-border/60 bg-background/40' : 'border-primary/30 bg-primary/5'
                 }`}
                 title={`Open the ${s.stage} column on the board`}
               >
-                <b className={`text-lg leading-none ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
+                <b className={`text-xl leading-none ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
                 <span className="mt-1 text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
               </button>
               {i < data.pipeline.length - 1 && (
-                <ChevronRight className="mx-0.5 h-4 w-4 shrink-0 text-muted-foreground/40" />
+                <span className="flex shrink-0 items-center"><ChevronRight className="h-4 w-4 text-muted-foreground/40" /></span>
               )}
-            </div>
+            </Fragment>
           ))}
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
@@ -231,6 +232,13 @@ function BriefReview({ onOpenProject }) {
   const [loading, setLoading] = useState(false);
   const [aiResult, setAiResult] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [recent, setRecent] = useState([]); // active projects, newest action first
+
+  useEffect(() => {
+    api.lbpProjects()
+      .then((d) => setRecent([...(d.projects || [])].sort((a, b) => String(b.last_activity_at || '').localeCompare(String(a.last_activity_at || '')))))
+      .catch(() => {});
+  }, []);
 
   const load = useCallback((m) => {
     setMode(m);
@@ -300,19 +308,44 @@ function BriefReview({ onOpenProject }) {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
-        {(loading || aiLoading) ? (
-          <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-        ) : brief ? (
-          <BriefText text={brief.text} refs={refs} onOpen={openArea} />
-        ) : (
-          <p className="text-sm text-muted-foreground">Pick a brief above to review the latest movement.</p>
-        )}
-        {aiOn && (
-          <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
-            <Sparkles className="h-3 w-3" /> AI
-          </span>
-        )}
+      <div className="flex min-h-0 flex-1 gap-3">
+        {/* left ~20% — most recent projects by last action; only what fits
+            vertically is shown (the list is clipped, not scrolled). */}
+        <aside className="hidden w-1/5 min-w-[150px] max-w-[260px] flex-col overflow-hidden rounded-lg border border-border/60 bg-background/40 sm:flex">
+          <div className="shrink-0 border-b border-border/60 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Recent activity</div>
+          <div className="flex flex-col overflow-hidden">
+            {recent.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">No projects yet.</p>
+            ) : recent.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => openArea(p.id)}
+                className="shrink-0 border-b border-border/40 px-3 py-2 text-left transition-colors hover:bg-accent/50"
+                title={p.name}
+              >
+                <span className="block truncate text-sm font-semibold">{p.name}</span>
+                <span className="block truncate text-[11px] text-muted-foreground">{p.stage} · {p.last_activity_at ? timeAgo(p.last_activity_at) : '—'}</span>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        {/* brief text */}
+        <div className="relative min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
+          {(loading || aiLoading) ? (
+            <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+          ) : brief ? (
+            <BriefText text={brief.text} refs={refs} onOpen={openArea} />
+          ) : (
+            <p className="text-sm text-muted-foreground">Pick a brief above to review the latest movement.</p>
+          )}
+          {aiOn && (
+            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
+              <Sparkles className="h-3 w-3" /> AI
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
@@ -568,7 +601,7 @@ function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
   ];
 
   return (
-    <div className="space-y-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex gap-2 overflow-x-auto pb-1">
         {chips.map(([key, label]) => (
           <button
@@ -588,11 +621,60 @@ function ListView({ filter = 'all', onFilterChange, onOpenProject }) {
       {projects && projects.length === 0 && (
         <p className="py-8 text-center text-sm text-muted-foreground">No projects match this filter.</p>
       )}
-      <div className="flex flex-col gap-2.5">
-        {(projects || []).map((p) => (
-          <ProjectCard key={p.id} project={p} onClick={() => onOpenProject(p.id)} />
-        ))}
-      </div>
+      {projects && projects.length > 0 && (
+        // Dense, single-line-per-record table with a sticky header — fills the
+        // space and stays information-dense. Scrolls horizontally on narrow.
+        <div className="min-h-0 flex-1 overflow-auto rounded-xl border">
+          {/* table-fixed so columns always fit the available width and truncate
+              cleanly (no clipped last column when the assistant is docked). */}
+          <table className="w-full min-w-[560px] table-fixed border-collapse text-sm">
+            <colgroup>
+              <col />
+              <col className="w-[104px]" />
+              <col className="w-[26%]" />
+              <col className="w-[84px]" />
+              <col className="w-[96px]" />
+              <col className="w-[104px]" />
+            </colgroup>
+            <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
+              <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-3 py-2 font-semibold">Project</th>
+                <th className="px-3 py-2 font-semibold">Stage</th>
+                <th className="px-3 py-2 font-semibold">Location</th>
+                <th className="px-3 py-2 font-semibold">Team</th>
+                <th className="whitespace-nowrap px-3 py-2 font-semibold">Started</th>
+                <th className="px-3 py-2 text-right font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((p) => (
+                <tr
+                  key={p.id}
+                  onClick={() => onOpenProject(p.id)}
+                  className="cursor-pointer border-t border-border/60 transition-colors hover:bg-accent/50"
+                >
+                  <td className="px-3 py-2.5">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      {p.pinned && <Pin className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                      <span className="truncate font-semibold">{p.name}</span>
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">{p.stage}</span>
+                      <span className="text-[11px] text-muted-foreground">{(p.stage_index ?? 0) + 1}/7</span>
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5"><LocationChip label={p.location_label} /></td>
+                  <td className="px-3 py-2.5"><Avatars assignees={p.assignees} max={3} /></td>
+                  <td className="whitespace-nowrap px-3 py-2.5 text-xs text-muted-foreground">{fmtDate(p.start_date)}</td>
+                  <td className="px-3 py-2.5"><div className="flex justify-end"><CardFlags project={p} /></div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

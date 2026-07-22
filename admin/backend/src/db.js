@@ -5,7 +5,7 @@ import { mkdirSync, existsSync, chmodSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 import { migrateUnencryptedTotpSecrets, assertEncryptionKey } from './lib/secrets.js';
-import { lbpMigration700, lbpMigration701Blockers } from './lib/lean-beaf-schema.js';
+import { lbpMigration700, lbpMigration701Blockers, lbpMigration702BoardOrder } from './lib/lean-beaf-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -105,6 +105,7 @@ export function getDb() {
 //               lib/lean-beaf-schema.js; block 700 is reserved for LBP.
 //   701 Lean BEAF Pro — lbp_blockers (blocked flag + break-barrier audit
 //               trail; one row per block→resolve cycle).
+//   702 Lean BEAF Pro — lbp_projects.board_pos (manual Kanban column order).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1830,6 +1831,7 @@ export function initDatabase() {
   // Lean BEAF Pro (block 700) — see lib/lean-beaf-schema.js.
   runMigration(db, 700, 'lean_beaf_pro_core', lbpMigration700);
   runMigration(db, 701, 'lean_beaf_pro_blockers', lbpMigration701Blockers);
+  runMigration(db, 702, 'lean_beaf_pro_board_order', lbpMigration702BoardOrder);
 
   console.log('Database initialized');
 }

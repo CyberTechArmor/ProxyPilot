@@ -1840,6 +1840,8 @@ export const api = {
     request(`/lbp/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   lbpSetStage: (id, stage) =>
     request(`/lbp/projects/${id}/stage`, { method: 'POST', body: JSON.stringify({ stage }) }),
+  lbpReorder: (stage, orderedIds) =>
+    request('/lbp/projects/reorder', { method: 'POST', body: JSON.stringify({ stage, ordered_ids: orderedIds }) }),
   lbpSetScope: (id, scope) =>
     request(`/lbp/projects/${id}/scope`, { method: 'PUT', body: JSON.stringify(scope) }),
   lbpSetAssignees: (id, user_ids) =>

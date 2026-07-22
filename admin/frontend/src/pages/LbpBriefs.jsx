@@ -7,8 +7,72 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { Loader2, ArrowLeft, ScrollText, Sparkles, ChevronRight, Sun } from 'lucide-react';
-import { fmtDate } from '@/components/lbp/shared';
+import { Loader2, ArrowLeft, ScrollText, Sparkles, ChevronRight, Sun, Wand2, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { fmtDate, timeAgo } from '@/components/lbp/shared';
+
+function formatUsd(n) {
+  const v = Number(n) || 0;
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+const RUN_MODE_LABELS = { daily: 'Daily', since_meeting: 'Since meeting', leadership: 'Leadership' };
+
+// AI generation audit — every restyle run: who ran it, the model, tokens, cost.
+function AiRunLog() {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    api.lbpBriefRuns().then(setData).catch((e) => setErr(e.message));
+  }, []);
+
+  if (err) return null;
+  if (!data) return null;
+
+  const totals = data.totals || { runs: 0, cost_usd: 0 };
+
+  return (
+    <section className="rounded-xl border bg-card p-4">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
+          <Wand2 className="h-4 w-4" />
+        </span>
+        <b className="text-sm">AI generation log</b>
+        <span className="ml-auto text-[11px] text-muted-foreground">
+          {totals.runs} run{totals.runs === 1 ? '' : 's'} · {formatUsd(totals.cost_usd)} total
+        </span>
+      </div>
+      {data.runs.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No AI briefs generated yet. Use “Generate with AI” on the dashboard to restyle a grounded brief.</p>
+      ) : (
+        <div className="-mx-1 overflow-x-auto">
+          <div className="min-w-[520px] divide-y">
+            <div className="grid grid-cols-[1fr,auto,auto,auto,auto] gap-2 px-1 pb-1.5 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+              <span>Who · mode</span><span>Model</span><span className="text-right">Tokens</span><span className="text-right">Cost</span><span className="text-right">When</span>
+            </div>
+            {data.runs.map((r) => (
+              <div key={r.id} className="grid grid-cols-[1fr,auto,auto,auto,auto] items-center gap-2 px-1 py-2 text-xs">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {r.ok ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
+                  <span className="min-w-0">
+                    <b className="block truncate font-semibold">{r.username || 'unknown'}</b>
+                    <span className="text-[10px] text-muted-foreground">{RUN_MODE_LABELS[r.mode] || r.mode}{r.ok ? '' : ' · fell back'}</span>
+                  </span>
+                </span>
+                <span className="truncate font-mono text-[10px] text-muted-foreground">{r.model}</span>
+                <span className="text-right font-mono text-[10px] text-muted-foreground">{(r.input_tokens || 0).toLocaleString()}/{(r.output_tokens || 0).toLocaleString()}</span>
+                <span className="text-right font-semibold">{formatUsd(r.cost_usd)}</span>
+                <span className="text-right text-[10px] text-muted-foreground">{timeAgo(r.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function windowLabel(from, to) {
   if (from && to) return `${fmtDate(from)} → ${fmtDate(to)}`;
@@ -92,6 +156,7 @@ export default function LbpBriefs() {
       {data && (
         <>
           <BriefCard brief={data.today} icon={Sun} onOpenBoard={openProject} />
+          <AiRunLog />
           <h2 className="pt-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Between meetings</h2>
           {data.periods.map((p, i) => (
             <BriefCard key={`${p.from}-${p.to}-${i}`} brief={p} onOpenBoard={openProject} />

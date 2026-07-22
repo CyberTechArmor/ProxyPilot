@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { migrateUnencryptedTotpSecrets, assertEncryptionKey } from './lib/secrets.js';
 import {
   lbpMigration700, lbpMigration701Blockers, lbpMigration702BoardOrder, lbpMigration703Schedules,
+  lbpMigration704BriefRuns,
 } from './lib/lean-beaf-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
@@ -110,6 +111,8 @@ export function getDb() {
 //   702 Lean BEAF Pro — lbp_projects.board_pos (manual Kanban column order).
 //   703 Lean BEAF Pro — lbp_schedules (multiple recurring meeting schedules,
 //               daily|weekly; migrates the legacy single weekly schedule).
+//   704 Lean BEAF Pro — lbp_brief_runs (AI brief generation audit: who ran
+//               it, mode, model, token usage, computed cost).
 const SCHEMA_MIGRATIONS = [];
 
 function ensureSchemaMigrationsTable(db) {
@@ -1837,6 +1840,7 @@ export function initDatabase() {
   runMigration(db, 701, 'lean_beaf_pro_blockers', lbpMigration701Blockers);
   runMigration(db, 702, 'lean_beaf_pro_board_order', lbpMigration702BoardOrder);
   runMigration(db, 703, 'lean_beaf_pro_schedules', lbpMigration703Schedules);
+  runMigration(db, 704, 'lean_beaf_pro_brief_runs', lbpMigration704BriefRuns);
 
   console.log('Database initialized');
 }

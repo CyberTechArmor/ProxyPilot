@@ -481,6 +481,43 @@ export function openBlockersByProject() {
   return map;
 }
 
+// ---- AI brief run audit (migration 704) ----
+
+// Record one AI brief generation. `ok` is true only when the model's text was
+// actually used (false on error or a fall-back to the deterministic brief).
+export function recordBriefRun({ userId, username, mode, model, inputTokens = 0, outputTokens = 0, costUsd = 0, ok = false, error = null }) {
+  const r = getDb().prepare(`
+    INSERT INTO lbp_brief_runs
+      (workspace_id, user_id, username, mode, model, input_tokens, output_tokens, cost_usd, ok, error, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    WORKSPACE_ID, userId ?? null, username ?? null, mode, model,
+    inputTokens || 0, outputTokens || 0, costUsd || 0, ok ? 1 : 0, error ?? null, nowIso(),
+  );
+  return getDb().prepare(`SELECT * FROM lbp_brief_runs WHERE id = ?`).get(r.lastInsertRowid);
+}
+
+export function listBriefRuns({ limit = 50 } = {}) {
+  return getDb().prepare(`SELECT * FROM lbp_brief_runs ORDER BY created_at DESC, id DESC LIMIT ?`).all(limit);
+}
+
+// Lifetime totals for the audit header (all runs, and successful ones).
+export function briefRunTotals() {
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS runs,
+           COALESCE(SUM(cost_usd), 0) AS cost_usd,
+           COALESCE(SUM(input_tokens), 0) AS input_tokens,
+           COALESCE(SUM(output_tokens), 0) AS output_tokens
+      FROM lbp_brief_runs
+  `).get();
+  return {
+    runs: row.runs || 0,
+    cost_usd: Math.round((row.cost_usd || 0) * 1e6) / 1e6,
+    input_tokens: row.input_tokens || 0,
+    output_tokens: row.output_tokens || 0,
+  };
+}
+
 // ---- files ----
 
 export function addFile(projectId, { original_name, stored_name, mime, size_bytes, uploadedBy }) {

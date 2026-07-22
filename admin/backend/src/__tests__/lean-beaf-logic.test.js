@@ -22,6 +22,8 @@ import {
   buildBrief, formatMetricValue, summarizeScopeChange, validateLocation,
   validateBlocker, validateBreakBarrier, blockerDurationDays,
   dueScheduleMarkers, describeSchedules, buildWindowBrief, buildBriefsFeed,
+  estimateBriefCost, citationTokens, citationsGroundedIn,
+  briefSystemPrompt, briefUserPrompt, LBP_MODEL_PRICING, DEFAULT_BRIEF_MODEL,
 } from '../lib/lean-beaf-logic.js';
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -404,4 +406,47 @@ test('location hierarchy: region → pod → site', () => {
   assert.equal(validateLocation({ name: 'X', kind: 'site', parent: { kind: 'region' } }).ok, false);
   assert.equal(validateLocation({ name: '', kind: 'site' }).ok, false);
   assert.equal(validateLocation({ name: 'X', kind: 'city' }).ok, false);
+});
+
+// ---- AI brief restyle (pure helpers; R07 grounding safety net) ----
+
+test('estimateBriefCost prices from token usage (Haiku default)', () => {
+  const r = estimateBriefCost({ model: 'claude-haiku-4-5', inputTokens: 1_000_000, outputTokens: 1_000_000 });
+  // $1/1M in + $5/1M out = $6 for 1M each.
+  assert.equal(r.cost_usd, 6);
+  assert.equal(r.priced, true);
+  // Opus is pricier.
+  assert.equal(estimateBriefCost({ model: 'claude-opus-4-8', inputTokens: 1_000_000, outputTokens: 0 }).cost_usd, 5);
+  // Unknown model → Haiku-floor estimate, flagged not-priced (still returns a cost).
+  const unknown = estimateBriefCost({ model: 'made-up', inputTokens: 1_000_000, outputTokens: 0 });
+  assert.equal(unknown.priced, false);
+  assert.equal(unknown.cost_usd, 1);
+  // Pricing table + default are consistent.
+  assert.ok(LBP_MODEL_PRICING[DEFAULT_BRIEF_MODEL]);
+});
+
+test('citationTokens extracts activity/report references', () => {
+  const toks = citationTokens('Moved [activity #12], reported X [report #3] and [activity #12] again');
+  assert.deepEqual([...toks].sort(), ['activity#12', 'report#3']);
+});
+
+test('citationsGroundedIn rejects an AI rewrite that invents a citation (R07)', () => {
+  const source = '1 project moved. • A: Stage MVP → Testing [activity #7]';
+  // Faithful restyle — same citations, different prose → grounded.
+  assert.equal(citationsGroundedIn('Project A advanced to Testing [activity #7].', source), true);
+  // Invented a report citation not in the source → NOT grounded (must fall back).
+  assert.equal(citationsGroundedIn('Project A advanced [activity #7]; impact up 40% [report #99].', source), false);
+  // No citations at all is trivially grounded (nothing to invent).
+  assert.equal(citationsGroundedIn('Nothing moved this period.', source), true);
+});
+
+test('brief prompts constrain the model to grounded restyle', () => {
+  const sys = briefSystemPrompt();
+  assert.match(sys, /Never state any number/);
+  assert.match(sys, /citation token/);
+  const user = briefUserPrompt({ mode: 'leadership', groundedText: '2 at MVP [activity #1]' });
+  assert.match(user, /Leadership report/);
+  assert.match(user, /\[activity #1\]/);
+  // Empty facts still produce a safe, non-empty prompt.
+  assert.match(briefUserPrompt({ mode: 'daily', groundedText: '' }), /No activity on record/);
 });

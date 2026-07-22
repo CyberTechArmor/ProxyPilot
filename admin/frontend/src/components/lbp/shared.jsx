@@ -30,6 +30,8 @@ export const fmtDate = (iso) => {
 
 export const timeAgo = (iso) => {
   if (!iso) return '—';
+  // Server stores UTC ISO; compare against the client clock and render relative.
+  // Clamp a slightly-future timestamp (minor clock skew) to "just now".
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return 'just now';
   if (mins < 60) return `${mins}m ago`;
@@ -38,6 +40,57 @@ export const timeAgo = (iso) => {
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 };
+
+// Full date + time in the viewer's local timezone (server sends UTC ISO).
+export const fmtDateTimeLocal = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
+
+// ---- schedules: stored in UTC, shown/entered in the viewer's local time ----
+
+// A Date at one occurrence of the schedule, interpreting time_hhmm (+ weekly
+// day_of_week) as UTC. Reference week is arbitrary — callers only read the
+// wall-clock fields off it.
+function scheduleSampleDate(schedule) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(schedule?.time_hhmm || ''));
+  if (!m) return null;
+  const d = new Date();
+  d.setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
+  if (schedule.frequency !== 'daily') {
+    const dow = Number(schedule.day_of_week);
+    if (Number.isInteger(dow)) d.setUTCDate(d.getUTCDate() + ((dow - d.getUTCDay() + 7) % 7));
+  }
+  return d;
+}
+
+// "Daily 4:00 AM" / "Mon 10:00 AM" in the viewer's local timezone.
+export function scheduleLocalLabel(schedule) {
+  const d = scheduleSampleDate(schedule);
+  if (!d) return '';
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (schedule?.frequency === 'daily') return `Daily ${time}`;
+  return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+}
+
+export function schedulesSummaryLocal(schedules = []) {
+  const active = (schedules || []).filter((s) => s.active);
+  if (!active.length) return null;
+  return active.map(scheduleLocalLabel).join(' · ');
+}
+
+// Convert a locally-picked (weekday, HH:MM) to the UTC fields the API stores.
+export function localScheduleToUtc({ frequency, dow, hhmm }) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(hhmm || ''));
+  if (!m) return { day_of_week: frequency === 'daily' ? null : Number(dow), time_hhmm: hhmm };
+  const d = new Date();
+  d.setHours(Number(m[1]), Number(m[2]), 0, 0); // interpret the picked time as LOCAL
+  if (frequency !== 'daily') d.setDate(d.getDate() + ((Number(dow) - d.getDay() + 7) % 7));
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return { day_of_week: frequency === 'daily' ? null : d.getUTCDay(), time_hhmm: `${hh}:${mm}` };
+}
 
 // ---- badges / chips ----
 

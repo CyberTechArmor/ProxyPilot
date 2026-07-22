@@ -33,8 +33,6 @@ import {
 import { Sparkles, Loader2, Wand2, ScrollText, Settings2, Send, X } from 'lucide-react';
 import BriefText from '@/components/lbp/BriefText';
 
-const BRIEF_MODE_LABEL = { daily: 'Daily brief', since_meeting: 'Since last meeting', leadership: 'Leadership report' };
-
 function formatUsd(n) {
   const v = Number(n) || 0;
   if (v === 0) return '$0.00';
@@ -62,19 +60,15 @@ export default function AiAssistant({ open, onOpen, onClose }) {
   const { toast } = useToast();
   const isAdmin = user?.role === 'admin';
 
-  const [brief, setBrief] = useState(null);
-  const [briefMode, setBriefMode] = useState('since_meeting');
-  const [briefLoading, setBriefLoading] = useState(false);
+  // Pure chat now — the brief (with its Daily / Since / Leadership options and
+  // the Generate button) lives on the dashboard; this panel is just grounded
+  // Q&A, available on every page.
   const [refs, setRefs] = useState(null);
-  const [aiResult, setAiResult] = useState(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiSettings, setAiSettings] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [askText, setAskText] = useState('');
   const [asking, setAsking] = useState(false);
   const [turns, setTurns] = useState([]);
   const threadRef = useRef(null);
-  const loadedRef = useRef(false);
 
   const openArea = (id, tab) => {
     navigate(`/lean-beaf/${id}${tab ? `?tab=${tab}` : ''}`);
@@ -83,53 +77,10 @@ export default function AiAssistant({ open, onOpen, onClose }) {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) onClose?.();
   };
 
-  const loadSettings = useCallback(() => {
-    api.lbpBriefSettings().then((d) => setAiSettings(d.settings)).catch(() => {});
-  }, []);
-
-  const loadBrief = useCallback((mode) => {
-    setBriefMode(mode);
-    setBriefLoading(true);
-    setAiResult(null);
-    api.lbpBrief(mode)
-      .then((d) => { setBrief(d.brief); setRefs(d.refs); })
-      .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
-      .finally(() => setBriefLoading(false));
-  }, [toast]);
-
-  // Load lazily the first time the panel is opened (no spend, one cheap GET —
-  // but don't fetch on every app load for a panel nobody opened).
-  useEffect(() => {
-    if (open && !loadedRef.current) {
-      loadedRef.current = true;
-      loadBrief('since_meeting');
-      loadSettings();
-    }
-  }, [open, loadBrief, loadSettings]);
-
   useEffect(() => {
     const el = threadRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [turns, asking, brief, briefLoading, aiLoading, open]);
-
-  const generateAi = async () => {
-    setAiLoading(true);
-    try {
-      const d = await api.lbpBriefAi(briefMode);
-      setBrief(d.brief);
-      setRefs(d.refs);
-      setAiResult(d.ai);
-      if (d.ai?.error === 'not_configured') {
-        toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.' });
-      } else if (d.ai?.fell_back) {
-        toast({ variant: 'destructive', title: 'Used the grounded brief', description: 'The AI rewrite was rejected; showing the deterministic version.' });
-      }
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
-    } finally {
-      setAiLoading(false);
-    }
-  };
+  }, [turns, asking, open]);
 
   const ask = async () => {
     const q = askText.trim();
@@ -156,8 +107,6 @@ export default function AiAssistant({ open, onOpen, onClose }) {
       setAsking(false);
     }
   };
-
-  const aiOn = aiResult && !aiResult.fell_back;
 
   return (
     <>
@@ -192,17 +141,8 @@ export default function AiAssistant({ open, onOpen, onClose }) {
             <Sparkles className="h-4 w-4" />
           </span>
           <b className="text-sm">Assistant</b>
+          <span className="hidden text-[11px] text-muted-foreground sm:inline">grounded Q&amp;A</span>
           <div className="ml-auto flex items-center gap-1">
-            <Button
-              size="sm"
-              className="h-8 bg-gradient-to-r from-purple-600 to-indigo-600 px-2.5 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
-              onClick={generateAi}
-              disabled={aiLoading || briefLoading}
-              title="Restyle the current brief with the model"
-            >
-              {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-              <span className="ml-1 hidden text-xs sm:inline">AI</span>
-            </Button>
             <button type="button" onClick={() => navigate('/lean-beaf/briefs')} title="All briefs + run log" className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
               <ScrollText className="h-4 w-4" />
             </button>
@@ -219,60 +159,24 @@ export default function AiAssistant({ open, onOpen, onClose }) {
 
         {/* thread */}
         <div ref={threadRef} className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
-          {/* in-chat suggestions — which brief to open */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-semibold text-muted-foreground">Briefs:</span>
-            {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership']].map(([mode, label]) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => loadBrief(mode)}
-                disabled={briefLoading || aiLoading}
-                className={cn(
-                  'rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-60',
-                  briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-primary',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {/* head: the brief itself */}
-          <ChatRow>
-            {(briefLoading || aiLoading) ? (
-              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Preparing the brief…</div>
-            ) : brief ? (
-              <>
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{BRIEF_MODE_LABEL[briefMode] || 'Brief'}</span>
-                  {aiOn && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
-                      <Sparkles className="h-3 w-3" /> AI
-                    </span>
-                  )}
-                </div>
-                <BriefText text={brief.text} refs={refs} onOpen={openArea} />
-                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                  {aiResult ? (
-                    aiResult.error === 'not_configured' ? (
-                      <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in AI settings.' : 'ask an admin.'}</span>
-                    ) : (
-                      <>
-                        <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
-                        <span>· {formatUsd(aiResult.cost_usd)}</span>
-                        {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback</span>}
-                      </>
-                    )
-                  ) : (
-                    <span>Record-grounded{aiSettings ? ` · AI: ${aiSettings.model}` : ''}</span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">Pick a brief above — or just ask a question below.</p>
-            )}
-          </ChatRow>
+          {/* empty state — a friendly prompt with example questions */}
+          {turns.length === 0 && !asking && (
+            <ChatRow>
+              <p className="text-sm">Ask me anything about your projects — I answer only from the recorded facts, and every figure stays cited.</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {["What's blocked right now?", 'Which projects moved this week?', 'What rolled out recently?'].map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => { setAskText(q); }}
+                    className="rounded-full border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </ChatRow>
+          )}
 
           {turns.map((t, i) => (
             t.role === 'user' ? (
@@ -326,7 +230,7 @@ export default function AiAssistant({ open, onOpen, onClose }) {
         </div>
       </aside>
 
-      <BriefAiSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={loadSettings} />
+      <BriefAiSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </>
   );
 }

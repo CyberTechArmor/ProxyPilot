@@ -8,7 +8,7 @@
 // Mobile-first per MOBILE_FIRST.md — the team drives this from phones.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useOutletContext } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -23,40 +23,36 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, Trash2, ArrowRight,
+  Loader2, Plus, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, Trash2, ArrowRight, Sparkles, Wand2,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
-  NewProjectDialog, timeAgo,
+  NewProjectDialog, timeAgo, fmtDateTimeLocal, scheduleLocalLabel,
+  schedulesSummaryLocal, localScheduleToUtc,
 } from '@/components/lbp/shared';
+import BriefText from '@/components/lbp/BriefText';
 
 const VIEWS = ['dashboard', 'list', 'board', 'archive'];
+const TABS = ['dashboard', 'list', 'board', 'assistant', 'archive'];
 
 export default function LeanBeafPro() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  // The docked assistant's control, provided by Layout (so we can offer it as a
+  // tab when there isn't room for the side panel).
+  const { setAssistant, assistantAvailable } = useOutletContext() || {};
   const view = VIEWS.includes(searchParams.get('view')) ? searchParams.get('view') : 'dashboard';
-  // List filter + Board focus-stage live in the URL so the dashboard tiles
-  // and movement rows can deep-link into a filtered list / a specific
-  // Kanban column (and so those views are shareable / back-button friendly).
   const listFilter = searchParams.get('filter') || 'all';
   const boardStage = searchParams.get('stage') || null;
-  // Switching views via the tabs resets any tile-driven filter/stage.
   const setView = (v) => setSearchParams(v === 'dashboard' ? {} : { view: v });
   const goToList = (filter) => setSearchParams({ view: 'list', filter });
   const goToBoardStage = (stage) => setSearchParams(stage ? { view: 'board', stage } : { view: 'board' });
   const [newOpen, setNewOpen] = useState(false);
 
-  // The Board uses the FULL content width (all 7 columns reachable); the other
-  // views cap to a centered ~1024px "measure" (readability / content well) so
-  // wide monitors don't stretch rows edge-to-edge. Header + tabs follow the
-  // active view's width so the chrome lines up with the content below.
-  const wide = view === 'board';
-  const measure = wide ? 'w-full' : 'mx-auto w-full max-w-5xl';
-
+  // Every view now uses the FULL content width (like the board), so the docked
+  // assistant leaves the app the most usable room.
   return (
-    <div className="w-full space-y-4">
-      <div className={`${measure} space-y-4`}>
+    <div className="flex w-full flex-1 flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -74,39 +70,53 @@ export default function LeanBeafPro() {
         </div>
       </div>
 
-      {/* view tabs — sticky segmented control, 4 equal columns */}
-      <div className="sticky top-14 z-30 grid grid-cols-4 gap-1 rounded-xl border bg-card p-1 md:top-0">
-        {VIEWS.map((v) => (
-          <button
-            key={v}
-            type="button"
-            onClick={() => setView(v)}
-            className={`rounded-lg px-1 py-2 text-sm font-semibold capitalize ${
-              view === v ? 'bg-primary/10 text-primary shadow-[inset_0_-2px_0] shadow-primary' : 'text-muted-foreground'
-            }`}
-          >
-            {v}
-          </button>
-        ))}
-      </div>
+      {/* view tabs — a sticky segmented control. The "Assistant" tab only shows
+          when the side dock isn't available (narrow screens); tapping it opens
+          the assistant so the AI is still reachable. */}
+      <div className="sticky top-14 z-30 flex gap-1 rounded-xl border bg-card p-1 md:top-0">
+        {TABS.map((t) => {
+          if (t === 'assistant') {
+            if (!assistantAvailable) return null;
+            return (
+              <button
+                key="assistant"
+                type="button"
+                onClick={() => setAssistant?.(true)}
+                className="flex flex-1 items-center justify-center gap-1 rounded-lg px-1 py-2 text-sm font-semibold text-muted-foreground lg:hidden"
+                title="Open the AI assistant"
+              >
+                <Sparkles className="h-3.5 w-3.5" /> Assistant
+              </button>
+            );
+          }
+          return (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setView(t)}
+              className={`flex-1 rounded-lg px-1 py-2 text-sm font-semibold capitalize ${
+                view === t ? 'bg-primary/10 text-primary shadow-[inset_0_-2px_0] shadow-primary' : 'text-muted-foreground'
+              }`}
+            >
+              {t}
+            </button>
+          );
+        })}
       </div>
 
       {view === 'board' ? (
         <BoardView focusStage={boardStage} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
+      ) : view === 'dashboard' ? (
+        <DashboardView
+          onOpenArchive={() => setView('archive')}
+          onOpenProject={(id, tab) => navigate(`/lean-beaf/${id}${tab ? `?tab=${tab}` : ''}`)}
+          onDrillTile={goToList}
+          onDrillStage={goToBoardStage}
+        />
+      ) : view === 'list' ? (
+        <ListView filter={listFilter} onFilterChange={goToList} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
       ) : (
-        <div className="mx-auto w-full max-w-5xl">
-          {view === 'dashboard' && (
-            <DashboardView
-              onOpenArchive={() => setView('archive')}
-              onDrillTile={goToList}
-              onDrillStage={goToBoardStage}
-            />
-          )}
-          {view === 'list' && (
-            <ListView filter={listFilter} onFilterChange={goToList} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
-          )}
-          {view === 'archive' && <ArchiveView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
-        </div>
+        <ArchiveView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
       )}
 
       <NewProjectDialog open={newOpen} onOpenChange={setNewOpen} onCreated={(p) => navigate(`/lean-beaf/${p.id}`)} />
@@ -116,10 +126,7 @@ export default function LeanBeafPro() {
 
 // ---- Dashboard ----
 
-// Compact date+time for the meeting history.
-const fmtDateTime = (iso) => { try { return new Date(iso).toLocaleString(); } catch { return iso; } };
-
-function DashboardView({ onOpenArchive, onDrillTile, onDrillStage }) {
+function DashboardView({ onOpenArchive, onOpenProject, onDrillTile, onDrillStage }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [meetingOpen, setMeetingOpen] = useState(false);
@@ -133,6 +140,7 @@ function DashboardView({ onOpenArchive, onDrillTile, onDrillStage }) {
   if (!data) return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
 
   const lastMeeting = data.meeting.current ? timeAgo(data.meeting.current.marked_at) : 'None yet';
+  const scheduleSummary = schedulesSummaryLocal(data.meeting.schedules);
 
   // Five tiles. The first four drill into the List; "Last meeting" is a text
   // tile that opens the meeting hub (mark now, schedules, history).
@@ -141,11 +149,11 @@ function DashboardView({ onOpenArchive, onDrillTile, onDrillStage }) {
     { label: 'Moved since meeting', value: data.tiles.moved_since_meeting, cls: 'text-primary', onClick: () => onDrillTile('moved'), title: 'View moved projects' },
     { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '', onClick: () => onDrillTile('stalled'), title: 'View stalled projects' },
     { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400', onClick: () => onDrillTile('all'), title: 'View projects' },
-    { label: 'Last meeting', value: lastMeeting, text: true, icon: CalendarCheck, sub: data.meeting.schedules_summary ? `Auto: ${data.meeting.schedules_summary}` : 'Tap to manage', onClick: () => setMeetingOpen(true), title: 'Meetings — mark now, schedules, history' },
+    { label: 'Last meeting', value: lastMeeting, text: true, icon: CalendarCheck, sub: scheduleSummary ? `Auto: ${scheduleSummary}` : 'Tap to manage', onClick: () => setMeetingOpen(true), title: 'Meetings — mark now, schedules, history' },
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-1 flex-col gap-4">
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
         {tiles.map((t) => (
           <button
@@ -201,13 +209,138 @@ function DashboardView({ onOpenArchive, onDrillTile, onDrillStage }) {
         </p>
       </div>
 
-      <p className="text-center text-xs text-muted-foreground">
-        The AI brief &amp; chat now live in the assistant — open it from the <b className="text-primary">Ask AI</b> button in the corner, on any page.
-      </p>
+      {/* AI brief — the three grounded briefs to review. Takes the remaining
+          height (up to a reasonable max). Ask-questions lives in the assistant. */}
+      <BriefReview onOpenProject={onOpenProject} />
 
       <MeetingHubDialog open={meetingOpen} onOpenChange={setMeetingOpen} onChanged={load} />
     </div>
   );
+}
+
+// The dashboard AI brief: Daily / Since meeting / Leadership to review, with an
+// optional AI restyle. Fills the remaining dashboard height (capped). Grounded
+// (R07) — citations + project names deep-link into the app.
+function BriefReview({ onOpenProject }) {
+  const { toast } = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const [brief, setBrief] = useState(null);
+  const [mode, setMode] = useState('since_meeting');
+  const [refs, setRefs] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  const load = useCallback((m) => {
+    setMode(m);
+    setLoading(true);
+    setAiResult(null);
+    api.lbpBrief(m)
+      .then((d) => { setBrief(d.brief); setRefs(d.refs); })
+      .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
+      .finally(() => setLoading(false));
+  }, [toast]);
+  useEffect(() => { load('since_meeting'); }, [load]);
+
+  const generate = async () => {
+    setAiLoading(true);
+    try {
+      const d = await api.lbpBriefAi(mode);
+      setBrief(d.brief);
+      setRefs(d.refs);
+      setAiResult(d.ai);
+      if (d.ai?.error === 'not_configured') {
+        toast({ variant: 'destructive', title: 'No model connected', description: isAdmin ? 'Add a model + API key under AI settings (in the assistant).' : 'Ask an admin to connect a model.' });
+      } else if (d.ai?.fell_back) {
+        toast({ variant: 'destructive', title: 'Used the grounded brief', description: 'The AI rewrite was rejected; showing the deterministic version.' });
+      }
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const openArea = (id, tab) => onOpenProject?.(id, tab);
+  const aiOn = aiResult && !aiResult.fell_back;
+
+  return (
+    <div className="flex max-h-[760px] min-h-[300px] flex-1 flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
+          <Sparkles className="h-5 w-5" />
+        </span>
+        <b className="text-base">AI Brief</b>
+        <span className="hidden text-[11px] text-muted-foreground sm:inline">every number cites its record · tap a citation to open it</span>
+        <div className="ml-auto flex items-center gap-2">
+          {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership']].map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => load(m)}
+              disabled={loading || aiLoading}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-60 ${
+                mode === m ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          <Button
+            size="sm"
+            className="h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
+            onClick={generate}
+            disabled={aiLoading || loading}
+            title="Restyle this grounded brief with the model"
+          >
+            {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
+            Generate with AI
+          </Button>
+        </div>
+      </div>
+
+      <div className="relative min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
+        {(loading || aiLoading) ? (
+          <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+        ) : brief ? (
+          <BriefText text={brief.text} refs={refs} onOpen={openArea} />
+        ) : (
+          <p className="text-sm text-muted-foreground">Pick a brief above to review the latest movement.</p>
+        )}
+        {aiOn && (
+          <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
+            <Sparkles className="h-3 w-3" /> AI
+          </span>
+        )}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        {aiResult ? (
+          aiResult.error === 'not_configured' ? (
+            <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in the assistant’s AI settings.' : 'ask an admin to connect one.'}</span>
+          ) : (
+            <>
+              <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
+              <span>· {formatUsd(aiResult.cost_usd)} this run</span>
+              <span>· {aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
+              {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
+            </>
+          )
+        ) : (
+          <span>Record-grounded · “Generate with AI” restyles it · ask follow-up questions in the assistant →</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// USD formatter for tiny per-run costs (fractions of a cent are common).
+function formatUsd(n) {
+  const v = Number(n) || 0;
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
 }
 
 // Meeting hub — everything meeting-related in one modal: mark now, manage the
@@ -278,7 +411,7 @@ function MeetingHubDialog({ open, onOpenChange, onChanged }) {
                   <CalendarCheck className={`h-4 w-4 shrink-0 ${m.source === 'schedule' ? 'text-muted-foreground' : 'text-primary'}`} />
                   <span className="min-w-0 flex-1">
                     <b className="text-sm">{timeAgo(m.marked_at)}</b>
-                    <span className="ml-1.5 text-xs text-muted-foreground">{fmtDateTime(m.marked_at)}</span>
+                    <span className="ml-1.5 text-xs text-muted-foreground">{fmtDateTimeLocal(m.marked_at)}</span>
                   </span>
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${m.source === 'schedule' ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'}`}>
                     {m.source === 'schedule' ? 'Auto' : 'Manual'}
@@ -329,10 +462,13 @@ function ScheduleManager({ onChanged }) {
   const add = async () => {
     setAdding(true);
     try {
+      // The picked day + time are in the viewer's local timezone; store as UTC
+      // so the schedule fires at a fixed instant regardless of server/viewer tz.
+      const utc = localScheduleToUtc({ frequency: freq, dow, hhmm: time });
       await api.lbpCreateSchedule({
         frequency: freq,
-        day_of_week: freq === 'weekly' ? Number(dow) : null,
-        time_hhmm: time,
+        day_of_week: utc.day_of_week,
+        time_hhmm: utc.time_hhmm,
         active: true,
       });
       changed();
@@ -357,7 +493,7 @@ function ScheduleManager({ onChanged }) {
           <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
             <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
               <CalendarClock className={`h-4 w-4 ${s.active ? 'text-primary' : 'text-muted-foreground'}`} />
-              {s.frequency === 'daily' ? 'Daily' : DOW_SHORT[s.day_of_week] ?? '?'} · {s.time_hhmm}
+              {scheduleLocalLabel(s)}
             </span>
             {!s.active && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">paused</span>}
             <div className="ml-auto flex items-center gap-1">

@@ -42,10 +42,11 @@ export default function Layout() {
   // Mobile sidebar drawer state
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Global Lean BEAF Pro AI assistant dock (right side, every page). Open state
-  // persists so it stays how the operator left it across reloads/navigation.
+  // Global Lean BEAF Pro AI assistant dock (right side, every page). Docked by
+  // default ("always there"); the operator can collapse it and the choice
+  // persists across reloads/navigation.
   const [assistantOpen, setAssistantOpen] = useState(
-    () => localStorage.getItem('lbp-assistant-open') === '1'
+    () => localStorage.getItem('lbp-assistant-open') !== '0'
   );
   const setAssistant = useCallback((v) => {
     setAssistantOpen(v);
@@ -578,7 +579,9 @@ export default function Layout() {
       )}>
         <SnapshotExportBanner />
         <div className="p-4 md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto">
-          <Outlet />
+          {/* Expose the assistant dock's state so routed pages (Lean BEAF Pro)
+              can surface it as a tab on narrow screens. */}
+          <Outlet context={{ assistantOpen, setAssistant, assistantAvailable: !isPending }} />
         </div>
       </main>
 

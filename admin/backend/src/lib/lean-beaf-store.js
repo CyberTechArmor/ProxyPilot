@@ -485,14 +485,14 @@ export function openBlockersByProject() {
 
 // Record one AI brief generation. `ok` is true only when the model's text was
 // actually used (false on error or a fall-back to the deterministic brief).
-export function recordBriefRun({ userId, username, mode, model, inputTokens = 0, outputTokens = 0, costUsd = 0, ok = false, error = null }) {
+export function recordBriefRun({ userId, username, mode, model, inputTokens = 0, outputTokens = 0, costUsd = 0, ok = false, error = null, outputText = null }) {
   const r = getDb().prepare(`
     INSERT INTO lbp_brief_runs
-      (workspace_id, user_id, username, mode, model, input_tokens, output_tokens, cost_usd, ok, error, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (workspace_id, user_id, username, mode, model, input_tokens, output_tokens, cost_usd, ok, error, output_text, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     WORKSPACE_ID, userId ?? null, username ?? null, mode, model,
-    inputTokens || 0, outputTokens || 0, costUsd || 0, ok ? 1 : 0, error ?? null, nowIso(),
+    inputTokens || 0, outputTokens || 0, costUsd || 0, ok ? 1 : 0, error ?? null, outputText ?? null, nowIso(),
   );
   return getDb().prepare(`SELECT * FROM lbp_brief_runs WHERE id = ?`).get(r.lastInsertRowid);
 }

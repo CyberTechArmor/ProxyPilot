@@ -139,10 +139,24 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
   - Cost is shown in the Brief section after each run (per-run USD + token
     counts, priced from `LBP_MODEL_PRICING`).
   - Every generation is audited in `lbp_brief_runs` (migration 704: who ran
-    it, mode, model, token usage, cost snapshot, ok/fell-back). Surfaced as
+    it, mode, model, token usage, cost snapshot, ok/fell-back) with the
+    generated brief text stored (migration 705, `output_text`). Surfaced as
     the "AI generation log" on the Briefs page (`GET /lbp/brief-runs`) with a
-    lifetime run count + total spend. Model settings live in app_settings, not
-    this table, so pricing changes never rewrite history.
+    lifetime run count + total spend; each row expands to re-read the exact
+    brief that run produced (the review area). Model settings live in
+    app_settings, not this table, so pricing changes never rewrite history.
+  - What's sent to the model (grounding provenance): ONLY the deterministic
+    grounded brief text, which `buildBrief` assembles server-side from stored
+    records — `lbp_projects` (names/stages), `lbp_activity` since the relevant
+    meeting marker (what moved, each `[activity #N]`), and `lbp_metric_reports`
+    for leadership mode (each `[report #N]`). The model gets the system prompt
+    (`briefSystemPrompt`) + a user message wrapping that grounded text
+    (`briefUserPrompt`) — no raw DB rows, no project internals beyond what the
+    grounded brief already states. Citation extraction (`citationTokens`) is
+    bracket-agnostic so it recognizes the deterministic brief's GROUPED form
+    (`[activity #1, activity #2, activity #3]`) as well as single brackets —
+    an earlier bracket-strict version found zero citations in the grouped
+    source and wrongly rejected every rewrite as ungrounded.
   - Endpoints: `POST /lbp/brief/ai` (generate + record), `GET /lbp/brief-runs`
     (audit), `GET`/`PUT /lbp/brief-settings`. The Anthropic call reuses the
     vetted provider client in `mock2/model-client.js` (raw Messages API over

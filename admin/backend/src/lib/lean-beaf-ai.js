@@ -143,6 +143,9 @@ export async function generateAiBrief({ grounded, userId = null, username = null
     userId, username, mode, model,
     inputTokens: input_tokens, outputTokens: output_tokens,
     costUsd: cost_usd, ok: res.ok && !fell_back, error,
+    // Persist what was actually shown (the accepted AI rewrite, or the grounded
+    // fallback) so the run can be re-read later on the Briefs page.
+    outputText: text,
   });
 
   return {

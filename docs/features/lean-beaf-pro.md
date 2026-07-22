@@ -177,16 +177,21 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     (activity → its Activity tab, report → its Metrics tab) via a `?tab=`
     param `LbpProjectDetail` reads. The link map (`buildBriefRefs`) ships with
     every brief/ask/run-log response.
-  - Ask (grounded Q&A): the "Ask" button opens an inline box; a question is
-    answered from `buildAskContext` — a cited facts document assembled from
+  - Chat setup: the Brief card is a conversation. The selected brief (Daily /
+    Since meeting / Leadership, or the AI restyle) is the opening assistant
+    message; a persistent composer at the bottom lets anyone go straight to
+    asking, and the input clears on send. Questions thread below as user
+    bubbles + grounded assistant answers, auto-scrolling to the newest. Answers
+    come from `buildAskContext` — a cited facts document assembled from
     `lbp_projects`, `lbp_activity`, `lbp_metric_reports` (each figure carries
     an `[activity #N]` / `[report #N]` citation). Same R07 posture as the
     brief: `askSystemPrompt` forbids uncited numbers and the
     `citationsGroundedIn` check rejects an answer citing a record not in the
     context. Each question is a recorded run (mode `question`, the Q+A stored
-    in `output_text`) so it's reviewable in the AI generation log. All AI/brief
-    controls (mode chips, Ask, Generate with AI, Briefs, settings) sit inline
-    in one row, with the meeting rhythm row directly above them.
+    in `output_text`) so it's reviewable in the AI generation log. The mode
+    chips + Generate with AI + Briefs + settings sit inline in one row, with
+    the meeting rhythm row directly above them; the rollout process-map is its
+    own card below the chat.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

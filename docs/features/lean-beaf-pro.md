@@ -188,10 +188,12 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     brief: `askSystemPrompt` forbids uncited numbers and the
     `citationsGroundedIn` check rejects an answer citing a record not in the
     context. Each question is a recorded run (mode `question`, the Q+A stored
-    in `output_text`) so it's reviewable in the AI generation log. The mode
-    chips + Generate with AI + Briefs + settings sit inline in one row, with
-    the meeting rhythm row directly above them; the rollout process-map is its
-    own card below the chat.
+    in `output_text`) so it's reviewable in the AI generation log. Dashboard
+    layout: stat tiles, then a dedicated meeting card (last-meeting line + Mark
+    meeting + Schedule), then the Brief chat card (Generate with AI / Briefs /
+    settings inline on the title row; the Daily / Since meeting / Leadership
+    picks are suggestion chips inside the chat that open that brief), then the
+    rollout process-map card last.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

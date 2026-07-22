@@ -285,55 +285,43 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
         ))}
       </div>
 
+      {/* meeting card — last meeting time + the two meeting buttons, its own
+          card now (extracted from the brief so the chat gets the space). */}
+      <div className="flex flex-wrap items-center gap-2.5 rounded-xl border bg-card p-4">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <CalendarCheck className="h-5 w-5" />
+        </span>
+        <div className="min-w-[150px] flex-1">
+          <b className="block text-sm">
+            {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
+          </b>
+          <span className="text-xs text-muted-foreground">
+            {data.meeting.schedules_summary
+              ? `Auto-marks: ${data.meeting.schedules_summary}`
+              : 'Movement is measured meeting-to-meeting'}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" className="h-10" onClick={markMeeting}>Mark meeting</Button>
+          <Button size="sm" variant="outline" className="h-10" onClick={() => setScheduleOpen(true)}>
+            <CalendarClock className="mr-1.5 h-4 w-4" /> Schedule
+          </Button>
+        </div>
+      </div>
+
       {/* AI brief — a chat. The brief is the first (assistant) message; the
           input below is always ready so anyone can go straight to asking. The
-          meeting rhythm sits right above the controls. Grounded (R07): numbers
-          cite their records; the AI only restyles / answers from those facts. */}
+          brief-mode picks are suggestion chips inside the chat. Grounded (R07):
+          numbers cite their records; the AI only restyles / answers from them. */}
       <div className="flex flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+        {/* header line — title + all brief/AI actions inline (saves vertical
+            space, opening the card up to the chat). */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
             <Sparkles className="h-5 w-5" />
           </span>
           <b className="text-base">Brief</b>
-          <span className="text-[11px] text-muted-foreground">chat grounded in your records · tap a citation to open it</span>
-        </div>
-
-        {/* meeting rhythm — kept right above the AI/brief controls. Marking a
-            meeting resets the "since meeting" window this brief summarizes. */}
-        <div className="mb-2.5 flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5">
-          <CalendarCheck className="h-4 w-4 shrink-0 text-primary" />
-          <div className="min-w-[150px] flex-1">
-            <b className="block text-xs">
-              {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
-            </b>
-            <span className="text-[11px] text-muted-foreground">
-              {data.meeting.schedules_summary
-                ? `Auto-marks: ${data.meeting.schedules_summary}`
-                : 'Movement is measured meeting-to-meeting'}
-            </span>
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" className="h-9" onClick={markMeeting}>Mark meeting</Button>
-            <Button size="sm" variant="outline" className="h-9" onClick={() => setScheduleOpen(true)}>
-              <CalendarClock className="mr-1.5 h-4 w-4" /> Schedule
-            </Button>
-          </div>
-        </div>
-
-        {/* one row: the brief-mode chips (which brief opens the chat) + actions. */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => loadBrief(mode)}
-              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+          <span className="hidden text-[11px] text-muted-foreground md:inline">chat grounded in your records · tap a citation to open it</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <Button
               size="sm"
@@ -357,7 +345,25 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
         </div>
 
         {/* chat thread — brief is the first message, questions thread below it. */}
-        <div ref={threadRef} className="flex max-h-[460px] min-h-[240px] flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
+        <div ref={threadRef} className="flex max-h-[520px] min-h-[280px] flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-border/60 bg-background/40 p-4">
+          {/* in-chat suggestions — which brief to open. Clicking triggers it. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-muted-foreground">Suggested briefs:</span>
+            {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => loadBrief(mode)}
+                disabled={briefLoading || aiLoading}
+                className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-60 ${
+                  briefMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-primary'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {/* head: the brief itself, as the opening assistant message */}
           <ChatRow role="assistant">
             {(briefLoading || aiLoading) ? (

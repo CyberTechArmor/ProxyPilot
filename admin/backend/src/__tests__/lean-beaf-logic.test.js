@@ -96,38 +96,39 @@ test('R04: moved iff last activity is after the marker; idle days otherwise; no 
 
 // ---- R05: markers accumulate; schedule auto-marks ----
 
-test('R05: latestScheduleOccurrence finds the most recent weekly occurrence', () => {
-  // 2026-07-22 is a Wednesday. Schedule: Mondays 09:00.
-  const now = new Date('2026-07-22T15:00:00');
+test('R05: latestScheduleOccurrence finds the most recent weekly occurrence (UTC)', () => {
+  // 2026-07-22 is a Wednesday. Schedule: Mondays 09:00 UTC. Times are UTC, so
+  // the test is timezone-independent (uses Z + getUTC*).
+  const now = new Date('2026-07-22T15:00:00Z');
   const occ = latestScheduleOccurrence({ active: 1, day_of_week: 1, time_hhmm: '09:00' }, now);
-  assert.equal(occ.getDay(), 1);
+  assert.equal(occ.getUTCDay(), 1);
   assert.ok(occ <= now);
   assert.equal(latestScheduleOccurrence({ active: 0, day_of_week: 1, time_hhmm: '09:00' }, now), null);
   assert.equal(latestScheduleOccurrence({ active: 1, day_of_week: 9, time_hhmm: '09:00' }, now), null);
 });
 
 test('R05: dueScheduleMarker fires only when the occurrence is newer than the latest marker', () => {
-  const now = new Date('2026-07-22T15:00:00');
+  const now = new Date('2026-07-22T15:00:00Z');
   const schedule = { active: 1, day_of_week: 1, time_hhmm: '09:00' };
   const due = dueScheduleMarker({ schedule, lastMarkerAt: '2026-07-01T00:00:00.000Z', now });
   assert.ok(due, 'a marker is due');
   assert.equal(dueScheduleMarker({ schedule, lastMarkerAt: now.toISOString(), now }), null);
 });
 
-test('R05: daily schedules resolve to today (or yesterday before the time)', () => {
-  const morning = new Date('2026-07-22T15:00:00'); // after 09:00
+test('R05: daily schedules resolve to today (or yesterday before the time), UTC', () => {
+  const morning = new Date('2026-07-22T15:00:00Z'); // after 09:00 UTC
   const daily = { active: 1, frequency: 'daily', time_hhmm: '09:00' };
   const occ = latestScheduleOccurrence(daily, morning);
-  assert.equal(occ.getFullYear(), 2026);
-  assert.equal(occ.getDate(), 22);
-  assert.equal(occ.getHours(), 9);
+  assert.equal(occ.getUTCFullYear(), 2026);
+  assert.equal(occ.getUTCDate(), 22);
+  assert.equal(occ.getUTCHours(), 9);
   // before today's time → yesterday's occurrence
-  const early = new Date('2026-07-22T06:00:00');
-  assert.equal(latestScheduleOccurrence(daily, early).getDate(), 21);
+  const early = new Date('2026-07-22T06:00:00Z');
+  assert.equal(latestScheduleOccurrence(daily, early).getUTCDate(), 21);
 });
 
 test('R05: multiple schedules produce one due marker each (deduped), newest-inclusive', () => {
-  const now = new Date('2026-07-20T15:00:00'); // Monday
+  const now = new Date('2026-07-20T15:00:00Z'); // Monday (UTC)
   const schedules = [
     { active: 1, frequency: 'daily', time_hhmm: '08:00' },
     { active: 1, frequency: 'weekly', day_of_week: 1, time_hhmm: '14:00' }, // Mon 14:00

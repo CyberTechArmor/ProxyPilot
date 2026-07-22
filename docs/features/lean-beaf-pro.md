@@ -189,18 +189,31 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
     `citationsGroundedIn` check rejects an answer citing a record not in the
     context. Each question is a recorded run (mode `question`, the Q+A stored
     in `output_text`) so it's reviewable in the AI generation log.
-  - Global assistant dock: the brief chat is a right-docked assistant available
-    on EVERY page (`components/lbp/AiAssistant.jsx`, rendered once in
-    `Layout.jsx` so the conversation persists across navigation). Collapsed
-    it's a floating "Ask AI" bubble in the corner; open it slides in. Responsive
-    by design — at `lg`+ it's a ~360px side panel and the app content reflows to
-    its left (Layout adds matching right padding); below `lg` it's a
-    full-content overlay (either the app or the chat, never a cramped both). It
-    holds the brief-mode suggestion chips, the brief, the Q&A thread, the
-    composer, Generate with AI, the Briefs link and (admin) model settings.
-    Hidden for pending accounts. Dashboard layout is now just: five stat tiles
-    (the fifth, "Last meeting", opens a meeting hub modal with Mark-now +
-    schedules + history/audit) and the rollout process-map directly under them.
+  - Global assistant dock: a right-docked, grounded-Q&A chat available on EVERY
+    page (`components/lbp/AiAssistant.jsx`, rendered once in `Layout.jsx` so the
+    conversation persists across navigation). Docked by default ("always
+    there"); the operator can collapse it to a floating "Ask AI" bubble and the
+    choice persists. Responsive — at `lg`+ it's a ~360px side panel and the app
+    content reflows to its left (Layout adds matching right padding); below `lg`
+    it's a full-content overlay, and on the Lean BEAF Pro page it's surfaced as
+    an "Assistant" tab (before Archive) so the AI stays reachable when there's
+    no room to dock. The panel is now PURE Q&A — the brief itself (with its
+    Daily / Since meeting / Leadership options + Generate with AI) lives on the
+    dashboard; the panel just answers questions (still grounded + cited, saved
+    to the Briefs log). Hidden for pending accounts.
+  - Dashboard: five stat tiles (the fifth, "Last meeting", opens a meeting hub
+    modal — Mark-now + schedules + history/audit), the rollout process-map
+    directly under them, then the **AI Brief** panel (Daily / Since / Leadership
+    to review + Generate with AI) which fills the remaining height up to a max.
+    Every Lean BEAF Pro view now uses the full content width (like the board).
+  - Timezone handling: meeting markers are stored as UTC ISO and rendered in the
+    viewer's local timezone (relative + absolute). Recurring-schedule times are
+    interpreted in UTC server-side (`latestScheduleOccurrence` uses UTC date
+    methods, so a schedule fires at a fixed instant regardless of server tz) and
+    the client formats them into local time for display (`scheduleLocalLabel`)
+    and converts a locally-picked time back to UTC on save (`localScheduleToUtc`)
+    — so the schedule label, the history, and the firing all agree in the
+    viewer's own clock.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

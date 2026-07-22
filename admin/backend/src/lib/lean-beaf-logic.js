@@ -166,25 +166,30 @@ export function summarizeActivityEntries(entries = []) {
 // (Date), or null. Pure (no clock); the store passes now and compares to the
 // latest marker to decide whether to lazily materialize a schedule marker.
 // Frequency defaults to 'weekly' so pre-703 callers keep their behavior.
+// Time (and weekly day_of_week) are interpreted in UTC, NOT the server's local
+// timezone — so a schedule fires at the same absolute instant regardless of
+// where the server runs, and the client formats it into the viewer's own
+// timezone for display. (Interpreting in server-local time made "13:45" fire at
+// an instant that then rendered as a different wall-clock on the client.)
 export function latestScheduleOccurrence(schedule, now) {
   if (!schedule || !schedule.active) return null;
   const m = /^(\d{2}):(\d{2})$/.exec(String(schedule.time_hhmm || ''));
   if (!m) return null;
   const occ = new Date(now.getTime());
-  occ.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  occ.setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
   const freq = schedule.frequency || 'weekly';
   if (freq === 'daily') {
     // Today's occurrence, or yesterday's if today's time hasn't arrived yet.
-    if (occ.getTime() > now.getTime()) occ.setDate(occ.getDate() - 1);
+    if (occ.getTime() > now.getTime()) occ.setUTCDate(occ.getUTCDate() - 1);
     return occ;
   }
   const dow = Number(schedule.day_of_week);
   if (!Number.isInteger(dow) || dow < 0 || dow > 6) return null;
   // Walk back to the scheduled weekday (0..6 days), then one more week if
   // today's occurrence is still in the future.
-  const back = (occ.getDay() - dow + 7) % 7;
-  occ.setDate(occ.getDate() - back);
-  if (occ.getTime() > now.getTime()) occ.setDate(occ.getDate() - 7);
+  const back = (occ.getUTCDay() - dow + 7) % 7;
+  occ.setUTCDate(occ.getUTCDate() - back);
+  if (occ.getTime() > now.getTime()) occ.setUTCDate(occ.getUTCDate() - 7);
   return occ;
 }
 

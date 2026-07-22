@@ -17,7 +17,8 @@ blockers are captured as activity/comments, not a field.
 
 - Backend: `admin/backend/src/lib/lean-beaf-logic.js` (pure decisions),
   `lean-beaf-store.js` (main-DB CRUD, `lbp_*` tables), `lean-beaf-schema.js`
-  (migration 700, registered in `db.js`; block 700 reserved),
+  (migrations 700–704, registered in `db.js`; block 700 reserved),
+  `lean-beaf-ai.js` (AI brief writer — settings, model call, run recording),
   `routes/lean-beaf.js` mounted at `/api/lbp`.
 - Frontend: nav tab "Lean BEAF Pro" (`/lean-beaf`), pages
   `LeanBeafPro.jsx` (Dashboard / List / Board / Archive) and
@@ -114,9 +115,40 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
   moved project citing its activity record ids (R07). Reached from the
   subtle "Briefs" button on the dashboard's Brief card. The dashboard's
   moved / no-movement lists were removed — the tiles drill into those — and
-  the Brief section was enlarged to fill the space.
-- AI reports render in-app only for now (deterministic, record-grounded —
-  no model call needed to satisfy R07).
+  the Brief section was enlarged to fill the space. The meeting rhythm
+  (last-meeting line + "Mark meeting" + "Schedule") is rolled into the Brief
+  card header — a brief *is* the meeting-to-meeting summary, so marking a
+  meeting there resets the window it covers. The Brief card also renders the
+  rollout pipeline as a left-to-right process-map (grounded stage counts,
+  each node jumping to its Kanban column).
+- AI brief writer (operator addition, 2026-07): the deterministic grounded
+  brief can be restyled by a real model — the cheap, fast Claude
+  (`claude-haiku-4-5` by default) — via an explicit "Generate with AI" button
+  (never auto-run, so no surprise spend). Grounding still holds by
+  construction: the model is handed ONLY the grounded facts and told to
+  restyle them, preserving every `[activity #N]` / `[report #N]` citation and
+  inventing no numbers; server-side we then reject any rewrite that introduces
+  a citation absent from the source (`citationsGroundedIn`) and fall back to
+  the deterministic text. So R07 holds even with a model in the loop, and the
+  brief is never empty (falls back when unconfigured / erroring / ungrounded).
+  - Model + API key are admin-configurable (gear on the Brief card →
+    `PUT /lbp/brief-settings`, admin-only; `GET` is open and non-secret). The
+    key is stored encrypted at rest (secrets.js) in `app_settings`
+    (`lbp_brief_model`, `lbp_brief_api_key_enc`), falling back to
+    `ANTHROPIC_API_KEY` from the environment.
+  - Cost is shown in the Brief section after each run (per-run USD + token
+    counts, priced from `LBP_MODEL_PRICING`).
+  - Every generation is audited in `lbp_brief_runs` (migration 704: who ran
+    it, mode, model, token usage, cost snapshot, ok/fell-back). Surfaced as
+    the "AI generation log" on the Briefs page (`GET /lbp/brief-runs`) with a
+    lifetime run count + total spend. Model settings live in app_settings, not
+    this table, so pricing changes never rewrite history.
+  - Endpoints: `POST /lbp/brief/ai` (generate + record), `GET /lbp/brief-runs`
+    (audit), `GET`/`PUT /lbp/brief-settings`. The Anthropic call reuses the
+    vetted provider client in `mock2/model-client.js` (raw Messages API over
+    the agent proxy), the same one `cve-research.js` reuses; the pure pieces
+    (pricing, citation grounding, prompt text) live in `lean-beaf-logic.js` so
+    they stay unit-testable without better-sqlite3.
 - Feedback entries are editable by their author for 24h, then locked.
 
 ## Scope notes

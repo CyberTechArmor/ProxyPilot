@@ -344,3 +344,31 @@ export function lbpMigration703Schedules(d) {
     }
   }
 }
+
+// Migration 704 (additive) — AI brief run audit. The dashboard brief can be
+// restyled by a real model (Haiku 4.5 by default); each generation records one
+// row here (who ran it, the mode, the model, token usage, the computed cost)
+// so an admin can audit every run and total spend. Costs are stored as a
+// snapshot (cost_usd) so the audit stays stable even if pricing changes; tokens
+// are kept alongside for re-pricing. `ok` is 1 only when the AI text was used
+// (0 when it errored or fell back to the deterministic brief). Model settings
+// themselves live in app_settings (key encrypted via secrets.js), not here.
+export function lbpMigration704BriefRuns(d) {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS lbp_brief_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL DEFAULT 1,
+      user_id TEXT,
+      username TEXT,
+      mode TEXT NOT NULL,
+      model TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL NOT NULL DEFAULT 0,
+      ok INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_lbp_brief_runs_at ON lbp_brief_runs(created_at DESC)`);
+}

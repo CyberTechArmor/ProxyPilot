@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2,
+  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin, ScrollText, Trash2, Wand2, Settings2, ArrowRight,
 } from 'lucide-react';
 import {
   LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
@@ -120,37 +120,73 @@ export default function LeanBeafPro() {
 
 function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile, onDrillStage }) {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [brief, setBrief] = useState(null);
   const [briefMode, setBriefMode] = useState('since_meeting');
   const [briefLoading, setBriefLoading] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // AI restyle: explicit (a real model call costs money) — never auto-run.
+  const [aiResult, setAiResult] = useState(null); // { fell_back, cost_usd, model, error, ... }
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSettings, setAiSettings] = useState(null);
 
   const load = useCallback(() => {
     api.lbpOverview().then(setData).catch((e) => setErr(e.message));
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  const loadSettings = useCallback(() => {
+    api.lbpBriefSettings().then((d) => setAiSettings(d.settings)).catch(() => {});
+  }, []);
+  useEffect(() => { loadSettings(); }, [loadSettings]);
+
+  // Deterministic, record-grounded brief — free, no model call. Auto-loads so
+  // the section is never empty; the AI restyle is a separate, explicit action.
   const loadBrief = useCallback((mode) => {
     setBriefMode(mode);
     setBriefLoading(true);
+    setAiResult(null);
     api.lbpBrief(mode)
       .then((d) => setBrief(d.brief))
       .catch((e) => toast({ variant: 'destructive', title: 'Brief failed', description: e.message }))
       .finally(() => setBriefLoading(false));
   }, [toast]);
 
-  // The Brief is now the dashboard's centerpiece — generate one on load so it
-  // is never empty.
   useEffect(() => { loadBrief('since_meeting'); }, [loadBrief]);
+
+  // Restyle the current grounded brief with the model (records a run + cost).
+  const generateAi = async () => {
+    setAiLoading(true);
+    try {
+      const d = await api.lbpBriefAi(briefMode);
+      setBrief(d.brief);
+      setAiResult(d.ai);
+      if (d.ai?.error === 'not_configured') {
+        toast({
+          variant: 'destructive',
+          title: 'No model connected',
+          description: isAdmin ? 'Add a model + API key under AI settings.' : 'Ask an admin to connect a model in AI settings.',
+        });
+      } else if (d.ai?.fell_back) {
+        toast({ variant: 'destructive', title: 'Used the grounded brief', description: 'The AI rewrite was rejected; showing the deterministic version.' });
+      }
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'AI brief failed', description: e.message });
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   const markMeeting = async () => {
     try {
       await api.lbpMarkMeeting();
       toast({ title: 'Meeting marked', description: 'Movement now counts from this point.' });
       load();
-      setBrief(null);
+      loadBrief(briefMode);
     } catch (e) {
       toast({ variant: 'destructive', title: 'Could not mark meeting', description: e.message });
     }
@@ -167,6 +203,8 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
     { label: 'No movement', value: data.tiles.no_movement, cls: data.tiles.no_movement > 0 ? 'text-amber-600 dark:text-amber-400' : '', filter: 'stalled' },
     { label: 'Locations live', value: data.tiles.locations_live, cls: 'text-green-600 dark:text-green-400', filter: 'all' },
   ];
+
+  const aiOn = aiResult && !aiResult.fell_back;
 
   return (
     <div className="space-y-4">
@@ -185,47 +223,62 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
         ))}
       </div>
 
-      {/* meeting bar — shows all recurring schedules; the moved / no-movement
-          lists were removed because the tiles above already drill into them. */}
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4">
-        <CalendarCheck className="h-5 w-5 text-primary" />
-        <div className="min-w-[180px] flex-1">
-          <b className="block text-sm">
-            {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
-          </b>
-          <span className="text-xs text-muted-foreground">
-            {data.meeting.schedules_summary
-              ? `Auto-marks: ${data.meeting.schedules_summary}`
-              : 'Movement is measured meeting-to-meeting'}
-          </span>
-        </div>
-        <div className="flex gap-2">
-          <Button size="sm" className="h-10" onClick={markMeeting}>Mark meeting now</Button>
-          <Button size="sm" variant="outline" className="h-10" onClick={() => setScheduleOpen(true)}>
-            <CalendarClock className="mr-1.5 h-4 w-4" /> Schedule
-          </Button>
-        </div>
-      </div>
-
-      {/* AI brief — the dashboard centerpiece. Grounded (R07): numbers cite
-          their records. Grows to fill the space the removed lists left. */}
-      <div className="flex min-h-[360px] flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
+      {/* AI brief — the dashboard centerpiece. The meeting rhythm now lives in
+          its header (a brief IS the meeting-to-meeting summary, so this is
+          where marking a meeting belongs). Grounded (R07): numbers cite their
+          records; the AI only restyles those grounded facts. */}
+      <div className="flex min-h-[420px] flex-col rounded-xl border bg-gradient-to-br from-card to-muted/30 p-5">
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
             <Sparkles className="h-5 w-5" />
           </span>
           <b className="text-base">Brief</b>
           <span className="text-[11px] text-muted-foreground">every number cites its record</span>
-          <button
-            type="button"
-            onClick={onOpenBriefs}
-            className="ml-auto inline-flex items-center gap-1 rounded-full border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-            title="See all briefs (daily + between meetings)"
-          >
-            <ScrollText className="h-3.5 w-3.5" /> Briefs
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+                title="AI model settings"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onOpenBriefs}
+              className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+              title="See all briefs + the AI run log"
+            >
+              <ScrollText className="h-3.5 w-3.5" /> Briefs
+            </button>
+          </div>
         </div>
-        <div className="mb-3 flex flex-wrap gap-2">
+
+        {/* meeting rhythm — rolled into the brief header. Marking a meeting
+            resets the "since meeting" window this brief summarizes. */}
+        <div className="mb-3 flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5">
+          <CalendarCheck className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-[150px] flex-1">
+            <b className="block text-xs">
+              {data.meeting.current ? `Last meeting ${timeAgo(data.meeting.current.marked_at)}` : 'No meeting marked yet'}
+            </b>
+            <span className="text-[11px] text-muted-foreground">
+              {data.meeting.schedules_summary
+                ? `Auto-marks: ${data.meeting.schedules_summary}`
+                : 'Movement is measured meeting-to-meeting'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" className="h-9" onClick={markMeeting}>Mark meeting</Button>
+            <Button size="sm" variant="outline" className="h-9" onClick={() => setScheduleOpen(true)}>
+              <CalendarClock className="mr-1.5 h-4 w-4" /> Schedule
+            </Button>
+          </div>
+        </div>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
           {[['daily', 'Daily'], ['since_meeting', 'Since meeting'], ['leadership', 'Leadership report']].map(([mode, label]) => (
             <button
               key={mode}
@@ -238,42 +291,199 @@ function DashboardView({ onOpenArchive, onOpenProject, onOpenBriefs, onDrillTile
               {label}
             </button>
           ))}
+          <Button
+            size="sm"
+            className="ml-auto h-9 bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-600/90 hover:to-indigo-600/90"
+            onClick={generateAi}
+            disabled={aiLoading || briefLoading}
+            title="Restyle this grounded brief with the model"
+          >
+            {aiLoading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1.5 h-4 w-4" />}
+            Generate with AI
+          </Button>
         </div>
-        <div className="flex-1 rounded-lg border border-border/60 bg-background/40 p-4">
-          {briefLoading ? (
+
+        <div className="relative flex-1 rounded-lg border border-border/60 bg-background/40 p-4">
+          {(briefLoading || aiLoading) ? (
             <div className="flex h-full items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
           ) : brief ? (
             <p className="whitespace-pre-wrap text-sm leading-relaxed">{brief.text}</p>
           ) : (
             <p className="text-sm text-muted-foreground">Pick a mode to generate a brief from the activity + metric records.</p>
           )}
+          {aiOn && (
+            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-semibold text-purple-600 dark:text-purple-400" title={`Model: ${aiResult.model}`}>
+              <Sparkles className="h-3 w-3" /> AI
+            </span>
+          )}
         </div>
-      </div>
 
-      {/* pipeline strip — each stage jumps to its Kanban column */}
-      <div>
-        <div className="flex gap-1.5 overflow-x-auto pb-1">
-          {data.pipeline.map((s) => (
-            <button
-              key={s.stage}
-              type="button"
-              onClick={() => onDrillStage(s.stage)}
-              className="min-w-[60px] flex-1 rounded-lg border bg-card px-1.5 py-2 text-center transition-colors hover:border-primary/50 focus-visible:border-primary/50 focus-visible:outline-none"
-              title={`Open the ${s.stage} column on the board`}
-            >
-              <b className={`block text-lg ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
-              <span className="text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
-            </button>
-          ))}
+        {/* cost + model line — shown after an AI run (spend transparency). */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          {aiResult ? (
+            aiResult.error === 'not_configured' ? (
+              <span className="text-amber-600 dark:text-amber-400">No model connected — {isAdmin ? 'set one in AI settings.' : 'ask an admin to connect one.'}</span>
+            ) : (
+              <>
+                <span className="inline-flex items-center gap-1"><Wand2 className="h-3 w-3" /> {aiResult.model}</span>
+                <span>·</span>
+                <span>{formatUsd(aiResult.cost_usd)} this run</span>
+                <span>·</span>
+                <span>{aiResult.input_tokens.toLocaleString()} in / {aiResult.output_tokens.toLocaleString()} out</span>
+                {aiResult.fell_back && <span className="text-amber-600 dark:text-amber-400">· grounded fallback shown</span>}
+              </>
+            )
+          ) : (
+            <span>
+              Deterministic &amp; record-grounded. “Generate with AI” restyles it
+              {aiSettings ? ` with ${aiSettings.model}` : ''}.
+            </span>
+          )}
         </div>
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          {data.archived_count} finished project{data.archived_count === 1 ? '' : 's'} in the{' '}
-          <button type="button" className="font-bold text-primary" onClick={onOpenArchive}>Archive →</button>
-        </p>
+
+        {/* rollout process-map — the innovation pipeline as a flow. Each stage
+            jumps to its Kanban column. Grounded: counts come from the records. */}
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+            <ArrowRight className="h-3.5 w-3.5" /> Rollout pipeline
+          </div>
+          <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+            {data.pipeline.map((s, i) => (
+              <div key={s.stage} className="flex items-center">
+                <button
+                  type="button"
+                  onClick={() => onDrillStage(s.stage)}
+                  className={`flex min-w-[64px] flex-col items-center rounded-lg border px-2 py-2 text-center transition-colors hover:border-primary/60 focus-visible:border-primary/60 focus-visible:outline-none ${
+                    s.count === 0 ? 'border-border/60 bg-background/40' : 'border-primary/30 bg-primary/5'
+                  }`}
+                  title={`Open the ${s.stage} column on the board`}
+                >
+                  <b className={`text-lg leading-none ${s.count === 0 ? 'text-muted-foreground/50' : 'text-primary'}`}>{s.count}</b>
+                  <span className="mt-1 text-[10px] font-bold tracking-wide text-muted-foreground">{s.stage}</span>
+                </button>
+                {i < data.pipeline.length - 1 && (
+                  <ChevronRight className="mx-0.5 h-4 w-4 shrink-0 text-muted-foreground/40" />
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {data.archived_count} finished project{data.archived_count === 1 ? '' : 's'} in the{' '}
+            <button type="button" className="font-bold text-primary" onClick={onOpenArchive}>Archive →</button>
+          </p>
+        </div>
       </div>
 
       <MeetingScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} onSaved={load} />
+      <BriefAiSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={loadSettings} />
     </div>
+  );
+}
+
+// USD formatter for tiny per-run costs (fractions of a cent are common with
+// Haiku). Shows enough precision to be meaningful without scientific notation.
+function formatUsd(n) {
+  const v = Number(n) || 0;
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+// Admin-only AI model settings for the brief writer. Model picker + optional
+// API key (blank keeps the stored one) + optional base URL. Non-admins never
+// see the trigger; the backend also gates the PUT.
+function BriefAiSettingsDialog({ open, onOpenChange, onSaved }) {
+  const { toast } = useToast();
+  const [settings, setSettings] = useState(null);
+  const [model, setModel] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setApiKey('');
+    api.lbpBriefSettings()
+      .then((d) => { setSettings(d.settings); setModel(d.settings.model); })
+      .catch((e) => toast({ variant: 'destructive', title: 'Could not load settings', description: e.message }));
+  }, [open, toast]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const d = await api.lbpSaveBriefSettings({ model, api_key: apiKey || undefined });
+      setSettings(d.settings);
+      setApiKey('');
+      toast({ title: 'AI settings saved' });
+      onSaved?.();
+      onOpenChange(false);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Could not save', description: e.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const choices = settings?.choices || [];
+  const price = settings?.pricing?.[model];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>AI brief settings</DialogTitle>
+          <DialogDescription>
+            The brief writer restyles the grounded facts — it never invents numbers. Pick the model and connect an
+            Anthropic API key. The cheap, fast model (Haiku) is the default.
+          </DialogDescription>
+        </DialogHeader>
+
+        {!settings ? (
+          <div className="py-6"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label className="text-xs">Model</Label>
+              <Select value={model} onValueChange={setModel}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {choices.map((c) => <SelectItem key={c.id} value={c.id}>{c.label}</SelectItem>)}
+                  {!choices.some((c) => c.id === model) && model && (
+                    <SelectItem value={model}>{model}</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              {price && (
+                <p className="text-[11px] text-muted-foreground">
+                  ${price.in.toFixed(2)} / 1M input · ${price.out.toFixed(2)} / 1M output tokens
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <Label className="text-xs">Anthropic API key</Label>
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={settings.has_api_key ? (settings.key_source === 'env' ? 'Using ANTHROPIC_API_KEY from the environment' : '•••••• stored — leave blank to keep') : 'sk-ant-…'}
+                className="font-mono"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Stored encrypted at rest. Leave blank to keep the current key.
+                {settings.key_source === 'env' && ' Currently falling back to the ANTHROPIC_API_KEY environment variable.'}
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Cancel</Button>
+              <Button className="h-11 sm:h-10" onClick={save} disabled={saving || !model}>
+                {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Save
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -332,7 +542,7 @@ function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Meeting schedules</DialogTitle>
           <DialogDescription>
@@ -365,7 +575,7 @@ function MeetingScheduleDialog({ open, onOpenChange, onSaved }) {
 
         <div className="mt-2 rounded-lg border border-dashed p-3">
           <p className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Add a schedule</p>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
             <div className="space-y-1">
               <Label className="text-xs">Repeats</Label>
               <Select value={freq} onValueChange={setFreq}>

@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth.js';
 import { logAudit } from '../db.js';
 import * as store from '../lib/lean-beaf-store.js';
+import { getBriefAiSettings, saveBriefAiSettings, generateAiBrief } from '../lib/lean-beaf-ai.js';
 import {
   LBP_STAGES, LBP_METRIC_UNITS, LBP_TIME_EVENT_TYPES, LBP_SENTIMENTS,
   isArchived, assertMutableProject, validateNewProject,
@@ -305,19 +306,66 @@ export function createLeanBeafRouter() {
     });
   });
 
-  // Grounded briefs (R07): deterministic, every number cites its record.
-  router.get('/brief', (req, res) => {
-    const mode = ['daily', 'since_meeting', 'leadership'].includes(req.query.mode) ? req.query.mode : 'daily';
+  // Build the deterministic, record-grounded brief for a mode (R07). Shared by
+  // the free GET /brief and the AI restyle (POST /brief/ai) so both start from
+  // the exact same grounded facts.
+  const buildGroundedBrief = (rawMode) => {
+    const mode = ['daily', 'since_meeting', 'leadership'].includes(rawMode) ? rawMode : 'daily';
     store.ensureScheduledMarker();
     const markerAt = store.latestMarker()?.marked_at || null;
-    const brief = buildBrief({
+    return buildBrief({
       mode,
       projects: store.listProjects(),
       activityEntries: store.listActivitySince(mode === 'leadership' ? null : markerAt && mode === 'since_meeting' ? markerAt : null),
       metricReports: store.listAllMetricReports(),
       markerAt,
     });
-    res.json({ brief });
+  };
+
+  // Grounded briefs (R07): deterministic, every number cites its record. No
+  // model call, no spend — safe to auto-load on the dashboard.
+  router.get('/brief', (req, res) => {
+    res.json({ brief: buildGroundedBrief(req.query.mode) });
+  });
+
+  // AI-restyled brief (explicit spend): restyles the SAME grounded facts with
+  // the configured model, records the run for the audit, and returns the cost.
+  // Falls back to the deterministic text (and says so) when the model isn't
+  // configured, errors, or produces an ungrounded rewrite — the brief is never
+  // empty and R07 always holds.
+  router.post('/brief/ai', async (req, res) => {
+    const grounded = buildGroundedBrief(req.body?.mode);
+    const result = await generateAiBrief({
+      grounded, userId: req.user.id, username: req.user.username || null,
+    });
+    res.json({ brief: { ...grounded, text: result.text }, ai: result });
+  });
+
+  // AI brief generation audit — who ran each brief, the model, and the cost.
+  // Visible to every member (it's a shared team tool); model settings below are
+  // admin-only.
+  router.get('/brief-runs', (_req, res) => {
+    res.json({ runs: store.listBriefRuns({ limit: 60 }), totals: store.briefRunTotals() });
+  });
+
+  // AI model settings. GET is non-secret (members see which model + cost basis
+  // is in effect); PUT is admin-only (set the model / paste the API key).
+  router.get('/brief-settings', (_req, res) => {
+    res.json({ settings: getBriefAiSettings() });
+  });
+
+  const briefSettingsSchema = z.object({
+    model: z.string().min(1).max(120).optional(),
+    api_key: z.string().max(400).nullable().optional(),
+    base_url: z.string().max(400).nullable().optional(),
+  });
+
+  router.put('/brief-settings', requireAdmin, (req, res) => {
+    const parsed = briefSettingsSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid AI brief settings' });
+    const settings = saveBriefAiSettings(parsed.data);
+    logAudit(req.user.id, 'LBP_BRIEF_SETTINGS', 'lbp_workspace', 1, { model: settings.model, key_set: !!parsed.data.api_key }, req.ip);
+    res.json({ settings });
   });
 
   // ---- archive (R09, R12) ----

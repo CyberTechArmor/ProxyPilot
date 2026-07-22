@@ -551,6 +551,98 @@ export function formatMetricValue(value, unit) {
   }
 }
 
+// ---- AI brief restyle (pure helpers) ----
+//
+// The dashboard brief can be restyled by a real model (the cheap fast Claude —
+// Haiku 4.5 by default). The DB/network wiring lives in lean-beaf-ai.js; the
+// pure pieces below (pricing, citation grounding, prompt text) live here so
+// they stay unit-testable without better-sqlite3.
+
+export const DEFAULT_BRIEF_MODEL = 'claude-haiku-4-5';
+
+// USD per 1,000,000 tokens (input, output). Unknown models fall back to the
+// Haiku floor so a cost still shows (flagged estimated by estimateBriefCost).
+export const LBP_MODEL_PRICING = Object.freeze({
+  'claude-haiku-4-5': { in: 1.0, out: 5.0 },
+  'claude-sonnet-5': { in: 3.0, out: 15.0 },
+  'claude-sonnet-4-6': { in: 3.0, out: 15.0 },
+  'claude-opus-4-8': { in: 5.0, out: 25.0 },
+  'claude-opus-4-7': { in: 5.0, out: 25.0 },
+  'claude-opus-4-6': { in: 5.0, out: 25.0 },
+  'claude-fable-5': { in: 10.0, out: 50.0 },
+});
+
+// Price a run from token usage. `priced` is false when the model wasn't in the
+// table (cost is then a Haiku-floor estimate).
+export function estimateBriefCost({ model, inputTokens = 0, outputTokens = 0 } = {}) {
+  const priced = Object.prototype.hasOwnProperty.call(LBP_MODEL_PRICING, model);
+  const rate = LBP_MODEL_PRICING[model] || LBP_MODEL_PRICING[DEFAULT_BRIEF_MODEL];
+  const cost = (Number(inputTokens) / 1e6) * rate.in + (Number(outputTokens) / 1e6) * rate.out;
+  return { cost_usd: Math.round(cost * 1e6) / 1e6, priced };
+}
+
+// Citations in a brief, normalized to tokens like "activity#12" / "report#3".
+export function citationTokens(text) {
+  const out = new Set();
+  const re = /\[(activity|report)\s*#(\d+)\]/gi;
+  let m;
+  while ((m = re.exec(String(text || ''))) !== null) out.add(`${m[1].toLowerCase()}#${m[2]}`);
+  return out;
+}
+
+// True iff every citation in `candidate` also appears in `source` — the R07
+// safety check: a false result means an AI rewrite invented a record reference,
+// so its text must be rejected in favor of the deterministic brief.
+export function citationsGroundedIn(candidate, source) {
+  const src = citationTokens(source);
+  for (const tok of citationTokens(candidate)) {
+    if (!src.has(tok)) return false;
+  }
+  return true;
+}
+
+const BRIEF_MODE_TITLE = {
+  daily: 'Daily brief',
+  since_meeting: 'Since the last meeting',
+  leadership: 'Leadership report',
+};
+
+// System prompt: restyle grounded facts only, preserve citations, invent nothing.
+export function briefSystemPrompt() {
+  return [
+    'You are the brief writer for "Lean BEAF Pro", the Spec Ops team\'s innovation',
+    'project tracker. You will be handed a GROUNDED brief: facts already computed',
+    'from the team\'s own records, where every number is followed by a citation',
+    'token such as [activity #12] or [report #3].',
+    '',
+    'Rewrite these exact facts into a clear, engaging, well-structured brief for a',
+    'busy team lead. You may reorganize, add light connective prose, and use short',
+    'bullet points or a tight paragraph.',
+    '',
+    'HARD RULES (do not break):',
+    '1. Never state any number, count, percentage, dollar figure or date that is',
+    '   not already in the grounded facts. You are restyling, not analyzing.',
+    '2. Keep every citation token exactly as written ([activity #12], [report #3])',
+    '   and keep it attached to the fact it supports. Never invent a new citation.',
+    '3. Do not invent project names, outcomes, or events. Use only what is given.',
+    '4. If the facts say nothing moved, say so plainly — never fabricate progress.',
+    '5. No preamble ("Here is the brief"), no sign-off. Return only the brief.',
+    'Keep it concise — a short paragraph or a handful of bullets.',
+  ].join('\n');
+}
+
+export function briefUserPrompt({ mode, groundedText } = {}) {
+  const title = BRIEF_MODE_TITLE[mode] || 'Brief';
+  return [
+    `Mode: ${title}.`,
+    '',
+    'Grounded facts (rewrite these, preserving every citation):',
+    '"""',
+    String(groundedText || '').trim() || 'No activity on record.',
+    '"""',
+  ].join('\n');
+}
+
 // ---- scope change summary (R03) ----
 
 // Diff two scope shapes into a short human summary for the activity log.

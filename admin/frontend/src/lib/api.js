@@ -1831,6 +1831,12 @@ export const api = {
   lbpBriefsFeed: () => request('/lbp/briefs'),
   lbpOverview: () => request('/lbp/overview'),
   lbpBrief: (mode) => request(`/lbp/brief?mode=${encodeURIComponent(mode)}`),
+  lbpBriefAi: (mode) =>
+    request('/lbp/brief/ai', { method: 'POST', body: JSON.stringify({ mode }) }),
+  lbpBriefRuns: () => request('/lbp/brief-runs'),
+  lbpBriefSettings: () => request('/lbp/brief-settings'),
+  lbpSaveBriefSettings: (data) =>
+    request('/lbp/brief-settings', { method: 'PUT', body: JSON.stringify(data) }),
   lbpArchive: () => request('/lbp/archive'),
   lbpProjects: ({ filter, includeArchived } = {}) => {
     const params = new URLSearchParams();

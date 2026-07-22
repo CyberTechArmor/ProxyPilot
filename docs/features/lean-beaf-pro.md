@@ -204,14 +204,20 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
   - Dashboard: five stat tiles (the fifth, "Last meeting", opens a meeting hub
     modal — Mark-now + schedules + history/audit), the rollout process-map
     directly under them (stages stretch to fill the full width), then the
-    **AI Brief** panel (Daily / Since / Leadership to review + Generate with AI)
-    which fills the remaining height up to a max. The brief panel has a left
-    ~20% "Recent activity" rail listing active projects newest-action-first
-    (clipped to what fits vertically), and the brief text on the right. Every
-    Lean BEAF Pro view uses the full content width (like the board).
+    **AI Brief** panel which fills the remaining height up to a max. It has a
+    left ~25% "Recent activity" rail (active projects newest-action-first, all
+    status flags shown, clipped to what fits vertically) and — filling the rest
+    — the log of AI briefs/answers generated (`components/lbp/AiRunList.jsx`),
+    each tappable to re-read. Interactive brief generation + follow-up questions
+    live in the assistant; there are no Daily/Since/Leadership or Generate
+    buttons on the dashboard. The run log was removed from the Briefs page (it
+    lives here now). Every Lean BEAF Pro view uses the full content width.
   - List view is a dense, SharePoint-style table: one single-line row per
-    project (Project / Stage / Location / Team / Started / Status), a sticky
-    header, `table-fixed` so columns always fit + truncate, filling the space.
+    project (Project / Description / Stage / Location / Team / Started /
+    Status), a sticky header, `table-fixed` so columns always fit + truncate,
+    filling the space. The Status column shows a single most-impactful badge
+    (Blocked supersedes archived-outcome, which supersedes moved/idle) — unlike
+    the recent-activity rail cards, which show all flags.
   - Timezone handling: meeting markers are stored as UTC ISO and rendered in the
     viewer's local timezone (relative + absolute). Recurring-schedule times are
     interpreted in UTC server-side (`latestScheduleOccurrence` uses UTC date

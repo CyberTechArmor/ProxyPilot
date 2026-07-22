@@ -23,11 +23,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import {
   Loader2, ArrowLeft, Pin, PinOff, ChevronRight, CheckCircle2, XCircle, Play,
-  Link2, Trash2, Plus, Boxes, FileText, Download, Send, Pencil,
+  Link2, Trash2, Plus, Boxes, FileText, Download, Send, Pencil, Flag, ShieldOff, Clock,
 } from 'lucide-react';
 import {
   LBP_STAGES, StageStepper, ScopeEditor, CloseOutDialog, OutcomeBadge,
-  MovedBadge, LocationChip, Avatars, fmtDate, timeAgo,
+  MovedBadge, BlockedBadge, LocationChip, Avatars, fmtDate, timeAgo,
 } from '@/components/lbp/shared';
 
 export default function LbpProjectDetail() {
@@ -45,6 +45,8 @@ export default function LbpProjectDetail() {
   const [assigneesOpen, setAssigneesOpen] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [buildOpen, setBuildOpen] = useState(false);
+  const [blockOpen, setBlockOpen] = useState(false);
+  const [breakOpen, setBreakOpen] = useState(false);
 
   const load = useCallback(() => {
     api.lbpProject(id).then((d) => setProject(d.project)).catch((e) => setErr(e.message));
@@ -71,9 +73,19 @@ export default function LbpProjectDetail() {
   const advance = async () => {
     const next = LBP_STAGES[LBP_STAGES.indexOf(project.stage) + 1];
     if (!next) return;
+    changeStage(next);
+  };
+
+  // Jump to any stage — forward or backward — by clicking a stepper node.
+  const changeStage = async (stage) => {
+    if (stage === project.stage) return;
+    const back = LBP_STAGES.indexOf(stage) < LBP_STAGES.indexOf(project.stage);
     try {
-      await api.lbpSetStage(project.id, next);
-      toast({ title: `Advanced to ${next}`, description: 'Set the rollout scope below for the new stage.' });
+      await api.lbpSetStage(project.id, stage);
+      toast({
+        title: `${back ? 'Moved back to' : 'Moved to'} ${stage}`,
+        description: back ? 'Stage change logged.' : 'Set the rollout scope below for the new stage.',
+      });
       load();
     } catch (e) {
       toast({ variant: 'destructive', title: 'Stage change failed', description: e.message });
@@ -101,11 +113,20 @@ export default function LbpProjectDetail() {
             </>
           )}
         </div>
+        {/* Meta order: start date → days-since counter → rollout stage →
+            assignees (status flags sit just before the avatars). */}
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <LocationChip label={project.location_label} />
           <span className="inline-flex items-center gap-1 text-xs text-muted-foreground whitespace-nowrap">
-            <Play className="h-3 w-3" /> started {fmtDate(project.start_date)}
+            <Play className="h-3 w-3" /> {fmtDate(project.start_date)}
           </span>
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-bold text-muted-foreground whitespace-nowrap"
+            title="Days since it started"
+          >
+            <Clock className="h-3 w-3" />{project.span_days ?? 0}d
+          </span>
+          <LocationChip label={project.location_label} />
+          {project.blocked && <BlockedBadge days={project.blocked_days} reason={project.blocked_reason} />}
           <MovedBadge moved={project.moved} daysIdle={project.days_idle} archived={archived} />
           <button type="button" onClick={() => !archived && setAssigneesOpen(true)} className="inline-flex items-center">
             <Avatars assignees={project.assignees} />
@@ -135,7 +156,11 @@ export default function LbpProjectDetail() {
 
       {/* stage + scope */}
       <div className="rounded-xl border bg-card p-4">
-        <StageStepper stage={project.stage} />
+        {/* Clicking any node jumps to that stage (forward or backward). */}
+        <StageStepper stage={project.stage} onStageClick={archived ? undefined : changeStage} />
+        {!archived && (
+          <p className="mt-1 text-center text-[11px] text-muted-foreground">Tap any stage to move there — forward or back.</p>
+        )}
         {!archived && (
           <div className="mt-3 flex flex-wrap gap-2">
             {project.stage !== 'All' && (
@@ -149,6 +174,28 @@ export default function LbpProjectDetail() {
             <Button size="sm" variant="outline" className="h-10 text-red-600 dark:text-red-400" onClick={() => setCloseOpen(true)}>
               <XCircle className="mr-1.5 h-4 w-4" /> Abandon
             </Button>
+            {!project.blocked && (
+              <Button size="sm" variant="outline" className="h-10 text-red-600 dark:text-red-400" onClick={() => setBlockOpen(true)}>
+                <Flag className="mr-1.5 h-4 w-4" /> Blocked
+              </Button>
+            )}
+          </div>
+        )}
+        {/* Blocked banner: reason + since-date + Break barrier action. */}
+        {!archived && project.blocked && (
+          <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1 text-sm font-bold text-red-600 dark:text-red-400">
+                <Flag className="h-4 w-4" /> Blocked
+              </span>
+              <span className="text-xs text-muted-foreground">
+                since {fmtDate(project.blocked_at)} · {project.blocked_days ?? 0}d
+              </span>
+              <Button size="sm" className="ml-auto h-9" onClick={() => setBreakOpen(true)}>
+                <ShieldOff className="mr-1.5 h-4 w-4" /> Break barrier
+              </Button>
+            </div>
+            {project.blocked_reason && <p className="mt-1.5 text-sm">{project.blocked_reason}</p>}
           </div>
         )}
         {!archived && (
@@ -158,6 +205,11 @@ export default function LbpProjectDetail() {
           </div>
         )}
       </div>
+
+      {/* blocker audit trail */}
+      {(project.blockers || []).length > 0 && (
+        <BlockerHistory blockers={project.blockers} />
+      )}
 
       {/* LXC build project (Mock2 integration) */}
       <div className="rounded-xl border bg-card p-4">
@@ -244,7 +296,162 @@ export default function LbpProjectDetail() {
       <AssigneesDialog open={assigneesOpen} onOpenChange={setAssigneesOpen} project={project} onSaved={load} />
       <AddLinkDialog open={linkOpen} onOpenChange={setLinkOpen} project={project} onSaved={load} />
       <BuildLxcDialog open={buildOpen} onOpenChange={setBuildOpen} project={project} onLinked={load} />
+      <BlockDialog open={blockOpen} onOpenChange={setBlockOpen} project={project} onSaved={load} />
+      <BreakBarrierDialog open={breakOpen} onOpenChange={setBreakOpen} project={project} onSaved={load} />
     </div>
+  );
+}
+
+// ---- blocker audit trail ----
+
+function BlockerHistory({ blockers }) {
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <h3 className="mb-3 text-xs font-bold uppercase tracking-wide text-muted-foreground">Blocker history</h3>
+      <div className="divide-y">
+        {blockers.map((b) => (
+          <div key={b.id} className="py-2.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {b.resolved_at ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-bold text-muted-foreground">
+                  <ShieldOff className="h-3 w-3" /> Resolved
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-[11px] font-bold text-red-600 dark:text-red-400">
+                  <Flag className="h-3 w-3" /> Open
+                </span>
+              )}
+              <span className="text-xs text-muted-foreground">
+                {fmtDate(b.blocked_at)}
+                {b.resolved_at ? ` → ${fmtDate(b.resolved_at)}` : ' → now'} · {b.duration_days ?? 0}d
+              </span>
+            </div>
+            <p className="mt-1 text-sm">{b.reason}</p>
+            {b.resolved_note && <p className="mt-0.5 text-xs text-muted-foreground">Break note: {b.resolved_note}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BlockDialog({ open, onOpenChange, project, onSaved }) {
+  const { toast } = useToast();
+  const [reason, setReason] = useState('');
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setReason('');
+    setDate(new Date().toISOString().slice(0, 10));
+  }, [open]);
+
+  const submit = async () => {
+    if (!reason.trim()) return;
+    setSaving(true);
+    try {
+      await api.lbpBlock(project.id, { reason: reason.trim(), date });
+      toast({ title: 'Blocker flagged', description: project.name });
+      onOpenChange(false);
+      onSaved?.();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Could not flag blocker', description: e.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Flag className="h-4 w-4 text-red-600 dark:text-red-400" /> Flag a blocker</DialogTitle>
+          <DialogDescription>Raise a barrier on this project. It stays flagged until someone breaks the barrier.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="lbp-block-reason">Reason (required)</Label>
+            <textarea
+              id="lbp-block-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              rows={3}
+              placeholder="What's blocking this?"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="lbp-block-date">Blocked since</Label>
+            <Input id="lbp-block-date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Defaults to today — change it if the blocker started earlier.</p>
+          </div>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button className="h-11 sm:h-10" variant="destructive" onClick={submit} disabled={saving || !reason.trim()}>
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Flag blocker
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BreakBarrierDialog({ open, onOpenChange, project, onSaved }) {
+  const { toast } = useToast();
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setDate(new Date().toISOString().slice(0, 10));
+    setNote('');
+  }, [open]);
+
+  const submit = async () => {
+    setSaving(true);
+    try {
+      await api.lbpUnblock(project.id, { date, note: note.trim() || undefined });
+      toast({ title: 'Barrier broken', description: project.name });
+      onOpenChange(false);
+      onSaved?.();
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Could not break barrier', description: e.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-full h-full rounded-none sm:max-w-md sm:h-auto sm:rounded-lg overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><ShieldOff className="h-4 w-4" /> Break the barrier</DialogTitle>
+          <DialogDescription>Clears the blocked flag and records when it was resolved (kept in the blocker history).</DialogDescription>
+        </DialogHeader>
+        {project.blocked_reason && (
+          <p className="rounded-md bg-muted/50 p-2 text-sm text-muted-foreground">Blocker: {project.blocked_reason}</p>
+        )}
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="lbp-break-date">Resolved on</Label>
+            <Input id="lbp-break-date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="lbp-break-note">Note (optional)</Label>
+            <Input id="lbp-break-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="How was it unblocked?" />
+          </div>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" className="h-11 sm:h-10" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button className="h-11 sm:h-10" onClick={submit} disabled={saving}>
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Break barrier
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1204,6 +1411,8 @@ function ActivityTab({ project, archived }) {
       case 'file_added': return `added file ${p.name}`;
       case 'feedback_added': return `captured ${String(p.sentiment || '').replace('_', ' ')} feedback`;
       case 'learning_added': return 'recorded a learning';
+      case 'blocked': return `flagged a blocker${p.reason ? `: ${p.reason}` : ''}`;
+      case 'unblocked': return 'broke the barrier (unblocked)';
       case 'link_added': return 'linked a related project';
       case 'lxc_linked': return 'linked an LXC build project';
       case 'outcome_set': return p.outcome === 'rolled_out' ? 'closed the project — rolled out ✓' : 'closed the project — abandoned ✕';

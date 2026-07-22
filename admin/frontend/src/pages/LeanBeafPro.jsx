@@ -23,10 +23,10 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon,
+  Loader2, Plus, Sparkles, CalendarCheck, CalendarClock, ChevronRight, Rocket, Archive as ArchiveIcon, Pin,
 } from 'lucide-react';
 import {
-  LBP_STAGES, ProjectCard, MovedBadge, ScopeEditor,
+  LBP_STAGES, ProjectCard, MovedBadge, CardFlags, ScopeEditor,
   NewProjectDialog, timeAgo,
 } from '@/components/lbp/shared';
 
@@ -47,11 +47,16 @@ export default function LeanBeafPro() {
   const goToBoardStage = (stage) => setSearchParams(stage ? { view: 'board', stage } : { view: 'board' });
   const [newOpen, setNewOpen] = useState(false);
 
+  // The Board uses the FULL content width (all 7 columns reachable); the other
+  // views cap to a centered ~1024px "measure" (readability / content well) so
+  // wide monitors don't stretch rows edge-to-edge. Header + tabs follow the
+  // active view's width so the chrome lines up with the content below.
+  const wide = view === 'board';
+  const measure = wide ? 'w-full' : 'mx-auto w-full max-w-5xl';
+
   return (
-    // Desktop readability: cap the content to a centered ~1024px "measure"
-    // (matching the approved 980px mockup) so wide monitors don't stretch
-    // rows edge-to-edge. See docs note on line length / content well.
-    <div className="mx-auto w-full max-w-5xl space-y-4">
+    <div className="w-full space-y-4">
+      <div className={`${measure} space-y-4`}>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -84,22 +89,26 @@ export default function LeanBeafPro() {
           </button>
         ))}
       </div>
+      </div>
 
-      {view === 'dashboard' && (
-        <DashboardView
-          onOpenArchive={() => setView('archive')}
-          onOpenProject={(id) => navigate(`/lean-beaf/${id}`)}
-          onDrillTile={goToList}
-          onDrillStage={goToBoardStage}
-        />
-      )}
-      {view === 'list' && (
-        <ListView filter={listFilter} onFilterChange={goToList} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
-      )}
-      {view === 'board' && (
+      {view === 'board' ? (
         <BoardView focusStage={boardStage} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
+      ) : (
+        <div className="mx-auto w-full max-w-5xl">
+          {view === 'dashboard' && (
+            <DashboardView
+              onOpenArchive={() => setView('archive')}
+              onOpenProject={(id) => navigate(`/lean-beaf/${id}`)}
+              onDrillTile={goToList}
+              onDrillStage={goToBoardStage}
+            />
+          )}
+          {view === 'list' && (
+            <ListView filter={listFilter} onFilterChange={goToList} onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />
+          )}
+          {view === 'archive' && <ArchiveView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
+        </div>
       )}
-      {view === 'archive' && <ArchiveView onOpenProject={(id) => navigate(`/lean-beaf/${id}`)} />}
 
       <NewProjectDialog open={newOpen} onOpenChange={setNewOpen} onCreated={(p) => navigate(`/lean-beaf/${p.id}`)} />
     </div>
@@ -558,9 +567,12 @@ function BoardView({ focusStage, onOpenProject }) {
                     className="cursor-grab rounded-lg border bg-card p-3 active:cursor-grabbing"
                   >
                     <button type="button" onClick={() => onOpenProject(p.id)} className="block w-full text-left">
-                      <span className="block truncate text-sm font-semibold">{p.name}</span>
-                      <span className="mt-1 flex items-center gap-2">
-                        <MovedBadge moved={p.moved} daysIdle={p.days_idle} archived={p.archived} />
+                      <span className="flex items-center gap-1.5">
+                        {p.pinned && <Pin className="h-3 w-3 shrink-0 text-primary" />}
+                        <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
+                      </span>
+                      <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <CardFlags project={p} />
                       </span>
                     </button>
                     {stage !== 'All' && (

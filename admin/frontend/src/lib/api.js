@@ -1846,6 +1846,11 @@ export const api = {
     request(`/lbp/projects/${id}/assignees`, { method: 'POST', body: JSON.stringify({ user_ids }) }),
   lbpCloseProject: (id, data) =>
     request(`/lbp/projects/${id}/close`, { method: 'POST', body: JSON.stringify(data) }),
+  lbpBlockers: (id) => request(`/lbp/projects/${id}/blockers`),
+  lbpBlock: (id, { reason, date }) =>
+    request(`/lbp/projects/${id}/block`, { method: 'POST', body: JSON.stringify({ reason, date }) }),
+  lbpUnblock: (id, { date, note } = {}) =>
+    request(`/lbp/projects/${id}/unblock`, { method: 'POST', body: JSON.stringify({ date, note }) }),
   lbpActivity: (id) => request(`/lbp/projects/${id}/activity`),
   lbpAddComment: (id, body) =>
     request(`/lbp/projects/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }),

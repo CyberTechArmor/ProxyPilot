@@ -28,7 +28,8 @@ import {
   ideaCheckMatches, deriveLocationLabel, deriveMovement, pipelineCounts,
   summarizeActivityEntries, summarizeScopeChange, archiveMeta,
   archiveMetaAnalysis, projectSpanDays, investedHours, buildBrief,
-  validateLocation, stageIndex,
+  validateLocation, stageIndex, validateBlocker, validateBreakBarrier,
+  blockerDurationDays,
 } from '../lib/lean-beaf-logic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -112,6 +113,12 @@ export function createLeanBeafRouter() {
       assignees: ctx.assignees.get(project.id) || [],
       task_counts: ctx.taskCounts.get(project.id) || { total: 0, done: 0 },
       scope,
+      // Blocked flag (derived from an open blocker row) so list / board /
+      // overview cards can all render it.
+      blocked: !!ctx.blockers.get(project.id),
+      blocked_reason: ctx.blockers.get(project.id)?.reason || null,
+      blocked_at: ctx.blockers.get(project.id)?.blocked_at || null,
+      blocked_days: ctx.blockers.get(project.id) ? blockerDurationDays(ctx.blockers.get(project.id)) : null,
     };
   };
 
@@ -123,6 +130,7 @@ export function createLeanBeafRouter() {
       scopes: store.scopesByProject(),
       assignees: store.assigneesByProject(),
       taskCounts: store.taskCountsByProject(),
+      blockers: store.openBlockersByProject(),
     };
   };
 
@@ -350,6 +358,8 @@ export function createLeanBeafRouter() {
         span_days: projectSpanDays(project),
         links: store.listLinksFor(project.id),
         lxc: await lxcInfoFor(project),
+        // Blocker audit trail (each block→break cycle, newest first).
+        blockers: store.listBlockers(project.id).map((b) => ({ ...b, duration_days: blockerDurationDays(b) })),
       },
     });
   });
@@ -444,6 +454,52 @@ export function createLeanBeafRouter() {
     store.addActivity(project.id, { type: 'outcome_set', authorId: req.user.id, payload: { outcome, final_stage: project.stage } });
     logAudit(req.user.id, 'LBP_PROJECT_CLOSE', 'lbp_project', project.id, { outcome }, req.ip);
     res.json({ project: updated });
+  });
+
+  // ---- blockers (blocked flag + break-barrier audit) ----
+
+  // Full blocker history (audit trail).
+  router.get('/projects/:id/blockers', (req, res) => {
+    const project = loadProject(req, res);
+    if (!project) return;
+    res.json({
+      blockers: store.listBlockers(project.id).map((b) => ({ ...b, duration_days: blockerDurationDays(b) })),
+      open: store.getOpenBlocker(project.id) || null,
+    });
+  });
+
+  // Flag a blocker: reason required, date defaults to today (editable). One
+  // open blocker at a time — flag again only after breaking the barrier.
+  router.post('/projects/:id/block', (req, res) => {
+    const project = loadProject(req, res);
+    if (!project) return;
+    if (!guardMutable(project, res)) return;
+    const { reason, date } = req.body || {};
+    const check = validateBlocker({ reason, date });
+    if (!check.ok) return res.status(400).json({ error: check.errors.join('; ') });
+    if (store.getOpenBlocker(project.id)) {
+      return res.status(409).json({ error: 'This project is already blocked — break the barrier before flagging a new blocker' });
+    }
+    const blocker = store.addBlocker(project.id, { reason: String(reason).trim(), blocked_at: date || null, blockedBy: req.user.id });
+    store.addActivity(project.id, { type: 'blocked', authorId: req.user.id, payload: { blocker_id: blocker.id, reason: blocker.reason, blocked_at: blocker.blocked_at } });
+    logAudit(req.user.id, 'LBP_PROJECT_BLOCK', 'lbp_project', project.id, { reason: blocker.reason, blocked_at: blocker.blocked_at }, req.ip);
+    res.status(201).json({ blocker });
+  });
+
+  // Break the barrier: resolve the open blocker, recording the date (defaults
+  // today, editable) and an optional note.
+  router.post('/projects/:id/unblock', (req, res) => {
+    const project = loadProject(req, res);
+    if (!project) return;
+    if (!guardMutable(project, res)) return;
+    const { date, note } = req.body || {};
+    const check = validateBreakBarrier({ date });
+    if (!check.ok) return res.status(400).json({ error: check.errors.join('; ') });
+    const resolved = store.resolveOpenBlocker(project.id, { resolved_at: date || null, resolvedBy: req.user.id, resolved_note: note ? String(note).trim() : null });
+    if (!resolved) return res.status(400).json({ error: 'This project is not currently blocked' });
+    store.addActivity(project.id, { type: 'unblocked', authorId: req.user.id, payload: { blocker_id: resolved.id, resolved_at: resolved.resolved_at, reason: resolved.reason } });
+    logAudit(req.user.id, 'LBP_PROJECT_UNBLOCK', 'lbp_project', project.id, { blocker_id: resolved.id, resolved_at: resolved.resolved_at }, req.ip);
+    res.json({ blocker: resolved });
   });
 
   // ---- activity + comments ----

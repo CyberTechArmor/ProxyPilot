@@ -91,7 +91,15 @@ metric-definition approval/retire, demo seed, and Build-LXC linking
 ## NOTES — decided defaults (locked; do not re-ask)
 
 - Stages normally advance one at a time; skipping is allowed and logged.
-- No "blocked" flag — activity/comments carry blockers.
+- Blocked flag (operator addition, 2026-07, supersedes the original "no
+  blocked flag" default): a project can be flagged Blocked with a reason and
+  a date (defaults today, editable). "Break barrier" clears the flag and
+  records the resolved date. Each block→break cycle is one immutable
+  `lbp_blockers` row (migration 701) — the table is the blocker audit trail,
+  also surfaced as `blocked`/`unblocked` activity entries. The flag renders
+  on list and kanban cards and in the detail header. Endpoints:
+  `POST /projects/:id/block`, `POST /projects/:id/unblock`,
+  `GET /projects/:id/blockers`. Comments still carry free-form context.
 - Site stage = one site (multiple sites ⇒ POD).
 - Metric-definition approval = workspace admin (Thomas).
 - Rolled Out does not require a metric on record, but the close-out modal

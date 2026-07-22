@@ -274,3 +274,28 @@ export function lbpMigration700(d) {
     insMet.run('Documents processed', 'count', 'up');
   }
 }
+
+// Migration 701 (additive) — blockers. Operator addition (Thomas, 2026-07):
+// a project can be flagged "blocked" with a reason and a date (defaults to
+// today, editable). "Break barrier" resolves the open flag and records the
+// date. Each block→break cycle is one immutable row, so the table doubles as
+// the blocker audit trail. A project is derived-blocked iff it has a row with
+// resolved_at IS NULL. This supersedes the original "no blocked flag" default.
+export function lbpMigration701Blockers(d) {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS lbp_blockers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES lbp_projects(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      blocked_at TEXT NOT NULL,
+      blocked_by TEXT,
+      resolved_at TEXT,
+      resolved_by TEXT,
+      resolved_note TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_lbp_blockers_project ON lbp_blockers(project_id, created_at DESC)`);
+  // Fast "is this project currently blocked?" lookup (open rows only).
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_lbp_blockers_open ON lbp_blockers(project_id) WHERE resolved_at IS NULL`);
+}

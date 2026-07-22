@@ -393,6 +393,52 @@ export function learningsByProject() {
   return map;
 }
 
+// ---- blockers (blocked flag + break-barrier audit trail) ----
+
+const nowDate = () => nowIso().slice(0, 10);
+
+// The project's currently-open blocker (resolved_at IS NULL), or undefined.
+export function getOpenBlocker(projectId) {
+  return getDb()
+    .prepare(`SELECT * FROM lbp_blockers WHERE project_id = ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1`)
+    .get(projectId);
+}
+
+// Full blocker history for a project (the audit trail), newest first.
+export function listBlockers(projectId) {
+  return getDb()
+    .prepare(`SELECT * FROM lbp_blockers WHERE project_id = ? ORDER BY created_at DESC, id DESC`)
+    .all(projectId);
+}
+
+export function addBlocker(projectId, { reason, blocked_at, blockedBy }) {
+  const r = getDb().prepare(`
+    INSERT INTO lbp_blockers (project_id, reason, blocked_at, blocked_by, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(projectId, reason, blocked_at || nowDate(), blockedBy ?? null, nowIso());
+  return getDb().prepare(`SELECT * FROM lbp_blockers WHERE id = ?`).get(r.lastInsertRowid);
+}
+
+// Break the barrier: resolve the open blocker, recording the date (defaults
+// today, editable) and who did it. Returns the resolved row, or null if none
+// was open.
+export function resolveOpenBlocker(projectId, { resolved_at, resolvedBy, resolved_note } = {}) {
+  const open = getOpenBlocker(projectId);
+  if (!open) return null;
+  getDb().prepare(`
+    UPDATE lbp_blockers SET resolved_at = ?, resolved_by = ?, resolved_note = ? WHERE id = ?
+  `).run(resolved_at || nowDate(), resolvedBy ?? null, resolved_note ?? null, open.id);
+  return getDb().prepare(`SELECT * FROM lbp_blockers WHERE id = ?`).get(open.id);
+}
+
+// projectId → open blocker, for shaping list/board/overview cards in one query.
+export function openBlockersByProject() {
+  const rows = getDb().prepare(`SELECT * FROM lbp_blockers WHERE resolved_at IS NULL`).all();
+  const map = new Map();
+  for (const r of rows) if (!map.has(r.project_id)) map.set(r.project_id, r);
+  return map;
+}
+
 // ---- files ----
 
 export function addFile(projectId, { original_name, stored_name, mime, size_bytes, uploadedBy }) {

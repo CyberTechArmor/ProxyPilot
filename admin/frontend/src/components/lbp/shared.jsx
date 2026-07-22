@@ -16,7 +16,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Pin, MapPin, Play, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { Loader2, Pin, MapPin, Play, CheckCircle2, XCircle, AlertTriangle, Flag } from 'lucide-react';
 
 export const LBP_STAGES = ['Idea', 'MVP', 'Testing', 'Site', 'POD', 'Region', 'All'];
 
@@ -70,6 +70,29 @@ export function OutcomeBadge({ outcome }) {
     );
   }
   return null;
+}
+
+export function BlockedBadge({ days, reason }) {
+  return (
+    <span
+      title={reason || 'Blocked'}
+      className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-600 dark:text-red-400 whitespace-nowrap"
+    >
+      <Flag className="h-3 w-3" /> Blocked{days != null ? ` · ${days}d` : ''}
+    </span>
+  );
+}
+
+// The badge cluster shared by list cards and kanban cards so their flags stay
+// in parity: archived → outcome; otherwise the blocked flag (if any) + moved.
+export function CardFlags({ project, className = '' }) {
+  if (project.archived) return <OutcomeBadge outcome={project.outcome} />;
+  return (
+    <span className={`inline-flex flex-wrap items-center justify-end gap-1.5 ${className}`}>
+      {project.blocked && <BlockedBadge days={project.blocked_days} reason={project.blocked_reason} />}
+      <MovedBadge moved={project.moved} daysIdle={project.days_idle} archived={project.archived} />
+    </span>
+  );
 }
 
 export function LocationChip({ label }) {
@@ -133,28 +156,48 @@ export function StageDots({ stage, stageIndex }) {
   );
 }
 
-// Full stepper for the detail page.
-export function StageStepper({ stage }) {
+// Full stepper for the detail page. When onStageClick is provided each node is
+// a button that jumps the project to that stage (either direction) — so you
+// can go backward, not just Advance forward.
+export function StageStepper({ stage, onStageClick }) {
   const idx = LBP_STAGES.indexOf(stage);
+  const clickable = typeof onStageClick === 'function';
   return (
     <div className="flex items-start overflow-x-auto pb-1" role="list" aria-label="Rollout stages">
-      {LBP_STAGES.map((s, i) => (
-        <div key={s} role="listitem" className="relative flex min-w-[48px] flex-1 flex-col items-center">
-          {i < LBP_STAGES.length - 1 && (
-            <span className={`absolute left-[calc(50%+10px)] right-[calc(-50%+10px)] top-[7px] h-0.5 ${i < idx ? 'bg-primary/50' : 'bg-border'}`} />
-          )}
-          <span
-            className={`z-10 h-4 w-4 rounded-full border-2 ${
-              i < idx ? 'border-primary/60 bg-primary/60'
-                : i === idx ? 'border-primary bg-primary ring-4 ring-primary/15'
-                  : 'border-border bg-muted'
-            }`}
-          />
-          <span className={`mt-1 whitespace-nowrap text-[10px] font-bold ${i === idx ? 'text-primary' : i < idx ? 'text-muted-foreground' : 'text-muted-foreground/60'}`}>
-            {s}
-          </span>
-        </div>
-      ))}
+      {LBP_STAGES.map((s, i) => {
+        const body = (
+          <>
+            {i < LBP_STAGES.length - 1 && (
+              <span className={`pointer-events-none absolute left-[calc(50%+10px)] right-[calc(-50%+10px)] top-[7px] h-0.5 ${i < idx ? 'bg-primary/50' : 'bg-border'}`} />
+            )}
+            <span
+              className={`z-10 h-4 w-4 rounded-full border-2 transition-all ${
+                i < idx ? 'border-primary/60 bg-primary/60'
+                  : i === idx ? 'border-primary bg-primary ring-4 ring-primary/15'
+                    : 'border-border bg-muted'
+              } ${clickable && i !== idx ? 'group-hover:border-primary group-hover:ring-4 group-hover:ring-primary/10' : ''}`}
+            />
+            <span className={`mt-1 whitespace-nowrap text-[10px] font-bold ${i === idx ? 'text-primary' : i < idx ? 'text-muted-foreground' : 'text-muted-foreground/60'} ${clickable && i !== idx ? 'group-hover:text-primary' : ''}`}>
+              {s}
+            </span>
+          </>
+        );
+        const shared = 'relative flex min-w-[48px] flex-1 flex-col items-center';
+        return clickable ? (
+          <button
+            key={s}
+            type="button"
+            role="listitem"
+            onClick={() => onStageClick(s)}
+            title={i === idx ? `Currently at ${s}` : `Move to ${s}`}
+            className={`${shared} group cursor-pointer bg-transparent`}
+          >
+            {body}
+          </button>
+        ) : (
+          <div key={s} role="listitem" className={shared}>{body}</div>
+        );
+      })}
     </div>
   );
 }
@@ -171,9 +214,7 @@ export function ProjectCard({ project, onClick, archived = false }) {
       <div className="flex items-center gap-2 min-w-0">
         {project.pinned && <Pin className="h-3.5 w-3.5 shrink-0 text-primary" />}
         <h3 className="min-w-0 flex-1 truncate text-base font-semibold">{project.name}</h3>
-        {archived ? <OutcomeBadge outcome={project.outcome} /> : (
-          <MovedBadge moved={project.moved} daysIdle={project.days_idle} archived={project.archived} />
-        )}
+        <CardFlags project={{ ...project, archived: project.archived ?? archived }} />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <Avatars assignees={project.assignees} />
